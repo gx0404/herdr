@@ -286,6 +286,15 @@ pub(super) fn palette_overlay(
     palette
 }
 
+/// 测试专用的本机状态目录：`config::test_dirs::isolate_dirs` 把本线程的目录覆盖指向一个
+/// 独立的临时根（状态目录已建好），不改进程环境变量。返回的句柄析构时（含 panic 展开）
+/// 还原覆盖并删掉整棵目录：测试不必自己清理，失败也不留目录。
+pub(super) fn isolated_state_home(name: &str) -> crate::config::test_dirs::IsolatedDirs {
+    let dirs = crate::config::test_dirs::isolate_dirs(name);
+    std::fs::create_dir_all(dirs.state_dir()).expect("temp state home");
+    dirs
+}
+
 mod agent_activity_window;
 mod agent_panel_characterization;
 mod agent_tree_seam;

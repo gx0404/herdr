@@ -66,9 +66,15 @@ fn spawn_statusline_process(
         shell.env_remove("HERDR_BIN_PATH");
     }
     match socket_path {
-        Some(path) => shell.env("HERDR_SOCKET_PATH", path),
-        None => shell.env_remove("HERDR_SOCKET_PATH"),
-    };
+        Some(path) => {
+            shell.env("HERDR_SOCKET_PATH", path);
+            // 包装串 exec 的 herdr 继承这份环境：配置/状态目录与 HOME 随 socket 隔离到用例目录。
+            isolate_herdr_env(&mut shell, socket_root(path));
+        }
+        None => {
+            shell.env_remove("HERDR_SOCKET_PATH");
+        }
+    }
     shell
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -145,7 +151,7 @@ fn run_usage_report(
     args: &[&str],
     input: &[u8],
 ) -> (std::process::Output, Duration) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut command = herdr_command(socket_root(socket_path));
     command.args(["api", "usage-report"]);
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
@@ -525,6 +531,7 @@ fn usage_report_passthrough_binary_reports_to_the_named_session_socket() {
             .args(args)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_STATE_HOME", base.join("state"))
             .env("HERDR_SESSION", "work")
             .env("HERDR_PANE_ID", "w1:p1")
             .env("HERDR_LANG", "en")

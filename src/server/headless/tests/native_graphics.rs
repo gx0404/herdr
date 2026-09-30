@@ -170,7 +170,7 @@ fn ack_native(server: &mut HeadlessServer, id: u64, transfer: u64, image: u32) {
 
 fn assert_retirement(control: &Receiver<Vec<u8>>, transfer: u64, image: u32) {
     assert!(matches!(
-        read_server_message(control.recv_timeout(Duration::from_millis(100)).expect("control retirement")),
+        read_server_message(control.recv_timeout(LOADED_WAIT).expect("control retirement")),
         ServerMessage::GraphicsTransmissionRetired { transfer_id, image_id }
             if transfer_id == transfer && image_id == image
     ));
@@ -432,10 +432,7 @@ fn native_timeout_uses_control_lane_and_falls_back_inline() {
         .unwrap();
     assert!(server.expire_native_graphics(Instant::now() + Duration::from_secs(60)));
     assert_retirement(&control, token, image);
-    assert_eq!(
-        render.recv_timeout(Duration::from_millis(100)).unwrap(),
-        vec![99]
-    );
+    assert_eq!(render.recv_timeout(LOADED_WAIT).unwrap(), vec![99]);
     assert!(render.try_recv().is_err());
     assert!(!path.exists());
     assert!(!server.native_graphics.is_pending(7));

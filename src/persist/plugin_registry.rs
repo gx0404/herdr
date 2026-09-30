@@ -160,18 +160,45 @@ pub fn reload_manifests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn temp_registry_path(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir()
-            .join(format!(
-                "herdr-registry-{name}-{}-{nanos}",
-                std::process::id()
-            ))
-            .join("plugins.json")
+    /// 唯一临时根下的 `plugins.json` 路径；析构时删掉整个根（含 panic 展开），失败的
+    /// 测试也不留残留。
+    struct TempRegistryPath(PathBuf);
+
+    impl std::ops::Deref for TempRegistryPath {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for TempRegistryPath {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRegistryPath {
+        fn drop(&mut self) {
+            if let Some(root) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    /// 根目录名用 pid + 计数器保证进程内唯一：时间戳在并发线程间可能撞车。
+    fn temp_registry_path(name: &str) -> TempRegistryPath {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "herdr-registry-{name}-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        // pid 复用时同名旧目录里的残留不能带进新测试。
+        let _ = std::fs::remove_dir_all(&root);
+        TempRegistryPath(root.join("plugins.json"))
     }
 
     fn sample_plugin(id: &str) -> InstalledPluginInfo {
@@ -390,13 +417,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn update_preserves_symlink_and_existing_plugin_settings() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let base = temp_registry_path("update");
-        let base = base.parent().unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", base);
+        // 注册表路径取本线程隔离的配置目录；链接目标放在它旁边的 dotfiles 里。
+        let dirs = crate::config::test_dirs::isolate_dirs("registry-update");
         let path = registry_path();
-        let target = base.join("dotfiles/plugins.json");
+        let target = dirs
+            .config_dir()
+            .parent()
+            .unwrap()
+            .join("dotfiles/plugins.json");
         let mut existing = sample_plugin("example.existing");
         existing.enabled = false;
         existing.source.kind = crate::api::schema::PluginSourceKind::Github;
@@ -405,13 +433,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
 
-        let result = update(|plugins| plugins.push(sample_plugin("example.added")));
-        match previous_config_home {
-            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-
-        let (_, entries) = result.unwrap();
+        let (_, entries) = update(|plugins| plugins.push(sample_plugin("example.added"))).unwrap();
         assert_eq!(std::fs::read_link(&path).unwrap(), target);
         assert_eq!(entries[0].plugin_id, "example.added");
         assert_eq!(
@@ -423,7 +445,6 @@ mod tests {
             std::fs::read(&target).unwrap()
         );
         assert_eq!(load_from_path(&target).len(), 2);
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

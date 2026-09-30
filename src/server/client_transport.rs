@@ -1531,7 +1531,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let filename = format!("h{}-{nanos}.sock", std::process::id());
+        let filename = format!(
+            "h{}-{nanos}-{}.sock",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        );
         #[cfg(unix)]
         {
             let _ = name;

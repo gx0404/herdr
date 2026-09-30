@@ -7,6 +7,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// 被测二进制使用的应用目录名，规则同 `tests/support/mod.rs::app_dir_name`（本文件不引入
+/// support）：debug 构建是 `herdr-dev`，release 构建是 `herdr`。
+fn app_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    }
+}
+
 struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
@@ -121,12 +131,18 @@ async fn host_shutdown_saves_layout_before_releasing_delay_lock() {
     let mut bus = private_bus(&address);
     let peer = Arc::new(Mutex::new(None));
     let mut service = login_service(&address, peer.clone()).await;
-    let socket = base.join("herdr-dev/sessions/shutdown/herdr.sock");
+    let session_dir = base.join(app_dir_name()).join("sessions/shutdown");
+    let socket = session_dir.join("herdr.sock");
     let config = base.join("config.toml");
     std::fs::write(&config, "onboarding = false\n[experimental]\nallow_nested = true\n[terminal]\ndefault_shell = \"/bin/sh\"\n").unwrap();
+    // server 会在三个工作区里起 shell：HOME 也放进沙箱，shell 的 rc 文件与历史、按 HOME
+    // 找数据的活动树适配器都落在沙箱里，碰不到开发机真实的主目录。
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let mut server = ChildGuard(
         Command::new(env!("CARGO_BIN_EXE_herdr"))
             .args(["--session", "shutdown", "server"])
+            .env("HOME", &home)
             .env("XDG_CONFIG_HOME", &base)
             .env("XDG_STATE_HOME", &base)
             .env("XDG_RUNTIME_DIR", &base)
@@ -203,7 +219,7 @@ async fn host_shutdown_saves_layout_before_releasing_delay_lock() {
     })
     .await
     .unwrap();
-    let saved = base.join("herdr-dev/sessions/shutdown/session.json");
+    let saved = session_dir.join("session.json");
     let layout: serde_json::Value = serde_json::from_slice(&std::fs::read(saved).unwrap()).unwrap();
     assert_eq!(layout["workspaces"].as_array().unwrap().len(), 3);
     assert_eq!(layout["workspaces"][2]["custom_name"], "three");

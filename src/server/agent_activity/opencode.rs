@@ -1247,12 +1247,13 @@ mod tests {
 
         fn empty() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "herdr-opencode-activity-{}-{}",
+                "herdr-opencode-activity-{}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .expect("系统时钟在纪元之后")
-                    .as_nanos()
+                    .as_nanos(),
+                crate::config::test_dirs::unique_id()
             ));
             fs::create_dir_all(&path).expect("临时 home 可创建");
             Self { path }

@@ -832,11 +832,12 @@ mod tests {
     use crate::api::schema::{
         Method, PluginSourceInfo, PluginSourceKind, Request, SuccessResponse,
     };
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::config::test_dirs::{isolate_dirs, IsolatedDirs};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[tokio::test]
     async fn pane_link_resolve_checks_staleness_without_side_effects() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("hover")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -899,15 +900,23 @@ mod tests {
         assert_eq!(response["error"]["code"], "stale_target");
     }
 
-    fn test_app() -> App {
+    /// 测试 App 连同本线程的隔离目录：插件的配置/状态目录与注册表都落在临时根下，
+    /// 随句柄删除。绑定成 `let (_dirs, mut app)`，App 先于句柄析构。
+    fn test_app() -> (IsolatedDirs, App) {
+        test_app_with_event_hub(crate::api::EventHub::default())
+    }
+
+    fn test_app_with_event_hub(event_hub: crate::api::EventHub) -> (IsolatedDirs, App) {
+        let dirs = isolate_dirs("plugins");
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        App::new(
+        let app = App::new(
             &crate::config::Config::default(),
             crate::app::AppPolicy::TEST,
             None,
             api_rx,
-            crate::api::EventHub::default(),
-        )
+            event_hub,
+        );
+        (dirs, app)
     }
 
     fn response_result(response: &str) -> ResponseResult {
@@ -916,12 +925,58 @@ mod tests {
             .result
     }
 
-    fn unique_temp_path(name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+    /// 测试用临时目录，析构时删除（含 panic 展开），失败的测试也不留残留。
+    struct TempRoot(std::path::PathBuf);
+
+    impl std::ops::Deref for TempRoot {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TempRoot {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 进程内唯一的临时目录名（pid + 计数器）：时间戳在并发线程间可能撞车。
+    fn unique_temp_path(name: &str) -> TempRoot {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "herdr-{name}-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        // pid 复用时同名旧目录里的残留不能带进新测试。
+        let _ = std::fs::remove_dir_all(&path);
+        TempRoot(path)
+    }
+
+    /// 等本 App 起的插件命令全部结束：命令以插件根为 cwd，Windows 上进程退出前删不掉
+    /// 这个目录。
+    fn wait_for_plugin_commands(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.drain_all_internal_events();
+            if app.state.plugin_commands_in_flight == 0 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "plugin commands still running: {}",
+                app.state.plugin_commands_in_flight
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     fn canonical_path_string(path: &std::path::Path) -> String {
@@ -1018,12 +1073,12 @@ action = "bootstrap"
 
     #[test]
     fn plugin_link_creates_stable_config_and_state_dirs() {
-        let mut app = test_app();
+        let (dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-link-dirs");
         let config_dir = super::env::plugin_config_dir("example.config-dirs");
         let state_dir = super::env::plugin_state_dir("example.config-dirs");
-        let _ = std::fs::remove_dir_all(&config_dir);
-        let _ = std::fs::remove_dir_all(&state_dir);
+        assert!(config_dir.starts_with(dirs.config_dir()));
+        assert!(state_dir.starts_with(dirs.state_dir()));
         write_manifest_content(
             &root,
             r#"
@@ -1041,22 +1096,17 @@ platforms = ["linux", "macos", "windows"]
         assert!(state_dir.is_dir());
 
         let _ = std::fs::remove_dir_all(root);
-        let _ = std::fs::remove_dir_all(config_dir);
-        let _ = std::fs::remove_dir_all(state_dir);
     }
 
     #[test]
     fn plugin_link_seeds_stable_config_dir_from_legacy_unhashed_dir() {
-        let mut app = test_app();
+        let (dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-link-legacy-config");
         let config_dir = super::env::plugin_config_dir("example.legacy-config");
-        let state_dir = super::env::plugin_state_dir("example.legacy-config");
-        let legacy_dir = crate::config::config_dir()
+        let legacy_dir = dirs
+            .config_dir()
             .join("plugins")
             .join("example.legacy-config");
-        let _ = std::fs::remove_dir_all(&config_dir);
-        let _ = std::fs::remove_dir_all(&state_dir);
-        let _ = std::fs::remove_dir_all(&legacy_dir);
         std::fs::create_dir_all(&legacy_dir).unwrap();
         std::fs::write(legacy_dir.join(".env"), "TELEGRAM_BOT_TOKEN=test\n").unwrap();
         write_manifest_content(
@@ -1078,14 +1128,11 @@ platforms = ["linux", "macos", "windows"]
         );
 
         let _ = std::fs::remove_dir_all(root);
-        let _ = std::fs::remove_dir_all(config_dir);
-        let _ = std::fs::remove_dir_all(state_dir);
-        let _ = std::fs::remove_dir_all(legacy_dir);
     }
 
     #[test]
     fn plugin_link_lists_and_unlinks_manifest() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-link");
         write_manifest(&root);
 
@@ -1261,7 +1308,7 @@ command = ["echo", " a", "first "]
 
     #[test]
     fn plugin_link_rejects_invalid_github_source_path() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-invalid-source");
         write_manifest(&root);
 
@@ -1490,7 +1537,7 @@ platforms = ["linux", "macos"]
 
     #[test]
     fn plugin_enable_disable_updates_registry_state() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-enable-disable");
         write_manifest(&root);
         link_manifest(&mut app, &root);
@@ -1541,7 +1588,7 @@ platforms = ["linux", "macos"]
 
     #[test]
     fn plugin_pane_open_requires_installed_plugin() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let response = app.handle_api_request(Request {
             id: "pane-open".into(),
             method: Method::PluginPaneOpen(PluginPaneOpenParams {
@@ -1564,7 +1611,7 @@ platforms = ["linux", "macos"]
 
     #[test]
     fn plugin_pane_open_rejects_popup_size_for_non_popup_placement() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-pane-non-popup-size-param");
         write_manifest(&root);
         link_manifest(&mut app, &root);
@@ -1596,7 +1643,7 @@ platforms = ["linux", "macos"]
     async fn windows_plugin_pane_commands_resolve_from_plugin_root_with_cwd_override() {
         use std::os::windows::ffi::OsStrExt;
 
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-pane-paths")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -1684,7 +1731,7 @@ command = ["cmd.exe", "/d", "/c", "slot.cmd", "default"]
             ("long", Some(&child_cwd)),
             ("default", None),
         ] {
-            let expected_cwd = cwd.unwrap_or(&root);
+            let expected_cwd = cwd.map_or(&*root, std::path::PathBuf::as_path);
             let open = app.handle_api_request(Request {
                 id: format!("pane-open-{entrypoint}"),
                 method: Method::PluginPaneOpen(PluginPaneOpenParams {
@@ -1771,7 +1818,7 @@ command = ["cmd.exe", "/d", "/c", "slot.cmd", "default"]
             std::fs::rename(&replacement, &executable).unwrap();
             assert!(!std::env::current_exe().unwrap().exists());
 
-            let mut app = test_app();
+            let (_dirs, mut app) = test_app();
             app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-update")];
             app.state.ensure_test_terminals();
             app.state.active = Some(0);
@@ -1836,14 +1883,7 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
             return;
         }
 
-        let root = std::env::temp_dir().join(format!(
-            "herdr-plugin-update-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = unique_temp_path("plugin-update");
         std::fs::create_dir_all(&root).unwrap();
         let executable = root.join("herdr test");
         std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
@@ -1853,7 +1893,7 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
                 "app::api::plugins::tests::plugin_launch_survives_executable_replacement",
                 "--nocapture",
             ])
-            .env(CHILD_ROOT, &root)
+            .env(CHILD_ROOT, root.as_os_str())
             .output();
         std::fs::remove_dir_all(&root).unwrap();
         let output = result.unwrap();
@@ -1868,7 +1908,7 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
     #[cfg(unix)]
     #[tokio::test]
     async fn plugin_pane_open_uses_plugin_root_title_env_and_target_context() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let mut workspace = crate::workspace::Workspace::test_new("plugin-target");
         workspace.custom_name = None;
         let root_pane = workspace.tabs[0].root_pane;
@@ -1987,7 +2027,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \
     #[cfg(unix)]
     #[tokio::test]
     async fn plugin_pane_open_injects_plugin_paths_and_protects_overrides() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-path-env")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -2085,14 +2125,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
     #[tokio::test]
     async fn plugin_pane_open_tab_emits_tab_created_before_pane_created() {
         let event_hub = crate::api::EventHub::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            crate::app::AppPolicy::TEST,
-            None,
-            api_rx,
-            event_hub.clone(),
-        );
+        let (_dirs, mut app) = test_app_with_event_hub(event_hub.clone());
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-tab")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -2168,14 +2201,7 @@ command = ["sh", "-c", "sleep 1"]
     #[tokio::test]
     async fn plugin_pane_open_zoomed_split_emits_layout_updated() {
         let event_hub = crate::api::EventHub::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            crate::app::AppPolicy::TEST,
-            None,
-            api_rx,
-            event_hub.clone(),
-        );
+        let (_dirs, mut app) = test_app_with_event_hub(event_hub.clone());
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-split")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -2247,14 +2273,7 @@ command = ["sh", "-c", "sleep 1"]
     #[tokio::test]
     async fn plugin_pane_open_overlay_emits_layout_updated() {
         let event_hub = crate::api::EventHub::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            crate::app::AppPolicy::TEST,
-            None,
-            api_rx,
-            event_hub.clone(),
-        );
+        let (_dirs, mut app) = test_app_with_event_hub(event_hub.clone());
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-overlay")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -2326,14 +2345,7 @@ command = ["sh", "-c", "sleep 1"]
     #[tokio::test]
     async fn plugin_pane_open_popup_is_layout_neutral() {
         let event_hub = crate::api::EventHub::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            crate::app::AppPolicy::TEST,
-            None,
-            api_rx,
-            event_hub.clone(),
-        );
+        let (_dirs, mut app) = test_app_with_event_hub(event_hub.clone());
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-popup")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -2439,7 +2451,7 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
 
     #[test]
     fn manifest_action_list_and_invoke_with_context() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-action-list");
         write_manifest(&root);
         link_manifest(&mut app, &root);
@@ -2512,12 +2524,13 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
             Some("external-correlation")
         );
 
+        wait_for_plugin_commands(&mut app);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn stale_registry_entries_are_visible_but_not_runnable() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-stale-registry");
         write_manifest(&root);
         let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
@@ -2584,20 +2597,13 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
 
     #[test]
     fn non_cli_plugin_consumers_refresh_global_enabled_state() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        let base = unique_temp_path("plugin-global-refresh");
-        std::env::set_var("XDG_CONFIG_HOME", &base);
-        let root = base.join("plugin");
+        // 盘上注册表在 test_app 隔离出的配置目录里。
+        let (_dirs, mut app) = test_app();
+        let root = unique_temp_path("plugin-global-refresh");
         write_manifest(&root);
         let plugin = load_plugin_manifest(&root.display().to_string(), false).unwrap();
-        crate::persist::plugin_registry::update(|plugins| {
-            plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
-            plugins.push(plugin.clone());
-        })
-        .unwrap();
+        crate::persist::plugin_registry::update(|plugins| plugins.push(plugin.clone())).unwrap();
 
-        let mut app = test_app();
         app.policy.persist_plugin_registry = true;
         let workspace = crate::workspace::Workspace::test_new("plugin-refresh");
         let pane_id = workspace.tabs[0].root_pane;
@@ -2668,31 +2674,17 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
             },
         });
         assert_eq!(app.state.plugin_command_logs.len(), logs_before);
-
-        let _ = std::fs::remove_dir_all(&base);
-        match previous_config_home {
-            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
     fn event_hooks_skip_registry_refresh_without_cached_subscriber() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        let base = unique_temp_path("plugin-cached-subscriber-precheck");
-        std::env::set_var("XDG_CONFIG_HOME", &base);
-        let root = base.join("plugin");
+        let (_dirs, mut app) = test_app();
+        let root = unique_temp_path("plugin-cached-subscriber-precheck");
         write_manifest(&root);
         let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
-        // 只在盘上注册表放入订阅者；内存缓存保持为空。
-        crate::persist::plugin_registry::update(|plugins| {
-            plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
-            plugins.push(plugin.clone());
-        })
-        .unwrap();
+        // 只在盘上注册表（test_app 隔离出的配置目录）放入订阅者；内存缓存保持为空。
+        crate::persist::plugin_registry::update(|plugins| plugins.push(plugin)).unwrap();
 
-        let mut app = test_app();
         app.policy.persist_plugin_registry = true;
         let workspace = crate::workspace::Workspace::test_new("plugin-precheck");
         app.state.workspaces = vec![workspace];
@@ -2724,22 +2716,12 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
         );
         // 内存缓存依旧为空：判空前置没有触发注册表加载。
         assert!(app.state.installed_plugins.is_empty());
-
-        crate::persist::plugin_registry::update(|plugins| {
-            plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
-        })
-        .unwrap();
-        let _ = std::fs::remove_dir_all(&base);
-        match previous_config_home {
-            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[cfg(unix)]
     #[test]
     fn manifest_action_invoke_runs_command_and_captures_log() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-action-runner");
         write_manifest_content(
             &root,
@@ -2806,7 +2788,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
     #[cfg(unix)]
     #[test]
     fn manifest_action_invoke_injects_plugin_paths() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-action-path-env");
         write_manifest_content(
             &root,
@@ -2894,7 +2876,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
 
     #[tokio::test]
     async fn current_plugin_context_leaves_client_owned_selection_empty() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let workspace = crate::workspace::Workspace::test_new("plugin-selection");
         let pane_id = workspace.tabs[0].root_pane;
         let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
@@ -2915,7 +2897,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
     #[cfg(unix)]
     #[test]
     fn startup_hooks_run_once_with_plugin_environment() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-startup-hook");
         let capture = root.join("startup.txt");
         write_manifest_content(
@@ -2952,7 +2934,7 @@ command = ["sh", "-c", "printf '%s:%s' \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_EVEN
     #[cfg(unix)]
     #[test]
     fn event_hooks_use_event_target_context() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![
             crate::workspace::Workspace::test_new("active"),
             crate::workspace::Workspace::test_new("event-target"),
@@ -3020,7 +3002,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
 
     #[test]
     fn plugin_command_limit_rejects_and_logs() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-command-limit");
         write_manifest(&root);
         link_manifest(&mut app, &root);
@@ -3052,7 +3034,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
 
     #[test]
     fn closed_event_context_uses_closed_target_ids() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("closed-events")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -3177,7 +3159,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
     #[cfg(unix)]
     #[test]
     fn plugin_link_handler_invokes_action_with_clicked_url_context() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("link-handler")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -3250,7 +3232,7 @@ action = "open"
 
     #[test]
     fn plugin_link_handlers_keep_manifest_order_for_overlapping_patterns() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-link-handler-order");
         write_manifest_content(
             &root,
@@ -3297,7 +3279,7 @@ action = "generic"
 
     #[test]
     fn plugin_link_rejects_invalid_link_handler_pattern() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-bad-link-handler-pattern");
         write_manifest_content(
             &root,
@@ -3340,7 +3322,7 @@ action = "open"
 
     #[test]
     fn plugin_link_rejects_link_handler_unknown_action() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-bad-link-handler-action");
         write_manifest_content(
             &root,
@@ -3380,7 +3362,7 @@ action = "missing"
 
     #[test]
     fn manifest_action_invoke_builds_default_workspace_context() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("issue")];
         app.state.workspaces[0].identity_cwd = "/tmp/issue".into();
         app.state.ensure_test_terminals();
@@ -3473,12 +3455,13 @@ command = ["show-ctx"]
         assert_eq!(worktree.checkout_path, "/repo/herdr-issue");
         assert!(worktree.is_linked_worktree);
 
+        wait_for_plugin_commands(&mut app);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn manifest_action_invoke_returns_plugin_disabled_when_disabled() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-disabled");
         write_manifest(&root);
 
@@ -3540,7 +3523,7 @@ command = ["sh", "-c", "echo ok"]
 
     #[test]
     fn link_with_unknown_event_name_succeeds_with_warning() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-bad-event");
         write_manifest_with_bad_event(&root);
 
@@ -3588,7 +3571,7 @@ command = ["sh", "-c", "echo ok"]
 
     #[test]
     fn output_changed_event_hooks_do_not_run_even_if_event_is_emitted() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-output-hook");
         write_manifest_with_bad_event(&root);
         link_manifest(&mut app, &root);
@@ -3612,7 +3595,7 @@ command = ["sh", "-c", "echo ok"]
 
     #[test]
     fn unlink_removes_plugin_pane_records_for_that_plugin() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-unlink-panes");
         write_manifest(&root);
         link_manifest(&mut app, &root);
@@ -3665,7 +3648,7 @@ command = ["sh", "-c", "echo ok"]
 
     #[test]
     fn plugin_pane_record_survives_pane_move() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-move")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -3712,7 +3695,7 @@ command = ["sh", "-c", "echo ok"]
 
     #[test]
     fn pane_exit_removes_plugin_pane_record() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-exit")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
@@ -3868,7 +3851,7 @@ command = ["run.bat"]
 
     #[test]
     fn invoke_on_unsupported_platform_returns_error() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-platform-reject");
         std::fs::create_dir_all(&root).unwrap();
 
@@ -3934,7 +3917,7 @@ command = ["act"]
 
     #[test]
     fn invoke_with_action_platform_override_uses_action_platforms() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-platform-action-override");
         std::fs::create_dir_all(&root).unwrap();
 
@@ -3996,7 +3979,7 @@ command = ["act"]
 
     #[test]
     fn invoke_with_undeclared_platforms_succeeds() {
-        let mut app = test_app();
+        let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-platform-undeclared");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
@@ -4050,6 +4033,7 @@ command = ["act"]
             "expected success for undeclared platforms: {invoke}"
         );
 
+        wait_for_plugin_commands(&mut app);
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -261,12 +261,13 @@ mod tests {
     fn streams() -> (LocalStream, LocalStream, std::path::PathBuf) {
         use interprocess::local_socket::traits::Listener as _;
         let path = std::env::temp_dir().join(format!(
-            "herdr-writer-{}-{}.sock",
+            "herdr-writer-{}-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::config::test_dirs::unique_id()
         ));
         let listener = crate::ipc::bind_private_local_listener(&path).unwrap();
         let accepting = std::thread::spawn(move || listener.accept().unwrap());

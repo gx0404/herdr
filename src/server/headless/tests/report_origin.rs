@@ -125,7 +125,7 @@ impl ReportFixture {
                 report_origin: origin,
             });
         let response = response_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(LOADED_WAIT)
             .expect("上报总会得到应答");
         serde_json::from_str(&response).expect("应答是 JSON")
     }

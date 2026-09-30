@@ -98,8 +98,11 @@ fn setup_with_strict_host_key_failure(
         "onboarding = false\n[remote]\nmanage_ssh_config = false\n",
     )
     .unwrap();
+    // 本地 status 也只读这份沙箱里的配置/状态，不碰开发机真实目录。
     let status = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["status", "client", "--json"])
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
         .output()
         .unwrap();
     assert!(status.status.success());

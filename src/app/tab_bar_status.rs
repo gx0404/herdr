@@ -560,8 +560,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after epoch")
             .as_nanos();
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。
+        let id = crate::config::test_dirs::unique_id();
         std::env::temp_dir().join(format!(
-            "herdr-tab-status-{name}-{}-{stamp}",
+            "herdr-tab-status-{name}-{}-{stamp}-{id}",
             std::process::id()
         ))
     }

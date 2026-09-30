@@ -2793,7 +2793,6 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
-    use std::sync::{Mutex, OnceLock};
     use std::thread;
 
     fn saved_machine(
@@ -2893,9 +2892,9 @@ mod tests {
         );
     }
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    // 会话名、socket 覆盖、MISE 目录等是进程全局的环境变量：与全 crate 共用一把测试环境锁。
+    fn env_lock() -> &'static crate::config::TestEnvLock {
+        crate::config::test_config_env_lock()
     }
 
     fn unique_test_socket_path(name: &str) -> std::path::PathBuf {
@@ -2903,8 +2902,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。
+        let id = crate::config::test_dirs::unique_id();
         std::path::PathBuf::from(format!(
-            "/tmp/hu-{name}-{}-{nanos}.sock",
+            "/tmp/hu-{name}-{}-{nanos}-{id}.sock",
             std::process::id()
         ))
     }
@@ -2966,22 +2967,6 @@ mod tests {
             sha256: None,
             notes_body: "### Changed\n- One".to_string(),
         }
-    }
-
-    fn set_test_config_home(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let short_name: String = name.chars().take(4).collect();
-        let dir = PathBuf::from(format!(
-            "/tmp/hu-{short_name}-{}-{nanos}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
-        dir
     }
 
     #[test]
@@ -3437,7 +3422,7 @@ mod tests {
     #[test]
     fn plain_update_targets_all_running_sessions() {
         let _guard = env_lock().lock().unwrap();
-        let config_home = set_test_config_home("all-sessions");
+        let _dirs = crate::config::test_dirs::isolate_dirs("all-sessions");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
@@ -3454,8 +3439,6 @@ mod tests {
 
         drop(default_listener);
         drop(work_listener);
-        let _ = fs::remove_dir_all(config_home);
-        std::env::remove_var("XDG_CONFIG_HOME");
 
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].label, crate::session::DEFAULT_SESSION_NAME);
@@ -3467,7 +3450,7 @@ mod tests {
     #[test]
     fn explicit_session_update_targets_only_that_session() {
         let _guard = env_lock().lock().unwrap();
-        let config_home = set_test_config_home("explicit-session");
+        let _dirs = crate::config::test_dirs::isolate_dirs("explicit-session");
         std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/ignored-herdr.sock");
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
@@ -3484,9 +3467,7 @@ mod tests {
         let expected_socket = crate::session::api_socket_path_for(Some("work"));
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
-        std::env::remove_var("XDG_CONFIG_HOME");
         crate::session::clear_explicit_session_for_test();
-        let _ = fs::remove_dir_all(config_home);
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].label, "work");
@@ -3522,7 +3503,7 @@ mod tests {
     fn plain_update_errors_when_named_session_has_client_socket_without_status_api() {
         let _guard = env_lock().lock().unwrap();
         let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
-        let config_home = set_test_config_home("client-only-session");
+        let _dirs = crate::config::test_dirs::isolate_dirs("client-only-session");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
@@ -3534,8 +3515,6 @@ mod tests {
         let err = plan_running_server_updates(&fake_release("9.8.7", Some(77))).unwrap_err();
 
         drop(work_client_listener);
-        let _ = fs::remove_dir_all(config_home);
-        std::env::remove_var("XDG_CONFIG_HOME");
 
         assert!(
             err.contains("work") && err.contains("status API did not respond"),

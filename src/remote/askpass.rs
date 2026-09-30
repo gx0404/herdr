@@ -426,8 +426,21 @@ mod tests {
 
     #[test]
     fn channel_delivers_prompts_and_returns_answers() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("askpass-roundtrip");
         let (channel, prompts) = SshAskpassChannel::start().expect("start channel");
         let socket = channel.environment().socket.clone();
+        // Windows 的端点标记文件建在本测试隔离的状态目录里，名字要能被陈旧端点清理认出。
+        #[cfg(windows)]
+        {
+            let state_dir = crate::config::test_dirs::isolated_state_dir().expect("isolated");
+            assert!(socket.starts_with(state_dir), "{}", socket.display());
+            let name = socket.file_name().expect("socket name").to_string_lossy();
+            assert_eq!(
+                crate::platform::remote_private_entry_owner(&name),
+                Some(std::process::id()),
+                "{name}"
+            );
+        }
 
         let helper = thread::spawn(move || askpass_roundtrip(&socket, "user@host's password:"));
         let prompt = prompts
@@ -441,6 +454,7 @@ mod tests {
 
     #[test]
     fn helper_entry_prints_the_answer_for_ssh() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("askpass-helper-entry");
         let (channel, prompts) = SshAskpassChannel::start().expect("start channel");
         let socket = channel.environment().socket.clone();
 
@@ -457,6 +471,7 @@ mod tests {
 
     #[test]
     fn dropping_the_channel_with_an_unanswered_prompt_is_bounded() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("askpass-drop-channel");
         let (channel, prompts) = SshAskpassChannel::start().expect("start channel");
         let socket = channel.environment().socket.clone();
         let helper = thread::spawn(move || askpass_roundtrip(&socket, "waiting:"));
@@ -475,6 +490,7 @@ mod tests {
 
     #[test]
     fn declined_prompts_and_missing_consumers_fail_the_helper() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("askpass-declined");
         let (channel, prompts) = SshAskpassChannel::start().expect("start channel");
         let socket = channel.environment().socket.clone();
 

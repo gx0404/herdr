@@ -16,8 +16,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::Value;
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid,
+    app_dir_name, cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    unregister_spawned_herdr_pid, INHERITED_DIR_OVERRIDES,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -87,11 +87,11 @@ fn spawn_server(
     api_socket_path: &Path,
     _client_socket_path: &Path,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
     fs::write(
-        config_home.join("herdr/config.toml"),
+        config_home.join(app_dir_name()).join("config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -107,12 +107,18 @@ fn spawn_server(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
     // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
     let home = runtime_dir.join("home");
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // 状态目录也显式隔离：不设时 state_dir 回退到平台目录（Windows 取 %LOCALAPPDATA%，
+    // 不随 HOME 走），外层继承的 XDG_STATE_HOME 也会把子进程带回开发机真实目录。
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -138,11 +144,11 @@ fn spawn_herdr_auto(
     api_socket_path: &Path,
     _client_socket_path: &Path,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
     fs::write(
-        config_home.join("herdr/config.toml"),
+        config_home.join(app_dir_name()).join("config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -157,6 +163,10 @@ fn spawn_herdr_auto(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    // 自动拉起的 server 继承这份环境，所以覆盖变量在这里清一次就够。
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     // No subcommand → auto-detect launch.
     // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
     // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
@@ -164,6 +174,8 @@ fn spawn_herdr_auto(
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // 自动拉起的 server 继承这份环境，状态目录同 spawn_server 一样隔离。
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -214,9 +226,14 @@ fn wait_for_log_contains(path: &Path, needle: &str, timeout: Duration) {
 }
 
 fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
+    // 配置/状态目录隔离到 socket 所在的用例目录（`<runtime>/`）：状态目录与 server 相同，
+    // 不设时 CLI 读写开发机真实的 herdr 目录。
+    let root = socket_path.parent().expect("socket path has a parent");
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    command.env("XDG_CONFIG_HOME", root.join("config"));
+    command.env("XDG_STATE_HOME", root.join("state"));
     command.output().unwrap()
 }
 
@@ -262,19 +279,19 @@ fn session_attach_without_terminal_leaves_no_session() {
     let runtime_dir = base.join("runtime");
     register_runtime_dir(&runtime_dir);
     let name = "no-tty";
-    let app_dir = if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    };
-    let session_dir = config_home.join(app_dir).join("sessions").join(name);
+    let session_dir = config_home.join(app_dir_name()).join("sessions").join(name);
+    // attach 本应在拉起 daemon 之前失败；万一回归拉起了 daemon，它和它的窗格 shell
+    // 也只碰用例自己的 HOME，不读写开发机的 rc 文件与历史。
+    let home = runtime_dir.join("home");
     let run = |args: &[&str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
         command
             .args(args)
+            .env("HOME", &home)
+            .env("SHELL", "/bin/sh")
             .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_STATE_HOME", runtime_dir.join("state"))
             .env("XDG_RUNTIME_DIR", &runtime_dir)
-            .env_remove("HERDR_CONFIG_PATH")
             .env_remove("HERDR_ENV")
             .env_remove("HERDR_SESSION")
             .env_remove("HERDR_SOCKET_PATH")
@@ -282,6 +299,9 @@ fn session_attach_without_terminal_leaves_no_session() {
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_TAB_ID")
             .env_remove("HERDR_PANE_ID");
+        for key in INHERITED_DIR_OVERRIDES {
+            command.env_remove(key);
+        }
         // Piped stdio alone can still leave /dev/tty usable. Match noninteractive
         // SSH by detaching the child from the test runner's controlling terminal.
         unsafe {
@@ -586,23 +606,15 @@ fn auto_detect_default_socket_path_from_config_dir() {
 
     // Don't set HERDR_SOCKET_PATH or HERDR_CLIENT_SOCKET_PATH.
     // The default paths should come from the app config directory, not XDG_RUNTIME_DIR.
-    let app_dir_name = if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    };
-    let api_socket = config_home.join(app_dir_name).join("herdr.sock");
-    let client_socket = config_home.join(app_dir_name).join("herdr-client.sock");
+    let app_dir = config_home.join(app_dir_name());
+    let api_socket = app_dir.join("herdr.sock");
+    let client_socket = app_dir.join("herdr-client.sock");
 
     // Spawn server with XDG_RUNTIME_DIR set to a different directory to prove it is ignored.
-    fs::create_dir_all(config_home.join(app_dir_name)).unwrap();
+    fs::create_dir_all(&app_dir).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
     register_runtime_dir(&runtime_dir);
-    fs::write(
-        config_home.join(app_dir_name).join("config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
+    fs::write(app_dir.join("config.toml"), "onboarding = false\n").unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -621,6 +633,7 @@ fn auto_detect_default_socket_path_from_config_dir() {
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
@@ -629,6 +642,9 @@ fn auto_detect_default_socket_path_from_config_dir() {
     // Explicitly remove socket overrides to test default path resolution.
     cmd.env_remove("HERDR_SOCKET_PATH");
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -672,12 +688,7 @@ fn auto_detect_writes_client_and_server_logs_to_separate_files() {
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(10));
 
-    let app_dir_name = if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    };
-    let log_dir = config_home.join(app_dir_name);
+    let log_dir = config_home.join(app_dir_name());
     let client_log = log_dir.join("herdr-client.log");
     let server_log = log_dir.join("herdr-server.log");
     let monolith_log = log_dir.join("herdr.log");
@@ -733,15 +744,20 @@ fn auto_detect_respects_nested_guard_before_auto_attach() {
     // 避免子进程读到开发机上真实的 CLI 数据。
     let nested_home = runtime_dir.join("home");
     let _ = fs::create_dir_all(&nested_home);
-    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let mut nested = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    nested
         .env("HOME", &nested_home)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_STATE_HOME", runtime_dir.join("state"))
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("HERDR_SOCKET_PATH", &api_socket)
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
-        .env("HERDR_ENV", "1")
-        .output()
-        .unwrap();
+        .env("HERDR_ENV", "1");
+    // 嵌套守卫看配置：外层继承的 HERDR_CONFIG_PATH 会让它改读开发机的真实配置。
+    for key in INHERITED_DIR_OVERRIDES {
+        nested.env_remove(key);
+    }
+    let output = nested.output().unwrap();
 
     assert!(
         !output.status.success(),

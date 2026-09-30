@@ -6,8 +6,9 @@ pub(super) use std::process::{Command, Stdio};
 pub(super) use std::thread;
 pub(super) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::support::INHERITED_DIR_OVERRIDES;
 pub(super) use crate::support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    app_dir_name, cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -93,7 +94,10 @@ pub(super) fn write_offline_git_config(
 }
 
 pub(super) fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {
-    config_home.join("herdr-dev").join("plugins").join("github")
+    config_home
+        .join(app_dir_name())
+        .join("plugins")
+        .join("github")
 }
 
 pub(super) fn path_missing_or_empty(path: &Path) -> bool {
@@ -213,14 +217,6 @@ pub(super) fn spawn_herdr_with_pane_history(
     )
 }
 
-pub(super) fn app_dir_name() -> &'static str {
-    if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    }
-}
-
 pub(super) fn named_session_socket(config_home: &Path, session: &str) -> PathBuf {
     config_home
         .join(app_dir_name())
@@ -253,6 +249,8 @@ pub(super) fn spawn_named_server(
         .args(["--session", session, "server"])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", config_home)
+        // 状态目录的约定与理由见 isolate_herdr_env。
+        .env("XDG_STATE_HOME", runtime_dir.join("state"))
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
@@ -262,6 +260,9 @@ pub(super) fn spawn_named_server(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    for key in INHERITED_DIR_OVERRIDES {
+        command.env_remove(key);
+    }
 
     let child = command.spawn().unwrap();
     register_spawned_herdr_pid(Some(child.id()));
@@ -311,6 +312,8 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
         .args(args)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", config_home)
+        // 与同一 runtime 目录下的 server 共用状态目录；`envs` 可以覆盖。
+        .env("XDG_STATE_HOME", runtime_dir.join("state"))
         .env("XDG_RUNTIME_DIR", runtime_dir)
         // Human-readable CLI stdout is localized (zh-CN default); pin English
         // so assertions on non-JSON output stay stable. JSON output is
@@ -321,6 +324,9 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
         // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD；server 会据此预建
         // 启动工作区，破坏用例的零工作区假设。
         .env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        command.env_remove(key);
+    }
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -397,6 +403,8 @@ pub(super) fn spawn_herdr_with_config(
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // 状态目录的约定与理由见 isolate_herdr_env。
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -405,6 +413,9 @@ pub(super) fn spawn_herdr_with_config(
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD；server 会据此预建
     // 启动工作区，破坏用例的零工作区假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     if let Some(path) = path_override {
         cmd.env("PATH", path);
     }
@@ -417,8 +428,46 @@ pub(super) fn spawn_herdr_with_config(
     }
 }
 
-pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
+/// 把 herdr 子进程的配置、状态目录与 HOME 隔离到用例目录 `root` 下（`config/`、`state/`、
+/// `home/`），并清掉外层继承的目录覆盖变量（`INHERITED_DIR_OVERRIDES`）。三处都要显式设：
+/// 没有 `XDG_STATE_HOME` 时 `state_dir()` 回退到平台目录（Windows 上是 `%LOCALAPPDATA%`，
+/// 不随 HOME 走）；agent 集成目录跟随 HOME，`integration install` 这类命令会往里写。拉起
+/// server 的助手按同一约定把状态目录与 HOME 放在 `<runtime_dir>/state`、`<runtime_dir>/home`。
+pub(super) fn isolate_herdr_env(command: &mut Command, root: &Path) {
+    command
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"));
+    for key in INHERITED_DIR_OVERRIDES {
+        command.env_remove(key);
+    }
+}
+
+/// 环境已隔离到 `root` 下的 herdr 命令（见 [`isolate_herdr_env`]）。
+pub(super) fn herdr_command(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    isolate_herdr_env(&mut command, root);
+    command
+}
+
+/// 只拿到 socket 的调用（`run_cli*` 等）以 socket 所在目录作隔离根，所以 socket 必须放在用例
+/// 自己的目录里。常见布局 `<runtime_dir>/herdr.sock` 下，CLI 的状态目录与 HOME 就与同一用例的
+/// server 相同。
+pub(super) fn socket_root(socket_path: &Path) -> &Path {
+    let root = socket_path
+        .parent()
+        .expect("socket path should live in the test's own directory");
+    // 直接放在共享临时目录下的 socket 会让各用例共用同一份配置/状态。
+    assert!(
+        root.is_absolute() && root != Path::new("/tmp") && root != std::env::temp_dir(),
+        "socket {} must live in the test's own directory",
+        socket_path.display()
+    );
+    root
+}
+
+pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
+    let mut command = herdr_command(socket_root(socket_path));
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
     // See run_named_cli_with_env_and_socket_override: pin English for the
@@ -432,7 +481,7 @@ pub(super) fn run_cli_in_dir(
     args: &[&str],
     current_dir: &Path,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut command = herdr_command(socket_root(socket_path));
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);

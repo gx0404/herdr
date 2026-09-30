@@ -360,12 +360,13 @@ mod tests {
 
     fn pair() -> (LocalStream, LocalStream, std::path::PathBuf) {
         let name = std::env::temp_dir().join(format!(
-            "herdr-handshake-{}-{}.sock",
+            "herdr-handshake-{}-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::config::test_dirs::unique_id()
         ));
         let listener = crate::ipc::bind_local_listener(&name).unwrap();
         let connecting = name.clone();

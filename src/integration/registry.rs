@@ -95,7 +95,7 @@ pub(crate) fn integration_target_install_layout_available(
 }
 
 pub(crate) fn command_available(command: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
+    let Some(paths) = search_path() else {
         return false;
     };
     std::env::split_paths(&paths).any(|dir| {
@@ -106,6 +106,17 @@ pub(crate) fn command_available(command: &str) -> bool {
                     && (command != "codex" || !crate::platform::codex_launch::is_shim(&path))
             })
     })
+}
+
+/// 找命令用的搜索路径：进程的 PATH。测试构建先看线程本地覆盖
+/// （`config::test_dirs::override_search_path`）：换掉或清空进程 PATH 会让同进程并发的
+/// 测试找不到 git 等命令。
+fn search_path() -> Option<std::ffi::OsString> {
+    #[cfg(test)]
+    if let Some(path) = crate::config::test_dirs::search_path() {
+        return Some(path);
+    }
+    std::env::var_os("PATH")
 }
 
 pub(crate) fn command_path_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {

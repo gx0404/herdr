@@ -1862,14 +1862,6 @@ mod tests {
         });
     }
 
-    fn unique_plugin_id(label: &str) -> String {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        format!("test.{label}.{}.{nanos}", std::process::id())
-    }
-
     fn github_plugin(
         id: &str,
         owner: &str,
@@ -2063,13 +2055,14 @@ mod tests {
 
     #[test]
     fn cli_user_dir_creation_seeds_legacy_config_before_printing_config_dir() {
-        let plugin_id = unique_plugin_id("legacy-config");
+        // 本线程的配置/状态目录隔离到临时根，插件 id 不必再各测试唯一。
+        let dirs = crate::config::test_dirs::isolate_dirs("cli-plugin-config-dir");
+        let plugin_id = "test.legacy-config".to_string();
         let config_dir = crate::plugin_paths::plugin_config_dir(&plugin_id);
         let state_dir = crate::plugin_paths::plugin_state_dir(&plugin_id);
-        let legacy_dir = crate::config::config_dir().join("plugins").join(&plugin_id);
-        let _ = std::fs::remove_dir_all(&config_dir);
-        let _ = std::fs::remove_dir_all(&state_dir);
-        let _ = std::fs::remove_dir_all(&legacy_dir);
+        let legacy_dir = dirs.config_dir().join("plugins").join(&plugin_id);
+        assert!(config_dir.starts_with(dirs.config_dir()));
+        assert!(state_dir.starts_with(dirs.state_dir()));
         std::fs::create_dir_all(&legacy_dir).unwrap();
         std::fs::write(legacy_dir.join(".env"), "TOKEN=legacy\n").unwrap();
 
@@ -2082,9 +2075,6 @@ mod tests {
             std::fs::read_to_string(config_dir.join(".env")).unwrap(),
             "TOKEN=legacy\n"
         );
-
-        let _ = std::fs::remove_dir_all(config_dir);
-        let _ = std::fs::remove_dir_all(state_dir);
-        let _ = std::fs::remove_dir_all(legacy_dir);
+        assert!(state_dir.is_dir());
     }
 }

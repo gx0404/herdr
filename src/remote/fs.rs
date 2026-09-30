@@ -97,7 +97,8 @@ impl RemoteDirEntry {
 /// config alive. 一次性通道用的是**可复用**的共享目录（HERDR-MACH-003）：
 /// 它按「档案 + 连接字段」命名、跨进程复用同一个 ssh master，因此有意不随
 /// drop 删除（进程退出后目录留在 `/tmp/herdr-ssh-<uid>-*`，空闲 master 由
-/// `ControlPersist=120` 自行退出）。
+/// `ControlPersist=120` 自行退出）。Windows 没有多路复用，目录按进程建在状态
+/// 目录里，进程退出后由下一个 herdr 进程的陈旧项清理删掉。
 pub(crate) struct RemoteFs {
     target: String,
     identity_file: Option<String>,
@@ -610,6 +611,7 @@ mod tests {
     /// 共享目录里，进程存活期内不被删除。
     #[test]
     fn one_off_sftp_channels_share_one_control_path_per_profile() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-fs-shared");
         let profile =
             SavedSshEndpoint::new("fs-test", "user@example.invalid", "default").expect("profile");
         let other =
@@ -649,6 +651,12 @@ mod tests {
             first.config.options.control_path.is_none(),
             "Windows 无 ControlMaster，control_path 按设计为 None"
         );
+        // Windows 的共享目录建在本测试隔离的状态目录里，不落到真实或共享的状态目录。
+        #[cfg(windows)]
+        for dir in [&first_dir, &third_dir] {
+            let state_dir = crate::config::test_dirs::isolated_state_dir().expect("isolated");
+            assert!(dir.starts_with(state_dir), "{}", dir.display());
+        }
         assert_ne!(first_dir, third_dir, "不同档案不共享控制路径目录");
 
         // 复用目录按设计不随进程退出删除，测试自己收拾（独立复审 轻级）。

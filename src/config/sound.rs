@@ -212,6 +212,9 @@ claude = "on"
 
     #[test]
     fn sound_path_resolution_prefers_specific_over_global() {
+        // 期望值与被测代码各解析一次 config_path()：线程本地隔离，免得两次之间被并发改
+        // HERDR_CONFIG_PATH / XDG_CONFIG_HOME 的测试换掉。
+        let _dirs = crate::config::test_dirs::isolate_dirs("sound-path-resolution");
         let config: Config = toml::from_str(
             r#"
 [ui.sound]

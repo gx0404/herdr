@@ -255,13 +255,15 @@ mod tests {
     use serde_json::json;
 
     fn unique_dir() -> PathBuf {
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。
         let dir = std::env::temp_dir().join(format!(
-            "herdr-opencode-config-{}-{}",
+            "herdr-opencode-config-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system clock should be after epoch")
-                .as_nanos()
+                .as_nanos(),
+            crate::config::test_dirs::unique_id()
         ));
         fs::create_dir_all(&dir).expect("temporary config directory should be created");
         dir

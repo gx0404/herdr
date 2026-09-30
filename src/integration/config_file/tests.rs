@@ -5,13 +5,15 @@ struct Directory(PathBuf);
 
 impl Directory {
     fn new() -> Self {
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。
         let path = std::env::temp_dir().join(format!(
-            "herdr-config-write-{}-{}",
+            "herdr-config-write-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::config::test_dirs::unique_id()
         ));
         fs::create_dir(&path).unwrap();
         Self(path)

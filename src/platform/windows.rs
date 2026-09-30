@@ -600,8 +600,7 @@ pub(crate) fn default_known_hosts_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {
-    let base = remote_private_temp_base();
-    std::fs::create_dir_all(&base)?;
+    let base = super::ensure_remote_private_temp_base()?;
     for attempt in 0..100 {
         let dir = base.join(format!("ssh-{}-{attempt}", std::process::id()));
         match create_remote_private_dir(&dir) {
@@ -627,7 +626,8 @@ pub(crate) fn create_remote_ssh_config_file(
 
 /// 复用只在支持 SSH 多路复用的平台上有意义；Windows 的
 /// `remote_ssh_config_paths().multiplexing` 为 false（没有 ControlPath），
-/// 这里退回一次性唯一目录。
+/// 这里退回一次性唯一目录。共享通道把它留到进程结束（不删），进程退出后由下一个
+/// 进程的 `sweep_stale_remote_private_entries_platform` 清理。
 pub(crate) fn reusable_remote_ssh_config_dir(
     _key: &str,
     control_socket_name: &str,
@@ -695,8 +695,193 @@ pub(crate) fn remote_private_temp_base() -> PathBuf {
     crate::config::state_dir().join("remote")
 }
 
+/// 端点路径只在即将绑定前计算：顺带清理已退出进程留下的陈旧端点标记文件（每个基准每进程
+/// 一次），只用普通 saved 连接、从不建受管配置目录的用户也不会越积越多。
 pub(crate) fn remote_bridge_endpoint_path(_readable_name: &str, short_name: &str) -> PathBuf {
-    remote_private_temp_base().join(short_name)
+    let base = remote_private_temp_base();
+    sweep_stale_remote_private_entries_platform(&base);
+    base.join(short_name)
+}
+
+/// 私有目录基准在 herdr 自己的状态目录里，没有系统清理：进程被杀或异常退出时不走 Drop，
+/// 共享通道目录按设计活到进程结束也不删，这些项会一直留着。每个基准每进程只扫一次——
+/// 陈旧项只来自已退出的进程，之后再退出的进程留下的项由下一个用到远程功能的 herdr 进程
+/// 收拾，开销只落在每个进程第一次建私有目录项时。
+pub(crate) fn sweep_stale_remote_private_entries_platform(base: &std::path::Path) {
+    static SWEPT_BASES: LazyLock<Mutex<HashSet<PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+    let first_use = SWEPT_BASES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(base.to_path_buf());
+    if first_use {
+        sweep_stale_remote_private_entries(base);
+    }
+}
+
+/// 删掉 `base` 下属主进程已确定退出的私有目录项，返回删掉的项数。尽力而为：失败只记日志，
+/// 不影响正在进行的远程操作。只认名字逐字匹配（`remote_private_entry`）且类型对得上的项，
+/// 符号链接与 junction 一律不碰也不跟随；本进程、仍在运行或查不清的进程的项都保留。
+fn sweep_stale_remote_private_entries(base: &std::path::Path) -> usize {
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(
+                    base = %base.display(),
+                    %err,
+                    "could not scan remote private dir for stale entries"
+                );
+            }
+            return 0;
+        }
+    };
+    let current_pid = std::process::id();
+    let mut exited_owners = HashMap::new();
+    let mut removed = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::debug!(
+                    base = %base.display(),
+                    %err,
+                    "could not read remote private dir entry"
+                );
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some((pid, kind)) = name.to_str().and_then(remote_private_entry) else {
+            continue;
+        };
+        if pid == current_pid
+            || !*exited_owners
+                .entry(pid)
+                .or_insert_with(|| process_has_exited(pid))
+        {
+            continue;
+        }
+        // 目录项自带的类型不跟随重解析点：junction 与符号链接既不算 dir 也不算 file。
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        let result = match kind {
+            RemotePrivateEntryKind::Dir if file_type.is_dir() => std::fs::remove_dir_all(&path),
+            RemotePrivateEntryKind::File if file_type.is_file() => std::fs::remove_file(&path),
+            _ => continue,
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(err) => tracing::debug!(
+                path = %path.display(),
+                %err,
+                "could not remove stale remote private entry"
+            ),
+        }
+    }
+    if removed > 0 {
+        tracing::debug!(
+            base = %base.display(),
+            removed,
+            "removed stale remote private entries"
+        );
+    }
+    removed
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemotePrivateEntryKind {
+    Dir,
+    File,
+}
+
+/// herdr 在 `remote_private_temp_base()` 下按属主 pid 命名的目录项：返回属主 pid 与种类。名字
+/// 必须逐字对应创建处的格式，否则 `None`（不清理）；创建处改名时这里要一起改。
+fn remote_private_entry(name: &str) -> Option<(u32, RemotePrivateEntryKind)> {
+    // `create_remote_ssh_config_dir`：`ssh-<pid>-<attempt>`。
+    if let Some(rest) = name.strip_prefix("ssh-") {
+        let (pid, attempt) = rest.split_once('-')?;
+        canonical_decimal::<u32>(attempt)?;
+        return Some((canonical_decimal(pid)?, RemotePrivateEntryKind::Dir));
+    }
+    // `remote::attach::private_download_dir`：`herdr-remote-<pid>-<asset key>-<attempt>`。
+    if let Some(rest) = name.strip_prefix("herdr-remote-") {
+        let (pid, rest) = rest.split_once('-')?;
+        let (asset_key, attempt) = rest.rsplit_once('-')?;
+        canonical_decimal::<u32>(attempt)?;
+        if !is_remote_asset_key(asset_key) {
+            return None;
+        }
+        return Some((canonical_decimal(pid)?, RemotePrivateEntryKind::Dir));
+    }
+    // 桥接端点短名（命名管道旁的标记文件）：`remote::attach::local_forward_socket_path` 的
+    // `herdr-r-<pid>-<目标前缀>-<hash>.sock`，`remote::saved` 的 `herdr-s-` / `herdr-api-`
+    // `<pid>-<档案 id 前 16 位>.sock`，`remote::askpass` 的 `herdr-ap-<pid>-<序号>.sock`。
+    let (tag, rest) = name
+        .strip_prefix("herdr-")?
+        .strip_suffix(".sock")?
+        .split_once('-')?;
+    let (pid, rest) = rest.split_once('-')?;
+    let rest_matches = match tag {
+        "r" => rest.rsplit_once('-').is_some_and(|(target, hash)| {
+            is_remote_target_prefix(target) && is_lower_hex(hash, 16)
+        }),
+        "s" | "api" => is_lower_hex(rest, 16),
+        "ap" => canonical_decimal::<u64>(rest).is_some(),
+        _ => false,
+    };
+    if !rest_matches {
+        return None;
+    }
+    Some((canonical_decimal(pid)?, RemotePrivateEntryKind::File))
+}
+
+/// 供创建处的测试核对：它们产出的名字能被陈旧项清理认出属主。
+#[cfg(test)]
+pub(crate) fn remote_private_entry_owner(name: &str) -> Option<u32> {
+    remote_private_entry(name).map(|(pid, _)| pid)
+}
+
+/// 与 `format!("{n}")` 的输出逐字一致的十进制数：非空、只有数字、没有多余的前导零。
+fn canonical_decimal<T: std::str::FromStr>(value: &str) -> Option<T> {
+    let canonical = !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'));
+    canonical.then(|| value.parse().ok()).flatten()
+}
+
+/// 下载资产的 key（`linux-x86_64`、`windows-installer`）：小写字母、数字与 `_`，`-` 分段。
+fn is_remote_asset_key(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+}
+
+/// 本地转发端点名里目标的前 8 个字符（已按 `sanitize_path_component` 清洗）。
+fn is_remote_target_prefix(value: &str) -> bool {
+    value.len() <= 8
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// 属主进程是否确定已退出（见 `process_state`）。拒绝访问等查不清的情形按仍在运行处理——
+/// `process_exists` 把打不开一律当成不存在，删目录不能沿用：宁可留下陈旧项，也不删活进程的
+/// 私有目录。
+fn process_has_exited(pid: u32) -> bool {
+    process_state(pid) == ProcessState::Exited
 }
 
 pub(crate) fn remote_reattach_program(program: &str) -> String {
@@ -2492,7 +2677,64 @@ pub fn signal_processes(pids: &[u32], signal: Signal) {
     }
 }
 
+/// 进程在进程对象 signaled 之前都算存在。Windows 先公布退出码，再结束其余线程、关掉句柄表
+/// （cwd、打开的文件）、释放地址空间，最后才把进程对象置为 signaled：只看退出码会在句柄仍被
+/// 占着时就报已退出，pane 收尾后紧接着删 worktree 目录因此失败。拿不到 `SYNCHRONIZE` 时（拒绝
+/// 访问等）沿用原来只读退出码的判定，打不开仍按不存在处理。
 pub fn process_exists(pid: u32) -> bool {
+    match process_state(pid) {
+        ProcessState::Running => true,
+        ProcessState::Exited => false,
+        ProcessState::Unknown => process_exit_code_is_still_active(pid),
+    }
+}
+
+/// 进程是否仍在运行、需要继续等它退出。
+///
+/// Windows 没有僵尸进程，[`process_exists`] 本身已满足终止阶梯的语义（HSR-02）；它等到进程
+/// 对象 signaled，阶梯因此不会在句柄表释放前就把 pane 当成已退出。
+pub fn process_alive_excluding_zombies(pid: u32) -> bool {
+    process_exists(pid)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessState {
+    /// 进程对象还没 signaled：在运行，或正在退出、句柄表还没释放完。
+    Running,
+    /// 进程对象已 signaled，或 pid 根本不存在。
+    Exited,
+    /// 拿不到带 `SYNCHRONIZE` 的句柄（拒绝访问等），或 pid 为 0：查不清。
+    Unknown,
+}
+
+fn process_state(pid: u32) -> ProcessState {
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{WaitForSingleObject, PROCESS_SYNCHRONIZE};
+
+    if pid == 0 {
+        return ProcessState::Unknown;
+    }
+    let access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+    let handle = unsafe { OpenProcess(access, 0, pid) };
+    if handle.is_null() {
+        let missing = std::io::Error::last_os_error().raw_os_error()
+            == i32::try_from(ERROR_INVALID_PARAMETER).ok();
+        return if missing {
+            ProcessState::Exited
+        } else {
+            ProcessState::Unknown
+        };
+    }
+    let process = ProcessHandle(handle);
+    match unsafe { WaitForSingleObject(process.0, 0) } {
+        WAIT_TIMEOUT => ProcessState::Running,
+        WAIT_OBJECT_0 => ProcessState::Exited,
+        _ => ProcessState::Unknown,
+    }
+}
+
+/// 只读退出码的旧判定：`SYNCHRONIZE` 被拒时的退路。
+fn process_exit_code_is_still_active(pid: u32) -> bool {
     let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
         return false;
     };
@@ -2500,14 +2742,6 @@ pub fn process_exists(pid: u32) -> bool {
     let mut exit_code = 0;
     let ok = unsafe { GetExitCodeProcess(process.0, &mut exit_code) } != 0;
     ok && exit_code == STILL_ACTIVE
-}
-
-/// 进程是否仍在运行、需要继续等它退出。
-///
-/// Windows 没有僵尸进程：`GetExitCodeProcess` 对已退出的进程返回退出码而不是
-/// `STILL_ACTIVE`，[`process_exists`] 本身已满足终止阶梯的语义（HSR-02）。
-pub fn process_alive_excluding_zombies(pid: u32) -> bool {
-    process_exists(pid)
 }
 
 static LAST_CLIPBOARD_WRITE_SEQUENCE: AtomicU32 = AtomicU32::new(0);
@@ -3274,6 +3508,322 @@ mod tests {
         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
     };
 
+    /// 测试用唯一临时路径：pid 区分进程，`test_dirs::unique_id` 区分 `cargo test` 同一进程里
+    /// 并发的测试（只靠 pid 或时间戳会撞名）。
+    fn unique_temp_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        ))
+    }
+
+    fn comspec() -> std::ffi::OsString {
+        std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into())
+    }
+
+    /// 已退出、但句柄还握在手里的子进程：pid 在测试期间不会被复用给别的进程。
+    fn exited_child() -> std::process::Child {
+        let mut child = Command::new(comspec())
+            .args(["/D", "/Q", "/C", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn short-lived child");
+        child.wait().expect("wait for short-lived child");
+        child
+    }
+
+    #[test]
+    fn remote_private_entry_names_match_their_creators_exactly() {
+        use super::RemotePrivateEntryKind::{Dir, File};
+
+        for (name, expected) in [
+            ("ssh-4242-0", Some((4242, Dir))),
+            ("ssh-4242-17", Some((4242, Dir))),
+            ("herdr-remote-4242-linux-x86_64-0", Some((4242, Dir))),
+            ("herdr-remote-4242-windows-installer-3", Some((4242, Dir))),
+            (
+                "herdr-r-4242-user-exa-0123456789abcdef.sock",
+                Some((4242, File)),
+            ),
+            ("herdr-r-4242--0123456789abcdef.sock", Some((4242, File))),
+            ("herdr-s-4242-0123456789abcdef.sock", Some((4242, File))),
+            ("herdr-api-4242-fedcba9876543210.sock", Some((4242, File))),
+            ("herdr-ap-4242-7.sock", Some((4242, File))),
+            // 与创建处的格式不逐字一致：一律不认。
+            ("ssh-4242", None),
+            ("ssh-4242-", None),
+            ("ssh-4242-x", None),
+            ("ssh-04242-0", None),
+            ("ssh-4242-00", None),
+            ("ssh-4242-0-old", None),
+            ("ssh-99999999999-0", None),
+            ("herdr-remote-4242-linux-x86_64", None),
+            ("herdr-remote-4242-Linux-x86_64-0", None),
+            ("herdr-remote-4242--0", None),
+            ("herdr-remote-4242-linux-x86_64-0.tmp", None),
+            ("herdr-remote-4242-dev-default.sock", None),
+            ("herdr-r-4242-user-0123456789abcde.sock", None),
+            ("herdr-r-4242-longtarget-0123456789abcdef.sock", None),
+            ("herdr-r-4242-user-0123456789ABCDEF.sock", None),
+            ("herdr-s-4242-0123456789abcdef", None),
+            ("herdr-s-4242-0123456789abcdef.sock.bak", None),
+            (
+                "herdr-api-ssh-4242-0123456789abcdef0123456789abcdef.sock",
+                None,
+            ),
+            ("herdr-ssh-4242-0123456789abcdef0123456789abcdef.sock", None),
+            ("herdr-askpass-4242-7.sock", None),
+            ("herdr-ap-4242-07.sock", None),
+            ("herdr-x-4242-7.sock", None),
+            ("known_hosts", None),
+        ] {
+            assert_eq!(super::remote_private_entry(name), expected, "{name}");
+        }
+    }
+
+    /// 陈旧私有目录项清理只删属主进程确定已退出、名字逐字匹配且类型对得上的项：本进程与仍在
+    /// 运行（或查不清）的进程的项、名字不匹配的项、类型不符的项都留着；junction 既不删也不
+    /// 跟随进去删目标。
+    #[test]
+    fn stale_remote_private_entries_of_exited_processes_are_swept() {
+        let dirs = crate::config::test_dirs::isolate_dirs("remote-sweep");
+        let base = dirs.state_dir().join("remote");
+        fs::create_dir_all(&base).expect("create remote base");
+        let exited = exited_child();
+        let dead = exited.id();
+        let live = std::process::id();
+        assert!(super::process_has_exited(dead));
+        assert!(!super::process_has_exited(live));
+
+        let stale_dirs = [
+            format!("ssh-{dead}-0"),
+            format!("ssh-{dead}-1"),
+            format!("herdr-remote-{dead}-linux-x86_64-0"),
+            format!("herdr-remote-{dead}-windows-installer-2"),
+        ];
+        let stale_files = [
+            format!("herdr-r-{dead}-user-exa-0123456789abcdef.sock"),
+            format!("herdr-s-{dead}-0123456789abcdef.sock"),
+            format!("herdr-api-{dead}-0123456789abcdef.sock"),
+            format!("herdr-ap-{dead}-7.sock"),
+        ];
+        let kept_dirs = [
+            format!("ssh-{live}-0"),
+            format!("herdr-remote-{live}-linux-x86_64-0"),
+            // System 进程（pid 4）一直在运行，打不开时也按仍在运行处理。
+            "ssh-4-0".to_owned(),
+            "ssh-0-0".to_owned(),
+            format!("ssh-{dead}-old"),
+            format!("ssh-0{dead}-0"),
+            // 名字是端点的格式，类型却是目录。
+            format!("herdr-ap-{dead}-8.sock"),
+        ];
+        let kept_files = [
+            format!("herdr-ap-{live}-7.sock"),
+            format!("herdr-s-{dead}-0123.sock"),
+            format!("herdr-ap-{dead}-7.sock.bak"),
+            // 名字是受管配置目录的格式，类型却是文件。
+            format!("ssh-{dead}-2"),
+            "known_hosts".to_owned(),
+        ];
+        for name in stale_dirs.iter().chain(&kept_dirs) {
+            fs::create_dir(base.join(name)).expect("create fixture dir");
+            fs::write(base.join(name).join("config"), b"Host *\n").expect("write fixture file");
+        }
+        for name in stale_files.iter().chain(&kept_files) {
+            fs::write(base.join(name), b"").expect("create fixture file");
+        }
+        let outside = dirs.state_dir().join("outside");
+        fs::create_dir_all(&outside).expect("create junction target");
+        fs::write(outside.join("keep"), b"keep").expect("write junction target file");
+        let junction = base.join(format!("ssh-{dead}-3"));
+        let status = Command::new(comspec())
+            .args(["/D", "/Q", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run mklink");
+        assert!(status.success(), "create junction fixture");
+
+        assert_eq!(
+            super::sweep_stale_remote_private_entries(&base),
+            stale_dirs.len() + stale_files.len()
+        );
+        for name in stale_dirs.iter().chain(&stale_files) {
+            assert!(
+                !base.join(name).exists(),
+                "stale entry must be removed: {name}"
+            );
+        }
+        for name in kept_dirs.iter().chain(&kept_files) {
+            assert!(base.join(name).exists(), "entry must be kept: {name}");
+        }
+        assert!(
+            fs::symlink_metadata(&junction).is_ok(),
+            "junction must be kept"
+        );
+        assert!(
+            outside.join("keep").is_file(),
+            "junction target must not be touched"
+        );
+        drop(exited);
+    }
+
+    /// 建私有目录项时顺带清理（每个基准每进程一次）：之后才出现的陈旧项留给下一个进程，
+    /// 开销不落在每次操作上。
+    #[test]
+    fn creating_a_private_dir_sweeps_its_base_once() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-sweep-once");
+        let base = super::remote_private_temp_base();
+        fs::create_dir_all(&base).expect("create remote base");
+        let exited = exited_child();
+        let dead = exited.id();
+        let stale = base.join(format!("ssh-{dead}-0"));
+        fs::create_dir(&stale).expect("create stale dir");
+
+        let created = super::create_remote_ssh_config_dir("ctl").expect("create ssh config dir");
+        assert!(created.starts_with(&base), "{}", created.display());
+        assert!(!stale.exists(), "the first private dir sweeps its base");
+
+        let later = base.join(format!("herdr-ap-{dead}-1.sock"));
+        fs::write(&later, b"").expect("create later stale endpoint");
+        let endpoint = super::remote_bridge_endpoint_path("readable.sock", "herdr-ap-0-0.sock");
+        assert!(endpoint.starts_with(&base), "{}", endpoint.display());
+        assert!(later.exists(), "a base is swept only once per process");
+        drop(exited);
+    }
+
+    /// 只用桥接端点、从不建受管配置目录的基准，也在第一次算端点路径时清理。
+    #[test]
+    fn bridge_endpoint_path_sweeps_stale_endpoints_on_first_use() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-sweep-endpoint");
+        let base = super::remote_private_temp_base();
+        fs::create_dir_all(&base).expect("create remote base");
+        let exited = exited_child();
+        let stale = base.join(format!("herdr-s-{}-0123456789abcdef.sock", exited.id()));
+        fs::write(&stale, b"").expect("create stale endpoint");
+
+        let endpoint = super::remote_bridge_endpoint_path("readable.sock", "herdr-ap-0-0.sock");
+        assert!(endpoint.starts_with(&base), "{}", endpoint.display());
+        assert!(!stale.exists(), "stale endpoint marker must be removed");
+        drop(exited);
+    }
+
+    /// 真实子进程：运行中算活着；退出并被 wait 之后（句柄仍握在手里，pid 不会被复用）算
+    /// 已退出。
+    #[test]
+    fn process_liveness_follows_a_real_child_until_it_exits() {
+        let mut child = Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn long-running child");
+        let pid = child.id();
+        assert!(super::process_exists(pid));
+        assert!(super::process_alive_excluding_zombies(pid));
+        assert!(!super::process_has_exited(pid));
+
+        child.kill().expect("kill child");
+        child.wait().expect("wait for child");
+        assert!(!super::process_exists(pid));
+        assert!(!super::process_alive_excluding_zombies(pid));
+        assert!(super::process_has_exited(pid));
+    }
+
+    /// 退出码恰好等于 `STILL_ACTIVE`（259）的进程已经退出：只看退出码会把它永远当成活着，
+    /// 按进程对象是否 signaled 判定才对。
+    #[test]
+    fn process_that_exited_with_the_still_active_code_is_gone() {
+        let mut child = Command::new(comspec())
+            .args(["/D", "/Q", "/C", "exit 259"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        let status = child.wait().expect("wait for child");
+        assert_eq!(status.code(), Some(259));
+        assert!(!super::process_exists(child.id()));
+        assert!(!super::process_alive_excluding_zombies(child.id()));
+        assert!(super::process_has_exited(child.id()));
+    }
+
+    const TEARDOWN_TEST_CHILD_ENV: &str = "HERDR_TEST_PROCESS_TEARDOWN_CHILD";
+    const TEARDOWN_TEST_CHILD_READY: &str = "herdr-teardown-child-ready";
+
+    /// 存活判定报「已退出」时进程的句柄表已经释放：它占着的 cwd 立刻删得掉。Windows 先公布
+    /// 退出码、再逐个结束线程、关句柄表，最后才把进程对象置为 signaled；只看退出码会在 cwd
+    /// 仍被占着时就报已退出（pane 收尾后紧接着删 worktree 目录因此失败）。子进程是本测试
+    /// 二进制自己，起几百个线程把这段窗口拉长到毫秒级。
+    #[test]
+    fn a_process_reported_gone_no_longer_holds_its_cwd() {
+        if std::env::var_os(TEARDOWN_TEST_CHILD_ENV).is_some() {
+            for _ in 0..400 {
+                let _ = thread::Builder::new()
+                    .stack_size(64 * 1024)
+                    .spawn(|| thread::sleep(Duration::from_secs(60)));
+            }
+            println!("{TEARDOWN_TEST_CHILD_READY}");
+            thread::sleep(Duration::from_secs(60));
+            return;
+        }
+
+        let dirs = crate::config::test_dirs::isolate_dirs("process-cwd-release");
+        let cwd = dirs.state_dir().join("cwd");
+        fs::create_dir_all(&cwd).expect("create cwd fixture");
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "platform::windows::tests::a_process_reported_gone_no_longer_holds_its_cwd",
+                "--nocapture",
+            ])
+            .env(TEARDOWN_TEST_CHILD_ENV, "1")
+            .current_dir(&cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn teardown child");
+        let stdout = child.stdout.take().expect("teardown child stdout");
+        let ready = std::io::BufRead::lines(std::io::BufReader::new(stdout))
+            .map_while(Result::ok)
+            .any(|line| line.contains(TEARDOWN_TEST_CHILD_READY));
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("teardown child did not start");
+        }
+        let pid = child.id();
+        child.kill().expect("kill child");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while super::process_exists(pid) {
+            assert!(Instant::now() < deadline, "killed child never went away");
+            thread::yield_now();
+        }
+        let removed = fs::remove_dir(&cwd);
+        child.wait().expect("wait for child");
+        removed.expect("the cwd of a process reported gone must be removable");
+    }
+
+    #[test]
+    fn process_liveness_rejects_pid_zero_and_missing_pids() {
+        for pid in [0, 4_294_967_292] {
+            assert!(!super::process_exists(pid), "{pid}");
+            assert!(!super::process_alive_excluding_zombies(pid), "{pid}");
+        }
+        assert!(super::process_exists(std::process::id()));
+        assert!(!super::process_has_exited(0));
+        assert!(super::process_has_exited(4_294_967_292));
+    }
+
     #[test]
     fn clipboard_text_equals_normalizes_line_endings() {
         assert!(super::clipboard_text_equals("hello", b"hello"));
@@ -3332,10 +3882,7 @@ mod tests {
     fn windows_plugin_runtime_path_keeps_verbatim_root_beyond_max_path() {
         use std::os::windows::ffi::OsStrExt;
 
-        let base = std::env::temp_dir().join(format!(
-            "herdr-plugin-runtime-path-limit-test-{}",
-            std::process::id()
-        ));
+        let base = unique_temp_path("herdr-plugin-runtime-path-limit-test");
         fs::create_dir_all(&base).expect("create test base");
         let extended_base = base.canonicalize().expect("canonicalize test base");
         let normal_base = super::standard_windows_path(&extended_base)
@@ -3376,10 +3923,7 @@ mod tests {
 
     #[test]
     fn private_remote_directory_supports_long_paths() {
-        let base = std::env::temp_dir().join(format!(
-            "herdr-private-remote-dir-test-{}",
-            std::process::id()
-        ));
+        let base = unique_temp_path("herdr-private-remote-dir-test");
         fs::create_dir_all(&base).expect("create test base");
         let private = base.join("x".repeat(240));
 
@@ -3527,14 +4071,7 @@ mod tests {
     #[test]
     fn windows_shells_round_trip_agent_arguments_through_a_real_command() {
         let _lock = crate::integration::integration_env_lock();
-        let base = std::env::temp_dir().join(format!(
-            "herdr-agent-argv-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        ));
+        let base = unique_temp_path("herdr-agent-argv");
         fs::create_dir_all(&base).unwrap();
         let helper = base.join("pi.cmd");
         fs::write(
@@ -3704,14 +4241,7 @@ mod tests {
             return;
         }
 
-        let base = std::env::temp_dir().join(format!(
-            "herdr-wmi-daemon-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        ));
+        let base = unique_temp_path("herdr-wmi-daemon-test");
         fs::create_dir_all(&base).unwrap();
         let capture = base.join("capture.txt");
         let test_exe = std::env::current_exe().expect("resolve test executable");
@@ -3729,7 +4259,8 @@ mod tests {
         assert_ne!(pid, 0, "WMI returned an invalid process id");
 
         let expected = format!("{}\ntrue\ntrue", base.display());
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // WMI 拉起在负载下要好几秒；宽上限只在真失败时才等满。
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if fs::read_to_string(&capture).is_ok_and(|captured| captured == expected) {
                 break;
@@ -3740,7 +4271,8 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(50));
         }
-        let _ = fs::remove_dir_all(base);
+        // 子进程写完捕获文件后才退出，退出前一直以 base 为工作目录：有界重试直到放开。
+        crate::config::test_dirs::remove_dir_eventually(&base);
     }
 
     fn console_process_ids() -> Vec<u32> {
@@ -3888,10 +4420,7 @@ mod tests {
 
     #[test]
     fn detached_custom_command_preserves_quoted_command_tail() {
-        let path = std::env::temp_dir().join(format!(
-            "herdr-raw-command-quotes-{}.txt",
-            std::process::id()
-        ));
+        let path = unique_temp_path("herdr-raw-command-quotes").with_extension("txt");
         let command = format!(r#"echo "hi" > "{}""#, path.display());
 
         let status = super::detached_custom_command_process_platform(&command)
@@ -3907,21 +4436,25 @@ mod tests {
 
     #[test]
     fn windows_process_cwd_reads_normalized_child_launch_directory() {
-        let name = format!("Herdr-Cwd-Case-{}", std::process::id());
-        let cwd = std::env::temp_dir().join(&name);
+        let cwd = unique_temp_path("Herdr-Cwd-Case");
+        let name = cwd
+            .file_name()
+            .expect("cwd fixture name")
+            .to_string_lossy()
+            .into_owned();
         fs::create_dir_all(&cwd).expect("create cwd fixture");
         let launch_cwd = cwd.with_file_name(name.to_ascii_lowercase());
 
-        let shell =
-            std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
-        let mut child = Command::new(shell)
-            .args(["/D", "/Q", "/C", "ping -n 11 127.0.0.1 > NUL"])
+        // 直接起 ping（不经 cmd /C）：kill 掉的就是占着 cwd 的进程，fixture 目录才删得掉；
+        // 经 cmd 时 ping 孙进程还会占着目录十秒，目录删不掉、留在临时目录里。
+        let mut child = Command::new("ping")
+            .args(["-n", "11", "127.0.0.1"])
             .current_dir(super::normalize_cwd_for_launch_platform(&launch_cwd))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn cmd");
+            .expect("spawn ping");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut observed = None;

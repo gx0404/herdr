@@ -100,3 +100,22 @@ fn codex_pane_shim_precedes_path_and_can_be_resolved_without_recursion() {
         io::ErrorKind::NotFound
     );
 }
+
+#[test]
+fn codex_pane_shim_is_the_shared_one_of_the_unit_test_base() {
+    let mut command = portable_pty::CommandBuilder::new("sh");
+    command.env_clear();
+    command.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+    command.env(super::super::HERDR_PANE_ID_ENV_VAR, "pane:1");
+    apply_pane_env(&mut command);
+    let directory = Path::new(command.get_env(SHIM_DIR).unwrap());
+    // Test processes share one shim per test binary there, never a per-process copy in the
+    // temp root or a production shim.
+    assert_eq!(
+        directory.parent().and_then(Path::file_name),
+        Some(OsStr::new("herdr-unit-codex-shim"))
+    );
+    assert!(crate::platform::codex_launch::is_shim(
+        &directory.join("codex")
+    ));
+}

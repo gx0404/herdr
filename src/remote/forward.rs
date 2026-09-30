@@ -554,6 +554,7 @@ mod tests {
 
     #[test]
     fn rebuild_records_spawn_failures_and_status_reports_them() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("forward-spawn-failures");
         let profile = profile_with_forwards(vec![
             rule(PortForwardKind::Local, 18080),
             rule(PortForwardKind::Dynamic, 11080),
@@ -574,6 +575,7 @@ mod tests {
 
     #[test]
     fn reconcile_keeps_healthy_forwards_and_restarts_failed_ones() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("forward-reconcile");
         let mut wanted = rule(PortForwardKind::Local, 18081);
         wanted.bind_address = Some("10.0.0.1".into());
         let profile = profile_with_forwards(vec![wanted.clone()]);
@@ -622,6 +624,7 @@ mod tests {
         // The connection came up with zero rules (or the set was torn down
         // when the rules were emptied): a freshly added rule starts the
         // whole set instead of waiting for the next reconnect.
+        let _dirs = crate::config::test_dirs::isolate_dirs("forward-reconcile-rebuild");
         let profile = profile_with_forwards(vec![rule(PortForwardKind::Local, 18082)]);
         let mut manager = manager_with(starter_succeeds);
         manager.reconcile(&profile);
@@ -634,11 +637,23 @@ mod tests {
     fn rebuild_never_multiplexes_forward_children() {
         // A shared control master would keep a torn-down rule's listener
         // (and the mux process itself) alive past the rule's lifetime.
+        let _dirs = crate::config::test_dirs::isolate_dirs("forward-no-multiplex");
         let profile = profile_with_forwards(vec![rule(PortForwardKind::Local, 18083)]);
         let mut manager = manager_with(starter_succeeds);
         manager.rebuild(&profile);
         let set = manager.sets.get(&profile.id).expect("tracked set");
         let config = set.config.as_ref().expect("managed config");
         assert!(config.options.control_path.is_none());
+        // Windows 的受管配置目录建在本测试隔离的状态目录里。
+        #[cfg(windows)]
+        {
+            let state_dir = crate::config::test_dirs::isolated_state_dir().expect("isolated");
+            let config_path = &config.options.config_path;
+            assert!(
+                config_path.starts_with(state_dir),
+                "{}",
+                config_path.display()
+            );
+        }
     }
 }

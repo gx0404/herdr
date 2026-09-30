@@ -17,12 +17,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::Value;
 use support::{
-    cleanup_test_base, client_shell_handshake, read_server_message, register_runtime_dir,
-    register_spawned_herdr_pid, unregister_spawned_herdr_pid, wait_for_client_shell_bootstrap,
-    wait_for_message_variant, wait_for_message_variants, wait_for_socket, wait_until,
-    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_PANE_SURFACE,
-    SERVER_MESSAGE_PANE_SURFACE_PATCH, SERVER_MESSAGE_SEMANTIC_NOTIFICATION,
-    SERVER_MESSAGE_SERVER_SHUTDOWN,
+    app_dir_name, cleanup_test_base, client_shell_handshake, read_server_message,
+    register_runtime_dir, register_spawned_herdr_pid, unregister_spawned_herdr_pid,
+    wait_for_client_shell_bootstrap, wait_for_message_variant, wait_for_message_variants,
+    wait_for_socket, wait_until, CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL,
+    INHERITED_DIR_OVERRIDES, SERVER_MESSAGE_PANE_SURFACE, SERVER_MESSAGE_PANE_SURFACE_PATCH,
+    SERVER_MESSAGE_SEMANTIC_NOTIFICATION, SERVER_MESSAGE_SERVER_SHUTDOWN,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -141,6 +141,9 @@ fn spawn_client_process_with_args_and_env(
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
@@ -196,6 +199,9 @@ fn spawn_server_with_config(
     let home = runtime_dir.join("home");
     let _ = std::fs::create_dir_all(&home);
     cmd.env("HOME", &home);
+    // 状态目录与客户端助手同一处（`<runtime>/state`）：不设时 state_dir 回退到平台目录
+    // （Windows 取 %LOCALAPPDATA%，不随 HOME 走），外层继承的 XDG_STATE_HOME 也会越过隔离。
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
@@ -204,6 +210,9 @@ fn spawn_server_with_config(
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -254,14 +263,6 @@ fn first_pane_id_in_workspace(socket_path: &PathBuf, workspace_id: &str) -> Stri
         thread::sleep(Duration::from_millis(25));
     }
     panic!("pane.list did not return a pane for workspace {workspace_id} before timeout");
-}
-
-fn app_dir_name() -> &'static str {
-    if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,14 +424,9 @@ fn client_sees_headless_startup_config_diagnostic() {
     let api_socket = runtime_dir.join("herdr.sock");
     let client_socket = runtime_dir.join("herdr-client.sock");
 
-    let app_dir = if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    };
-    fs::create_dir_all(config_home.join(app_dir)).unwrap();
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::write(
-        config_home.join(app_dir).join("config.toml"),
+        config_home.join(app_dir_name()).join("config.toml"),
         "[keys\nprefix = \"ctrl+a\"\n",
     )
     .unwrap();
@@ -449,10 +445,12 @@ fn client_sees_headless_startup_config_diagnostic() {
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     // HOME 隔离到测试目录：客户端连着时 server 会轮询外部来源（zcode 等按 HOME 读
-    // 真实数据），XDG_STATE_HOME 未设时 state_dir 也会回退到真实 HOME。
+    // 真实数据）。状态目录另经 XDG_STATE_HOME 隔离：不设时 state_dir 回退到平台目录
+    // （Windows 取 %LOCALAPPDATA%，不随 HOME 走）。
     let home = runtime_dir.join("home");
     let _ = std::fs::create_dir_all(&home);
     cmd.env("HOME", &home);
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", &api_socket);
@@ -461,6 +459,9 @@ fn client_sees_headless_startup_config_diagnostic() {
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -505,11 +506,11 @@ fn server_unreachable_shows_clear_error() {
     let runtime_dir = base.join("runtime");
     let api_socket = runtime_dir.join("herdr.sock");
 
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
     register_runtime_dir(&runtime_dir);
     fs::write(
-        config_home.join("herdr/config.toml"),
+        config_home.join(app_dir_name()).join("config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -517,7 +518,8 @@ fn server_unreachable_shows_clear_error() {
     // HOME 隔离到测试目录，避免 client 读取开发机真实 HOME 下的数据。
     let home = runtime_dir.join("home");
     let _ = std::fs::create_dir_all(&home);
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let mut client = std::process::Command::new(env!("CARGO_BIN_EXE_herdr"));
+    client
         .arg("client")
         .env("HERDR_DISABLE_SOUND", "1")
         .env("HOME", &home)
@@ -528,9 +530,11 @@ fn server_unreachable_shows_clear_error() {
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
         // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
-        .env_remove("HERDR_STARTUP_CWD")
-        .output()
-        .expect("client command should run");
+        .env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        client.env_remove(key);
+    }
+    let output = client.output().expect("client command should run");
 
     assert!(
         !output.status.success(),
@@ -1063,8 +1067,8 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     let ssh_commands = base.join("ssh-commands");
     let bridge_pid = base.join("bridge-pid");
     fs::write(bin.join("ssh"), format!(
-        "#!/bin/sh\nexport HOME={} XDG_CONFIG_HOME={} XDG_RUNTIME_DIR={} HERDR_SOCKET_PATH={}\nunset HERDR_CLIENT_SOCKET_PATH HERDR_SESSION\nfor arg do last=\"$arg\"; done\nprintf '%s\\n' \"$last\" >> {}\ncase \"$last\" in *remote-client-bridge*) printf '%s\\n' \"$$\" > {};; esac\nexec /bin/sh -c \"$last\"\n",
-        quote(&base.join("home")), quote(&remote_config), quote(&remote_runtime), quote(&remote_api), quote(&ssh_commands), quote(&bridge_pid),
+        "#!/bin/sh\nexport HOME={} XDG_CONFIG_HOME={} XDG_STATE_HOME={} XDG_RUNTIME_DIR={} HERDR_SOCKET_PATH={}\nunset HERDR_CLIENT_SOCKET_PATH HERDR_SESSION\nfor arg do last=\"$arg\"; done\nprintf '%s\\n' \"$last\" >> {}\ncase \"$last\" in *remote-client-bridge*) printf '%s\\n' \"$$\" > {};; esac\nexec /bin/sh -c \"$last\"\n",
+        quote(&base.join("home")), quote(&remote_config), quote(&remote_runtime.join("state")), quote(&remote_runtime), quote(&remote_api), quote(&ssh_commands), quote(&bridge_pid),
     )).unwrap();
     fs::set_permissions(bin.join("ssh"), fs::Permissions::from_mode(0o700)).unwrap();
     let path = format!(
@@ -1517,8 +1521,8 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
     let quote =
         |path: &std::path::Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
     fs::write(bin.join("ssh"), format!(
-        "#!/bin/sh\nexport HOME={} XDG_CONFIG_HOME={} XDG_RUNTIME_DIR={} HERDR_SOCKET_PATH={}\nunset HERDR_CLIENT_SOCKET_PATH HERDR_SESSION\nfor arg do last=\"$arg\"; done\nexec /bin/sh -c \"$last\"\n",
-        quote(&base.join("home")), quote(&remote_config), quote(&remote_runtime), quote(&remote_api),
+        "#!/bin/sh\nexport HOME={} XDG_CONFIG_HOME={} XDG_STATE_HOME={} XDG_RUNTIME_DIR={} HERDR_SOCKET_PATH={}\nunset HERDR_CLIENT_SOCKET_PATH HERDR_SESSION\nfor arg do last=\"$arg\"; done\nexec /bin/sh -c \"$last\"\n",
+        quote(&base.join("home")), quote(&remote_config), quote(&remote_runtime.join("state")), quote(&remote_runtime), quote(&remote_api),
     )).unwrap();
     fs::set_permissions(bin.join("ssh"), fs::Permissions::from_mode(0o700)).unwrap();
     let path = format!(
@@ -2454,10 +2458,12 @@ fn client_receives_notify_on_agent_state_change() {
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     // HOME 隔离到测试目录：客户端连着时 server 会轮询外部来源（zcode 等按 HOME 读
-    // 真实数据），XDG_STATE_HOME 未设时 state_dir 也会回退到真实 HOME。
+    // 真实数据）。状态目录另经 XDG_STATE_HOME 隔离：不设时 state_dir 回退到平台目录
+    // （Windows 取 %LOCALAPPDATA%，不随 HOME 走）。
     let home = runtime_dir.join("home");
     let _ = std::fs::create_dir_all(&home);
     cmd.env("HOME", &home);
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", &api_socket);
@@ -2466,6 +2472,9 @@ fn client_receives_notify_on_agent_state_change() {
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());

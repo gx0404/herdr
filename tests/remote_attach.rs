@@ -114,6 +114,12 @@ exit 255
         .env("FAKE_SSH_ADVANCED", &advanced_path)
         .env("FAKE_SSH_FIRST_DONE", &first_done_path)
         .env("HERDR_CONFIG_PATH", temp_dir.join("config.toml"))
+        // HERDR_CONFIG_PATH 只换配置文件：配置目录（日志等）与状态目录也要落在测试目录里。
+        .env("XDG_CONFIG_HOME", temp_dir.join("config"))
+        .env("XDG_STATE_HOME", temp_dir.join("state"))
+        // 远程连接流程按 HOME 找 `~/.ssh`（受管 ssh 配置会 Include 用户配置）：指到测试目录，
+        // 不读写开发机的 ssh 配置。
+        .env("HOME", &temp_dir)
         .env_remove("HERDR_ENV")
         // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
         .env_remove("HERDR_STARTUP_CWD")

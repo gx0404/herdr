@@ -19,6 +19,7 @@ use support::{
     cleanup_test_base, client_shell_handshake, drain_messages, register_runtime_dir,
     register_spawned_herdr_pid, send_detach, unregister_spawned_herdr_pid, wait_for_disconnect,
     wait_for_socket, wait_until, CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL,
+    INHERITED_DIR_OVERRIDES,
 };
 
 const CUSTOM_HEADLESS_SIZE_CONFIG: &str = r#"onboarding = false
@@ -128,9 +129,16 @@ fn spawn_server_with_config(
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // 状态目录也显式隔离：不设时 state_dir 回退到平台目录（Windows 取 %LOCALAPPDATA%，
+    // 不随 HOME 走），外层继承的 XDG_STATE_HOME 也会把 server 带回开发机真实目录。
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
+    // 配置写在 `herdr/` 下，debug 构建默认读 `herdr-dev/`：显式指向写入的文件。
     cmd.env("HERDR_CONFIG_PATH", config_home.join("herdr/config.toml"));
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");

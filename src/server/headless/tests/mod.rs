@@ -27,7 +27,7 @@ fn client_shell_projection(
     let read_control = |expected| {
         let ServerMessage::EndpointControl { kind, data } = read_server_message(
             receiver
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(LOADED_WAIT)
                 .expect("endpoint projection"),
         ) else {
             panic!("expected endpoint control {expected}");
@@ -76,17 +76,10 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     );
 
     app.state.default_shell = crate::app::exiting_test_command().into();
-    let dir = std::env::temp_dir().join(format!(
-        "hh-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = fs::create_dir_all(&dir);
-    let socket_path = dir.join("client.sock");
-    let _ = fs::remove_file(&socket_path);
+    // 客户端 socket（Windows 上是由路径推出的命名管道）与活动树 home 都建在这个目录里，
+    // 目录随 server 一起删掉。
+    let scratch = ScratchDir::new("hh");
+    let socket_path = scratch.path().join("client.sock");
     let listener = bind_local_listener(&socket_path).expect("bind test listener");
     let client_socket_identity =
         socket_file_identity(&socket_path).expect("test listener socket identity");
@@ -102,7 +95,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     let headless_size = app.state.headless_size;
     // 活动树运行时的 home 隔离到本测试的临时目录：适配器（zcode 等）会按 home 读
     // 本机真实的 CLI 数据，用真 HOME 会让「外部来源为空」之类的断言随开发机状态漂移。
-    let activity_home = dir.join("home");
+    let activity_home = scratch.path().join("home");
     let _ = fs::create_dir_all(&activity_home);
     let agent_activity = crate::server::agent_activity::Service::with_sources(
         app.event_tx.clone(),
@@ -151,6 +144,44 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         should_quit,
         server_event_rx,
         server_event_tx,
+        _test_scratch_dir: Some(scratch),
+    }
+}
+
+/// 测试建的临时目录：析构时（含 panic 展开）删掉，删不掉就限时重试到它消失——活动树的
+/// 后台线程可能还开着 home 下的目录句柄，git 与 pane 进程刚退出时也可能还占着 cwd，
+/// Windows 上杀毒扫描会短暂占着新写的文件，只删一次会把目录留下。
+pub(super) struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    /// 新建 `<临时目录>/<prefix>-<pid>-<纳秒>-<序号>`。同一进程里并发建的目录靠进程内序号
+    /// 分开，只靠时间戳会撞名（Windows 时钟只有 100ns 精度）；前缀要短：unix socket 建在
+    /// 里面，macOS 的 socket 路径上限只有 104 字节。
+    fn new(prefix: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0),
+            crate::config::test_dirs::unique_id()
+        ));
+        fs::create_dir_all(&dir).expect("create test scratch dir");
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let deadline = Instant::now() + LOADED_WAIT;
+        while fs::remove_dir_all(&self.0).is_err() && self.0.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -334,9 +365,7 @@ fn headless_api_request_drains_all_pending_internal_events_before_reading_state(
             stream_active: None,
         })
     );
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
     assert_eq!(response["result"]["type"], "ok");
@@ -373,7 +402,7 @@ fn window_title_test_server() -> (HeadlessServer, std::sync::mpsc::Receiver<Vec<
 /// The test client writer drains its queue on a background thread, so
 /// reading a pushed message needs a timeout rather than `try_recv`.
 fn next_window_title(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Option<Option<String>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + LOADED_WAIT;
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         let Ok(bytes) = control_rx.recv_timeout(remaining) else {
             return None;
@@ -612,7 +641,7 @@ fn clearing_the_api_title_falls_back_to_herdr_when_window_titles_are_disabled() 
 }
 
 fn next_terminal_cwd(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Option<Option<String>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + LOADED_WAIT;
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         let Ok(bytes) = control_rx.recv_timeout(remaining) else {
             return None;
@@ -859,15 +888,16 @@ async fn promoted_client_window_title_uses_its_own_view() {
     shutdown_test_runtimes(&mut server);
 }
 
-/// 等测试写端转发来的下一条消息用的与负载无关的宽上限（N21c，做法同 `93621e2c`）：
-/// `ClientWriter::test_channel` 由一条转发线程把消息搬进通道，负载高时它可能好一阵
-/// 才被调度到，固定 100 ms 会误报 Timeout。消息一到立即返回，只在真的没发时才等满；
-/// 「不应收到」的否定窗口不受负载误报，保持原样。
-const FORWARDED_MESSAGE_WAIT: Duration = Duration::from_secs(30);
+/// 等异步结果用的与负载无关的宽上限（N21c，做法同 `93621e2c`）：测试写端转发来的消息
+/// （`ClientWriter::test_channel` 由一条转发线程把消息搬进通道）、后台线程的应答与 app
+/// 事件、测试 git 闸门的进入信号。负载高时这些线程可能好一阵才被调度到，固定的 100 ms–5 s
+/// 会误报超时。结果一到立即返回，只在真的没来时才等满；「不应收到」的否定窗口不受负载
+/// 误报，保持原样。
+const LOADED_WAIT: Duration = Duration::from_secs(30);
 
 /// 收下测试写端转发来的下一条消息；等不到就以 `what` 报错。
 fn recv_forwarded(rx: &std::sync::mpsc::Receiver<Vec<u8>>, what: &str) -> Vec<u8> {
-    rx.recv_timeout(FORWARDED_MESSAGE_WAIT)
+    rx.recv_timeout(LOADED_WAIT)
         .unwrap_or_else(|err| panic!("{what}: {err:?}"))
 }
 
@@ -4024,26 +4054,22 @@ async fn terminal_popup_is_visible_and_modal_only_on_its_owning_tab() {
         terminal_id: popup_terminal_id.to_string(),
         events: vec![popup_key(crate::protocol::ClientKeyKind::Press)],
     });
-    assert!(
-        !tokio::time::timeout(Duration::from_secs(1), popup_input.recv())
-            .await
-            .expect("popup press timed out")
-            .expect("popup press")
-            .is_empty()
-    );
+    assert!(!tokio::time::timeout(LOADED_WAIT, popup_input.recv())
+        .await
+        .expect("popup press timed out")
+        .expect("popup press")
+        .is_empty());
     assert!(server.focus_shell_client_on_tab(31, &second_tab_id));
     server.handle_server_event(ServerEvent::ClientShellPopupInput {
         client_id: 31,
         terminal_id: popup_terminal_id.to_string(),
         events: vec![popup_key(crate::protocol::ClientKeyKind::Release)],
     });
-    assert!(
-        !tokio::time::timeout(Duration::from_secs(1), popup_input.recv())
-            .await
-            .expect("popup release timed out")
-            .expect("popup release after navigation")
-            .is_empty()
-    );
+    assert!(!tokio::time::timeout(LOADED_WAIT, popup_input.recv())
+        .await
+        .expect("popup release timed out")
+        .expect("popup release after navigation")
+        .is_empty());
 
     assert!(
         !server.handle_server_event(ServerEvent::ClientShellPopupInput {
@@ -4199,7 +4225,7 @@ async fn worktree_discovery_does_not_block_client_typing() {
             stream_active: None,
         });
         entered
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(LOADED_WAIT)
             .expect("Git discovery started");
         assert!(response_rx.try_recv().is_err(), "Git must still be blocked");
         server.handle_server_event(ServerEvent::ClientShellPaneInput {
@@ -4214,14 +4240,13 @@ async fn worktree_discovery_does_not_block_client_typing() {
             Bytes::from_static(b"x")
         );
         release.send(()).unwrap();
-        let event = tokio::time::timeout(Duration::from_secs(5), server.app.event_rx.recv())
+        let event = tokio::time::timeout(LOADED_WAIT, server.app.event_rx.recv())
             .await
             .unwrap()
             .unwrap();
         server.handle_internal_event_with_forwarding(event);
         let response: api::schema::ErrorResponse =
-            serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(5)).unwrap())
-                .unwrap();
+            serde_json::from_str(&response_rx.recv_timeout(LOADED_WAIT).unwrap()).unwrap();
         assert_eq!(response.error.code, "worktree_list_failed");
     }
     shutdown_test_runtimes(&mut server);
@@ -4229,10 +4254,13 @@ async fn worktree_discovery_does_not_block_client_typing() {
 
 #[tokio::test]
 async fn deferred_worktree_open_disconnect_keeps_other_clients_focus() {
+    // 仓库与检出放在同一个临时目录里，测试结束（含 panic）时整个删掉。先于 server 建，
+    // 也就晚于它析构：删目录时 server 已放下对仓库与检出的一切引用。
+    let scratch = ScratchDir::new("herdr-disconnected-open");
+    let repo = scratch.path().join("repo");
+    let checkout = scratch.path().join("checkout");
     let mut server = test_headless_server();
     let mut source = crate::workspace::Workspace::test_new("pending-open-source");
-    let repo = std::env::temp_dir().join(format!("herdr-disconnected-open-{}", source.id));
-    let checkout = repo.with_extension("checkout");
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git")
             .args(args)
@@ -4296,12 +4324,10 @@ async fn deferred_worktree_open_disconnect_keeps_other_clients_focus() {
             }),
         }),
     });
-    entered
-        .recv_timeout(Duration::from_secs(5))
-        .expect("Git started");
+    entered.recv_timeout(LOADED_WAIT).expect("Git started");
     server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 51 });
     release.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(LOADED_WAIT, async {
         loop {
             let event = server.app.event_rx.recv().await.unwrap();
             let completed = matches!(&event, AppEvent::WorktreeReadFinished(_));
@@ -4323,14 +4349,6 @@ async fn deferred_worktree_open_disconnect_keeps_other_clients_focus() {
         "disconnected endpoint must not turn into public navigation"
     );
     shutdown_test_runtimes(&mut server);
-    git(&[
-        "-C",
-        repo.to_str().unwrap(),
-        "worktree",
-        "remove",
-        checkout.to_str().unwrap(),
-    ]);
-    let _ = std::fs::remove_dir_all(repo);
 }
 
 #[tokio::test]
@@ -7984,9 +8002,7 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
     });
 
     assert!(changed);
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
     assert_eq!(
         parsed.result,
@@ -8048,9 +8064,7 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
     });
 
     assert!(changed);
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
     assert_eq!(
         parsed.result,
@@ -8095,9 +8109,7 @@ fn notification_show_api_validates_empty_title_before_disabled_delivery() {
     });
 
     assert!(changed);
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     let parsed: api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
     assert_eq!(parsed.error.code, "invalid_params");
     assert_eq!(parsed.error.message, "notification title is empty");
@@ -8128,9 +8140,7 @@ fn notification_show_api_reports_no_foreground_client() {
     });
 
     assert!(changed);
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
     assert_eq!(
         parsed.result,
@@ -8181,9 +8191,7 @@ fn notification_show_api_includes_sound_in_semantic_event() {
         })
     );
 
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
     assert_eq!(
         parsed.result,
@@ -8242,9 +8250,7 @@ fn completion_guard_api_report(server: &mut HeadlessServer, method: api::schema:
         report_origin: None,
         stream_active: None,
     });
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     serde_json::from_str::<api::schema::SuccessResponse>(&response).expect("successful report");
 }
 
@@ -8304,9 +8310,7 @@ fn api_report_agent_stores_valid_resume_argv_and_rejects_invalid() {
         observation_events: None,
         report_origin: None,
     });
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     assert!(response.contains("invalid_resume_argv"), "{response}");
     assert_eq!(
         server.app.state.terminals[&terminal_id]
@@ -8339,9 +8343,7 @@ fn api_report_agent_stores_valid_resume_argv_and_rejects_invalid() {
         observation_events: None,
         report_origin: None,
     });
-    let response = response_rx
-        .recv_timeout(Duration::from_millis(100))
-        .unwrap();
+    let response = response_rx.recv_timeout(LOADED_WAIT).unwrap();
     assert!(response.contains("resume_not_accepted"), "{response}");
     assert_eq!(
         server.app.state.terminals[&terminal_id]
@@ -8405,7 +8407,7 @@ fn completion_guard_notifications(
     loop {
         let message = read_server_message(
             receiver
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(LOADED_WAIT)
                 .expect("notification barrier"),
         );
         if matches!(&message, ServerMessage::EndpointControl { kind, .. } if kind == "test.completion-barrier")
@@ -8727,7 +8729,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
     });
 
     assert!(changed);
-    assert!(response_rx.recv_timeout(Duration::from_millis(100)).is_ok());
+    assert!(response_rx.recv_timeout(LOADED_WAIT).is_ok());
     assert_eq!(
         server.app.state.terminals.get(&terminal_id).unwrap().state,
         crate::detect::AgentState::Working

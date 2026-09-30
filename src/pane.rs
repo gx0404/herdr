@@ -217,12 +217,13 @@ pub(crate) fn recorded_client_ssh_auth_sock_for_test() -> Option<std::ffi::OsStr
     client_reported_ssh_auth_sock()
 }
 
+/// 读写 `CLIENT_REPORTED_SSH_AUTH_SOCK` 这类进程全局状态的测试持有的锁：就是全局的
+/// `config::test_config_env_lock`（环境变量同样是进程全局的），一把锁排开两类改动。
 #[cfg(test)]
-pub(crate) fn pane_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+pub(crate) fn pane_env_test_lock() -> crate::config::TestEnvGuard {
+    crate::config::test_config_env_lock()
         .lock()
-        .expect("pane env test lock")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -4468,8 +4469,11 @@ mod tests {
             .expect("clock")
             .as_nanos();
         // 固定短 /tmp：macOS 的 $TMPDIR 会让其下的 agent.sock 超出 sun_path（104 字节）。
-        let dir =
-            std::path::PathBuf::from(format!("/tmp/hsa-{tag}-{}-{stamp}", std::process::id()));
+        let dir = std::path::PathBuf::from(format!(
+            "/tmp/hsa-{tag}-{}-{stamp}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        ));
         std::fs::create_dir_all(&dir).expect("create ssh auth sock test dir");
         dir
     }
@@ -5355,7 +5359,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn login_shell_builder_resolves_bare_shell_names_from_path() {
-        let _lock = crate::integration::integration_env_lock();
+        let _env = crate::config::test_config_env_lock().lock().unwrap();
         let base = std::env::temp_dir().join(format!(
             "herdr-login-shell-path-{}-{}",
             std::process::id(),
@@ -5373,8 +5377,14 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", &bin);
+        // 假 shell 的目录放到 PATH 最前面而不是替换整个 PATH：同进程里并发的测试照样找得到
+        // git、sh 等真实命令。PATH 在放锁时自动还原。
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)),
+        )
+        .unwrap();
+        std::env::set_var("PATH", path);
 
         let cmd = pane_shell_command_builder_for_target(
             PaneShellConfig::new("fake-shell", crate::config::ShellModeConfig::Login),
@@ -5387,10 +5397,6 @@ mod tests {
             cmd.get_env("SHELL").and_then(std::ffi::OsStr::to_str),
             shell.to_str()
         );
-        match original_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
         let _ = std::fs::remove_dir_all(base);
     }
 

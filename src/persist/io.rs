@@ -164,20 +164,48 @@ mod tests {
         PaneHistorySnapshot, TabHistorySnapshot, WorkspaceHistorySnapshot,
     };
 
-    fn temp_session_path(name: &str) -> PathBuf {
+    /// 唯一临时根下的 `session.json` 路径；析构时删掉整个根（含断言失败的 panic 展开），
+    /// 测试不留残留。
+    struct TempSessionPath(PathBuf);
+
+    impl std::ops::Deref for TempSessionPath {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for TempSessionPath {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempSessionPath {
+        fn drop(&mut self) {
+            if let Some(root) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    fn temp_session_path(name: &str) -> TempSessionPath {
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。
         let unique = format!(
-            "herdr-session-tests-{}-{}-{}",
+            "herdr-session-tests-{}-{}-{}-{}",
             name,
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::config::test_dirs::unique_id()
         );
-        std::env::temp_dir().join(unique).join("session.json")
+        TempSessionPath(std::env::temp_dir().join(unique).join("session.json"))
     }
 
-    fn temp_session_paths(name: &str) -> (PathBuf, PathBuf) {
+    fn temp_session_paths(name: &str) -> (TempSessionPath, PathBuf) {
         let session = temp_session_path(name);
         let history = session.with_file_name("session-history.json");
         (session, history)

@@ -481,7 +481,7 @@ fn parse_catalog(content: &str) -> Result<Vec<CatalogAgent>, String> {
 }
 
 pub(crate) fn load_status() -> ManifestUpdateStatus {
-    // 没隔离状态目录的测试（构造 App、explain 等）不读开发机上真实的更新状态。
+    // 本线程没隔离状态目录的测试（构造 App、explain 等）不读共享或真实的更新状态。
     #[cfg(test)]
     if crate::config::test_dirs::isolated_state_dir().is_none() {
         return ManifestUpdateStatus::default();
@@ -594,8 +594,8 @@ fn directory_sync_unsupported(err: &std::io::Error) -> bool {
 }
 
 fn state_root() -> PathBuf {
-    // 测试构建只解析到隔离的临时状态目录：远端缓存与更新状态一旦写进开发机真实的
-    // herdr-dev 目录，之后每次跑测试都会读到。隔离失效时直接失败，不读也不写那里。
+    // 测试构建只解析到本线程隔离的临时状态目录（`test_dirs::isolate_dirs`）：远端缓存与
+    // 更新状态写进共享目录，之后别的测试都会读到。没隔离时直接失败，不读也不写别处。
     #[cfg(test)]
     let dir = crate::config::test_dirs::isolated_state_dir()
         .expect("agent detection state dir must be isolated to a temp dir in tests");
@@ -713,32 +713,50 @@ contains = ["{contains}"]
         )
     }
 
+    /// 在本线程独占的临时目录里跑 `f`：配置/状态目录是线程本地覆盖，不改进程环境变量；
+    /// manifest 缓存先按隔离目录重载，结束后还原成进入前的样子（隔离目录随之删除）。
     fn with_state_dir<T>(name: &str, f: impl FnOnce() -> T) -> T {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let old_config = std::env::var_os("XDG_CONFIG_HOME");
-        let old_state = std::env::var_os("XDG_STATE_HOME");
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-manifest-update-{name}-{}",
-            std::process::id()
-        ));
-        let config_dir = dir.join("config");
-        let state_dir = dir.join("state");
-        let _ = fs::remove_dir_all(&dir);
-        std::env::set_var("XDG_CONFIG_HOME", &config_dir);
-        std::env::set_var("XDG_STATE_HOME", &state_dir);
+        let _dirs = crate::config::test_dirs::isolate_dirs(&format!("manifest-update-{name}"));
+        let _cache = crate::detect::manifest::scoped_thread_manifest_cache();
         crate::detect::manifest::reload_manifests();
-        let result = f();
-        match old_config {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        f()
+    }
+
+    /// 把 catalog URL 环境变量指到本地 `file://` 目录：环境变量是进程全局的，全程持有
+    /// 全局测试环境锁；析构时还原（断言失败展开时也还原）后才放锁。
+    struct CatalogUrlOverride {
+        previous: Option<std::ffi::OsString>,
+        _env_lock: crate::config::TestEnvGuard,
+    }
+
+    impl CatalogUrlOverride {
+        fn set(index: &Path) -> Self {
+            let env_lock = crate::config::test_config_env_lock().lock().unwrap();
+            let previous = std::env::var_os(CATALOG_URL_ENV);
+            std::env::set_var(CATALOG_URL_ENV, file_url(index));
+            Self {
+                previous,
+                _env_lock: env_lock,
+            }
         }
-        match old_state {
-            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-            None => std::env::remove_var("XDG_STATE_HOME"),
+    }
+
+    impl Drop for CatalogUrlOverride {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
+                None => std::env::remove_var(CATALOG_URL_ENV),
+            }
         }
-        crate::detect::manifest::reload_manifests();
-        let _ = fs::remove_dir_all(&dir);
-        result
+    }
+
+    fn file_url(path: &Path) -> String {
+        format!(
+            "file:///{}",
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches('/')
+        )
     }
 
     #[test]
@@ -784,18 +802,7 @@ path = "codex.toml"
                 remote_manifest("9999.01.01.1", "throttle-ready"),
             )
             .unwrap();
-            let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
-            std::env::set_var(
-                CATALOG_URL_ENV,
-                format!(
-                    "file:///{}",
-                    web_dir
-                        .join("index.toml")
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_start_matches('/')
-                ),
-            );
+            let _catalog_url = CatalogUrlOverride::set(&web_dir.join("index.toml"));
 
             // 上次检查就在刚刚：节流直接返回，不抓取、不发事件。
             let mut status = ManifestUpdateStatus {
@@ -827,10 +834,6 @@ path = "codex.toml"
             assert_eq!(updated.len(), 1);
             assert_eq!(updated[0].agent, Agent::Codex);
 
-            match old_catalog_url {
-                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
-                None => std::env::remove_var(CATALOG_URL_ENV),
-            }
             let _ = fs::remove_dir_all(&web_dir);
         });
     }
@@ -858,7 +861,6 @@ path = "codex.toml"
     #[test]
     fn auto_update_reloads_manifest_cache_after_remote_commit() {
         with_state_dir("auto-update-reloads-cache", || {
-            let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
             let web_dir = std::env::temp_dir()
                 .join(format!("herdr-manifest-update-web-{}", std::process::id()));
             let _ = fs::remove_dir_all(&web_dir);
@@ -879,17 +881,7 @@ path = "codex.toml"
                 remote_manifest("9999.01.01.1", "auto-update-ready"),
             )
             .unwrap();
-            std::env::set_var(
-                CATALOG_URL_ENV,
-                format!(
-                    "file:///{}",
-                    web_dir
-                        .join("index.toml")
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_start_matches('/')
-                ),
-            );
+            let _catalog_url = CatalogUrlOverride::set(&web_dir.join("index.toml"));
 
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             auto_update(tx);
@@ -913,10 +905,6 @@ path = "codex.toml"
                 Some("idle")
             );
 
-            match old_catalog_url {
-                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
-                None => std::env::remove_var(CATALOG_URL_ENV),
-            }
             let _ = fs::remove_dir_all(&web_dir);
         });
     }
@@ -928,7 +916,6 @@ path = "codex.toml"
             process_agent_manifest(Agent::Codex, &initial, 1).unwrap();
             crate::detect::manifest::reload_manifests();
 
-            let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
             let web_dir = std::env::temp_dir().join(format!(
                 "herdr-manifest-update-current-web-{}",
                 std::process::id()
@@ -949,17 +936,7 @@ path = "codex.toml"
             let current = remote_manifest("9999.01.01.2", "current-ready");
             fs::write(web_dir.join("codex.toml"), &current).unwrap();
             fs::write(remote_manifest_path(Agent::Codex), current).unwrap();
-            std::env::set_var(
-                CATALOG_URL_ENV,
-                format!(
-                    "file:///{}",
-                    web_dir
-                        .join("index.toml")
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_start_matches('/')
-                ),
-            );
+            let _catalog_url = CatalogUrlOverride::set(&web_dir.join("index.toml"));
 
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             auto_update(tx);
@@ -979,10 +956,6 @@ path = "codex.toml"
                 Some("idle")
             );
 
-            match old_catalog_url {
-                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
-                None => std::env::remove_var(CATALOG_URL_ENV),
-            }
             let _ = fs::remove_dir_all(&web_dir);
         });
     }
@@ -996,7 +969,6 @@ path = "codex.toml"
             process_agent_manifest(Agent::Kimi, &initial_kimi, 1).unwrap();
             crate::detect::manifest::reload_manifests();
 
-            let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
             let web_dir = std::env::temp_dir().join(format!(
                 "herdr-manifest-update-partial-web-{}",
                 std::process::id()
@@ -1026,17 +998,7 @@ path = "missing-kimi.toml"
                 remote_manifest_for("kimi", "9999.01.01.2", "kimi-current-ready"),
             )
             .unwrap();
-            std::env::set_var(
-                CATALOG_URL_ENV,
-                format!(
-                    "file:///{}",
-                    web_dir
-                        .join("index.toml")
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_start_matches('/')
-                ),
-            );
+            let _catalog_url = CatalogUrlOverride::set(&web_dir.join("index.toml"));
 
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             auto_update(tx);
@@ -1064,10 +1026,6 @@ path = "missing-kimi.toml"
                 Some("idle")
             );
 
-            match old_catalog_url {
-                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
-                None => std::env::remove_var(CATALOG_URL_ENV),
-            }
             let _ = fs::remove_dir_all(&web_dir);
         });
     }
@@ -1223,14 +1181,7 @@ path = "gemini.toml"
                 vec![Agent::Codex]
             );
 
-            let url = format!(
-                "file:///{}",
-                web_dir
-                    .join("index.toml")
-                    .to_string_lossy()
-                    .replace('\\', "/")
-                    .trim_start_matches('/')
-            );
+            let url = file_url(&web_dir.join("index.toml"));
             let output = check_and_update_from_url(&url).expect("更新不因已删 id 失败");
 
             assert_eq!(output.checked, vec![Agent::Codex]);

@@ -1969,8 +1969,9 @@ mod tests {
                 .map(|elapsed| elapsed.as_nanos())
                 .unwrap_or(0);
             let path = std::env::temp_dir().join(format!(
-                "herdr-claude-activity-{name}-{}-{nanos}",
-                std::process::id()
+                "herdr-claude-activity-{name}-{}-{nanos}-{}",
+                std::process::id(),
+                crate::config::test_dirs::unique_id()
             ));
             std::fs::create_dir_all(&path).expect("建临时目录");
             Self(path)

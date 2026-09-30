@@ -1298,12 +1298,11 @@ fn process_session_id_raw(pid: u32) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
     use std::{cell::RefCell, collections::HashMap};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    // PATH / DISPLAY / WAYLAND_DISPLAY 是进程全局的：与全 crate 共用一把测试环境锁。
+    fn env_lock() -> &'static crate::config::TestEnvLock {
+        crate::config::test_config_env_lock()
     }
 
     #[test]
@@ -1991,8 +1990,15 @@ mod tests {
                 .expect("fake clipboard command should be executable");
         }
 
+        // 子进程按 PATH 找假的 wl-copy / xclip，所以得改进程 PATH；假命令目录放到最前面而
+        // 不是替换整个 PATH，同进程并发的测试照样找得到 git、sh 等真实命令。
+        let test_path = std::env::join_paths(
+            std::iter::once(temp_dir.clone())
+                .chain(cleanup.old_path.iter().flat_map(std::env::split_paths)),
+        )
+        .expect("test path should be valid");
         unsafe {
-            std::env::set_var("PATH", &temp_dir);
+            std::env::set_var("PATH", test_path);
             std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
             std::env::set_var("DISPLAY", ":0");
             std::env::set_var("HERDR_TEST_XCLIP_PAYLOAD", &payload);

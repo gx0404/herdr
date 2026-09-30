@@ -134,10 +134,17 @@ mod tests {
     use std::io::{BufRead, BufReader, Read};
     use std::os::unix::net::UnixListener;
 
+    /// 测试自己的 API socket 放在隔离的临时根里：路径唯一（pid + 进程级计数器），测试失败时
+    /// 也随根目录删掉。
+    fn isolated_api_socket(dirs: &crate::config::test_dirs::IsolatedDirs) -> std::path::PathBuf {
+        std::fs::create_dir_all(dirs.state_dir()).unwrap();
+        dirs.state_dir().join("api.sock")
+    }
+
     #[test]
     fn registration_stops_when_the_server_rejects_the_agent() {
-        let socket_path =
-            std::env::temp_dir().join(format!("herdr-agent-rejected-{}.sock", std::process::id()));
+        let dirs = crate::config::test_dirs::isolate_dirs("agent-rejected");
+        let socket_path = isolated_api_socket(&dirs);
         let listener = UnixListener::bind(&socket_path).unwrap();
         let server = std::thread::spawn(move || {
             for expected in ["ping", "server.ssh_agent.register"] {
@@ -174,8 +181,8 @@ mod tests {
 
     #[test]
     fn registration_retries_when_the_api_is_initially_missing() {
-        let socket_path =
-            std::env::temp_dir().join(format!("herdr-agent-retry-{}.sock", std::process::id()));
+        let dirs = crate::config::test_dirs::isolate_dirs("agent-retry");
+        let socket_path = isolated_api_socket(&dirs);
         let registration = Registration::start_at("/test/agent.sock".into(), socket_path.clone())
             .expect("missing API must not permanently disable registration");
         let listener = UnixListener::bind(&socket_path).unwrap();

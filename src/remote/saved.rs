@@ -173,14 +173,7 @@ impl SavedSshApiBridge {
                 }
             };
             let command = super::attach::cached_remote_api_command(&metadata, &profile.session);
-            let path = crate::platform::remote_bridge_endpoint_path(
-                &format!("herdr-api-ssh-{}-{profile_id}.sock", std::process::id()),
-                &format!(
-                    "herdr-api-{}-{}.sock",
-                    std::process::id(),
-                    &profile_id[..16]
-                ),
-            );
+            let path = saved_api_bridge_path(profile_id);
             let bridge = SshStdioBridge::start_command(
                 profile.target.to_owned(),
                 command,
@@ -293,6 +286,13 @@ fn saved_bridge_path(profile_id: &str) -> PathBuf {
     crate::platform::remote_bridge_endpoint_path(&readable, &short)
 }
 
+fn saved_api_bridge_path(profile_id: &str) -> PathBuf {
+    let pid = std::process::id();
+    let readable = format!("herdr-api-ssh-{pid}-{profile_id}.sock");
+    let short = format!("herdr-api-{pid}-{}.sock", &profile_id[..16]);
+    crate::platform::remote_bridge_endpoint_path(&readable, &short)
+}
+
 fn validated_saved_ssh(
     profile: &SavedSshEndpoint,
     askpass: Option<AskpassEnvironment>,
@@ -354,11 +354,26 @@ mod tests {
 
     #[test]
     fn bridge_paths_use_profile_identity_not_target_or_session() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("saved-bridge-paths");
         let first = saved_bridge_path("0123456789abcdef0123456789abcdef");
         let second = saved_bridge_path("fedcba9876543210fedcba9876543210");
         assert_ne!(first, second);
         assert!(!first.to_string_lossy().contains("example.com"));
         assert!(!first.to_string_lossy().contains("default"));
+        let api = saved_api_bridge_path("0123456789abcdef0123456789abcdef");
+        assert_ne!(api, first);
+        // Windows 的端点标记文件建在本测试隔离的状态目录里，名字要能被陈旧端点清理认出。
+        #[cfg(windows)]
+        for path in [first, second, api] {
+            let state_dir = crate::config::test_dirs::isolated_state_dir().expect("isolated");
+            assert!(path.starts_with(state_dir), "{}", path.display());
+            let name = path.file_name().expect("endpoint name").to_string_lossy();
+            assert_eq!(
+                crate::platform::remote_private_entry_owner(&name),
+                Some(std::process::id()),
+                "{name}"
+            );
+        }
     }
 
     #[test]

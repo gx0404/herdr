@@ -104,6 +104,8 @@ mod tests {
 
     #[test]
     fn client_socket_path_defaults_to_config_dir() {
+        // 会话名是进程全局的环境变量：持全局测试环境锁，放锁时自动还原。
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
         let path = client_socket_path_from_overrides(None, None);

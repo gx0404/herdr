@@ -506,6 +506,23 @@ pub(crate) fn ssh_config_home_dir() -> Option<std::path::PathBuf> {
     }
 }
 
+/// 取 `remote_private_temp_base()` 并确保它存在：在其下新建私有目录项（受管 ssh 配置目录、
+/// 下载目录）之前调用。Windows 的基准在 herdr 自己的状态目录里，顺带清理已退出进程留下的
+/// 私有目录项（见 `sweep_stale_remote_private_entries_platform`）。
+pub(crate) fn ensure_remote_private_temp_base() -> std::io::Result<std::path::PathBuf> {
+    let base = remote_private_temp_base();
+    std::fs::create_dir_all(&base)?;
+    sweep_stale_remote_private_entries_platform(&base);
+    Ok(base)
+}
+
+/// unix（及其余非 Windows 平台）的基准是系统临时目录（`$TMPDIR` / `/tmp`），不扫：系统
+/// 会清理（开机清空、systemd-tmpfiles / macOS 定期清理）；它是所有程序共用的大目录，逐项
+/// 扫描放在用户操作路径上不便宜；容器共享 `/tmp` 时本 pid 命名空间里查不到的 pid 不代表
+/// 属主已退出；跨进程复用的共享通道目录（`herdr-ssh-<uid>-<摘要>`）也不按 pid 命名。
+#[cfg(not(windows))]
+fn sweep_stale_remote_private_entries_platform(_base: &std::path::Path) {}
+
 pub(crate) const REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED: bool =
     cfg!(any(target_os = "linux", target_os = "macos"));
 
@@ -517,6 +534,8 @@ mod remote_bridge_tests;
 mod unix_common;
 #[cfg(unix)]
 pub(crate) mod unix_image_files;
+#[cfg(all(test, unix))]
+pub(crate) use unix_common::remote_bridge_endpoint_path_under;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, default_known_hosts_path, detach_stdout, end_cli_output,
@@ -827,12 +846,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ssh_auth_sock_path_is_live_requires_an_owned_socket() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("herdr-sock-live-{}-{stamp}", std::process::id()));
+        // 隔离的临时根：路径唯一（pid + 进程级计数器），测试失败时也随根目录删掉。
+        let dirs = crate::config::test_dirs::isolate_dirs("sock-live");
+        let dir = dirs.state_dir().to_path_buf();
         std::fs::create_dir_all(&dir).expect("create test dir");
 
         assert!(!ssh_auth_sock_path_is_live(&dir.join("missing")));
@@ -857,6 +873,24 @@ mod tests {
                 std::ffi::OsStr::new("-lc"),
                 std::ffi::OsStr::new("echo hello")
             ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn server_daemon_detach_creates_new_session() {
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg(
+            r#"sid=$(ps -o sid= -p $$ | tr -d ' ')
+test "$sid" = "$$"
+"#,
+        );
+        detach_server_daemon_command(&mut command);
+
+        let status = command.status().unwrap();
+        assert!(
+            status.success(),
+            "detached server child should be its own session leader"
         );
     }
 

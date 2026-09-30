@@ -578,7 +578,6 @@ fn worktree_membership(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::api::schema::{
         ErrorResponse, Request, SuccessResponse, WorktreeCreateParams, WorktreeListParams,
@@ -590,12 +589,18 @@ mod tests {
     };
     use crate::{config::Config, workspace::Workspace};
 
+    /// pid + 进程内计数器：线程模式的 `cargo test` 里并发测试会拿到同一时间戳，所以不靠
+    /// 时间戳；pid 复用留下的同名旧目录先清掉。名字尽量短：默认检出路径含两段这种名字，
+    /// Windows 上检出路径超过 215 个字符时 `git worktree add` 报 `'$GIT_DIR' too big`，
+    /// TEMP 稍长一点就会触到。
     fn unique_temp_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+        let path = std::env::temp_dir().join(format!(
+            "herdr-{name}-{}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        path
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
@@ -625,11 +630,22 @@ mod tests {
         repo
     }
 
+    /// 每个测试第一句就调用并持有到结束：App::new 会读配置/状态目录，插件命令在调用线程上
+    /// 建插件的配置/状态目录，都要落在本测试自己的临时目录里。
+    fn isolate_test_dirs() -> crate::config::test_dirs::IsolatedDirs {
+        crate::config::test_dirs::isolate_dirs("worktree-api")
+    }
+
     fn test_app() -> App {
         test_app_with_event_hub(crate::api::EventHub::default())
     }
 
     fn test_app_with_event_hub(event_hub: crate::api::EventHub) -> App {
+        assert!(
+            crate::config::test_dirs::isolated_config_dir().is_some()
+                && crate::config::test_dirs::isolated_state_dir().is_some(),
+            "call isolate_test_dirs() before building the App"
+        );
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
@@ -681,40 +697,56 @@ mod tests {
         }
     }
 
-    /// 删掉测试建的 worktree。Windows 上杀毒扫描等会在 git 删目录的瞬间留下条目，git 报
-    /// `Directory not empty`，但 worktree 已注销（删检出失败也会接着删管理目录）：只对这个
-    /// 报错等残留检出目录删掉、补一次 prune 并确认已不在列表里；其它失败照常 panic。
+    /// 删掉测试建的 worktree：走生产删除路径，Windows 上杀毒扫描等造成的
+    /// `Directory not empty` 瞬态由它兜底；其它失败照常 panic 并带上 git 的报错。
     fn remove_test_worktree(repo: &Path, checkout: &Path) {
         let remove = crate::worktree::build_worktree_remove_command(repo, checkout, false, false);
-        let Err(err) = crate::worktree::run_worktree_command(&remove) else {
-            return;
-        };
-        assert!(
-            err.contains("Directory not empty"),
-            "git worktree remove failed: {err}"
-        );
+        if let Err(err) = crate::worktree::run_worktree_remove_command_with_recovery(
+            &remove, repo, checkout, false, false,
+        ) {
+            panic!("git worktree remove failed: {err}");
+        }
+    }
+
+    /// 等本 App 起的插件命令全部退出：命令以插件根为 cwd，Windows 上它还活着时目录删不掉；
+    /// 它还继承了测试进程的输出管道，比测试进程活得久就被 nextest 报 LEAK。
+    fn wait_for_plugin_commands(app: &mut App) {
         let deadline = std::time::Instant::now() + LOADED_WAIT;
-        while checkout.exists() && std::fs::remove_dir_all(checkout).is_err() {
+        loop {
+            app.drain_all_internal_events();
+            if app.state.plugin_commands_in_flight == 0 {
+                return;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
-                "leftover checkout {} is still held: {err}",
-                checkout.display()
+                "plugin commands still running: {}",
+                app.state.plugin_commands_in_flight
             );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// 关掉本 App 的全部 pane 并等终止阶梯收尾：`shutdown` 只把阶梯交给 reaper 线程，
+    /// pane 进程以检出或仓库为 cwd，Windows 上它还活着时目录删不掉（留下空目录）。
+    fn shutdown_pane_processes(app: &mut App) {
+        crate::app::api::test_support::shutdown_test_runtimes(app);
+        assert!(
+            crate::pane::drain_pending_pane_shutdowns(LOADED_WAIT),
+            "pane processes were still terminating"
+        );
+    }
+
+    /// 收尾删测试临时目录，限时重试到它消失：Windows 上终止阶梯按退出码判定进程已退出，
+    /// 这时它可能还没关掉 cwd 句柄（杀毒扫描也会短暂占着文件），一次删不掉就会留下空目录。
+    fn remove_temp_dir(path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        let deadline = std::time::Instant::now() + LOADED_WAIT;
+        while std::fs::remove_dir_all(path).is_err()
+            && path.exists()
+            && std::time::Instant::now() < deadline
+        {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let _ = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(["worktree", "prune"])
-            .output();
-        let worktrees = crate::worktree::list_existing_worktrees(repo, false).unwrap();
-        assert!(
-            worktrees
-                .iter()
-                .all(|entry| entry.path.file_name() != checkout.file_name()),
-            "worktree {} is still registered: {err}",
-            checkout.display()
-        );
     }
 
     fn install_event_plugin(app: &mut App, name: &str, event: &str) -> PathBuf {
@@ -751,6 +783,23 @@ mod tests {
         plugin_root
     }
 
+    /// 插件命令在调用线程上建插件的配置/状态目录：必须落在本测试的隔离目录里，而不是
+    /// 共享沙箱或开发机真实的 herdr-dev 目录。
+    fn assert_plugin_dirs_isolated(dirs: &crate::config::test_dirs::IsolatedDirs, plugin_id: &str) {
+        let config_dir = crate::plugin_paths::plugin_config_dir(plugin_id);
+        let state_dir = crate::plugin_paths::plugin_state_dir(plugin_id);
+        assert!(
+            config_dir.starts_with(dirs.config_dir()) && config_dir.is_dir(),
+            "{}",
+            config_dir.display()
+        );
+        assert!(
+            state_dir.starts_with(dirs.state_dir()) && state_dir.is_dir(),
+            "{}",
+            state_dir.display()
+        );
+    }
+
     fn response_channel() -> (
         std::sync::mpsc::Sender<String>,
         std::sync::mpsc::Receiver<String>,
@@ -774,6 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_worktree_create_opens_workspace_and_marks_membership() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-create-repo");
         let worktree_root = unique_temp_path("api-worktree-create-root");
         let event_hub = crate::api::EventHub::default();
@@ -862,16 +912,15 @@ mod tests {
             ]
         );
 
-        for (_, runtime) in app.terminal_runtimes.drain() {
-            runtime.shutdown();
-        }
+        shutdown_pane_processes(&mut app);
         remove_test_worktree(&repo, Path::new(&worktree.path));
-        let _ = std::fs::remove_dir_all(worktree_root);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(worktree_root);
+        remove_temp_dir(repo);
     }
 
     #[tokio::test]
     async fn deferred_api_worktree_create_preserves_event_and_plugin_context() {
+        let dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-create-deferred-repo");
         let worktree_root = unique_temp_path("api-worktree-create-deferred-root");
         let event_hub = crate::api::EventHub::default();
@@ -940,17 +989,18 @@ mod tests {
             log.event.as_deref() == Some("worktree.created")
                 && log.status == crate::api::schema::PluginCommandStatus::Running
         }));
+        assert_plugin_dirs_isolated(&dirs, "example.deferred-create");
 
-        for (_, runtime) in app.terminal_runtimes.drain() {
-            runtime.shutdown();
-        }
-        let _ = std::fs::remove_dir_all(worktree_root);
-        let _ = std::fs::remove_dir_all(repo);
-        let _ = std::fs::remove_dir_all(plugin_root);
+        wait_for_plugin_commands(&mut app);
+        shutdown_pane_processes(&mut app);
+        remove_temp_dir(worktree_root);
+        remove_temp_dir(repo);
+        remove_temp_dir(plugin_root);
     }
 
     #[tokio::test]
     async fn deferred_api_worktree_create_checks_out_existing_branch() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-create-existing-branch-repo");
         let worktree_root = unique_temp_path("api-worktree-create-existing-branch-root");
         let branch = "foo";
@@ -998,15 +1048,14 @@ mod tests {
         );
         assert!(app.pending_api_worktree_creates.is_empty());
 
-        for (_, runtime) in app.terminal_runtimes.drain() {
-            runtime.shutdown();
-        }
-        let _ = std::fs::remove_dir_all(worktree_root);
-        let _ = std::fs::remove_dir_all(repo);
+        shutdown_pane_processes(&mut app);
+        remove_temp_dir(worktree_root);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn deferred_api_worktree_create_failure_clears_pending_checkout() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-create-failure-repo");
         let worktree_root = unique_temp_path("api-worktree-create-failure-root");
         let branch_name = std::process::Command::new("git")
@@ -1059,12 +1108,13 @@ mod tests {
         assert_eq!(error.error.code, "worktree_create_failed");
         assert_ne!(error.error.code, "worktree_operation_in_progress");
 
-        let _ = std::fs::remove_dir_all(worktree_root);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(worktree_root);
+        remove_temp_dir(repo);
     }
 
     #[tokio::test]
     async fn deferred_api_worktree_create_completes_after_source_workspace_changes() {
+        let _dirs = isolate_test_dirs();
         let event_hub = crate::api::EventHub::default();
         let mut app = test_app_with_event_hub(event_hub.clone());
         let repo = create_committed_repo("api-worktree-create-changed-source-repo");
@@ -1125,15 +1175,14 @@ mod tests {
             Some("other")
         );
 
-        for (_, runtime) in app.terminal_runtimes.drain() {
-            runtime.shutdown();
-        }
-        let _ = std::fs::remove_dir_all(checkout);
-        let _ = std::fs::remove_dir_all(repo);
+        shutdown_pane_processes(&mut app);
+        remove_temp_dir(checkout);
+        remove_temp_dir(repo);
     }
 
     #[tokio::test]
     async fn api_worktree_create_from_cwd_emits_parent_with_membership() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-create-cwd-repo");
         let worktree_root = unique_temp_path("api-worktree-create-cwd-root");
         let event_hub = crate::api::EventHub::default();
@@ -1175,16 +1224,15 @@ mod tests {
             "auto-created parent workspace event should include parent worktree membership"
         );
 
-        for (_, runtime) in app.terminal_runtimes.drain() {
-            runtime.shutdown();
-        }
+        shutdown_pane_processes(&mut app);
         remove_test_worktree(&repo, Path::new(&worktree.path));
-        let _ = std::fs::remove_dir_all(worktree_root);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(worktree_root);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn invalid_worktree_create_from_cwd_does_not_create_parent_workspace() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-create-invalid-cwd-repo");
         let mut app = test_app();
 
@@ -1203,11 +1251,12 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_request");
         assert!(app.state.workspaces.is_empty());
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn invalid_worktree_open_from_cwd_does_not_create_parent_workspace() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-open-invalid-cwd-repo");
         let mut app = test_app();
 
@@ -1227,11 +1276,12 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_request");
         assert!(app.state.workspaces.is_empty());
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn raw_api_worktree_create_rejects_relative_path_override() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-relative-path-repo");
         let mut app = app_with_parent(&repo);
         let workspace_id = app.state.workspaces[0].id.clone();
@@ -1252,11 +1302,12 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_request");
         assert_eq!(app.state.workspaces.len(), 1);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn raw_api_worktree_create_rejects_relative_cwd() {
+        let _dirs = isolate_test_dirs();
         let mut app = test_app();
 
         let response = run_deferred_api_request(
@@ -1278,6 +1329,7 @@ mod tests {
 
     #[test]
     fn api_worktree_open_reuses_already_open_checkout_from_subdirectory() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-open-repo");
         let checkout = unique_temp_path("api-worktree-open-checkout");
         run_git(
@@ -1353,11 +1405,12 @@ mod tests {
         }));
 
         remove_test_worktree(&repo, &checkout);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn api_worktree_open_focuses_already_open_checkout_whose_folder_is_missing() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-open-missing-repo");
         let checkout = unique_temp_path("api-worktree-open-missing-checkout");
         let branch = "worktree/api-open-missing";
@@ -1451,11 +1504,12 @@ mod tests {
         assert_eq!(workspace.workspace_id, app.state.workspaces[1].id);
 
         run_git(&repo, &["worktree", "prune"]);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn api_worktree_open_preserves_explicit_membership_after_shell_cd() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-membership-repo");
         let checkout = unique_temp_path("api-worktree-membership-checkout");
         run_git(
@@ -1558,11 +1612,12 @@ mod tests {
         app.state.assert_invariants_for_test();
 
         remove_test_worktree(&repo, &checkout);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn api_worktree_open_label_on_already_open_checkout_emits_rename_event() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-open-label-repo");
         let checkout = unique_temp_path("api-worktree-open-label-checkout");
         run_git(
@@ -1639,11 +1694,12 @@ mod tests {
         }));
 
         remove_test_worktree(&repo, &checkout);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[tokio::test]
     async fn deferred_worktree_open_rejects_removed_or_replaced_target() {
+        let _dirs = isolate_test_dirs();
         for replacement in ["missing", "directory", "repository"] {
             let repo = create_committed_repo("api-stale-target-source");
             let checkout = unique_temp_path("api-stale-target");
@@ -1705,13 +1761,14 @@ mod tests {
                 .iter()
                 .all(|ws| ws.worktree_space().is_none()));
             app.state.assert_invariants_for_test();
-            let _ = std::fs::remove_dir_all(checkout);
-            let _ = std::fs::remove_dir_all(repo);
+            remove_temp_dir(checkout);
+            remove_temp_dir(repo);
         }
     }
 
     #[tokio::test]
     async fn deferred_worktree_reads_bound_running_and_queued_discovery() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-read-limit");
         let mut app = app_with_parent(&repo);
         app.worktree_read_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
@@ -1763,11 +1820,12 @@ mod tests {
         let response = run_deferred_api_request(&mut app, request(false));
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(app.worktree_read_slots.available_permits(), 1);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[tokio::test]
     async fn deferred_worktree_open_rechecks_source_identity_and_existing_target() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-open-pending-source");
         let other_repo = create_committed_repo("api-worktree-open-unrelated-source");
         let checkout = unique_temp_path("api-worktree-open-pending-target");
@@ -1860,14 +1918,16 @@ mod tests {
                 crate::worktree::canonical_or_original(&repo)
             );
             app.state.assert_invariants_for_test();
+            shutdown_pane_processes(&mut app);
         }
         remove_test_worktree(&repo, &checkout);
-        let _ = std::fs::remove_dir_all(repo);
-        let _ = std::fs::remove_dir_all(other_repo);
+        remove_temp_dir(repo);
+        remove_temp_dir(other_repo);
     }
 
     #[tokio::test]
     async fn api_worktree_open_source_checkout_created_by_request_is_not_already_open() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-open-source-repo");
         let event_hub = crate::api::EventHub::default();
         let mut app = test_app_with_event_hub(event_hub.clone());
@@ -1918,12 +1978,13 @@ mod tests {
 
         app.state.selected = 0;
         app.state.close_selected_workspace();
-        app.shutdown_detached_terminal_runtimes();
-        let _ = std::fs::remove_dir_all(repo);
+        shutdown_pane_processes(&mut app);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn api_worktree_list_reports_open_workspace_ids() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-list-repo");
         let checkout = unique_temp_path("api-worktree-list-checkout");
         run_git(
@@ -1972,11 +2033,12 @@ mod tests {
         assert!(entry.is_linked_worktree);
 
         remove_test_worktree(&repo, &checkout);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn api_worktree_list_accepts_linked_checkout_sources() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-list-linked-repo");
         let checkout = unique_temp_path("api-worktree-list-linked-checkout");
         run_git(
@@ -2037,11 +2099,12 @@ mod tests {
         }
 
         remove_test_worktree(&repo, &checkout);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn api_worktree_list_preserves_prunable_entries() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-list-prunable-repo");
         let checkout = unique_temp_path("api-worktree-list-prunable-checkout");
         run_git(
@@ -2086,11 +2149,12 @@ mod tests {
         assert!(entry.is_linked_worktree);
 
         run_git(&repo, &["worktree", "prune"]);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn api_worktree_remove_requires_force_for_dirty_checkout() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-remove-repo");
         let checkout = unique_temp_path("api-worktree-remove-checkout");
         run_git(
@@ -2157,11 +2221,12 @@ mod tests {
         assert!(!checkout.exists());
         assert_eq!(app.state.workspaces.len(), 1);
 
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn api_worktree_remove_emits_close_event_and_drains_runtime_shutdowns() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-remove-event-repo");
         let checkout = unique_temp_path("api-worktree-remove-event-checkout");
         run_git(
@@ -2242,11 +2307,12 @@ mod tests {
             )
         }));
 
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn deferred_api_worktree_remove_preserves_event_and_plugin_context() {
+        let dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-remove-deferred-repo");
         let checkout = unique_temp_path("api-worktree-remove-deferred-checkout");
         run_git(
@@ -2318,13 +2384,16 @@ mod tests {
                 && log.status == crate::api::schema::PluginCommandStatus::Running
         }));
         assert!(app.state.workspaces.is_empty());
+        assert_plugin_dirs_isolated(&dirs, "example.deferred-remove");
 
-        let _ = std::fs::remove_dir_all(repo);
-        let _ = std::fs::remove_dir_all(plugin_root);
+        wait_for_plugin_commands(&mut app);
+        remove_temp_dir(repo);
+        remove_temp_dir(plugin_root);
     }
 
     #[test]
     fn deferred_api_worktree_remove_rejects_duplicate_in_flight_request() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-remove-duplicate-repo");
         let checkout = unique_temp_path("api-worktree-remove-duplicate-checkout");
         run_git(
@@ -2388,11 +2457,12 @@ mod tests {
 
         let event = wait_for_app_event(&mut app);
         app.handle_internal_event(event);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn deferred_api_worktree_remove_rejects_duplicate_checkout_path_in_flight_request() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-remove-duplicate-path-repo");
         let checkout = unique_temp_path("api-worktree-remove-duplicate-path-checkout");
         run_git(
@@ -2461,11 +2531,12 @@ mod tests {
 
         let event = wait_for_app_event(&mut app);
         app.handle_internal_event(event);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn deferred_api_worktree_create_rejects_checkout_with_remove_in_flight() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-create-remove-in-flight-repo");
         let checkout = unique_temp_path("api-worktree-create-remove-in-flight-checkout");
         let mut app = test_app();
@@ -2497,11 +2568,12 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "worktree_operation_in_progress");
         assert!(app.event_rx.try_recv().is_err());
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[test]
     fn deferred_api_worktree_remove_rejects_checkout_with_create_in_flight() {
+        let _dirs = isolate_test_dirs();
         let repo = create_committed_repo("api-worktree-remove-create-in-flight-repo");
         let checkout = unique_temp_path("api-worktree-remove-create-in-flight-checkout");
         run_git(
@@ -2555,11 +2627,12 @@ mod tests {
         assert!(app.event_rx.try_recv().is_err());
         let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, true, false);
         let _ = crate::worktree::run_worktree_command(&remove);
-        let _ = std::fs::remove_dir_all(repo);
+        remove_temp_dir(repo);
     }
 
     #[tokio::test]
     async fn failed_worktree_remove_preserves_and_restores_shutdown_pane() {
+        let _dirs = isolate_test_dirs();
         let checkout = unique_temp_path("api-worktree-remove-failure-checkout");
         std::fs::create_dir_all(&checkout).unwrap();
         let mut app = test_app();
@@ -2662,12 +2735,13 @@ mod tests {
         );
         assert_eq!(app.state.workspaces[app.state.selected].id, foreground_id);
 
-        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
-        let _ = std::fs::remove_dir_all(checkout);
+        shutdown_pane_processes(&mut app);
+        remove_temp_dir(checkout);
     }
 
     #[test]
     fn deferred_api_background_worktree_remove_preserves_focused_workspace() {
+        let _dirs = isolate_test_dirs();
         let mut app = test_app();
         let checkout = PathBuf::from("/repo/herdr-issue");
         let membership = crate::workspace::WorktreeSpaceMembership {
@@ -2739,6 +2813,7 @@ mod tests {
 
     #[tokio::test]
     async fn deferred_api_worktree_remove_emits_removed_after_workspace_changes() {
+        let _dirs = isolate_test_dirs();
         let event_hub = crate::api::EventHub::default();
         let mut app = test_app_with_event_hub(event_hub.clone());
         let checkout = PathBuf::from("/repo/herdr-issue");

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid,
+    app_dir_name, cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
+    unregister_spawned_herdr_pid, INHERITED_DIR_OVERRIDES,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -155,12 +155,8 @@ fn spawn_herdr_with_config(
 ) -> SpawnedHerdr {
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
-    // debug 构建读 `herdr-dev/`、release 构建读 `herdr/`（`config::app_dir_name`）：两处都写，
-    // 测试二进制是哪种构建都能读到。
-    for app_dir in ["herdr", "herdr-dev"] {
-        fs::create_dir_all(config_home.join(app_dir)).unwrap();
-        fs::write(config_home.join(app_dir).join("config.toml"), config).unwrap();
-    }
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
+    fs::write(config_home.join(app_dir_name()).join("config.toml"), config).unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -179,6 +175,9 @@ fn spawn_herdr_with_config(
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // 状态目录也显式隔离：不设时 state_dir 回退到平台目录（Windows 取 %LOCALAPPDATA%，
+    // 不随 HOME 走），外层继承的 XDG_STATE_HOME 也会把 server 带回开发机真实目录。
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -187,6 +186,9 @@ fn spawn_herdr_with_config(
     // 从 herdr 窗格内跑测试时会继承宿主 client 的启动目录：server 会据此预建一个
     // 启动工作区，而本文件的用例都假设 server 以「零工作区」起步。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     if let Some(path) = path_override {
         cmd.env("PATH", path);
     }
@@ -361,7 +363,7 @@ fn server_reload_agent_manifests_reports_runtime_override() {
     let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
-    let override_dir = config_home.join("herdr-dev").join("agent-detection");
+    let override_dir = config_home.join(app_dir_name()).join("agent-detection");
     fs::create_dir_all(&override_dir).unwrap();
     let override_path = override_dir.join("codex.toml");
     fs::write(
@@ -453,7 +455,7 @@ fn shutdown_preserves_session_after_shell_is_signaled() {
     child.child.wait().expect("server should stop cleanly");
 
     let session: serde_json::Value = serde_json::from_slice(
-        &fs::read(config_home.join("herdr-dev/session.json")).expect("saved session"),
+        &fs::read(config_home.join(app_dir_name()).join("session.json")).expect("saved session"),
     )
     .expect("valid session json");
     assert_eq!(session["workspaces"].as_array().map(Vec::len), Some(1));

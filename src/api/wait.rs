@@ -864,12 +864,13 @@ mod tests {
 
     fn wait_test_stream_pair(name: &str) -> (LocalStream, LocalStream, std::path::PathBuf) {
         let filename = format!(
-            "herdr-wait-{name}-{}-{}.sock",
+            "herdr-wait-{name}-{}-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            crate::config::test_dirs::unique_id()
         );
         // 同 server::client_transport 的测试 socket：unix 用短 /tmp，macOS 的
         // $TMPDIR 会让路径超出 sun_path（104 字节）。

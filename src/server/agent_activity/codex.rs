@@ -2019,8 +2019,9 @@ mod tests {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!(
-            "herdr-codex-activity-{name}-{}-{nanos}",
-            std::process::id()
+            "herdr-codex-activity-{name}-{}-{nanos}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
         ))
     }
 

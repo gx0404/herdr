@@ -15,8 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, client_handshake, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
+    app_dir_name, cleanup_test_base, client_handshake, register_runtime_dir,
+    register_spawned_herdr_pid, unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
+    INHERITED_DIR_OVERRIDES,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -104,11 +105,11 @@ fn spawn_server(
     api_socket_path: &Path,
     _client_socket_path: &Path,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
     fs::write(
-        config_home.join("herdr/config.toml"),
+        config_home.join(app_dir_name()).join("config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -130,6 +131,9 @@ fn spawn_server(
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // 状态目录也显式隔离：不设时 state_dir 回退到平台目录（Windows 取 %LOCALAPPDATA%，
+    // 不随 HOME 走），外层继承的 XDG_STATE_HOME 也会把 server 带回开发机真实目录。
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -137,6 +141,9 @@ fn spawn_server(
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -370,6 +377,7 @@ fn duplicate_server_start_fails_gracefully() {
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", &api_socket);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -377,6 +385,9 @@ fn duplicate_server_start_fails_gracefully() {
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let mut child2 = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child2.process_id());

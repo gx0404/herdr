@@ -2840,8 +2840,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
 }
 
 fn private_download_dir(asset_key: &str) -> io::Result<PathBuf> {
-    let base = crate::platform::remote_private_temp_base();
-    fs::create_dir_all(&base)?;
+    let base = crate::platform::ensure_remote_private_temp_base()?;
     for attempt in 0..100 {
         let dir = base.join(format!(
             "herdr-remote-{}-{}-{attempt}",
@@ -3326,22 +3325,26 @@ fn channel_share_key(profile: &SavedSshEndpoint) -> String {
 }
 
 /// 每档案共享目录：同一 key 解析到同一个可复用目录——进程内由缓存复用，跨进程
-/// 由目录名复用（HERDR-MACH-003）。`Arc` 留在进程级表里，本进程因此不会删除
-/// 目录（其他进程可能正连着同一个 master）。
+/// 由目录名复用（HERDR-MACH-003）。进程级表只记路径、不持有删除责任，本进程因此
+/// 不会删除目录（其他进程可能正连着同一个 master）。表按「私有目录基准 + key」记：
+/// 基准变了（测试线程各自隔离的状态目录）不会拿到别处的目录；缓存的目录被外部删掉
+/// （系统清理临时目录、用户手动清理）时重新建，而不是之后的操作都因目录不存在失败。
 fn shared_channel_dir(key: &str, control_socket_name: &str) -> io::Result<PathBuf> {
     use std::sync::{Mutex, OnceLock};
-    static SHARED: OnceLock<Mutex<std::collections::HashMap<String, Arc<ManagedSshConfigDir>>>> =
-        OnceLock::new();
-    let table = SHARED.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    type SharedDirs = std::collections::HashMap<(PathBuf, String), PathBuf>;
+    static SHARED: OnceLock<Mutex<SharedDirs>> = OnceLock::new();
+    let table = SHARED.get_or_init(|| Mutex::new(SharedDirs::new()));
     let mut guard = table
         .lock()
         .map_err(|_| io::Error::other("shared ssh config dir lock poisoned"))?;
-    if let Some(dir) = guard.get(key) {
-        return Ok(dir.path.clone());
+    let cache_key = (crate::platform::remote_private_temp_base(), key.to_owned());
+    if let Some(path) = guard.get(&cache_key) {
+        if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+            return Ok(path.clone());
+        }
     }
     let path = crate::platform::reusable_remote_ssh_config_dir(key, control_socket_name)?;
-    let dir = Arc::new(ManagedSshConfigDir { path: path.clone() });
-    guard.insert(key.to_owned(), Arc::clone(&dir));
+    guard.insert(cache_key, path.clone());
     Ok(path)
 }
 
@@ -3802,6 +3805,12 @@ fn run_client_process(
 }
 
 fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
+    let (readable_name, short_name) = local_forward_socket_names(target, session_name);
+    crate::platform::remote_bridge_endpoint_path(&readable_name, &short_name)
+}
+
+/// 本地转发端点的可读名与短名（可读名放不下 socket 路径上限时用短名）。
+fn local_forward_socket_names(target: &str, session_name: &str) -> (String, String) {
     let pid = std::process::id();
     let target_clean = sanitize_path_component(target);
     let session_clean = sanitize_path_component(session_name);
@@ -3809,7 +3818,7 @@ fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
     let target_prefix: String = target_clean.chars().take(8).collect();
     let hash = short_socket_hash(target, session_name);
     let short_name = format!("herdr-r-{pid}-{target_prefix}-{hash}.sock");
-    crate::platform::remote_bridge_endpoint_path(&readable_name, &short_name)
+    (readable_name, short_name)
 }
 
 #[cfg(all(test, unix))]
@@ -3869,7 +3878,9 @@ mod tests {
 
     #[cfg(unix)]
     fn upload_test_streams(name: &str) -> (crate::ipc::LocalStream, crate::ipc::LocalStream) {
-        let socket = local_forward_socket_path(name, "upload-test");
+        // 端点名只含 pid：同一进程里并发的测试靠 `test_dirs::unique_id` 区分。
+        let sequence = crate::config::test_dirs::unique_id();
+        let socket = local_forward_socket_path(&format!("{name}-{sequence}"), "upload-test");
         let listener = crate::ipc::bind_private_local_listener(&socket).unwrap();
         let client = crate::ipc::connect_local_stream(&socket).unwrap();
         let server = listener.accept().unwrap();
@@ -4009,15 +4020,20 @@ mod tests {
         assert_eq!(worker.join().unwrap(), expected);
     }
 
+    /// 测试自己的 socket / 临时文件放在隔离的临时根里：路径唯一（pid + 进程级计数器，见
+    /// `isolate_dirs`），测试失败时也随根目录一起删掉。
+    fn isolated_test_path(dirs: &crate::config::test_dirs::IsolatedDirs, name: &str) -> PathBuf {
+        fs::create_dir_all(dirs.state_dir()).expect("create isolated test dir");
+        dirs.state_dir().join(name)
+    }
+
     #[cfg(unix)]
     #[test]
     fn bridge_socket_is_user_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let socket = std::env::temp_dir().join(format!(
-            "herdr-bridge-permissions-test-{}.sock",
-            std::process::id()
-        ));
+        let dirs = crate::config::test_dirs::isolate_dirs("bridge-socket-perms");
+        let socket = isolated_test_path(&dirs, "bridge.sock");
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
             os: "linux",
             arch: "x86_64",
@@ -4037,7 +4053,6 @@ mod tests {
         assert_eq!(mode, BRIDGE_SOCKET_PERMISSION_MODE);
 
         drop(bridge);
-        let _ = std::fs::remove_file(socket);
     }
 
     #[cfg(unix)]
@@ -4055,11 +4070,8 @@ mod tests {
             flags & libc::O_NONBLOCK != 0
         }
 
-        let socket = std::env::temp_dir().join(format!(
-            "herdr-bridge-blocking-test-{}.sock",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&socket);
+        let dirs = crate::config::test_dirs::isolate_dirs("bridge-blocking");
+        let socket = isolated_test_path(&dirs, "bridge.sock");
         let listener = crate::ipc::bind_private_local_listener(&socket).expect("bind listener");
         let client = crate::ipc::connect_local_stream(&socket).expect("connect client");
         let mut server = listener.accept().expect("accept client");
@@ -4073,7 +4085,6 @@ mod tests {
         drop(server);
         drop(client);
         drop(listener);
-        let _ = std::fs::remove_file(socket);
     }
 
     #[cfg(windows)]
@@ -4081,7 +4092,6 @@ mod tests {
     fn bridge_stream_delivers_large_frame_before_delayed_reply() {
         use std::io::Read as _;
         use std::sync::mpsc;
-        use std::time::{SystemTime, UNIX_EPOCH};
 
         fn read_frame(stream: &mut crate::ipc::LocalStream) -> Vec<u8> {
             let mut length = [0; 4];
@@ -4100,14 +4110,8 @@ mod tests {
             stream.write_all(body).expect("write frame body");
         }
 
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock after epoch")
-            .as_nanos();
-        let socket = std::env::temp_dir().join(format!(
-            "herdr-bridge-large-frame-{}-{nonce}.sock",
-            std::process::id()
-        ));
+        let dirs = crate::config::test_dirs::isolate_dirs("bridge-large-frame");
+        let socket = isolated_test_path(&dirs, "bridge.sock");
         let listener = crate::ipc::bind_private_local_listener(&socket).expect("bind listener");
         let (large_received_tx, large_received_rx) = mpsc::channel();
         let client_socket = socket.clone();
@@ -4134,11 +4138,11 @@ mod tests {
         client.join().expect("client thread");
         drop(server);
         drop(listener);
-        let _ = std::fs::remove_file(socket);
     }
 
     #[test]
     fn bridge_drop_while_waiting_for_client_is_bounded() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-bridge-drop");
         let socket = local_forward_socket_path("drop-test", "default");
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
             os: "linux",
@@ -4167,6 +4171,7 @@ mod tests {
     fn managed_ssh_config_includes_user_config_then_fallback() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-managed-config");
         let managed_config = write_managed_ssh_config(None).expect("write managed config");
         let path = managed_config.options.config_path.clone();
         let control_path = managed_config
@@ -4229,6 +4234,7 @@ mod tests {
 
     #[test]
     fn bridge_options_keep_temporary_config_alive_after_helper_drop() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-config-lifetime");
         let config = write_managed_ssh_config(None).unwrap();
         let path = config.options.config_path.clone();
         let worker_options = config.options.clone();
@@ -4283,9 +4289,44 @@ mod tests {
         assert_eq!(channel_share_key(&renamed), key, "展示字段不换 master");
     }
 
+    /// 共享目录缓存按「私有目录基准 + key」记：同一基准同一 key 复用；缓存的目录被外部删掉
+    /// 后重新建，而不是一直交出不存在的路径；换了基准（`cargo test` 同一进程里另一个测试
+    /// 线程隔离的状态目录）不会拿到别处、已随那个测试删掉的目录。
+    #[test]
+    fn shared_channel_dir_is_recreated_and_scoped_to_the_private_base() {
+        let key = format!(
+            "shared-dir-test-{}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        );
+        let (first, first_state_dir) = {
+            let dirs = crate::config::test_dirs::isolate_dirs("remote-shared-dir-a");
+            let first = shared_channel_dir(&key, SSH_CONTROL_SOCKET_NAME).expect("first");
+            let cached = shared_channel_dir(&key, SSH_CONTROL_SOCKET_NAME).expect("cached");
+            assert_eq!(cached, first, "同一基准同一 key 复用同一个目录");
+            fs::remove_dir_all(&first).expect("remove shared dir");
+            let recreated = shared_channel_dir(&key, SSH_CONTROL_SOCKET_NAME).expect("recreate");
+            assert!(recreated.is_dir(), "缓存的目录被删掉后要重新建");
+            #[cfg(windows)]
+            assert!(recreated.starts_with(crate::platform::remote_private_temp_base()));
+            (recreated, dirs.state_dir().to_path_buf())
+        };
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-shared-dir-b");
+        let other = shared_channel_dir(&key, SSH_CONTROL_SOCKET_NAME).expect("other base");
+        assert!(other.is_dir(), "{}", other.display());
+        assert!(!other.starts_with(&first_state_dir), "{}", other.display());
+        #[cfg(windows)]
+        assert!(other.starts_with(crate::platform::remote_private_temp_base()));
+        // unix 的共享目录按名字跨进程复用、不在隔离根里，测试自己收拾；Windows 上随隔离根删掉。
+        for dir in [first, other] {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn remote_ssh_command_uses_managed_config_when_present() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-ssh-command");
         let mut managed_config = write_managed_ssh_config(None).expect("write managed config");
         managed_config.options.control_path = Some(PathBuf::from("/tmp/herdr test/control"));
         let config_path = managed_config.options.config_path.clone();
@@ -4346,8 +4387,14 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_managed_ssh_config_uses_keepalives_without_control_socket() {
+        let dirs = crate::config::test_dirs::isolate_dirs("remote-windows-config");
         let managed_config = write_managed_ssh_config(None).expect("write managed config");
         let config_path = managed_config.options.config_path.clone();
+        assert!(
+            config_path.starts_with(dirs.state_dir()),
+            "managed config must live in this test's isolated state dir: {}",
+            config_path.display()
+        );
         assert!(managed_config.options.control_path.is_none());
         let contents = std::fs::read_to_string(&config_path).expect("read managed config");
         assert!(contents.contains("ServerAliveInterval 15"));
@@ -4428,6 +4475,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn endpoint_probe_preserves_setup_ssh_options() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-endpoint-probe");
         let managed_config = write_managed_ssh_config(None).expect("write managed config");
         let marker = managed_config
             .options
@@ -4519,6 +4567,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn managed_ssh_config_renders_profile_options_as_fallback_directives() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-profile-config");
         let options = full_profile_options();
         let managed_config =
             write_managed_ssh_config(Some(&options)).expect("write managed config");
@@ -4562,6 +4611,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn saved_ssh_command_with_profile_options_uses_managed_config_without_multiplexing() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-saved-options");
         let options = full_profile_options();
         let ssh = RemoteSsh::new_saved(
             "example".into(),
@@ -4594,6 +4644,7 @@ mod tests {
 
     #[test]
     fn saved_ssh_command_maps_profile_host_key_policy_for_background_use() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-saved-policy");
         for (policy, expected) in [
             (
                 crate::client::endpoint::StrictHostKeyChecking::AcceptNew,
@@ -4635,6 +4686,7 @@ mod tests {
 
     #[test]
     fn askpass_retry_drops_batch_mode_and_attaches_the_channel() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-askpass-retry");
         let options = ProfileSshOptions {
             server_alive_interval: Some(30),
             ..ProfileSshOptions::default()
@@ -4686,6 +4738,7 @@ mod tests {
 
     #[test]
     fn interactive_ssh_and_scp_share_host_policy_and_askpass() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-interactive-policy");
         for (policy, expected) in [
             (None, None),
             (
@@ -4727,6 +4780,7 @@ mod tests {
 
     #[test]
     fn pinned_host_options_apply_to_both_ssh_and_scp() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("remote-pinned-host");
         let mut config = write_managed_ssh_config(None).unwrap();
         config.options.pinned_known_hosts =
             Some(config.options.config_path.with_file_name("reviewed_hosts"));
@@ -5152,16 +5206,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_bridge_returns_application_exit_while_descendant_is_running() {
-        let pid_file = std::env::temp_dir().join(format!(
-            "herdr bridge descendant {}-{}.pid",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("current time")
-                .as_nanos()
-        ));
+        let dirs = crate::config::test_dirs::isolate_dirs("bridge-descendant");
+        let pid_file = isolated_test_path(&dirs, "herdr bridge descendant.pid");
+        // 负载下起进程很慢（杀毒软件限流、并发的测试进程），启动链留足 30 秒；后代睡得远比
+        // 这更久，等后代退出才返回的错误实现仍会撞上截止时间而失败。
         let script = format!(
-            "$child = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 30' -NoNewWindow -PassThru; Set-Content -LiteralPath {} -Value $child.Id; exit 23",
+            "$child = Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 120' -NoNewWindow -PassThru; Set-Content -LiteralPath {} -Value $child.Id; exit 23",
             crate::platform::quote_powershell_arg(&pid_file.to_string_lossy())
         );
         let encoded = base64::engine::general_purpose::STANDARD.encode(
@@ -5183,7 +5233,7 @@ mod tests {
             .stderr(Stdio::null());
         crate::platform::configure_background_command(&mut launcher);
         let mut launcher = launcher.spawn().expect("launch Windows bridge command");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let status = loop {
             let status = launcher.try_wait().expect("poll bridge launcher");
             if status.is_some() || Instant::now() >= deadline {
@@ -6186,17 +6236,47 @@ function Get-Process {
     #[cfg(windows)]
     #[test]
     fn windows_local_forward_endpoint_uses_private_state_dir() {
+        let dirs = crate::config::test_dirs::isolate_dirs("remote-forward-endpoint");
         let path = local_forward_socket_path("user@example.com", "work");
         assert!(path.starts_with(crate::platform::remote_private_temp_base()));
+        assert!(path.starts_with(dirs.state_dir()));
         assert!(path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with("herdr-r-")));
     }
 
-    #[cfg(unix)]
-    fn remote_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    /// Windows 上按属主 pid 命名的私有目录项（受管 ssh 配置目录、下载目录、桥接端点）
+    /// 都要被陈旧项清理认出来：创建处改了名字而清理没跟上时这里失败。
+    #[cfg(windows)]
+    #[test]
+    fn windows_private_entries_are_named_for_the_stale_sweep() {
+        let dirs = crate::config::test_dirs::isolate_dirs("remote-private-names");
+        let config = write_managed_ssh_config(None).expect("write managed config");
+        let config_dir = config
+            .options
+            .config_path
+            .parent()
+            .expect("config dir")
+            .to_path_buf();
+        let downloads = ["linux-x86_64", "windows-installer"]
+            .map(|asset_key| private_download_dir(asset_key).expect("create download dir"));
+        let endpoints = [
+            local_forward_socket_path("user@example.com", "work"),
+            local_forward_socket_path("@@@", "work"),
+        ];
+        for path in [config_dir.as_path()]
+            .into_iter()
+            .chain(downloads.iter().map(PathBuf::as_path))
+            .chain(endpoints.iter().map(PathBuf::as_path))
+        {
+            assert!(path.starts_with(dirs.state_dir()), "{}", path.display());
+            let name = path.file_name().expect("entry name").to_string_lossy();
+            assert_eq!(
+                crate::platform::remote_private_entry_owner(&name),
+                Some(std::process::id()),
+                "{name}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -6208,7 +6288,7 @@ function Get-Process {
     #[cfg(unix)]
     #[test]
     fn local_forward_socket_path_uses_readable_name_when_it_fits() {
-        let _guard = remote_env_lock().lock().unwrap();
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         // Short target + session leave plenty of room — keep the human-
         // readable form so the socket path stays grep-friendly.
         let path = local_forward_socket_path("dev", "default");
@@ -6233,7 +6313,7 @@ function Get-Process {
     #[cfg(unix)]
     #[test]
     fn local_forward_socket_path_fits_in_sun_path() {
-        let _guard = remote_env_lock().lock().unwrap();
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         // Worst case for the readable form: macOS-style 49-char TMPDIR +
         // max-length sanitized components. Should fall back to the hashed
         // short name, which fits under TMPDIR.
@@ -6251,31 +6331,29 @@ function Get-Process {
     #[cfg(unix)]
     #[test]
     fn local_forward_socket_path_falls_back_to_tmp_when_dir_is_long() {
-        let _guard = remote_env_lock().lock().unwrap();
-        // Force a TMPDIR long enough that even the hashed short name cannot
-        // fit inside it. The fallback should drop to /tmp.
-        let prior = std::env::var_os("TMPDIR");
-        let long_dir = std::env::temp_dir().join("a".repeat(80));
-        let _ = fs::create_dir_all(&long_dir);
-        std::env::set_var("TMPDIR", &long_dir);
-
-        let path = local_forward_socket_path("longish-host.example.com", "default");
-        let fits = fits_unix_socket_path(&path);
-        let parent = path.parent().map(Path::to_path_buf);
+        // A temp dir long enough that even the hashed short name cannot fit
+        // inside it. The fallback should drop to /tmp. 超长目录直接作参数传入，不改进程级的
+        // TMPDIR（同一进程里并发的测试会看到）。
+        let long_dir = Path::new("/tmp").join("a".repeat(80));
+        let (readable_name, short_name) =
+            local_forward_socket_names("longish-host.example.com", "default");
+        let path = crate::platform::remote_bridge_endpoint_path_under(
+            &long_dir,
+            &readable_name,
+            &short_name,
+        );
         let filename = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
 
-        match prior {
-            Some(v) => std::env::set_var("TMPDIR", v),
-            None => std::env::remove_var("TMPDIR"),
-        }
-        let _ = fs::remove_dir_all(&long_dir);
-
-        assert!(fits, "fallback path still overflows: {}", path.display());
-        assert_eq!(parent.as_deref(), Some(Path::new("/tmp")));
+        assert!(
+            fits_unix_socket_path(&path),
+            "fallback path still overflows: {}",
+            path.display()
+        );
+        assert_eq!(path.parent(), Some(Path::new("/tmp")));
         assert!(
             filename.starts_with("herdr-r-"),
             "expected hashed fallback, got {filename}"
@@ -6284,11 +6362,8 @@ function Get-Process {
 
     #[test]
     fn install_source_cleanup_removes_temporary_directory() {
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-install-source-cleanup-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let dirs = crate::config::test_dirs::isolate_dirs("install-source-cleanup");
+        let dir = isolated_test_path(&dirs, "install-source");
         fs::create_dir(&dir).expect("create temp dir");
         let path = dir.join("herdr.tmp");
         fs::write(&path, b"test").expect("write temp file");

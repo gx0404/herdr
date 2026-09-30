@@ -459,9 +459,7 @@ async fn projection_restamp_covers_every_view_in_one_batch() {
     let revision = server.clients[&1].shell_projection_revision;
     assert!(revision > before);
     let restamped = decode_batch(
-        output
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("restamped views"),
+        output.recv_timeout(LOADED_WAIT).expect("restamped views"),
         &mut decoder,
     );
     assert_eq!(restamped.len(), 2);

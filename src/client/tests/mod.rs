@@ -1,10 +1,9 @@
 use super::*;
 use std::ffi::OsString;
-use std::sync::{Mutex, OnceLock};
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+// 终端探测、会话与重连命令都读进程全局的环境变量：与全 crate 共用一把测试环境锁。
+fn env_lock() -> &'static crate::config::TestEnvLock {
+    crate::config::test_config_env_lock()
 }
 
 #[test]
@@ -273,8 +272,9 @@ impl TempImageFile {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "herdr-client-drop-{name_fragment}-{}-{nanos}.{extension}",
-            std::process::id()
+            "herdr-client-drop-{name_fragment}-{}-{nanos}-{}.{extension}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
         ));
         std::fs::write(&path, bytes).unwrap();
         Self { path }
@@ -676,24 +676,21 @@ fn sound_from_notify_message_rejects_unknown_payloads() {
     assert_eq!(sound_from_notify_message("toast"), None);
 }
 
+/// 在本线程隔离目录的 config.toml 里写入 `content`：线程本地覆盖，不经进程级
+/// `HERDR_CONFIG_PATH`，不必持测试环境锁，也不会让并发的别的测试读到这份配置。
+fn isolated_client_config(name: &str, content: &str) -> crate::config::test_dirs::IsolatedDirs {
+    let dirs = crate::config::test_dirs::isolate_dirs(name);
+    std::fs::create_dir_all(dirs.config_dir()).unwrap();
+    std::fs::write(crate::config::config_path(), content).unwrap();
+    dirs
+}
+
 #[test]
 fn reload_local_client_config_refreshes_local_client_presentation_state() {
-    let _guard = crate::config::test_config_env_lock().lock().unwrap();
-    let path = std::env::temp_dir().join(format!(
-        "herdr-client-config-reload-{}-{}.toml",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::write(
-        &path,
+    let _config = isolated_client_config(
+        "client-config-reload",
         "[ui]\nredraw_on_focus_gained = false\nhost_cursor = \"drawn\"\nmouse_capture = false\n",
-    )
-    .unwrap();
-    let path_string = path.to_string_lossy().to_string();
-    let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
+    );
     let mut sound_config = crate::config::SoundConfig::default();
     let mut redraw_on_focus_gained = true;
     let mut draw_host_cursor = false;
@@ -711,23 +708,14 @@ fn reload_local_client_config_refreshes_local_client_presentation_state() {
     assert!(!redraw_on_focus_gained);
     assert!(draw_host_cursor);
     assert!(!mouse_capture);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn reload_local_client_config_keeps_ui_preferences_when_ui_is_invalid() {
-    let _guard = crate::config::test_config_env_lock().lock().unwrap();
-    let path = std::env::temp_dir().join(format!(
-        "herdr-client-invalid-ui-reload-{}-{}.toml",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::write(&path, "[ui]\nmouse_capture = \"invalid\"\n").unwrap();
-    let path_string = path.to_string_lossy().to_string();
-    let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
+    let _config = isolated_client_config(
+        "client-invalid-ui-reload",
+        "[ui]\nmouse_capture = \"invalid\"\n",
+    );
     let mut sound_config = crate::config::SoundConfig::default();
     let mut redraw_on_focus_gained = false;
     let mut draw_host_cursor = true;
@@ -745,7 +733,6 @@ fn reload_local_client_config_keeps_ui_preferences_when_ui_is_invalid() {
     assert!(!mouse_capture);
     assert!(!redraw_on_focus_gained);
     assert!(draw_host_cursor);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]

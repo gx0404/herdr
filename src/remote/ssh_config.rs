@@ -1652,9 +1652,11 @@ Host bastion
     // ---------------------------------------------------------------
 
     fn fixture_root(name: &str) -> PathBuf {
+        // pid 区分进程，`test_dirs::unique_id` 区分 `cargo test` 同一进程里并发的测试。
         let root = std::env::temp_dir().join(format!(
-            "herdr-ssh-config-test-{}-{name}",
-            std::process::id()
+            "herdr-ssh-config-test-{}-{}-{name}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();

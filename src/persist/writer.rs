@@ -273,13 +273,15 @@ mod tests {
     use super::*;
 
     fn writer(protect_unloaded: bool) -> SessionWriter {
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。
         let directory = std::env::temp_dir().join(format!(
-            "herdr-session-recovery-{}-{}",
+            "herdr-session-recovery-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::config::test_dirs::unique_id()
         ));
         std::fs::create_dir_all(&directory).unwrap();
         SessionWriter {
@@ -295,20 +297,58 @@ mod tests {
         .unwrap()
     }
 
+    /// Windows 上杀毒软件会在新文件落盘后短暂打开它扫描：这期间读它报共享冲突（os error
+    /// 32），删掉的文件也要等扫描放手才从目录里消失（删除挂起）。测试在几毫秒内接连改同一批
+    /// 文件，所以观察目录与文件时等到状态稳定（有时限），不只看一眼。
+    const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+    /// 收尾删测试目录：删不掉就稍等重试；到时限仍删不掉只是临时目录残留，不算测试失败。
+    fn remove_test_dir(writer: &SessionWriter) {
+        let directory = writer.path.parent().unwrap();
+        let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
+        while std::fs::remove_dir_all(directory).is_err()
+            && directory.exists()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(SETTLE_POLL);
+        }
+    }
+
+    /// 目录条目数等到 `expected`（被修剪的副本在扫描放手前仍列在目录里）；到时限返回最后
+    /// 看到的数，由调用方断言。
+    fn settled_entry_count(directory: &Path, expected: usize) -> usize {
+        let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            let count = std::fs::read_dir(directory).unwrap().count();
+            if count == expected || std::time::Instant::now() >= deadline {
+                return count;
+            }
+            std::thread::sleep(SETTLE_POLL);
+        }
+    }
+
     fn backups(writer: &SessionWriter) -> Vec<Vec<u8>> {
         let directory = writer.path.with_file_name("session-backups");
         if !directory.exists() {
             return Vec::new();
         }
-        let mut entries: Vec<_> = std::fs::read_dir(directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        entries.sort();
-        entries
-            .into_iter()
-            .map(|path| std::fs::read(path).unwrap())
-            .collect()
+        let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            let mut entries: Vec<_> = std::fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            entries.sort();
+            // 读不开的条目要么正被扫描，要么是删除挂起、稍后就消失：整体重新列一遍再读。
+            match entries.iter().map(std::fs::read).collect::<io::Result<_>>() {
+                Ok(contents) => return contents,
+                Err(err) if std::time::Instant::now() >= deadline => {
+                    panic!("failed to read recovery copies: {err}")
+                }
+                Err(_) => std::thread::sleep(SETTLE_POLL),
+            }
+        }
     }
 
     fn snapshots(writer: &SessionWriter) -> Vec<(u128, PathBuf)> {
@@ -340,7 +380,7 @@ mod tests {
         assert_eq!(snapshots(&writer), files);
         assert_eq!(std::fs::read(&files[0].1).unwrap(), saved);
         assert!(backups(&writer).is_empty());
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -389,7 +429,7 @@ mod tests {
             .unwrap();
         writer.save(&snapshot(), None);
         assert_eq!(snapshots(&writer), vec![(1, old)]);
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -421,7 +461,7 @@ mod tests {
             2,
             "new mtime restores cadence across restart"
         );
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -435,7 +475,7 @@ mod tests {
         assert!(locked.exists());
         assert!(!removable.exists());
         assert!(prune_backups(&[(1, locked)], 1).is_err());
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -446,7 +486,7 @@ mod tests {
         assert!(writer.path.exists());
         writer.clear();
         assert!(!writer.path.exists());
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -463,7 +503,7 @@ mod tests {
             writer.clear();
             assert!(!writer.path.exists());
             assert!(backups(&writer).is_empty());
-            std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+            remove_test_dir(&writer);
         }
     }
 
@@ -489,7 +529,7 @@ mod tests {
         writer.clear();
         assert!(!writer.path.exists());
         assert_eq!(backups(&writer), vec![original.to_vec()]);
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -516,7 +556,7 @@ mod tests {
             saved.workspaces[0].custom_name.as_deref(),
             Some("latest layout")
         );
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -532,8 +572,8 @@ mod tests {
             writer.save(&snapshot(), None);
         }
         assert_eq!(std::fs::read(manual).unwrap(), b"manual recovery copy");
-        assert_eq!(std::fs::read_dir(directory).unwrap().count(), 4);
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        assert_eq!(settled_entry_count(&directory, 4), 4);
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -545,7 +585,7 @@ mod tests {
         writer.clear();
         assert!(!writer.path.exists());
         assert_eq!(backups(&writer), vec![b"late layout".to_vec()]);
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -560,7 +600,7 @@ mod tests {
         std::fs::remove_dir(&temporary).unwrap();
         writer.save(&snapshot(), None);
         assert_eq!(backups(&writer), vec![b"original".to_vec()]);
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -592,7 +632,7 @@ mod tests {
         assert!(recovery_files(writer.path.parent().unwrap())
             .unwrap()
             .is_empty());
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -618,7 +658,7 @@ mod tests {
             writer.save(&snapshot(), None);
         }
         assert_eq!(backups(&writer), vec![vec![1], vec![2], vec![3]]);
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[test]
@@ -633,7 +673,7 @@ mod tests {
         writer.save(&snapshot(), None);
         writer.clear();
         assert_eq!(backups(&writer), vec![vec![2], vec![3], vec![4]]);
-        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+        remove_test_dir(&writer);
     }
 
     #[cfg(unix)]
@@ -670,7 +710,7 @@ mod tests {
             }
             writer.clear();
             assert!(target.exists());
-            std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+            remove_test_dir(&writer);
         }
     }
 }

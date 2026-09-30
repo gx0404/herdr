@@ -806,9 +806,15 @@ fn pane_read_rejects_invalid_value_with_usage_error() {
     // Invalid option values fail as CLI usage errors before any server
     // contact: exit 2 with the plain parser message, not the old
     // `Error: Custom { ... }` io::Error wrapper from main.
-    let socket_path = Path::new("/tmp/herdr-cli-invalid-values-no-server.sock");
+    // socket 放进用例自己的目录：run_cli 以它的父目录作配置/状态目录与 HOME 的隔离根。
+    let base = unique_test_dir();
+    let _dir = TestDirGuard::new(&base);
+    let socket_path = base.join("no-server.sock");
 
-    let read = run_cli(socket_path, &["pane", "read", "w1:p1", "--source", "bogus"]);
+    let read = run_cli(
+        &socket_path,
+        &["pane", "read", "w1:p1", "--source", "bogus"],
+    );
     assert_eq!(read.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&read.stderr);
     assert!(stderr.contains("invalid read source: bogus"));

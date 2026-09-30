@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, client_shell_handshake, register_runtime_dir, register_spawned_herdr_pid,
-    send_client_shell_shift_enter, unregister_spawned_herdr_pid, wait_for_client_shell_bootstrap,
-    wait_for_message_variant, wait_for_socket, SERVER_MESSAGE_ENDPOINT_CONTROL,
-    SERVER_MESSAGE_SERVER_SHUTDOWN,
+    app_dir_name, cleanup_test_base, client_shell_handshake, register_runtime_dir,
+    register_spawned_herdr_pid, send_client_shell_shift_enter, unregister_spawned_herdr_pid,
+    wait_for_client_shell_bootstrap, wait_for_message_variant, wait_for_socket,
+    INHERITED_DIR_OVERRIDES, SERVER_MESSAGE_ENDPOINT_CONTROL, SERVER_MESSAGE_SERVER_SHUTDOWN,
 };
 
 struct SpawnedHerdr {
@@ -51,6 +51,16 @@ fn unique_test_dir() -> PathBuf {
     PathBuf::from(format!("/tmp/hlh-{}-{n}", std::process::id()))
 }
 
+const TEST_CONFIG: &str = "onboarding = false\n";
+
+/// 把用例配置写到被测二进制读取的应用目录（`support::app_dir_name`）；写到别的目录会被
+/// 静默忽略。
+fn write_config(config_home: &Path, config: &str) {
+    let app_dir = config_home.join(app_dir_name());
+    fs::create_dir_all(&app_dir).unwrap();
+    fs::write(app_dir.join("config.toml"), config).unwrap();
+}
+
 fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket: &Path) -> SpawnedHerdr {
     spawn_server_with_env(config_home, runtime_dir, api_socket, &[])
 }
@@ -61,13 +71,18 @@ fn spawn_server_with_env(
     api_socket: &Path,
     extra_env: &[(&str, &str)],
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    spawn_server_with_config_and_env(config_home, runtime_dir, api_socket, TEST_CONFIG, extra_env)
+}
+
+fn spawn_server_with_config_and_env(
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket: &Path,
+    config: &str,
+    extra_env: &[(&str, &str)],
+) -> SpawnedHerdr {
+    write_config(config_home, config);
     fs::create_dir_all(runtime_dir).unwrap();
-    fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -85,6 +100,9 @@ fn spawn_server_with_env(
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    // 状态目录也显式隔离（与 spawn_default_session_server 同一处）：不设时 state_dir 回退到
+    // 平台目录（Windows 取 %LOCALAPPDATA%，不随 HOME 走），外层继承的 XDG_STATE_HOME 也会越过隔离。
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket);
     cmd.env(
@@ -95,6 +113,9 @@ fn spawn_server_with_env(
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建
     // 启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
@@ -112,13 +133,8 @@ fn spawn_named_session_server(
     runtime_dir: &Path,
     session_name: &str,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    write_config(config_home, TEST_CONFIG);
     fs::create_dir_all(runtime_dir).unwrap();
-    fs::write(
-        config_home.join("herdr-dev/config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -136,6 +152,7 @@ fn spawn_named_session_server(
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SESSION", session_name);
     cmd.env_remove("HERDR_SOCKET_PATH");
@@ -144,6 +161,9 @@ fn spawn_named_session_server(
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建
     // 启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -154,13 +174,8 @@ fn spawn_named_session_server(
 }
 
 fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    write_config(config_home, TEST_CONFIG);
     fs::create_dir_all(runtime_dir).unwrap();
-    fs::write(
-        config_home.join("herdr-dev/config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -187,6 +202,9 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建
     // 启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -203,13 +221,8 @@ fn spawn_server_with_args_and_socket_env(
     api_socket_env: Option<&Path>,
     client_socket_env: Option<&Path>,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    write_config(config_home, TEST_CONFIG);
     fs::create_dir_all(runtime_dir).unwrap();
-    fs::write(
-        config_home.join("herdr-dev/config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
 
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -231,6 +244,7 @@ fn spawn_server_with_args_and_socket_env(
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config_home);
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env_remove("HERDR_SESSION");
     if let Some(api_socket_env) = api_socket_env {
@@ -247,6 +261,9 @@ fn spawn_server_with_args_and_socket_env(
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建
     // 启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -764,7 +781,7 @@ fn live_handoff_unknown_pane_exit_preserves_session_on_shutdown() {
     }
 
     let session: serde_json::Value = serde_json::from_slice(
-        &fs::read(config_home.join("herdr-dev/session.json")).expect("saved session"),
+        &fs::read(config_home.join(app_dir_name()).join("session.json")).expect("saved session"),
     )
     .expect("valid session json");
     assert_eq!(session["workspaces"].as_array().map(Vec::len), Some(1));
@@ -857,7 +874,7 @@ fn live_handoff_preserves_named_session_socket_paths() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let session_dir = config_home.join("herdr-dev/sessions/work");
+    let session_dir = config_home.join(app_dir_name()).join("sessions/work");
     let api_socket = session_dir.join("herdr.sock");
     let client_socket = session_dir.join("herdr-client.sock");
 
@@ -873,7 +890,7 @@ fn live_handoff_preserves_named_session_socket_paths() {
     wait_for_api(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(5));
     assert!(
-        !config_home.join("herdr-dev/herdr.sock").exists(),
+        !config_home.join(app_dir_name()).join("herdr.sock").exists(),
         "named handoff unexpectedly bound the default session API socket"
     );
 
@@ -890,10 +907,10 @@ fn live_handoff_ignores_leaked_default_socket_env_for_named_session() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let default_session_dir = config_home.join("herdr-dev");
+    let default_session_dir = config_home.join(app_dir_name());
     let default_api_socket = default_session_dir.join("herdr.sock");
     let default_client_socket = default_session_dir.join("herdr-client.sock");
-    let work_session_dir = config_home.join("herdr-dev/sessions/work");
+    let work_session_dir = config_home.join(app_dir_name()).join("sessions/work");
     let work_api_socket = work_session_dir.join("herdr.sock");
     let work_client_socket = work_session_dir.join("herdr-client.sock");
 
@@ -937,7 +954,7 @@ fn live_handoff_preserves_client_socket_env_without_api_socket_env() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let api_socket = config_home.join("herdr-dev/herdr.sock");
+    let api_socket = config_home.join(app_dir_name()).join("herdr.sock");
     let client_socket = runtime_dir.join("custom-client.sock");
 
     let spawned = spawn_server_with_args_and_socket_env(
@@ -972,8 +989,8 @@ fn live_handoff_preserves_installed_plugins() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let api_socket = config_home.join("herdr-dev/herdr.sock");
-    let registry_path = config_home.join("herdr-dev/plugins.json");
+    let api_socket = config_home.join(app_dir_name()).join("herdr.sock");
+    let registry_path = config_home.join(app_dir_name()).join("plugins.json");
     let existing_plugin = base.join("plugins/existing");
     let added_plugin = base.join("plugins/added");
     write_plugin_manifest(&existing_plugin, "test.live-handoff-existing");
@@ -1506,15 +1523,13 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     .unwrap();
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
     // 测试进程自己扮演 pi 扩展发 `herdr:pi` 上报，它不在窗格进程树里：关掉上报来源校验。
-    // debug 构建读 `herdr-dev/`（`spawn_server` 只写 release 构建读的 `herdr/`）。
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
-    fs::write(
-        config_home.join("herdr-dev/config.toml"),
+    let spawned = spawn_server_with_config_and_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
         "onboarding = false\n[server]\nverify_report_process = false\n",
-    )
-    .unwrap();
-
-    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+        &[],
+    );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);
     let created = request(
@@ -1905,10 +1920,12 @@ fn live_handoff_preserves_http_servers_across_multiple_sessions() {
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let sessions = [
-        (None, config_home.join("herdr-dev/herdr.sock")),
+        (None, config_home.join(app_dir_name()).join("herdr.sock")),
         (
             Some("work"),
-            config_home.join("herdr-dev/sessions/work/herdr.sock"),
+            config_home
+                .join(app_dir_name())
+                .join("sessions/work/herdr.sock"),
         ),
     ];
     let mut spawned = Vec::new();

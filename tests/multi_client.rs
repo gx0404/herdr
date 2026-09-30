@@ -15,11 +15,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::Value;
 use support::{
-    cleanup_test_base, client_shell_handshake, drain_messages, register_runtime_dir,
+    app_dir_name, cleanup_test_base, client_shell_handshake, drain_messages, register_runtime_dir,
     register_spawned_herdr_pid, send_client_shell_focus, send_detach, unregister_spawned_herdr_pid,
     wait_for_client_shell_bootstrap, wait_for_message_variant, wait_for_message_variants,
-    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_PANE_SURFACE,
-    SERVER_MESSAGE_PANE_SURFACE_PATCH,
+    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, INHERITED_DIR_OVERRIDES,
+    SERVER_MESSAGE_PANE_SURFACE, SERVER_MESSAGE_PANE_SURFACE_PATCH,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -76,10 +76,15 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 }
 
 fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
-    fs::create_dir_all(config.join("herdr")).unwrap();
+    // 写到被测二进制读取的应用目录：同一 config 下的客户端也读这一份。
+    fs::create_dir_all(config.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime).unwrap();
     register_runtime_dir(runtime);
-    fs::write(config.join("herdr/config.toml"), "onboarding = false\n").unwrap();
+    fs::write(
+        config.join(app_dir_name()).join("config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,
@@ -96,6 +101,9 @@ fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config);
+    // 状态目录也显式隔离：不设时 state_dir 回退到平台目录（Windows 取 %LOCALAPPDATA%，
+    // 不随 HOME 走），外层继承的 XDG_STATE_HOME 也会把子进程带回开发机真实目录。
+    cmd.env("XDG_STATE_HOME", runtime.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime);
     cmd.env("HERDR_SOCKET_PATH", api);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -103,6 +111,9 @@ fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);
@@ -131,6 +142,7 @@ fn spawn_client(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
     let _ = fs::create_dir_all(&home);
     cmd.env("HOME", &home);
     cmd.env("XDG_CONFIG_HOME", config);
+    cmd.env("XDG_STATE_HOME", runtime.join("state"));
     cmd.env("XDG_RUNTIME_DIR", runtime);
     cmd.env("HERDR_SOCKET_PATH", api);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
@@ -138,6 +150,9 @@ fn spawn_client(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);

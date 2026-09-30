@@ -37,17 +37,8 @@ fn online_remote(state: &mut ClientShellState, profile: &SavedSshEndpoint, pane_
     state.set_endpoint_status(&endpoint_id, ClientEndpointStatus::Online);
 }
 
-fn with_temp_state_home(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "herdr-broadcast-ui-test-{name}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp state home");
-    // 线程本地覆盖而不是改进程环境变量：`cargo test` 单进程并发时环境
-    // 变量是全局的，会串到同进程的其它测试（nextest 才是进程隔离）。
-    crate::config::test_dirs::set_state_dir(dir.clone());
-    dir
+fn with_temp_state_home(name: &str) -> crate::config::test_dirs::IsolatedDirs {
+    isolated_state_home(&format!("broadcast-{name}"))
 }
 
 fn key(code: KeyCode) -> crate::input::TerminalKey {
@@ -69,7 +60,7 @@ fn broadcast_set(pairs: &[(Option<ProfileId>, &str)], enabled: bool) -> Broadcas
 
 #[test]
 fn broadcast_mirror_follows_external_file_changes() {
-    let dir = with_temp_state_home("watcher");
+    let _dir = with_temp_state_home("watcher");
     let build = profile("Build", "build.example", "44");
     let mut state = state_with_profiles(std::slice::from_ref(&build));
     assert!(state.broadcast_indicator_count().is_none());
@@ -105,12 +96,11 @@ fn broadcast_mirror_follows_external_file_changes() {
     .expect("corrupt the file");
     assert!(!state.refresh_broadcast_mirror());
     assert_eq!(state.broadcast_indicator_count(), Some(2));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn broadcast_mirror_refresh_keeps_overlay_editing_state_and_local_writes_win() {
-    let dir = with_temp_state_home("watcher-edit");
+    let _dir = with_temp_state_home("watcher-edit");
     let mut state = state_with_profiles(&[]);
     broadcast_set(&[(None, "pane_1")], true)
         .store()
@@ -147,12 +137,11 @@ fn broadcast_mirror_refresh_keeps_overlay_editing_state_and_local_writes_win() {
         super::super::broadcast::ClientBroadcastView::PickMachine
     ));
     assert_eq!(overlay.message.as_deref(), Some("editing"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn broadcast_overlay_defaults_to_disabled_empty_and_gate_persists() {
-    let dir = with_temp_state_home("gate");
+    let _dir = with_temp_state_home("gate");
     let mut state = state_with_profiles(&[]);
     state.open_broadcast_overlay();
     assert!(matches!(
@@ -173,12 +162,11 @@ fn broadcast_overlay_defaults_to_disabled_empty_and_gate_persists() {
 
     // An empty set still blocks the fan-out indicator.
     assert!(state.broadcast_indicator_count().is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn broadcast_picker_registers_one_pane_per_endpoint() {
-    let dir = with_temp_state_home("picker");
+    let _dir = with_temp_state_home("picker");
     let build = profile("Build", "build.example", "40");
     let mut state = state_with_profiles(std::slice::from_ref(&build));
     online_remote(&mut state, &build, "pane_r1");
@@ -213,7 +201,6 @@ fn broadcast_picker_registers_one_pane_per_endpoint() {
     );
     assert_eq!(candidates.len(), 1);
     assert!(candidates[0].0.is_local());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

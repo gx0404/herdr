@@ -389,6 +389,7 @@ fn plugin_install_usage_errors_include_options_without_installing() {
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let state_home = base.join("state");
+    let app_config_dir = config_home.join(app_dir_name());
     fs::create_dir_all(&runtime_dir).unwrap();
 
     for args in [
@@ -405,8 +406,8 @@ fn plugin_install_usage_errors_include_options_without_installing() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("herdr plugin install"), "{stderr}");
         assert!(stderr.contains("[--ref REF] [--yes"), "{stderr}");
-        assert!(!config_home.join("herdr-dev/plugins").exists());
-        assert!(!config_home.join("herdr-dev/plugins.json").exists());
+        assert!(!app_config_dir.join("plugins").exists());
+        assert!(!app_config_dir.join("plugins.json").exists());
         assert!(!state_home.exists());
     }
 
@@ -854,11 +855,8 @@ command = ["sh", "-c", "echo new"]
 
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
+    let managed_checkout =
+        managed_github_plugin_dir(&config_home).join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     fs::create_dir_all(&managed_checkout).unwrap();
     fs::write(managed_checkout.join("old-marker"), "old checkout\n").unwrap();
 
@@ -976,11 +974,8 @@ command = ["sh", "-c", "echo install"]
 
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
+    let managed_checkout =
+        managed_github_plugin_dir(&config_home).join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     let git_config = write_offline_git_config(
         &base,
         &source_repo,
@@ -1100,11 +1095,8 @@ command = ["sh", "-c", "echo install"]
 
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
+    let managed_checkout =
+        managed_github_plugin_dir(&config_home).join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     let git_config = write_offline_git_config(
         &base,
         &source_repo,

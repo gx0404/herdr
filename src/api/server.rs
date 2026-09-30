@@ -833,7 +833,7 @@ mod windows_tests {
         let path = std::env::temp_dir().join(format!(
             "herdr-api-{name}-{}-{}.sock",
             std::process::id(),
-            Instant::now().elapsed().as_nanos()
+            crate::config::test_dirs::unique_id()
         ));
         let listener = crate::ipc::bind_local_listener(&path).unwrap();
         let client = crate::ipc::connect_local_stream(&path).unwrap();
@@ -1272,20 +1272,18 @@ mod tests {
     use std::io::{BufRead, BufReader, Read};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
-    use std::sync::{Mutex, OnceLock};
     use tokio::sync::mpsc;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn unique_test_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "herdr-{name}-{}-{nanos}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        ))
     }
 
     fn read_line(stream: &mut LocalStream) -> String {
@@ -1412,20 +1410,20 @@ mod tests {
         (api_tx, responder)
     }
 
+    // 下面几个用例改进程环境变量：全程持全局测试环境锁，放锁时自动还原。
     #[test]
     fn socket_path_prefers_explicit_env_override() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let unique = format!("/tmp/herdr-test-{}.sock", std::process::id());
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
         std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, &unique);
         assert_eq!(socket_path(), PathBuf::from(&unique));
-        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
     }
 
     #[test]
     fn socket_path_defaults_to_config_dir_even_when_xdg_runtime_dir_is_set() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_test_path("socket-default-config-home");
         let runtime_dir = unique_test_path("socket-default-runtime");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
@@ -1438,14 +1436,11 @@ mod tests {
             .join(crate::config::app_dir_name())
             .join("herdr.sock");
         assert_eq!(socket_path(), expected);
-
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
     fn socket_path_uses_named_session_dir() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = unique_test_path("socket-named-config-home");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
@@ -1458,9 +1453,6 @@ mod tests {
             .join("work")
             .join("herdr.sock");
         assert_eq!(socket_path(), expected);
-
-        std::env::remove_var(crate::session::SESSION_ENV_VAR);
-        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]

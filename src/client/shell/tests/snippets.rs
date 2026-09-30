@@ -4,15 +4,8 @@ use crate::client::endpoint::{
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 
-fn with_temp_state_home(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("herdr-snippets-test-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp state home");
-    // 线程本地覆盖而不是改进程环境变量：`cargo test` 单进程并发时环境
-    // 变量是全局的，会串到同进程的其它测试（nextest 才是进程隔离）。
-    crate::config::test_dirs::set_state_dir(dir.clone());
-    dir
+fn with_temp_state_home(name: &str) -> crate::config::test_dirs::IsolatedDirs {
+    isolated_state_home(&format!("snippets-{name}"))
 }
 
 fn state() -> ClientShellState {
@@ -96,7 +89,7 @@ fn snippets_view(state: &ClientShellState) -> &super::super::snippets_overlay::C
 
 #[test]
 fn snippet_list_renders_and_filters() {
-    let dir = with_temp_state_home("list");
+    let _dir = with_temp_state_home("list");
     seed_snippet(
         "deploy",
         "kubectl rollout restart deploy/{{name}}",
@@ -123,12 +116,11 @@ fn snippet_list_renders_and_filters() {
     let text = frame_text(&mut state, 106, 30);
     assert!(!text.contains("kubectl logs"), "frame: {text}");
     assert!(text.contains("rollout"), "frame: {text}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn snippet_form_saves_edits_and_deletes() {
-    let dir = with_temp_state_home("form");
+    let _dir = with_temp_state_home("form");
     let mut state = state();
     state.open_snippets_overlay(false);
     state.route_snippets_key(&key(KeyCode::Char('n')), &mut ClientShellInput::default());
@@ -184,12 +176,11 @@ fn snippet_form_saves_edits_and_deletes() {
     ));
     state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
     assert!(SnippetLibrary::load().expect("library").snippets.is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn snippet_run_current_pane_sends_input_and_records_history() {
-    let dir = with_temp_state_home("run");
+    let _dir = with_temp_state_home("run");
     seed_snippet("deploy", "kubectl rollout restart deploy/api", &[]);
     let mut state = state();
     state.open_snippets_overlay(true);
@@ -253,12 +244,11 @@ fn snippet_run_current_pane_sends_input_and_records_history() {
         .as_ref()
         .expect("summary toast shows");
     assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Success);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn snippet_run_variables_render_into_the_command() {
-    let dir = with_temp_state_home("vars");
+    let _dir = with_temp_state_home("vars");
     seed_snippet(
         "restart",
         "kubectl rollout restart deploy/{{name}}",
@@ -291,12 +281,11 @@ fn snippet_run_variables_render_into_the_command() {
     ));
     let text = frame_text(&mut state, 106, 30);
     assert!(text.contains("rollout restart deploy/api"), "frame: {text}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn snippet_run_multi_machine_fans_out_per_endpoint() {
-    let dir = with_temp_state_home("fanout");
+    let _dir = with_temp_state_home("fanout");
     seed_snippet("uptime", "uptime", &[]);
     let build = SavedSshEndpoint::new("Build", "build.example", "default").expect("profile");
     let build_profile_id = build.id.clone();
@@ -373,7 +362,6 @@ fn snippet_run_multi_machine_fans_out_per_endpoint() {
     assert!(state.snippet_runs.is_empty(), "run state cleared");
     let notice = state.visible_endpoint_notice.as_ref().expect("toast");
     assert!(notice.body.contains("no such pane"), "{}", notice.body);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-07：指针路过后的首次点击只允许选中。MENU-01 之后 hover 只写
@@ -382,7 +370,7 @@ fn snippet_run_multi_machine_fans_out_per_endpoint() {
 /// 抖动）无关。
 #[test]
 fn snippet_list_click_runs_only_on_the_second_click_after_hover() {
-    let dir = with_temp_state_home("double-click");
+    let _dir = with_temp_state_home("double-click");
     seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
     seed_snippet("logs", "kubectl logs -f svc/web", &[]);
     let mut state = state();
@@ -453,7 +441,6 @@ fn snippet_list_click_runs_only_on_the_second_click_after_hover() {
         snippets_view(&state),
         super::super::snippets_overlay::ClientSnippetsView::RunTargets(_)
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// MENU-01：`hovered` 存的是行号，而 List / RunTargets / RunPickPane /
@@ -462,7 +449,7 @@ fn snippet_list_click_runs_only_on_the_second_click_after_hover() {
 /// 才纠正——切视图的唯一写点 `set_view` 必须连带清掉它。
 #[test]
 fn snippet_view_switch_clears_the_pointer_hover() {
-    let dir = with_temp_state_home("hover-view-switch");
+    let _dir = with_temp_state_home("hover-view-switch");
     seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
     seed_snippet("logs", "kubectl logs -f svc/web", &[]);
     let mut state = state();
@@ -519,14 +506,13 @@ fn snippet_view_switch_clears_the_pointer_hover() {
         panic!("snippets overlay");
     };
     assert_eq!(overlay.hovered, None, "回到列表也清 hover");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 点击痕迹记的是片段身份，不是行号：删掉一个片段后整列上移，原先记下的行号
 /// 指向的已经是另一个片段，这一次点击必须只算首击。
 #[test]
 fn deleting_a_snippet_invalidates_the_click_trace_for_that_row() {
-    let dir = with_temp_state_home("delete-trace");
+    let _dir = with_temp_state_home("delete-trace");
     seed_snippet("alpha", "echo alpha", &[]);
     seed_snippet("beta", "echo beta", &[]);
     seed_snippet("gamma", "echo gamma", &[]);
@@ -571,13 +557,12 @@ fn deleting_a_snippet_invalidates_the_click_trace_for_that_row() {
         ),
         "a snippet that moved up into the clicked row must not run on the first click"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 窗口过期分支：超过 `ui.double_click_ms` 的第二次点击仍然只算首击。
 #[test]
 fn snippet_click_outside_the_double_click_window_only_selects() {
-    let dir = with_temp_state_home("expired-window");
+    let _dir = with_temp_state_home("expired-window");
     seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
     seed_snippet("logs", "kubectl logs -f svc/web", &[]);
     let mut state = state();
@@ -608,7 +593,6 @@ fn snippet_click_outside_the_double_click_window_only_selects() {
         overlay.last_click.is_some(),
         "the expired click still becomes the new trace"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 整套长按保护取决于 `step()` 为每个破坏性步进返回不同值：把某个变体并进零值组
@@ -688,7 +672,7 @@ fn overlay_step_separates_every_destructive_snippet_step() {
 fn held_enter_does_not_walk_the_snippet_run_flow() {
     use crossterm::event::KeyEventKind;
 
-    let dir = with_temp_state_home("held-enter");
+    let _dir = with_temp_state_home("held-enter");
     seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
     let mut state = state();
     state.open_snippets_overlay(false);
@@ -716,7 +700,6 @@ fn held_enter_does_not_walk_the_snippet_run_flow() {
             "held enter must not advance past the target picker"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// C-02 残留面（已拍板）：RunConfirm 的执行键换成 y（与 worktree 强删同构）。
@@ -724,7 +707,7 @@ fn held_enter_does_not_walk_the_snippet_run_flow() {
 /// 不再执行，`y`（或 ctrl+↵）才执行。
 #[test]
 fn plain_enter_presses_never_execute_snippet_run() {
-    let dir = with_temp_state_home("plain-enter-run");
+    let _dir = with_temp_state_home("plain-enter-run");
     seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
     let mut state = state();
     state.open_snippets_overlay(true);
@@ -766,12 +749,11 @@ fn plain_enter_presses_never_execute_snippet_run() {
         state.overlay.is_none(),
         "overlay closes once the run starts"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn ctrl_enter_executes_snippet_run() {
-    let dir = with_temp_state_home("ctrl-enter-run");
+    let _dir = with_temp_state_home("ctrl-enter-run");
     seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
     let mut state = state();
     state.open_snippets_overlay(true);
@@ -795,7 +777,6 @@ fn ctrl_enter_executes_snippet_run() {
         "ctrl+enter executes the run: {:?}",
         outcome.actions
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -819,7 +800,7 @@ fn palette_lists_snippet_and_import_actions() {
 /// C-20 残留面：滚轮只滚视口，不改键盘选中；回车仍作用在原选中行上。
 #[test]
 fn snippet_list_wheel_scrolls_the_viewport_without_moving_the_selection() {
-    let dir = with_temp_state_home("wheel-scroll");
+    let _dir = with_temp_state_home("wheel-scroll");
     for index in 0..12 {
         seed_snippet(&format!("snippet-{index:02}"), "true", &[]);
     }
@@ -870,14 +851,13 @@ fn snippet_list_wheel_scrolls_the_viewport_without_moving_the_selection() {
     let label = snippet_label_at(&state, overlay.selected).expect("选中行标签");
     let text = frame_text(&mut state, 106, 24);
     assert!(text.contains(&label), "选中行必须滚进视野: {text}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// STATE-04 守门：渲染是纯函数——连续 compose 之间滚动状态不变，只有输入
 /// （键盘 / 滚轮）能改它。
 #[test]
 fn composing_twice_leaves_the_list_scroll_untouched() {
-    let dir = with_temp_state_home("scroll-purity");
+    let _dir = with_temp_state_home("scroll-purity");
     for index in 0..12 {
         seed_snippet(&format!("snippet-{index:02}"), "true", &[]);
     }
@@ -913,14 +893,13 @@ fn composing_twice_leaves_the_list_scroll_untouched() {
         _ => panic!("snippets overlay"),
     };
     assert_eq!(after_repaint, after_input, "重绘不得改写滚动状态");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-05：机器选择器的勾选按端点 id 记录，端点上下线导致行错位时不会把勾选
 /// 错绑到别的机器上。
 #[test]
 fn machine_picker_keeps_selections_bound_to_endpoints_across_list_changes() {
-    let dir = with_temp_state_home("picker-identity");
+    let _dir = with_temp_state_home("picker-identity");
     seed_snippet("uptime", "uptime", &[]);
     let alpha = SavedSshEndpoint::new("Alpha", "alpha.example", "default").expect("profile");
     let beta = SavedSshEndpoint::new("Beta", "beta.example", "default").expect("profile");
@@ -976,13 +955,12 @@ fn machine_picker_keeps_selections_bound_to_endpoints_across_list_changes() {
         !endpoints.contains(&alpha_id),
         "Alpha 被取消勾选后不得因行错位重新进入目标: {endpoints:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-06：并发运行各占一个槽位——两次运行前后开始、各自收尾，互不覆盖。
 #[test]
 fn concurrent_snippet_runs_keep_their_own_pending_state() {
-    let dir = with_temp_state_home("concurrent-runs");
+    let _dir = with_temp_state_home("concurrent-runs");
     seed_snippet("alpha-snippet", "uptime", &[]);
     seed_snippet("beta-snippet", "whoami", &[]);
     let build = SavedSshEndpoint::new("Build", "build.example", "default").expect("profile");
@@ -1076,7 +1054,6 @@ fn concurrent_snippet_runs_keep_their_own_pending_state() {
         2,
         "第二次运行的两条历史都在：{labels:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 独立复审 中-3：端点投影重建（远端重启 / 重新附加）会丢掉在途请求，挂着的
@@ -1084,7 +1061,7 @@ fn concurrent_snippet_runs_keep_their_own_pending_state() {
 /// 永远不会完成的条目。
 #[test]
 fn endpoint_projection_reset_finishes_in_flight_snippet_runs() {
-    let dir = with_temp_state_home("projection-reset-runs");
+    let _dir = with_temp_state_home("projection-reset-runs");
     seed_snippet("uptime", "uptime", &[]);
     let build = SavedSshEndpoint::new("Build", "build.example", "default").expect("profile");
     let build_id = ClientEndpointId::Ssh(build.id.clone());
@@ -1124,5 +1101,4 @@ fn endpoint_projection_reset_finishes_in_flight_snippet_runs() {
         "被丢弃的目标按失败写入历史: {:?}",
         library.history.len()
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

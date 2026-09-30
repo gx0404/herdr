@@ -132,7 +132,7 @@ async fn server_loop_drains_api_backlog_and_runs_scheduled_work() {
     server.app.config_diagnostic_deadline = Some(Instant::now());
     server.app.state.config_diagnostic = Some("expired diagnostic".into());
 
-    tokio::time::timeout(Duration::from_secs(5), server.run())
+    tokio::time::timeout(LOADED_WAIT, server.run())
         .await
         .expect("queued API requests must wake the server loop")
         .expect("server loop shuts down cleanly");

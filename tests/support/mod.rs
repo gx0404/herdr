@@ -24,6 +24,32 @@ const CLIENT_MESSAGE_CLIENT_SHELL_PANE_INPUT: u32 = 13;
 const CLIENT_MESSAGE_CLIENT_SHELL_FOCUS: u32 = 18;
 const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
 
+/// 外层环境里能把 herdr 子进程引回开发机真实目录的变量，HOME / XDG_CONFIG_HOME /
+/// XDG_STATE_HOME 的隔离管不到它们：`HERDR_CONFIG_PATH` 直接指定配置文件；其余改写 agent
+/// 集成目录（`~/.claude`、`~/.codex`、`~/.kimi-code`、`~/.pi/agent`，opencode 的数据目录跟随
+/// `XDG_DATA_HOME`），`integration install` 往里写、server 的活动树适配器从里读。拉起 herdr
+/// 的助手都清掉它们，让这些位置落回用例自己的配置目录与 HOME。
+pub const INHERITED_DIR_OVERRIDES: &[&str] = &[
+    "HERDR_CONFIG_PATH",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "KIMI_CODE_HOME",
+    "PI_CODING_AGENT_DIR",
+    "XDG_DATA_HOME",
+];
+
+/// 被测二进制在配置目录下使用的应用目录名（`config::app_dir_name`）：debug 构建是
+/// `herdr-dev`，release 构建是 `herdr`。测试与被测二进制按同一 profile 构建，所以跟随本
+/// crate 的 `debug_assertions`；写死任一名字，另一种 profile 下配置会被静默忽略、断言会去查
+/// 不存在的路径。
+pub fn app_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    }
+}
+
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;

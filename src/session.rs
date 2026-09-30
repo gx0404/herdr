@@ -496,11 +496,10 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use interprocess::local_socket::traits::Listener as _;
-    use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    // 会话名、socket 覆盖是进程全局的环境变量：与全 crate 共用一把测试环境锁。
+    fn env_lock() -> &'static crate::config::TestEnvLock {
+        crate::config::test_config_env_lock()
     }
 
     #[cfg(unix)]
@@ -509,7 +508,9 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。
+        let id = crate::config::test_dirs::unique_id();
+        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}-{id}", std::process::id()))
     }
 
     #[cfg(unix)]
@@ -598,9 +599,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stop_session_times_out_when_socket_stays_open_without_response() {
-        let _guard = env_lock().lock().unwrap();
-        let config_home = PathBuf::from(format!("/tmp/hs-stop-open-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        // 只要私有目录：线程本地隔离，不改进程环境变量。
+        let _dirs = crate::config::test_dirs::isolate_dirs("stop-open");
         let session_name = "silent";
         let socket_path = api_socket_path_for(Some(session_name));
         std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
@@ -640,8 +640,6 @@ mod tests {
         assert!(err.contains("did not stop"), "{err}");
         keep_running.store(false, Ordering::Relaxed);
         handle.join().unwrap();
-        let _ = std::fs::remove_dir_all(&config_home);
-        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
@@ -776,9 +774,7 @@ mod tests {
     #[test]
     fn configure_from_args_maps_default_session_name_to_default_path() {
         let _guard = env_lock().lock().unwrap();
-        let config_home =
-            std::env::temp_dir().join(format!("herdr-session-default-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let dirs = crate::config::test_dirs::isolate_dirs("session-default");
         std::env::set_var(SESSION_ENV_VAR, "work");
         clear_explicit_session_for_test();
         std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/inherited.sock");
@@ -797,11 +793,8 @@ mod tests {
         assert!(explicit_session_requested());
         assert_eq!(
             active_api_socket_path(),
-            config_home
-                .join(crate::config::app_dir_name())
-                .join("herdr.sock")
+            dirs.config_dir().join("herdr.sock")
         );
-        std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
@@ -829,9 +822,7 @@ mod tests {
     #[test]
     fn env_default_session_name_uses_default_path() {
         let _guard = env_lock().lock().unwrap();
-        let config_home =
-            std::env::temp_dir().join(format!("herdr-env-session-default-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let dirs = crate::config::test_dirs::isolate_dirs("env-session-default");
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         std::env::set_var(SESSION_ENV_VAR, DEFAULT_SESSION_NAME);
         EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
@@ -848,11 +839,8 @@ mod tests {
         assert!(!explicit_session_requested());
         assert_eq!(
             active_api_socket_path(),
-            config_home
-                .join(crate::config::app_dir_name())
-                .join("herdr.sock")
+            dirs.config_dir().join("herdr.sock")
         );
-        std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         clear_explicit_session_for_test();
@@ -925,9 +913,7 @@ mod tests {
     #[test]
     fn explicit_session_socket_ignores_inherited_socket_override() {
         let _guard = env_lock().lock().unwrap();
-        let config_home =
-            std::env::temp_dir().join(format!("herdr-session-precedence-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        let dirs = crate::config::test_dirs::isolate_dirs("session-precedence");
         std::env::set_var(SESSION_ENV_VAR, "work");
         EXPLICIT_SESSION_REQUESTED.store(true, Ordering::Relaxed);
         std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/inherited.sock");
@@ -936,13 +922,11 @@ mod tests {
 
         assert_eq!(
             path,
-            config_home
-                .join(crate::config::app_dir_name())
+            dirs.config_dir()
                 .join("sessions")
                 .join("work")
                 .join("herdr.sock")
         );
-        std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
@@ -992,9 +976,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stop_session_fails_when_socket_remains_reachable_after_timeout() {
-        let _guard = env_lock().lock().unwrap();
-        let config_home = PathBuf::from(format!("/tmp/hs-stop-{}", std::process::id()));
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        // 只要私有目录：线程本地隔离，不改进程环境变量。
+        let _dirs = crate::config::test_dirs::isolate_dirs("stop-slow");
         let session_name = "slow";
         let socket_path = api_socket_path_for(Some(session_name));
         std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
@@ -1037,8 +1020,6 @@ mod tests {
         );
         keep_running.store(false, Ordering::Relaxed);
         handle.join().unwrap();
-        let _ = std::fs::remove_dir_all(&config_home);
-        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
@@ -1062,17 +1043,11 @@ mod tests {
 
     #[test]
     fn list_sessions_skips_reserved_default_directory() {
-        let _guard = env_lock().lock().unwrap();
-        let config_home =
-            std::env::temp_dir().join(format!("herdr-session-list-{}", std::process::id()));
-        let sessions_dir = config_home
-            .join(crate::config::app_dir_name())
-            .join("sessions");
+        // 列会话只看配置目录，不读会话相关的环境变量：线程本地隔离即可，不必持锁。
+        let dirs = crate::config::test_dirs::isolate_dirs("session-list");
+        let sessions_dir = dirs.config_dir().join("sessions");
         std::fs::create_dir_all(sessions_dir.join(DEFAULT_SESSION_NAME)).unwrap();
         std::fs::create_dir_all(sessions_dir.join("work")).unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
-        std::env::remove_var(SESSION_ENV_VAR);
-        clear_explicit_session_for_test();
 
         let sessions = list_sessions().unwrap();
         let names: Vec<_> = sessions
@@ -1081,7 +1056,5 @@ mod tests {
             .collect();
 
         assert_eq!(names, vec![DEFAULT_SESSION_NAME, "work"]);
-        std::fs::remove_dir_all(&config_home).unwrap();
-        std::env::remove_var("XDG_CONFIG_HOME");
     }
 }

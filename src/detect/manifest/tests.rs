@@ -40,41 +40,27 @@ id = "codex"
     )
 }
 
+/// 在本线程独占的临时目录里跑 `f`：配置/状态目录是线程本地覆盖，不改进程环境变量，
+/// `cargo test` 同进程并发的别的测试看不到；manifest 缓存先按隔离目录重载，结束后
+/// 还原成进入前的样子（隔离目录随之删除）。
 fn with_manifest_dirs<T>(name: &str, f: impl FnOnce() -> T) -> T {
-    let _guard = crate::config::test_config_env_lock().lock().unwrap();
-    let old_config = std::env::var_os("XDG_CONFIG_HOME");
-    let old_state = std::env::var_os("XDG_STATE_HOME");
-    let base = std::env::temp_dir().join(format!(
-        "herdr-manifest-loader-{name}-{}",
-        std::process::id()
-    ));
-    let config_dir = base.join("config");
-    let state_dir = base.join("state");
-    let _ = std::fs::remove_dir_all(&base);
-    std::env::set_var("XDG_CONFIG_HOME", &config_dir);
-    std::env::set_var("XDG_STATE_HOME", &state_dir);
+    let _dirs = crate::config::test_dirs::isolate_dirs(&format!("manifest-{name}"));
+    let _cache = scoped_thread_manifest_cache();
     reload_manifests();
-    let result = f();
-    match old_config {
-        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-        None => std::env::remove_var("XDG_CONFIG_HOME"),
-    }
-    match old_state {
-        Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-        None => std::env::remove_var("XDG_STATE_HOME"),
-    }
-    reload_manifests();
-    let _ = std::fs::remove_dir_all(&base);
-    result
+    f()
 }
 
-/// 测试 manifest 只能写进隔离的临时目录。override_path / remote_manifest_path 在测试
-/// 构建里本就只解析到临时目录，这里再断言一次：写进开发机真实的 herdr-dev 目录后，
-/// 那份合成规则会整份替换捆绑 manifest，之后每次跑检测测试都会读到它。
+/// 测试 manifest 只能写进本线程隔离的目录。override_path / remote_manifest_path 在测试
+/// 构建里本就只解析到那里，这里再断言一次：写进共享或真实的 herdr-dev 目录后，那份
+/// 合成规则会整份替换捆绑 manifest，别的检测测试都会读到它。
 fn write_isolated_manifest(path: PathBuf, content: &str) {
+    let isolated = [
+        crate::config::test_dirs::isolated_config_dir(),
+        crate::config::test_dirs::isolated_state_dir(),
+    ];
     assert!(
-        path.starts_with(std::env::temp_dir()),
-        "refusing to write a test manifest outside the temp dir: {}",
+        isolated.iter().flatten().any(|dir| path.starts_with(dir)),
+        "refusing to write a test manifest outside this thread's isolated dirs: {}",
         path.display()
     );
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -93,7 +79,7 @@ fn write_remote_codex_without_reload(content: &str) {
 
 fn write_local_codex(content: &str) {
     let path = override_path(Agent::Codex)
-        .expect("local override dir must be isolated to a temp dir (XDG_CONFIG_HOME)");
+        .expect("local override dir must be isolated to a temp dir (with_manifest_dirs)");
     write_isolated_manifest(path, content);
     reload_manifests();
 }
@@ -358,10 +344,15 @@ fn compiled_rules_are_shared_until_manifest_reload() {
             AgentState::Working
         );
 
+        // 测试构建的缓存按线程隔离：工作线程接过本线程的缓存，模拟生产里各检测线程
+        // 共用同一份进程级缓存。
+        let cache = THREAD_MANIFEST_CACHE.with(|slot| slot.borrow().clone());
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 let reloaded = &reloaded;
+                let cache = cache.clone();
                 scope.spawn(move || {
+                    THREAD_MANIFEST_CACHE.with(|slot| *slot.borrow_mut() = cache);
                     let loaded = load_manifest(Agent::Codex).unwrap();
                     assert_eq!(
                         loaded.compiled_rules.as_ptr(),
@@ -374,6 +365,30 @@ fn compiled_rules_are_shared_until_manifest_reload() {
             }
         });
     });
+}
+
+#[test]
+fn manifest_reload_only_affects_the_reloading_thread() {
+    // `cargo test` 同进程并发：一个测试 reload 出的合成 manifest 不能被别的测试线程读到；
+    // 离开隔离作用域后本线程也回到捆绑 manifest。
+    let sees_bundled_only = |label: &str| {
+        let result = explain(Agent::Codex, "thread-local-marker");
+        assert!(
+            matches!(result.source, Some(ManifestSource::Bundled)),
+            "{label}: {result:?}"
+        );
+        assert_ne!(matched_rule_id(&result), Some("test"), "{label}");
+    };
+    with_manifest_dirs("thread-local-cache", || {
+        write_local_codex(&local_manifest("working", "thread-local-marker"));
+        let local = explain(Agent::Codex, "thread-local-marker");
+        assert_eq!(local.state, AgentState::Working);
+        assert!(matches!(local.source, Some(ManifestSource::Override(_))));
+        std::thread::scope(|scope| {
+            scope.spawn(|| sees_bundled_only("other thread"));
+        });
+    });
+    sees_bundled_only("after scope");
 }
 
 #[test]

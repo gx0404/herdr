@@ -3401,12 +3401,14 @@ mod tests {
 
     #[test]
     fn init_early_prefers_env_over_config() {
+        // `HERDR_LANG` 是进程全局的环境变量（`apply_config_language` 也读它）：持全局测试
+        // 环境锁，放锁时自动还原。
+        let _env = crate::config::test_config_env_lock().lock().unwrap();
         let _guard = lang_guard(Lang::ZhCn);
         // Without HERDR_LANG set the config peek decides; this environment
         // may not have a config file, so only assert the env precedence.
         std::env::set_var(LANG_ENV_VAR, "en");
         init_early();
         assert_eq!(lang(), Lang::En);
-        std::env::remove_var(LANG_ENV_VAR);
     }
 }

@@ -1518,7 +1518,8 @@ mod tests {
         assert!(!handles(&Method::AgentList(EmptyParams::default())));
     }
 
-    /// 环境变量的临时改写：作用域结束恢复原值。调用方须先持有 integration 的环境锁。
+    /// 环境变量的临时改写：作用域结束恢复原值（同一测试里前后几段各自还原）。调用方须全程
+    /// 持有 `integration_env_lock`（即全局测试环境锁），放锁时整份环境再按快照还原。
     struct EnvOverride {
         name: &'static str,
         original: Option<std::ffi::OsString>,

@@ -16,14 +16,8 @@ fn profile(label: &str, target: &str, seed: &str, enabled: bool) -> SavedSshEndp
     profile
 }
 
-fn with_temp_state_home(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("herdr-scenes-test-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp state home");
-    // 线程本地覆盖而不是改进程环境变量：`cargo test` 单进程并发时环境
-    // 变量是全局的，会串到同进程的其它测试（nextest 才是进程隔离）。
-    crate::config::test_dirs::set_state_dir(dir.clone());
-    dir
+fn with_temp_state_home(name: &str) -> crate::config::test_dirs::IsolatedDirs {
+    isolated_state_home(&format!("scenes-{name}"))
 }
 
 fn state_with_profiles(profiles: &[SavedSshEndpoint]) -> ClientShellState {
@@ -90,7 +84,7 @@ fn scenes_path(_dir: &std::path::Path) -> std::path::PathBuf {
 
 #[test]
 fn scene_save_persists_snapshot_and_shows_success_notice() {
-    let dir = with_temp_state_home("save");
+    let home = with_temp_state_home("save");
     let build = profile("Build", "build.example", "1", true);
     let stage = profile("Stage", "stage.example", "2", false);
     let mut state = state_with_profiles(&[build.clone(), stage.clone()]);
@@ -109,7 +103,7 @@ fn scene_save_persists_snapshot_and_shows_success_notice() {
     let mut outcome = ClientShellInput::default();
     state.submit_scene_save_form(&mut outcome);
 
-    let content = std::fs::read_to_string(scenes_path(&dir)).expect("scene file");
+    let content = std::fs::read_to_string(scenes_path(home.state_dir())).expect("scene file");
     let saved: serde_json::Value = serde_json::from_str(&content).expect("scene json");
     assert_eq!(saved["version"], 1);
     let entry = &saved["scenes"][0];
@@ -136,12 +130,11 @@ fn scene_save_persists_snapshot_and_shows_success_notice() {
             }
         ))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn scene_restore_enables_disables_and_focuses_active_machine() {
-    let dir = with_temp_state_home("restore");
+    let _dir = with_temp_state_home("restore");
     let build = profile("Build", "build.example", "1", true);
     let stage = profile("Stage", "stage.example", "2", false);
     let extra = profile("Extra", "extra.example", "3", true);
@@ -216,12 +209,11 @@ fn scene_restore_enables_disables_and_focuses_active_machine() {
         .as_ref()
         .expect("restore toast");
     assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Success);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn scene_restore_reports_missing_machines_without_failing() {
-    let dir = with_temp_state_home("missing");
+    let _dir = with_temp_state_home("missing");
     let build = profile("Build", "build.example", "1", true);
     seed_catalog(std::slice::from_ref(&build));
     let mut state = state_with_profiles(std::slice::from_ref(&build));
@@ -251,12 +243,11 @@ fn scene_restore_reports_missing_machines_without_failing() {
         catalog.ssh.iter().all(|profile| profile.enabled),
         "present machines stay enabled"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn scenes_overlay_lists_scenes_and_delete_flow_updates_store() {
-    let dir = with_temp_state_home("list");
+    let home = with_temp_state_home("list");
     let mut state = state_with_profiles(&[]);
     super::super::scenes_overlay::store_scenes_to(
         &super::super::scenes_overlay::scene_snapshots_path(),
@@ -296,16 +287,15 @@ fn scenes_overlay_lists_scenes_and_delete_flow_updates_store() {
         ))
     ));
     state.route_scenes_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
-    let remaining =
-        super::super::scenes_overlay::load_scenes_from(&scenes_path(&dir)).expect("load scenes");
+    let remaining = super::super::scenes_overlay::load_scenes_from(&scenes_path(home.state_dir()))
+        .expect("load scenes");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].name, "morning");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn scene_rename_flow_updates_store() {
-    let dir = with_temp_state_home("rename");
+    let home = with_temp_state_home("rename");
     let mut state = state_with_profiles(&[]);
     super::super::scenes_overlay::store_scenes_to(
         &super::super::scenes_overlay::scene_snapshots_path(),
@@ -326,8 +316,8 @@ fn scene_rename_flow_updates_store() {
     *editor = text_editor_for("standup");
     state.route_scenes_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
 
-    let remaining =
-        super::super::scenes_overlay::load_scenes_from(&scenes_path(&dir)).expect("load scenes");
+    let remaining = super::super::scenes_overlay::load_scenes_from(&scenes_path(home.state_dir()))
+        .expect("load scenes");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].name, "standup");
     assert!(matches!(
@@ -339,7 +329,6 @@ fn scene_rename_flow_updates_store() {
             }
         ))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -387,7 +376,7 @@ fn text_editor_for(text: &str) -> TextEditor {
 /// 静默删掉被重命名的那一条。
 #[test]
 fn scene_rename_to_existing_name_keeps_both_scenes() {
-    let dir = with_temp_state_home("rename-collision");
+    let home = with_temp_state_home("rename-collision");
     let mut state = state_with_profiles(&[]);
     super::super::scenes_overlay::store_scenes_to(
         &super::super::scenes_overlay::scene_snapshots_path(),
@@ -407,8 +396,8 @@ fn scene_rename_to_existing_name_keeps_both_scenes() {
     *editor = text_editor_for("night");
     state.route_scenes_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
 
-    let stored =
-        super::super::scenes_overlay::load_scenes_from(&scenes_path(&dir)).expect("load scenes");
+    let stored = super::super::scenes_overlay::load_scenes_from(&scenes_path(home.state_dir()))
+        .expect("load scenes");
     let names = stored
         .iter()
         .map(|scene| scene.name.clone())
@@ -426,7 +415,6 @@ fn scene_rename_to_existing_name_keeps_both_scenes() {
         panic!("撞名后必须留在重命名表单里");
     };
     assert!(error.is_some(), "撞名必须给出可见错误");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-02：列表单击只选中；恢复走按钮 / Enter / 同一行的二次点击。
@@ -434,7 +422,7 @@ fn scene_rename_to_existing_name_keeps_both_scenes() {
 fn scenes_row_single_click_selects_without_restoring() {
     use crossterm::event::{MouseButton, MouseEventKind};
 
-    let dir = with_temp_state_home("click");
+    let _dir = with_temp_state_home("click");
     let build = profile("Build", "build.example", "1", true);
     let extra = profile("Extra", "extra.example", "3", true);
     seed_catalog(&[build.clone(), extra.clone()]);
@@ -486,14 +474,13 @@ fn scenes_row_single_click_selects_without_restoring() {
         .as_ref()
         .expect("restore toast");
     assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Success);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-02：`restore_disable_others` 默认关闭；打开后恢复必须先确认要断开的
 /// 机器，确认前不得写端点目录。
 #[test]
 fn scene_restore_disable_others_defaults_off_and_confirms_before_disconnecting() {
-    let dir = with_temp_state_home("disable-others");
+    let _dir = with_temp_state_home("disable-others");
     let build = profile("Build", "build.example", "1", true);
     let extra = profile("Extra", "extra.example", "3", true);
     seed_catalog(&[build.clone(), extra.clone()]);
@@ -555,7 +542,6 @@ fn scene_restore_disable_others_defaults_off_and_confirms_before_disconnecting()
         Some(false),
         "确认后才真正停用现场之外的机器"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 批 2 遗留：scenes 各视图必须有互不相同的步进指纹，否则同视图同键的
@@ -600,7 +586,7 @@ fn scenes_views_have_distinct_overlay_steps() {
 fn held_enter_does_not_confirm_scene_restore() {
     use crossterm::event::KeyEventKind;
 
-    let dir = with_temp_state_home("held-enter");
+    let _dir = with_temp_state_home("held-enter");
     let build = profile("Build", "build.example", "1", true);
     let extra = profile("Extra", "extra.example", "3", true);
     seed_catalog(&[build.clone(), extra.clone()]);
@@ -646,7 +632,6 @@ fn held_enter_does_not_confirm_scene_restore() {
         catalog.ssh.iter().all(|profile| profile.enabled),
         "长按期间不得写端点目录"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-02 + C-02（非 kitty 宿主面）：确认页的确认键与列表的恢复键不同，
@@ -654,7 +639,7 @@ fn held_enter_does_not_confirm_scene_restore() {
 /// 走不完「列表 → 确认页 → 真的恢复」；只有 `y` 才落盘。
 #[test]
 fn plain_enter_presses_never_confirm_scene_restore() {
-    let dir = with_temp_state_home("plain-enter");
+    let _dir = with_temp_state_home("plain-enter");
     let build = profile("Build", "build.example", "1", true);
     let extra = profile("Extra", "extra.example", "3", true);
     seed_catalog(&[build.clone(), extra.clone()]);
@@ -700,14 +685,13 @@ fn plain_enter_presses_never_confirm_scene_restore() {
         Some(false),
         "确认后才真正停用现场之外的机器"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-02：确认页的价值是把名单摊开，名单放不下时必须显式说明还有几台，
 /// 不能静默丢弃溢出行。
 #[test]
 fn scene_restore_confirm_names_overflowing_machines_with_a_remainder_line() {
-    let dir = with_temp_state_home("confirm-overflow");
+    let _dir = with_temp_state_home("confirm-overflow");
     let build = profile("Build", "build.example", "1", true);
     let mut profiles = vec![build.clone()];
     for index in 0..24u32 {
@@ -746,14 +730,13 @@ fn scene_restore_confirm_names_overflowing_machines_with_a_remainder_line() {
         squeeze(&text).contains(&more_prefix),
         "名单溢出时必须提示还有几台: {text}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-02：确认页展示的名单就是确认后执行的名单。确认页会停留任意时长，
 /// 期间快照事件可能新增已启用的机器——它没被摊给用户看过，就不许被停用。
 #[test]
 fn scene_restore_confirm_only_disables_the_machines_it_listed() {
-    let dir = with_temp_state_home("confirm-frozen");
+    let _dir = with_temp_state_home("confirm-frozen");
     let build = profile("Build", "build.example", "1", true);
     let extra = profile("Extra", "extra.example", "3", true);
     seed_catalog(&[build.clone(), extra.clone()]);
@@ -789,14 +772,13 @@ fn scene_restore_confirm_only_disables_the_machines_it_listed() {
         "确认页没列出的机器不得被停用"
     );
     assert_eq!(enabled_of(&extra.id), Some(false), "列出的机器照常停用");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-02 的快路径：开关打开但没有任何机器需要停用时直接恢复，不弹空名单
 /// 确认页。这条守门防止条件被回归成「总是确认」或「总是跳过」。
 #[test]
 fn scene_restore_with_nothing_to_disable_skips_the_confirmation() {
-    let dir = with_temp_state_home("confirm-fast-path");
+    let _dir = with_temp_state_home("confirm-fast-path");
     let build = profile("Build", "build.example", "1", true);
     let idle = profile("Idle", "idle.example", "2", false);
     seed_catalog(&[build.clone(), idle.clone()]);
@@ -826,14 +808,13 @@ fn scene_restore_with_nothing_to_disable_skips_the_confirmation() {
         Some(true),
         "现场内的机器保持启用"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-03 的另一半：保存表单手输一个已存在的现场名，旧快照不得被静默替换，
 /// 语义与改名撞名一致（拒绝并报错）。
 #[test]
 fn scene_save_with_an_existing_name_is_rejected() {
-    let dir = with_temp_state_home("save-collision");
+    let home = with_temp_state_home("save-collision");
     let build = profile("Build", "build.example", "1", true);
     let mut state = state_with_profiles(&[]);
     super::super::scenes_overlay::store_scenes_to(
@@ -854,8 +835,8 @@ fn scene_save_with_an_existing_name_is_rejected() {
     let mut outcome = ClientShellInput::default();
     state.submit_scene_save_form(&mut outcome);
 
-    let stored =
-        super::super::scenes_overlay::load_scenes_from(&scenes_path(&dir)).expect("load scenes");
+    let stored = super::super::scenes_overlay::load_scenes_from(&scenes_path(home.state_dir()))
+        .expect("load scenes");
     assert_eq!(stored.len(), 1, "撞名保存不得新增条目");
     assert_eq!(
         stored[0].machines.len(),
@@ -869,7 +850,6 @@ fn scene_save_with_an_existing_name_is_rejected() {
         panic!("撞名后必须留在保存表单里");
     };
     assert!(form.error.is_some(), "撞名保存必须给出可见错误");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-02：双击窗口外的第二次点击只选中——窗口判据本身也要有守门。
@@ -877,7 +857,7 @@ fn scene_save_with_an_existing_name_is_rejected() {
 fn scenes_click_outside_the_double_click_window_only_selects() {
     use crossterm::event::{MouseButton, MouseEventKind};
 
-    let dir = with_temp_state_home("click-window");
+    let _dir = with_temp_state_home("click-window");
     let build = profile("Build", "build.example", "1", true);
     seed_catalog(std::slice::from_ref(&build));
     let mut state = state_with_profiles(std::slice::from_ref(&build));
@@ -912,7 +892,6 @@ fn scenes_click_outside_the_double_click_window_only_selects() {
         panic!("窗口外的两次点击都只选中，浮层必须留在原地");
     };
     assert_eq!(overlay.selected, 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TOOL-02：离开子视图会清掉点击痕迹，否则「点一行 → r 改名 → Esc 回列表 →
@@ -921,7 +900,7 @@ fn scenes_click_outside_the_double_click_window_only_selects() {
 fn leaving_a_scene_subview_clears_the_click_trail() {
     use crossterm::event::{MouseButton, MouseEventKind};
 
-    let dir = with_temp_state_home("click-trail");
+    let _dir = with_temp_state_home("click-trail");
     let build = profile("Build", "build.example", "1", true);
     seed_catalog(std::slice::from_ref(&build));
     let mut state = state_with_profiles(std::slice::from_ref(&build));
@@ -962,7 +941,6 @@ fn leaving_a_scene_subview_clears_the_click_trail() {
         panic!("进出子视图后第一次点击只能选中");
     };
     assert_eq!(overlay.selected, 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// MENU-01：指针划过现场列表只写 `hovered`，键盘选中不动——否则 ↑↓ 选好一条
@@ -971,7 +949,7 @@ fn leaving_a_scene_subview_clears_the_click_trail() {
 fn scene_hover_does_not_move_the_keyboard_selection() {
     use crossterm::event::MouseEventKind;
 
-    let dir = with_temp_state_home("hover-selection");
+    let _dir = with_temp_state_home("hover-selection");
     let build = profile("Build", "build.example", "1", true);
     seed_catalog(std::slice::from_ref(&build));
     let mut state = state_with_profiles(std::slice::from_ref(&build));
@@ -1034,7 +1012,6 @@ fn scene_hover_does_not_move_the_keyboard_selection() {
     };
     assert_eq!(overlay.hovered, None, "移出行区域后不留残影");
     assert_eq!(overlay.selected, 0);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// C-20 残留面：滚轮只滚视口，不改键盘选中；回车恢复的仍是原选中现场，
@@ -1043,7 +1020,7 @@ fn scene_hover_does_not_move_the_keyboard_selection() {
 fn scenes_wheel_scrolls_the_viewport_without_moving_the_selection() {
     use crossterm::event::MouseEventKind;
 
-    let dir = with_temp_state_home("wheel-selection");
+    let _dir = with_temp_state_home("wheel-selection");
     let profiles = (0..12)
         .map(|index| {
             profile(
@@ -1116,7 +1093,6 @@ fn scenes_wheel_scrolls_the_viewport_without_moving_the_selection() {
     };
     assert!(enabled(&profiles[0]), "回车应恢复原选中现场 s00");
     assert!(!enabled(&profiles[6]), "滚到的 s06 不该被恢复");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// STATE-03：列表变空的瞬间不能把滚动位置清零——快照重载 / 全部删除后列表
@@ -1125,7 +1101,7 @@ fn scenes_wheel_scrolls_the_viewport_without_moving_the_selection() {
 fn emptying_the_scene_list_keeps_the_scroll_position() {
     use crossterm::event::MouseEventKind;
 
-    let dir = with_temp_state_home("state-03");
+    let _dir = with_temp_state_home("state-03");
     let profiles = (0..12)
         .map(|index| {
             profile(
@@ -1191,5 +1167,4 @@ fn emptying_the_scene_list_keeps_the_scroll_position() {
         _ => panic!("scenes overlay"),
     };
     assert_eq!(restored, scrolled, "列表回来后视口位置保持");
-    let _ = std::fs::remove_dir_all(&dir);
 }

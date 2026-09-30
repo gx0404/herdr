@@ -487,7 +487,16 @@ pub(crate) fn remote_private_temp_base() -> PathBuf {
 }
 
 pub(crate) fn remote_bridge_endpoint_path(readable_name: &str, short_name: &str) -> PathBuf {
-    let tmp = std::env::temp_dir();
+    remote_bridge_endpoint_path_under(&std::env::temp_dir(), readable_name, short_name)
+}
+
+/// 临时目录由调用方给出的 `remote_bridge_endpoint_path`：测试用超长的目录验证回退，不必改
+/// 进程级的 `TMPDIR`（同一进程里并发的测试会看到）。
+pub(crate) fn remote_bridge_endpoint_path_under(
+    tmp: &Path,
+    readable_name: &str,
+    short_name: &str,
+) -> PathBuf {
     let readable = tmp.join(readable_name);
     if fits_unix_socket_path(&readable) {
         return readable;
@@ -661,11 +670,22 @@ mod tests {
         assert_eq!(stable_key_digest("herdr"), 0xe4e1_6546_1418_32fe);
     }
 
+    /// 测试用唯一 key：pid 区分进程，`test_dirs::unique_id` 区分 `cargo test` 同一进程里的测试。
+    fn unique_test_key(label: &str) -> String {
+        format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        )
+    }
+
     #[test]
     fn reusable_remote_ssh_config_dir_reuses_one_private_dir_per_key() {
         use std::os::unix::fs::MetadataExt;
 
-        let key = format!("test-reuse-{}", std::process::id());
+        // 目录建在 `$TMPDIR` 下：持环境锁，两次解析之间不会有测试改掉 TMPDIR。
+        let _env = crate::config::test_config_env_lock().lock().unwrap();
+        let key = unique_test_key("test-reuse");
         let first = reusable_remote_ssh_config_dir(&key, "ctl").expect("first");
         let second = reusable_remote_ssh_config_dir(&key, "ctl").expect("second");
         let other =
@@ -687,7 +707,8 @@ mod tests {
     fn reusable_remote_ssh_config_dir_falls_back_for_non_private_dir() {
         use std::os::unix::fs::PermissionsExt;
 
-        let key = format!("test-fallback-{}", std::process::id());
+        let _env = crate::config::test_config_env_lock().lock().unwrap();
+        let key = unique_test_key("test-fallback");
         let existing = reusable_remote_ssh_config_dir(&key, "ctl").expect("first");
         std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o777))
             .expect("loosen permissions");

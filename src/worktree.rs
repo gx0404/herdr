@@ -1,8 +1,16 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const DEFAULT_WORKTREE_PREFIX: &str = "worktree";
+
+/// git 删除中途失败（`failed to delete`）且 worktree 已注销后，收尾残留的总时限：瞬态（杀毒
+/// 扫描、尚在退出的 pane 进程）通常很快过去，只有残留确实删不掉时才会等满。
+const FAILED_DELETE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// 收尾各轮之间的间隔：从 50ms 起翻倍、封顶 1s，5 秒内最多扫十轮，而不是每 100ms 一轮。
+const FAILED_DELETE_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+const FAILED_DELETE_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorktreeCommand {
@@ -207,6 +215,18 @@ pub(crate) fn is_not_working_tree_remove_error(message: &str) -> bool {
     lower.contains("is not a working tree") || lower.contains("is not a worktree")
 }
 
+/// git 过了删除前的检查后，删检出或管理目录时的任何失败都报
+/// `error: failed to delete '<path>': <原因>`：Windows 上杀毒扫描或索引器恰在此时持有、新建
+/// 条目（`Directory not empty`），尚在退出的 pane 进程的 cwd 仍在检出里（`Permission
+/// denied`）等。git 此时已不回头，删检出失败也会接着删管理目录。按行首匹配，路径里碰巧含
+/// 这段文字的其它报错不算。
+fn is_failed_delete_remove_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .lines()
+        .any(|line| line.starts_with("error: failed to delete '"))
+}
+
 #[cfg(windows)]
 pub(crate) fn worktree_dirty_remove_message(path: &Path) -> String {
     format!(
@@ -354,27 +374,189 @@ pub(crate) fn run_worktree_remove_command_with_recovery(
     force: bool,
     trust_repository: bool,
 ) -> Result<(), String> {
-    match run_worktree_command(command) {
-        Ok(()) => Ok(()),
-        Err(err) if force && is_not_working_tree_remove_error(&err) => {
-            if worktree_list_contains_path(repo_root, path, trust_repository)? {
-                return Err(err);
-            }
-            if path.exists() {
-                if !leftover_worktree_checkout_matches_repo(repo_root, path, trust_repository) {
-                    return Err(err);
-                }
-                std::fs::remove_dir_all(path).map_err(|remove_err| {
-                    format!(
-                        "{err}; failed to remove leftover checkout {}: {remove_err}",
-                        path.display()
-                    )
-                })?;
-            }
-            Ok(())
-        }
-        Err(err) => Err(err),
+    run_worktree_command(command).or_else(|err| {
+        recover_worktree_remove_error(
+            err,
+            repo_root,
+            path,
+            force,
+            trust_repository,
+            FAILED_DELETE_RECOVERY_TIMEOUT,
+        )
+    })
+}
+
+/// 按 git 报错判断失败的删除能否视为已完成；其余报错原样返回。
+fn recover_worktree_remove_error(
+    err: String,
+    repo_root: &Path,
+    path: &Path,
+    force: bool,
+    trust_repository: bool,
+    failed_delete_timeout: Duration,
+) -> Result<(), String> {
+    if is_failed_delete_remove_error(&err) {
+        return recover_failed_delete_remove(
+            err,
+            repo_root,
+            path,
+            trust_repository,
+            failed_delete_timeout,
+        );
     }
+    if !force || !is_not_working_tree_remove_error(&err) {
+        return Err(err);
+    }
+    if worktree_list_contains_path(repo_root, path, trust_repository)? {
+        return Err(err);
+    }
+    if path.exists() {
+        if !leftover_worktree_checkout_matches_repo(repo_root, path, trust_repository) {
+            return Err(err);
+        }
+        std::fs::remove_dir_all(path).map_err(|remove_err| {
+            format!(
+                "{err}; failed to remove leftover checkout {}: {remove_err}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// git 删除中途失败后仍会接着删管理目录，所以报 `failed to delete` 时 worktree 通常已注销，
+/// 只剩残留检出目录和/或不带 `gitdir` 的孤儿管理目录（`git worktree list` 看不到，`git gc`
+/// 会清理）。此时重试只会报 "is not a working tree"，force 也因检出里的 `.git` 已删而认不出
+/// 残留，只能在这里收尾。不跑 `git worktree prune`：它会连带清掉无关的陈旧 worktree（例如
+/// 位于未挂载盘上的）。
+///
+/// git 已退出、herdr 也不 prune，注册状态之后不会再变：只查一次，仍注册就原样返回 git 的
+/// 报错。已注销则在时限内收尾残留（见 `clean_up_unregistered_leftovers`）：只删空目录，文件
+/// 一律保留——可能是删除期间新写入的真实数据，也可能是 git 在第一处失败后没再删到的检出
+/// 内容。检出路径消失即成功；到时仍有残留也算成功并告警（git 视角已删除，保持 herdr
+/// workspace 状态一致更重要）。
+fn recover_failed_delete_remove(
+    err: String,
+    repo_root: &Path,
+    path: &Path,
+    trust_repository: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let registered = worktree_list_contains_path(repo_root, path, trust_repository)
+        .map_err(|list_err| format!("{err}; failed to check worktree registration: {list_err}"))?;
+    if registered {
+        return Err(err);
+    }
+    let cleanup = clean_up_unregistered_leftovers(path, timeout);
+    if cleanup.removed {
+        tracing::info!(
+            path = %path.display(),
+            err = %err,
+            sweeps = cleanup.sweeps,
+            "worktree removal recovered after git failed to delete part of it"
+        );
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            kept_entry = ?cleanup.kept,
+            err = %err,
+            sweeps = cleanup.sweeps,
+            "worktree was removed from git, but leftover entries remain in its checkout \
+             directory {}; they were kept and the directory must be removed by hand",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// 已注销 worktree 的残留收尾结果。
+struct LeftoverCleanup {
+    /// 检出路径已不存在。
+    removed: bool,
+    /// 扫过整棵残留树的轮数。
+    sweeps: u32,
+    /// 最近一轮遇到的一个永不删除的条目（文件、符号链接或 junction）。
+    kept: Option<PathBuf>,
+}
+
+/// 时限内分轮收尾：每轮自底向上删空目录，删不掉的（例如仍是某进程的 cwd）等它释放，轮间
+/// 间隔指数退避。残留里只要还有一个永不删除的条目，检出目录就不可能删掉，所以记下的那个
+/// 条目还在时只看它一眼、不再重扫整棵树（`node_modules`、`target/` 这类大残留只扫一遍）；
+/// 它消失了才重扫。
+fn clean_up_unregistered_leftovers(path: &Path, timeout: Duration) -> LeftoverCleanup {
+    let deadline = Instant::now() + timeout;
+    let mut backoff = FAILED_DELETE_RETRY_INITIAL_BACKOFF;
+    let mut cleanup = LeftoverCleanup {
+        removed: false,
+        sweeps: 0,
+        kept: None,
+    };
+    loop {
+        if !cleanup.kept.as_deref().is_some_and(leftover_entry_remains) {
+            cleanup.kept = None;
+            cleanup.sweeps += 1;
+            if remove_empty_dirs_bottom_up(path, deadline, &mut cleanup.kept) {
+                cleanup.removed = true;
+                return cleanup;
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return cleanup;
+        }
+        std::thread::sleep(backoff.min(remaining));
+        backoff = (backoff * 2).min(FAILED_DELETE_RETRY_MAX_BACKOFF);
+    }
+}
+
+/// 条目仍占着路径：读元数据被拒（例如删除挂起）也算还在，它照样挡着上层目录的删除。
+fn leftover_entry_remains(entry: &Path) -> bool {
+    match std::fs::symlink_metadata(entry) {
+        Ok(_) => true,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
+/// 自底向上删除 `dir` 及其下的空目录，返回 `dir` 是否已不存在。只删真实目录，不跟随链接：
+/// 文件、符号链接与 junction 一律保留，遇到的第一个记进 `kept`；已知非空的目录不再试
+/// `remove_dir`。每个条目前都看 `deadline`，过了就停手，大残留树不会让调用拖过时限。
+fn remove_empty_dirs_bottom_up(dir: &Path, deadline: Instant, kept: &mut Option<PathBuf>) -> bool {
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            kept.get_or_insert_with(|| dir.to_path_buf());
+            return false;
+        }
+        Err(error) => {
+            return matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            )
+        }
+    }
+    let mut emptied = true;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            let entry_path = entry.path();
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                emptied &= remove_empty_dirs_bottom_up(&entry_path, deadline, kept);
+            } else {
+                kept.get_or_insert(entry_path);
+                emptied = false;
+            }
+        }
+    }
+    emptied
+        && match std::fs::remove_dir(dir) {
+            Ok(()) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        }
 }
 
 fn leftover_worktree_checkout_matches_repo(
@@ -605,6 +787,11 @@ fn forgiving_real_path(path: &Path) -> PathBuf {
 pub(crate) mod test_list_gate {
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    /// 等测试放行的上限，与测试侧 `LOADED_WAIT` 一致：负载高时测试线程要很久才走到放行，
+    /// 一放行即返回，只有测试确实忘了放行才会等满。
+    const RELEASE_WAIT: Duration = Duration::from_secs(30);
 
     struct Gate {
         path: PathBuf,
@@ -636,21 +823,23 @@ pub(crate) mod test_list_gate {
         if let Some(gate) = gate {
             gate.entered.send(()).unwrap();
             gate.release
-                .recv_timeout(std::time::Duration::from_secs(10))
+                .recv_timeout(RELEASE_WAIT)
                 .expect("test must release worktree discovery without blocking the server loop");
         }
     }
 }
 
+/// 按 `forgiving_real_path` 比较：删除恢复时检出目录往往已不存在，仍要把经由短文件名或
+/// 符号链接祖先的写法与 git 记录的真实路径对上，否则仍注册的 worktree 会被当成已注销。
 fn worktree_list_contains_path(
     repo_root: &Path,
     path: &Path,
     trust_repository: bool,
 ) -> Result<bool, String> {
-    let expected = canonical_or_original(path);
+    let expected = forgiving_real_path(path);
     Ok(list_existing_worktrees(repo_root, trust_repository)?
         .into_iter()
-        .any(|entry| canonical_or_original(&entry.path) == expected))
+        .any(|entry| forgiving_real_path(&entry.path) == expected))
 }
 
 #[cfg(test)]
@@ -900,7 +1089,7 @@ prunable stale
         assert_eq!(checkout_has_dirty_files(&checkout, false), Ok(true));
 
         let remove = build_worktree_remove_command(&repo, &checkout, true, false);
-        run_worktree_command(&remove).unwrap();
+        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true, false).unwrap();
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1095,7 +1284,7 @@ prunable stale
         );
 
         let remove = build_worktree_remove_command(&repo, &checkout, false, false);
-        run_worktree_command(&remove).unwrap();
+        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, false, false).unwrap();
         assert!(!checkout.exists());
 
         let _ = std::fs::remove_dir_all(repo);
@@ -1193,7 +1382,7 @@ prunable stale
             .any(|entry| entry.branch.as_deref() == Some(branch)));
 
         let remove = build_worktree_remove_command(&repo, &checkout, true, false);
-        run_worktree_command(&remove).unwrap();
+        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true, false).unwrap();
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1374,7 +1563,7 @@ prunable stale
         let add = build_worktree_add_new_branch_command(&repo, &checkout, branch, "HEAD", false);
         run_worktree_command(&add).unwrap();
         let remove = build_worktree_remove_command(&repo, &checkout, true, false);
-        run_worktree_command(&remove).unwrap();
+        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true, false).unwrap();
         std::fs::create_dir_all(&checkout).unwrap();
         let stale_admin_dir = git_common_worktrees_dir(&repo, false)
             .unwrap()
@@ -1401,7 +1590,7 @@ prunable stale
         let add = build_worktree_add_new_branch_command(&repo, &checkout, branch, "HEAD", false);
         run_worktree_command(&add).unwrap();
         let remove = build_worktree_remove_command(&repo, &checkout, true, false);
-        run_worktree_command(&remove).unwrap();
+        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true, false).unwrap();
         std::fs::create_dir_all(&checkout).unwrap();
         std::fs::write(checkout.join("unrelated"), "do not delete\n").unwrap();
 
@@ -1412,5 +1601,503 @@ prunable stale
         assert!(checkout.join("unrelated").exists());
         let _ = std::fs::remove_dir_all(checkout);
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// 等得到结果的用例给宽上限：条件一成立即返回，负载高时也不误判。
+    const GENEROUS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+    /// 注定等满的用例（残留删不掉）用短上限，不白等生产的 5 秒。
+    const SHORT_RECOVERY_TIMEOUT: Duration = Duration::from_millis(300);
+
+    /// 与 git 删除中途失败时的报错同形（`run_worktree_command` 固定 `LC_ALL=C`）。
+    fn failed_delete_error(path: &Path, reason: &str) -> String {
+        format!("error: failed to delete '{}': {reason}", path.display())
+    }
+
+    #[test]
+    fn failed_delete_remove_error_matches_every_git_delete_failure() {
+        for reason in [
+            "Directory not empty",
+            "Permission denied",
+            "Device or resource busy",
+        ] {
+            for path in ["D:/w/herdr/issue-137", ".git/worktrees/issue-137"] {
+                let message = failed_delete_error(Path::new(path), reason);
+                assert!(is_failed_delete_remove_error(&message), "{message}");
+            }
+        }
+        // 前面带 `git status` 的 warning 行时照样认得出。
+        assert!(is_failed_delete_remove_error(
+            "warning: could not open directory 'sub/': Permission denied\n\
+             error: failed to delete 'D:/w/herdr/issue-137': Permission denied"
+        ));
+        // git 在删除前就拒绝的报错不算：此时什么都还没删，worktree 仍注册；路径里碰巧含这段
+        // 文字也不算。
+        for message in [
+            "fatal: '/w/x' is not a working tree",
+            "fatal: '/w/x' contains modified or untracked files, use --force to delete it",
+            "fatal: '/w/x' is a main working tree",
+            "fatal: cannot remove a locked working tree, lock reason: usb\n\
+             use 'remove -f -f' to override or unlock first",
+            "fatal: validation failed, cannot remove working tree: '/w/x/.git' does not exist",
+            "fatal: failed to run 'git status' on '/w/x'",
+            "fatal: '/w/error: failed to delete 'x' is not a working tree",
+        ] {
+            assert!(!is_failed_delete_remove_error(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn failed_delete_recovery_removes_empty_leftovers_of_unregistered_worktree() {
+        let repo = create_committed_repo("worktree-failed-delete-leftover-repo");
+        // 删管理目录失败时留下的孤儿管理目录没有 `gitdir`，git 列表看不到它。
+        let orphan_admin_dir = git_common_worktrees_dir(&repo, false)
+            .unwrap()
+            .join("orphan");
+        std::fs::create_dir_all(orphan_admin_dir.join("logs")).unwrap();
+        std::fs::write(orphan_admin_dir.join("logs/HEAD"), "log\n").unwrap();
+        for reason in ["Directory not empty", "Permission denied"] {
+            for force in [false, true] {
+                let checkout = unique_temp_path("worktree-failed-delete-leftover-checkout");
+                std::fs::create_dir_all(checkout.join("src/nested/deeper")).unwrap();
+                std::fs::create_dir_all(checkout.join("docs")).unwrap();
+
+                let result = recover_worktree_remove_error(
+                    failed_delete_error(&checkout, reason),
+                    &repo,
+                    &checkout,
+                    force,
+                    false,
+                    GENEROUS_RECOVERY_TIMEOUT,
+                );
+
+                assert_eq!(result, Ok(()), "{reason}, force={force}");
+                assert!(!checkout.exists(), "{reason}, force={force}");
+            }
+        }
+        // 只有管理目录删失败、检出早已删光：同样已注销，没有残留要收尾。
+        let gone = unique_temp_path("worktree-failed-delete-leftover-gone");
+        let result = recover_worktree_remove_error(
+            failed_delete_error(&orphan_admin_dir, "Permission denied"),
+            &repo,
+            &gone,
+            false,
+            false,
+            GENEROUS_RECOVERY_TIMEOUT,
+        );
+        assert_eq!(result, Ok(()));
+        // 不跑 `git worktree prune`：孤儿管理目录留给 `git gc`。
+        assert!(orphan_admin_dir.join("logs/HEAD").exists());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn failed_delete_recovery_waits_for_transient_entries_to_clear() {
+        let repo = create_committed_repo("worktree-failed-delete-transient-repo");
+        let checkout = unique_temp_path("worktree-failed-delete-transient-checkout");
+        // 模拟杀毒扫描等瞬态：残留条目过一会儿自行消失，之后空目录才删得掉。
+        let transient = checkout.join("src/scan.tmp");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::write(&transient, "held\n").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::remove_file(transient).unwrap();
+        });
+
+        let result = recover_worktree_remove_error(
+            failed_delete_error(&checkout, "Directory not empty"),
+            &repo,
+            &checkout,
+            false,
+            false,
+            GENEROUS_RECOVERY_TIMEOUT,
+        );
+        release.join().unwrap();
+
+        assert_eq!(result, Ok(()));
+        assert!(!checkout.exists());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn failed_delete_recovery_keeps_leftover_files_of_unregistered_worktree() {
+        let repo = create_committed_repo("worktree-failed-delete-files-repo");
+        let checkout = unique_temp_path("worktree-failed-delete-files-checkout");
+        std::fs::create_dir_all(checkout.join("src/empty")).unwrap();
+        std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+        let kept = checkout.join("src/written-during-removal.txt");
+        std::fs::write(&kept, "keep me\n").unwrap();
+
+        let result = recover_worktree_remove_error(
+            failed_delete_error(&checkout, "Permission denied"),
+            &repo,
+            &checkout,
+            false,
+            false,
+            SHORT_RECOVERY_TIMEOUT,
+        );
+
+        // git 视角已注销：照样成功（残留只告警），文件原样保留，空目录清掉。
+        assert_eq!(result, Ok(()));
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "keep me\n");
+        assert!(!checkout.join("src/empty").exists());
+        assert!(!checkout.join("target").exists());
+        let _ = std::fs::remove_dir_all(checkout);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn failed_delete_recovery_returns_git_error_while_worktree_is_registered() {
+        let repo = create_committed_repo("worktree-failed-delete-registered-repo");
+        let checkout = unique_temp_path("worktree-failed-delete-registered-checkout");
+        let add = build_worktree_add_new_branch_command(
+            &repo,
+            &checkout,
+            "worktree/failed-delete-registered",
+            "HEAD",
+            false,
+        );
+        run_worktree_command(&add).unwrap();
+        std::fs::create_dir_all(checkout.join("empty")).unwrap();
+        let error = failed_delete_error(&checkout, "Permission denied");
+
+        let started = Instant::now();
+        let result = recover_worktree_remove_error(
+            error.clone(),
+            &repo,
+            &checkout,
+            false,
+            false,
+            GENEROUS_RECOVERY_TIMEOUT,
+        );
+
+        assert_eq!(result, Err(error));
+        // 注册状态在 git 退出后不会再变：查一次就返回，不等时限。
+        let elapsed = started.elapsed();
+        assert!(elapsed < GENEROUS_RECOVERY_TIMEOUT / 2, "{elapsed:?}");
+        // 仍注册时不碰检出，连空目录也保留。
+        assert!(checkout.join("empty").is_dir());
+        assert!(worktree_list_contains_path(&repo, &checkout, false).unwrap());
+
+        let remove = build_worktree_remove_command(&repo, &checkout, true, false);
+        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true, false).unwrap();
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn failed_delete_recovery_keeps_git_error_when_registration_is_unknown() {
+        let base = unique_temp_path("worktree-failed-delete-unknown");
+        let checkout = base.join("checkout");
+        std::fs::create_dir_all(checkout.join("empty")).unwrap();
+        let error = failed_delete_error(&checkout, "Directory not empty");
+
+        // 仓库已不在：`git worktree list` 失败，无法确认注销就不能当成已删除。
+        let result = recover_worktree_remove_error(
+            error.clone(),
+            &base.join("missing-repo"),
+            &checkout,
+            false,
+            false,
+            GENEROUS_RECOVERY_TIMEOUT,
+        );
+
+        let message = result.unwrap_err();
+        assert!(message.starts_with(&error), "{message}");
+        assert!(checkout.join("empty").is_dir());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn unrecognized_worktree_remove_errors_are_returned_unchanged() {
+        let repo = create_committed_repo("worktree-remove-error-passthrough-repo");
+        let checkout = unique_temp_path("worktree-remove-error-passthrough-checkout");
+        std::fs::create_dir_all(checkout.join("empty")).unwrap();
+        let errors = [
+            (
+                false,
+                format!(
+                    "fatal: '{}' contains modified or untracked files, use --force to delete it",
+                    checkout.display()
+                ),
+            ),
+            (
+                false,
+                format!("fatal: '{}' is not a working tree", checkout.display()),
+            ),
+            (
+                true,
+                "fatal: cannot remove a locked working tree;\n\
+                 use 'remove -f -f' to override or unlock first"
+                    .to_string(),
+            ),
+        ];
+        for (force, error) in errors {
+            let result = recover_worktree_remove_error(
+                error.clone(),
+                &repo,
+                &checkout,
+                force,
+                false,
+                GENEROUS_RECOVERY_TIMEOUT,
+            );
+            assert_eq!(result, Err(error));
+        }
+        // 真实 git 报错同样原样返回：非 force 删除未注册的路径。
+        let remove = build_worktree_remove_command(&repo, &checkout, false, false);
+        let error =
+            run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, false, false)
+                .unwrap_err();
+        assert!(is_not_working_tree_remove_error(&error), "{error}");
+        // 只有 git 删除中途失败才会清理空目录。
+        assert!(checkout.join("empty").is_dir());
+        let _ = std::fs::remove_dir_all(checkout);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn leftover_cleanup_sweeps_once_while_a_kept_entry_remains() {
+        let checkout = unique_temp_path("worktree-leftover-sweep-once");
+        std::fs::create_dir_all(checkout.join("src/empty")).unwrap();
+        std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+        let kept = checkout.join("src/keep.txt");
+        std::fs::write(&kept, "keep me\n").unwrap();
+        let timeout = Duration::from_secs(1);
+
+        let started = Instant::now();
+        let cleanup = clean_up_unregistered_leftovers(&checkout, timeout);
+
+        // 文件在，检出目录就删不掉：第一轮清掉空目录后只盯着这个文件、不再重扫整棵树，但仍
+        // 等到时限，好在它消失时接着收尾。
+        assert!(!cleanup.removed);
+        assert_eq!(cleanup.sweeps, 1);
+        assert_eq!(cleanup.kept.as_deref(), Some(kept.as_path()));
+        assert!(started.elapsed() >= timeout);
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "keep me\n");
+        assert!(!checkout.join("src/empty").exists());
+        assert!(!checkout.join("target").exists());
+        let _ = std::fs::remove_dir_all(checkout);
+    }
+
+    #[test]
+    fn leftover_cleanup_resweeps_once_the_kept_entry_is_gone() {
+        let checkout = unique_temp_path("worktree-leftover-resweep");
+        std::fs::create_dir_all(checkout.join("src/nested")).unwrap();
+        let transient = checkout.join("src/scan.tmp");
+        std::fs::write(&transient, "held\n").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::remove_file(transient).unwrap();
+        });
+
+        let cleanup = clean_up_unregistered_leftovers(&checkout, GENEROUS_RECOVERY_TIMEOUT);
+        release.join().unwrap();
+
+        // 挡路的文件消失后再扫一轮即可，不是每次退避醒来都扫。
+        assert!(cleanup.removed);
+        assert!(cleanup.sweeps <= 2, "{}", cleanup.sweeps);
+        assert!(!checkout.exists());
+    }
+
+    #[test]
+    fn leftover_sweep_stops_at_the_deadline() {
+        let checkout = unique_temp_path("worktree-leftover-deadline");
+        std::fs::create_dir_all(checkout.join("a/b/c")).unwrap();
+        std::fs::create_dir_all(checkout.join("d")).unwrap();
+        let mut kept = None;
+
+        // 时限已过：一个条目都不再处理，大残留树不会让调用拖过时限。
+        assert!(!remove_empty_dirs_bottom_up(
+            &checkout,
+            Instant::now(),
+            &mut kept
+        ));
+
+        assert!(checkout.join("a/b/c").is_dir());
+        assert!(checkout.join("d").is_dir());
+        assert_eq!(kept, None);
+        let _ = std::fs::remove_dir_all(checkout);
+    }
+
+    /// 在 `link` 建一个指向目录 `target` 的链接（Windows 用无需特权的 junction）。
+    #[cfg(unix)]
+    fn link_dir(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn link_dir(target: &Path, link: &Path) {
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn leftover_sweep_keeps_links_without_following_them() {
+        let base = unique_temp_path("worktree-leftover-link");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(outside.join("empty")).unwrap();
+        let checkout = base.join("checkout");
+        std::fs::create_dir_all(checkout.join("empty")).unwrap();
+        let link = checkout.join("link");
+        link_dir(&outside, &link);
+        let mut kept = None;
+
+        let deadline = Instant::now() + GENEROUS_RECOVERY_TIMEOUT;
+        assert!(!remove_empty_dirs_bottom_up(&checkout, deadline, &mut kept));
+
+        // 链接本身留着，也不顺着它删目标里的空目录；旁边的空目录照删。
+        assert_eq!(kept.as_deref(), Some(link.as_path()));
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(outside.join("empty").is_dir());
+        assert!(!checkout.join("empty").exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 打开目录且不共享删除，同 Windows 给进程当前目录开的句柄：释放前谁也删不掉它，用来
+    /// 模拟尚在退出、cwd 仍在检出里的 pane 进程。
+    #[cfg(windows)]
+    fn hold_dir_like_process_cwd(dir: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .unwrap()
+    }
+
+    /// 真实 git：检出根被占用时，git 删光里面的内容、删根失败，但照样删掉管理目录。占用在
+    /// 时限内释放就收尾成功；一直不释放也按已注销成功，空的根留着。
+    #[cfg(windows)]
+    #[test]
+    fn failed_delete_recovery_handles_checkout_held_by_exiting_process() {
+        let repo = create_committed_repo("worktree-held-checkout-repo");
+        for released_in_time in [true, false] {
+            let checkout = unique_temp_path("worktree-held-checkout");
+            let add = build_worktree_add_new_branch_command(
+                &repo,
+                &checkout,
+                &format!("worktree/held-checkout-{released_in_time}"),
+                "HEAD",
+                false,
+            );
+            run_worktree_command(&add).unwrap();
+            let held = hold_dir_like_process_cwd(&checkout);
+            let remove = build_worktree_remove_command(&repo, &checkout, false, false);
+
+            let error = run_worktree_command(&remove).unwrap_err();
+            eprintln!("git worktree remove with the checkout held: {error}");
+            assert!(is_failed_delete_remove_error(&error), "{error}");
+
+            if released_in_time {
+                let release = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    drop(held);
+                });
+                let result = recover_worktree_remove_error(
+                    error,
+                    &repo,
+                    &checkout,
+                    false,
+                    false,
+                    GENEROUS_RECOVERY_TIMEOUT,
+                );
+                release.join().unwrap();
+                assert_eq!(result, Ok(()));
+                assert!(!checkout.exists());
+            } else {
+                let started = Instant::now();
+                let result = recover_worktree_remove_error(
+                    error,
+                    &repo,
+                    &checkout,
+                    false,
+                    false,
+                    SHORT_RECOVERY_TIMEOUT,
+                );
+                assert!(started.elapsed() >= SHORT_RECOVERY_TIMEOUT);
+                assert_eq!(result, Ok(()));
+                assert!(std::fs::read_dir(&checkout).unwrap().next().is_none());
+                drop(held);
+                let _ = std::fs::remove_dir(&checkout);
+            }
+            assert!(!worktree_list_contains_path(&repo, &checkout, false).unwrap());
+        }
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// 真实 git：被占用的是检出里的子目录时，git 在第一处失败就停手，排在它后面的检出内容
+    /// 没删到。恢复只删空目录，这些文件原样保留，到时按已注销成功（告警）。
+    #[cfg(windows)]
+    #[test]
+    fn failed_delete_recovery_keeps_files_git_did_not_reach() {
+        let repo = create_committed_repo("worktree-held-subdir-repo");
+        let checkout = unique_temp_path("worktree-held-subdir-checkout");
+        let add = build_worktree_add_new_branch_command(
+            &repo,
+            &checkout,
+            "worktree/held-subdir",
+            "HEAD",
+            false,
+        );
+        run_worktree_command(&add).unwrap();
+        // NTFS 按名字顺序枚举：`aaa` 排在 `README.md` 之前，git 删到它就停。
+        let held_dir = checkout.join("aaa");
+        std::fs::create_dir(&held_dir).unwrap();
+        let held = hold_dir_like_process_cwd(&held_dir);
+        let remove = build_worktree_remove_command(&repo, &checkout, false, false);
+
+        let error = run_worktree_command(&remove).unwrap_err();
+        drop(held);
+        eprintln!("git worktree remove with a subdirectory held: {error}");
+        assert!(is_failed_delete_remove_error(&error), "{error}");
+        let readme = checkout.join("README.md");
+        assert!(readme.is_file(), "git should stop before README.md");
+
+        let result = recover_worktree_remove_error(
+            error,
+            &repo,
+            &checkout,
+            false,
+            false,
+            SHORT_RECOVERY_TIMEOUT,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert!(!held_dir.exists());
+        assert!(readme.is_file());
+        assert!(!worktree_list_contains_path(&repo, &checkout, false).unwrap());
+        let _ = std::fs::remove_dir_all(checkout);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn leftover_cleanup_backs_off_while_an_empty_dir_is_held() {
+        let checkout = unique_temp_path("worktree-leftover-held");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let held = hold_dir_like_process_cwd(&checkout);
+
+        let cleanup = clean_up_unregistered_leftovers(&checkout, Duration::from_secs(2));
+
+        // 没有永不删除的条目、只是目录被占着：按退避重试（50ms 起翻倍、封顶 1s），2 秒内
+        // 至多七轮，而不是每 100ms 一轮。
+        assert!(!cleanup.removed);
+        assert_eq!(cleanup.kept, None);
+        assert!((2..=7).contains(&cleanup.sweeps), "{}", cleanup.sweeps);
+        drop(held);
+        assert!(clean_up_unregistered_leftovers(&checkout, GENEROUS_RECOVERY_TIMEOUT).removed);
     }
 }

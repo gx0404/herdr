@@ -1,9 +1,7 @@
 use super::*;
 
 fn receive_message(receiver: &std::sync::mpsc::Receiver<Vec<u8>>) -> (Vec<u8>, ServerMessage) {
-    let bytes = receiver
-        .recv_timeout(Duration::from_secs(1))
-        .expect("render message");
+    let bytes = receiver.recv_timeout(LOADED_WAIT).expect("render message");
     let message = read_server_message(bytes.clone());
     (bytes, message)
 }
@@ -217,7 +215,7 @@ async fn surface_delta_preserves_graphics_baseline_through_queue_recovery() {
         without_asset_payload(baseline_before_queue)
     );
     let _ = render_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(LOADED_WAIT)
         .expect("drain full render lane");
 
     server.render_and_stream();

@@ -89,8 +89,11 @@ exec "$TEST_REMOTE_HERDR" "$@"
         remote.set_nonblocking(true).unwrap();
         let local = UnixListener::bind(root.join("local.sock")).unwrap();
         local.set_nonblocking(true).unwrap();
+        // 本地 status 也只读这份沙箱里的配置/状态，不碰开发机真实目录。
         let status = Command::new(env!("CARGO_BIN_EXE_herdr"))
             .args(["status", "client", "--json"])
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
             .output()
             .unwrap();
         let status: Value = serde_json::from_slice(&status.stdout).unwrap();

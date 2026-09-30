@@ -30,18 +30,36 @@ pub fn app_dir_name() -> &'static str {
     }
 }
 
+#[cfg(not(test))]
 pub fn config_dir() -> PathBuf {
+    resolve_config_dir()
+}
+
+/// 测试构建：线程本地覆盖原样返回；其余解析结果经 `test_dirs::confine` 限定在临时目录内。
+#[cfg(test)]
+pub fn config_dir() -> PathBuf {
+    test_dirs::config_dir().unwrap_or_else(|| test_dirs::confine(resolve_config_dir(), "config"))
+}
+
+#[cfg(not(test))]
+pub fn state_dir() -> PathBuf {
+    resolve_state_dir()
+}
+
+/// 测试构建：口径同 `config_dir`。
+#[cfg(test)]
+pub fn state_dir() -> PathBuf {
+    test_dirs::state_dir().unwrap_or_else(|| test_dirs::confine(resolve_state_dir(), "state"))
+}
+
+fn resolve_config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(dir).join(app_dir_name());
     }
     platform_config_dir()
 }
 
-pub fn state_dir() -> PathBuf {
-    #[cfg(test)]
-    if let Some(dir) = test_dirs::state_dir() {
-        return dir;
-    }
+fn resolve_state_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
         return PathBuf::from(dir).join(app_dir_name());
     }
@@ -51,17 +69,29 @@ pub fn state_dir() -> PathBuf {
 // 测试专用的线程本地目录覆盖：`cargo test` 在同一进程里并发跑测试，
 // 经环境变量（XDG_STATE_HOME 等）改路径会串到别的测试；各测试线程改
 // 自己的覆盖即可互不干扰。每个测试跑在自己的线程上，覆盖随线程结束。
+//
+// 没有覆盖时照常按 XDG_* → 平台目录解析，但结果不在临时目录下（开发机真实的
+// herdr-dev 目录）就换成共享沙箱：单测在任何平台都碰不到真实的配置与状态目录。
 #[cfg(test)]
 pub(crate) mod test_dirs {
-    use std::path::PathBuf;
+    use std::cell::RefCell;
+    use std::ffi::{OsStr, OsString};
+    use std::marker::PhantomData;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    use std::thread::LocalKey;
 
     thread_local! {
-        static STATE_DIR: std::cell::RefCell<Option<PathBuf>> =
-            const { std::cell::RefCell::new(None) };
-        static HOME_DIR: std::cell::RefCell<Option<PathBuf>> =
-            const { std::cell::RefCell::new(None) };
-        static CONFIG_PATH: std::cell::RefCell<Option<PathBuf>> =
-            const { std::cell::RefCell::new(None) };
+        static CONFIG_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static STATE_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static HOME_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static CONFIG_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static SEARCH_PATH: RefCell<Option<OsString>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn config_dir() -> Option<PathBuf> {
+        CONFIG_DIR.with(|slot| slot.borrow().clone())
     }
 
     pub(crate) fn state_dir() -> Option<PathBuf> {
@@ -76,12 +106,65 @@ pub(crate) mod test_dirs {
         CONFIG_PATH.with(|slot| slot.borrow().clone())
     }
 
+    /// 本线程找可执行文件用的搜索路径覆盖（格式同 PATH），见 `override_search_path`。
+    pub(crate) fn search_path() -> Option<OsString> {
+        SEARCH_PATH.with(|slot| slot.borrow().clone())
+    }
+
+    /// `override_home_dir` / `override_search_path` 的作用域句柄：析构时还原进入前的覆盖
+    /// （可嵌套，按后进先出释放）。覆盖是线程本地的，所以句柄不能跨线程移动。
+    pub(crate) struct ScopedOverride<T: 'static> {
+        slot: &'static LocalKey<RefCell<Option<T>>>,
+        previous: Option<T>,
+        _not_send: PhantomData<*const ()>,
+    }
+
+    impl<T: 'static> Drop for ScopedOverride<T> {
+        fn drop(&mut self) {
+            // 线程收尾时线程本地变量可能已先销毁，用 try_with 免得析构里再 panic。
+            let previous = self.previous.take();
+            let _ = self.slot.try_with(|slot| *slot.borrow_mut() = previous);
+        }
+    }
+
+    fn scoped_override<T: 'static>(
+        slot: &'static LocalKey<RefCell<Option<T>>>,
+        value: T,
+    ) -> ScopedOverride<T> {
+        ScopedOverride {
+            slot,
+            previous: slot.with(|current| current.replace(Some(value))),
+            _not_send: PhantomData,
+        }
+    }
+
+    /// 把本线程的「用户主目录」换成 `dir`：integration 的 agent 配置目录、SSH 配置发现等
+    /// 读取处在测试构建里都先看它。代替改进程级 HOME / USERPROFILE——那会被同进程并发的
+    /// 测试和它们起的子进程看到。
+    pub(crate) fn override_home_dir(dir: impl AsRef<Path>) -> ScopedOverride<PathBuf> {
+        scoped_override(&HOME_DIR, dir.as_ref().to_path_buf())
+    }
+
+    /// 把本线程找可执行文件用的搜索路径换成 `path`（格式同 PATH，空串即什么都找不到）。
+    /// 代替改进程级 PATH——换掉或清空后，同进程并发的测试连 git 都找不到。只影响进程内
+    /// 按 PATH 查找的代码（`integration::command_available`）；要让子进程看到，仍须持锁
+    /// 改 PATH，且尽量往前追加而不是整个替换。
+    pub(crate) fn override_search_path(path: impl AsRef<OsStr>) -> ScopedOverride<OsString> {
+        scoped_override(&SEARCH_PATH, path.as_ref().to_os_string())
+    }
+
+    /// 覆盖 `config_dir()` 的解析结果（测试线程本地，不需还原）。
+    pub(crate) fn set_config_dir(dir: PathBuf) {
+        CONFIG_DIR.with(|slot| *slot.borrow_mut() = Some(dir));
+    }
+
     /// 覆盖 `state_dir()` 的解析结果（测试线程本地，不需还原）。
     pub(crate) fn set_state_dir(dir: PathBuf) {
         STATE_DIR.with(|slot| *slot.borrow_mut() = Some(dir));
     }
 
-    /// 覆盖测试里「用户主目录」的解析结果（SSH 配置发现等读取处）。
+    /// 覆盖测试里「用户主目录」的解析结果：与 `override_home_dir` 同一覆盖，但不还原
+    /// （测试线程本地，随线程结束）。
     pub(crate) fn set_home_dir(dir: PathBuf) {
         HOME_DIR.with(|slot| *slot.borrow_mut() = Some(dir));
     }
@@ -91,26 +174,384 @@ pub(crate) mod test_dirs {
         CONFIG_PATH.with(|slot| *slot.borrow_mut() = Some(path));
     }
 
-    /// 测试已隔离到临时目录的 `config_dir()`，否则 None。没设 `XDG_CONFIG_HOME` 时
-    /// 它落在开发机真实的 herdr-dev 配置目录；CI 与部分开发机全局设了
-    /// `XDG_CONFIG_HOME`，所以还要求在临时目录下。返回校验过的路径本身，调用方不再
-    /// 二次解析（并发测试可能在两次解析之间改掉环境变量）。
+    /// 本线程隔离到临时目录的 `config_dir()`，否则 None。只认线程本地覆盖：进程环境
+    /// 变量随时可能被同进程并发的别的测试改掉，共享沙箱是各测试共用的，都不算隔离。
+    /// 返回校验过的路径本身，调用方不再二次解析。
     pub(crate) fn isolated_config_dir() -> Option<PathBuf> {
-        std::env::var_os("XDG_CONFIG_HOME")?;
-        under_temp_dir(super::config_dir())
+        config_dir().filter(|dir| is_under_temp_root(dir))
     }
 
-    /// 测试已隔离到临时目录的 `state_dir()`（线程本地覆盖或 `XDG_STATE_HOME`），
-    /// 否则 None；口径同 `isolated_config_dir`。
+    /// 本线程隔离到临时目录的 `state_dir()`，否则 None；口径同 `isolated_config_dir`。
     pub(crate) fn isolated_state_dir() -> Option<PathBuf> {
-        if state_dir().is_none() {
-            std::env::var_os("XDG_STATE_HOME")?;
-        }
-        under_temp_dir(super::state_dir())
+        state_dir().filter(|dir| is_under_temp_root(dir))
     }
 
-    fn under_temp_dir(dir: PathBuf) -> Option<PathBuf> {
-        dir.starts_with(std::env::temp_dir()).then_some(dir)
+    /// `isolate_dirs` 的作用域句柄：析构时还原进入前的覆盖（可嵌套，按后进先出释放），
+    /// 并尽力删掉临时根目录。覆盖是线程本地的，所以句柄不能跨线程移动。
+    pub(crate) struct IsolatedDirs {
+        root: PathBuf,
+        config_dir: PathBuf,
+        state_dir: PathBuf,
+        home_dir: PathBuf,
+        previous_config_dir: Option<PathBuf>,
+        previous_state_dir: Option<PathBuf>,
+        previous_config_path: Option<PathBuf>,
+        previous_home_dir: Option<PathBuf>,
+        _not_send: PhantomData<*const ()>,
+    }
+
+    impl IsolatedDirs {
+        pub(crate) fn config_dir(&self) -> &Path {
+            &self.config_dir
+        }
+
+        pub(crate) fn state_dir(&self) -> &Path {
+            &self.state_dir
+        }
+
+        /// 隔离的用户主目录（`<root>/home`，不预先创建）。
+        pub(crate) fn home_dir(&self) -> &Path {
+            &self.home_dir
+        }
+    }
+
+    impl Drop for IsolatedDirs {
+        fn drop(&mut self) {
+            // 线程收尾时线程本地变量可能已先销毁，用 try_with 免得析构里再 panic。
+            let config_dir = self.previous_config_dir.take();
+            let _ = CONFIG_DIR.try_with(|slot| *slot.borrow_mut() = config_dir);
+            let state_dir = self.previous_state_dir.take();
+            let _ = STATE_DIR.try_with(|slot| *slot.borrow_mut() = state_dir);
+            let config_path = self.previous_config_path.take();
+            let _ = CONFIG_PATH.try_with(|slot| *slot.borrow_mut() = config_path);
+            let home_dir = self.previous_home_dir.take();
+            let _ = HOME_DIR.try_with(|slot| *slot.borrow_mut() = home_dir);
+            remove_dir_eventually(&self.root);
+        }
+    }
+
+    /// 删除测试临时目录，删不掉时有界重试（最多 30 秒，删掉即返回）：Windows 上刚退出的
+    /// 子进程、杀毒扫描会短暂占着目录里的句柄，一次 `remove_dir_all` 失败就算了会留下残留。
+    /// 到期仍删不掉只放弃，不让测试失败。
+    pub(crate) fn remove_dir_eventually(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::fs::remove_dir_all(path).is_err()
+            && path.exists()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// 测试用的唯一临时目录：创建时先清掉 pid 复用留下的同名旧目录，析构时（含 panic
+    /// 展开）按 `remove_dir_eventually` 删除。
+    pub(crate) struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        pub(crate) fn new(name: &str) -> Self {
+            let label: String = name.chars().map(path_safe_char).take(32).collect();
+            let path = short_temp_base().join(format!(
+                "herdr-{label}-{}-{}",
+                std::process::id(),
+                unique_id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap_or_else(|err| {
+                panic!("failed to create test temp dir {}: {err}", path.display())
+            });
+            Self { path }
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            remove_dir_eventually(&self.path);
+        }
+    }
+
+    /// 进程内递增的序号，给测试的临时路径、socket 与命名管道取名用。pid 分开并发的
+    /// nextest 进程，同一进程里并发的测试线程只能靠它分开：时间戳会撞（Windows 的系统
+    /// 时钟只有 100ns 精度，两个线程同一刻取到同一个值）。
+    pub(crate) fn unique_id() -> u64 {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// 新建唯一的临时根，把本线程的 `config_dir()` / `state_dir()` 指向其下的 `config/`
+    /// 与 `state/`，`config_path()` 指向 `config/config.toml`（不再读进程级
+    /// `HERDR_CONFIG_PATH`；要换配置文件，在此之后调 `set_config_path`），用户主目录
+    /// （`override_home_dir` 的同一覆盖）指向 `home/`：`App::new` 列集成推荐等读
+    /// `~/.claude`、`~/.codex` 的地方不再碰开发机的真实主目录。不改进程环境变量，所以
+    /// 不必持 `test_config_env_lock`；`isolated_config_dir` / `isolated_state_dir` 据此
+    /// 判定隔离。unix 上根放在 `/tmp` 下并保持路径短：socket 建在配置目录里，macOS 的
+    /// socket 路径上限只有 104 字节。
+    pub(crate) fn isolate_dirs(name: &str) -> IsolatedDirs {
+        let label: String = name.chars().map(path_safe_char).take(24).collect();
+        let root = short_temp_base().join(format!(
+            "herdr-test-{label}-{}-{}",
+            std::process::id(),
+            unique_id()
+        ));
+        // pid 复用时同名旧目录里的残留不能带进新测试。
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap_or_else(|err| {
+            panic!(
+                "failed to create isolated test dir {}: {err}",
+                root.display()
+            )
+        });
+        let config_dir = root.join("config");
+        let state_dir = root.join("state");
+        let config_path = config_dir.join("config.toml");
+        let home_dir = root.join("home");
+        IsolatedDirs {
+            previous_config_dir: CONFIG_DIR.with(|slot| slot.replace(Some(config_dir.clone()))),
+            previous_state_dir: STATE_DIR.with(|slot| slot.replace(Some(state_dir.clone()))),
+            previous_config_path: CONFIG_PATH.with(|slot| slot.replace(Some(config_path))),
+            previous_home_dir: HOME_DIR.with(|slot| slot.replace(Some(home_dir.clone()))),
+            root,
+            config_dir,
+            state_dir,
+            home_dir,
+            _not_send: PhantomData,
+        }
+    }
+
+    /// 没有线程本地覆盖时的解析结果不在临时目录下，就换成共享沙箱。
+    pub(super) fn confine(dir: PathBuf, kind: &str) -> PathBuf {
+        if is_under_temp_root(&dir) {
+            dir
+        } else {
+            sandbox_dir(kind)
+        }
+    }
+
+    /// `HERDR_CONFIG_PATH` 同口径：指到临时目录以外（开发机 shell 里设的真实配置）时，
+    /// 换成沙箱里的 config.toml。
+    pub(super) fn confine_config_path(path: PathBuf) -> PathBuf {
+        if is_under_temp_root(&path) {
+            path
+        } else {
+            sandbox_dir("config").join("config.toml")
+        }
+    }
+
+    /// 共享沙箱 `<base>/herdr-unit-sandbox-<user>/<kind>/<app>`：本进程各测试与并发的
+    /// nextest 进程共用，不算隔离，也不自动清理。目录名带上用户名，免得多用户机器上
+    /// 撞到别人建的目录没有权限。
+    fn sandbox_dir(kind: &str) -> PathBuf {
+        let user: String = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_default()
+            .chars()
+            .map(path_safe_char)
+            .collect();
+        short_temp_base()
+            .join(format!("herdr-unit-sandbox-{user}"))
+            .join(kind)
+            .join(super::app_dir_name())
+    }
+
+    fn path_safe_char(ch: char) -> char {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            ch
+        } else {
+            '_'
+        }
+    }
+
+    /// 临时目录根：`std::env::temp_dir()` 与 `short_temp_base()`，各含规范化形式（macOS
+    /// 的 `/tmp` 实为 `/private/tmp`，Windows 规范化后带 `\\?\` 前缀）。进程首次用到时的
+    /// 根缓存下来（规范化要碰文件系统）；测试临时改了 TMPDIR 等变量时再补上当时的
+    /// temp_dir。
+    fn is_under_temp_root(path: &Path) -> bool {
+        static INITIAL_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+        let initial = INITIAL_ROOTS
+            .get_or_init(|| with_canonical_forms(vec![std::env::temp_dir(), short_temp_base()]));
+        if initial.iter().any(|root| path.starts_with(root)) {
+            return true;
+        }
+        let current = std::env::temp_dir();
+        !initial.contains(&current)
+            && with_canonical_forms(vec![current])
+                .iter()
+                .any(|root| path.starts_with(root))
+    }
+
+    fn with_canonical_forms(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+        let canonical: Vec<PathBuf> = roots
+            .iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .collect();
+        roots.into_iter().chain(canonical).collect()
+    }
+
+    // 测试目录的基准：unix 用短的 `/tmp`（本仓库测试建 socket 也用它，见 macOS 的
+    // socket 路径上限），其余平台用系统临时目录。
+    #[cfg(unix)]
+    fn short_temp_base() -> PathBuf {
+        PathBuf::from("/tmp")
+    }
+
+    #[cfg(not(unix))]
+    fn short_temp_base() -> PathBuf {
+        std::env::temp_dir()
+    }
+
+    mod tests {
+        use super::*;
+
+        /// 一定不在任何临时目录根下的路径：临时目录所在文件系统的根下。
+        fn outside_temp_roots() -> PathBuf {
+            let root = std::env::temp_dir()
+                .ancestors()
+                .last()
+                .map(Path::to_path_buf)
+                .unwrap();
+            let path = root.join("herdr-real-profile-probe");
+            assert!(!is_under_temp_root(&path), "{}", path.display());
+            path
+        }
+
+        #[test]
+        fn isolate_dirs_overrides_this_thread_and_restores_on_drop() {
+            let outer_state = std::env::temp_dir().join("herdr-isolate-dirs-outer-state");
+            set_state_dir(outer_state.clone());
+            let root = {
+                let dirs = isolate_dirs("outer");
+                let root = dirs.config_dir().parent().unwrap().to_path_buf();
+                assert!(root.is_dir());
+                assert_eq!(crate::config::config_dir().as_path(), dirs.config_dir());
+                assert_eq!(crate::config::state_dir().as_path(), dirs.state_dir());
+                assert_eq!(
+                    crate::config::config_path(),
+                    dirs.config_dir().join("config.toml")
+                );
+                assert_eq!(home_dir().as_deref(), Some(dirs.home_dir()));
+                assert!(dirs.home_dir().starts_with(&root));
+                assert_eq!(isolated_config_dir().as_deref(), Some(dirs.config_dir()));
+                assert_eq!(isolated_state_dir().as_deref(), Some(dirs.state_dir()));
+                {
+                    let inner = isolate_dirs("inner");
+                    assert_ne!(inner.config_dir(), dirs.config_dir());
+                    assert_eq!(isolated_config_dir().as_deref(), Some(inner.config_dir()));
+                    assert_eq!(isolated_state_dir().as_deref(), Some(inner.state_dir()));
+                    assert_eq!(home_dir().as_deref(), Some(inner.home_dir()));
+                }
+                // 内层结束后回到外层的隔离目录。
+                assert_eq!(isolated_config_dir().as_deref(), Some(dirs.config_dir()));
+                assert_eq!(isolated_state_dir().as_deref(), Some(dirs.state_dir()));
+                assert_eq!(home_dir().as_deref(), Some(dirs.home_dir()));
+                root
+            };
+            // 外层结束：还原进入前的覆盖（state 有，config、config_path 与主目录没有），删掉
+            // 临时根。
+            assert_eq!(state_dir(), Some(outer_state));
+            assert_eq!(config_dir(), None);
+            assert_eq!(config_path(), None);
+            assert_eq!(home_dir(), None);
+            assert!(!root.exists());
+            STATE_DIR.with(|slot| slot.borrow_mut().take());
+        }
+
+        #[test]
+        fn scoped_overrides_nest_and_restore_the_previous_value() {
+            let outer = std::env::temp_dir().join("herdr-override-outer-home");
+            let inner = std::env::temp_dir().join("herdr-override-inner-home");
+            {
+                let _outer_home = override_home_dir(&outer);
+                let _outer_path = override_search_path(&outer);
+                {
+                    let _inner_home = override_home_dir(&inner);
+                    let _no_path = override_search_path("");
+                    assert_eq!(home_dir(), Some(inner.clone()));
+                    assert_eq!(search_path(), Some(OsString::new()));
+                }
+                assert_eq!(home_dir(), Some(outer.clone()));
+                assert_eq!(search_path(), Some(outer.clone().into_os_string()));
+            }
+            assert_eq!(home_dir(), None);
+            assert_eq!(search_path(), None);
+        }
+
+        #[test]
+        fn unisolated_dirs_never_resolve_outside_a_temp_root() {
+            // 进程环境变量（可能正被并发的别的测试设成临时目录）不算隔离；没有线程本地
+            // 覆盖时解析结果要么在临时目录下，要么是共享沙箱，绝不是真实的 herdr-dev 目录。
+            assert_eq!(isolated_config_dir(), None);
+            assert_eq!(isolated_state_dir(), None);
+            for path in [
+                crate::config::config_dir(),
+                crate::config::state_dir(),
+                crate::config::config_path(),
+            ] {
+                assert!(is_under_temp_root(&path), "{}", path.display());
+            }
+        }
+
+        #[test]
+        fn confinement_keeps_temp_paths_and_sandboxes_everything_else() {
+            let temp = std::env::temp_dir().join("herdr-confine-probe");
+            assert_eq!(confine(temp.clone(), "config"), temp);
+            let short = short_temp_base().join("hs-confine-probe");
+            assert_eq!(confine(short.clone(), "state"), short);
+            if let Ok(canonical) = std::fs::canonicalize(std::env::temp_dir()) {
+                let canonical = canonical.join("herdr-confine-probe");
+                assert_eq!(confine(canonical.clone(), "config"), canonical);
+            }
+
+            let real = outside_temp_roots();
+            let config_sandbox = confine(real.clone(), "config");
+            let state_sandbox = confine(real.clone(), "state");
+            let app = crate::config::app_dir_name();
+            assert!(is_under_temp_root(&config_sandbox));
+            assert!(config_sandbox.ends_with(Path::new("config").join(app)));
+            assert!(state_sandbox.ends_with(Path::new("state").join(app)));
+            let sandbox_root = config_sandbox.ancestors().nth(2).unwrap();
+            assert!(state_sandbox.starts_with(sandbox_root));
+            assert!(sandbox_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("herdr-unit-sandbox-")));
+            assert_eq!(
+                confine_config_path(real.join("config.toml")),
+                config_sandbox.join("config.toml")
+            );
+            let temp_config = temp.join("config.toml");
+            assert_eq!(confine_config_path(temp_config.clone()), temp_config);
+        }
+
+        #[test]
+        fn explicit_overrides_are_kept_but_only_temp_ones_count_as_isolated() {
+            // 线程本地覆盖是测试自己给的，原样返回；不在临时目录下就不算隔离。
+            let real = outside_temp_roots();
+            set_config_dir(real.clone());
+            set_state_dir(real.clone());
+            assert_eq!(crate::config::config_dir(), real);
+            assert_eq!(crate::config::state_dir(), real);
+            assert_eq!(isolated_config_dir(), None);
+            assert_eq!(isolated_state_dir(), None);
+
+            let temp = std::env::temp_dir().join("herdr-explicit-override-probe");
+            set_config_dir(temp.clone());
+            assert_eq!(isolated_config_dir(), Some(temp));
+            CONFIG_DIR.with(|slot| slot.borrow_mut().take());
+            STATE_DIR.with(|slot| slot.borrow_mut().take());
+        }
     }
 }
 
@@ -270,10 +711,23 @@ pub fn config_path() -> PathBuf {
     if let Some(path) = test_dirs::config_path() {
         return path;
     }
-    if let Ok(path) = std::env::var(CONFIG_PATH_ENV_VAR) {
-        return PathBuf::from(path);
+    if let Some(path) = config_path_from_env() {
+        return path;
     }
     config_dir().join("config.toml")
+}
+
+#[cfg(not(test))]
+fn config_path_from_env() -> Option<PathBuf> {
+    std::env::var(CONFIG_PATH_ENV_VAR).ok().map(PathBuf::from)
+}
+
+/// 测试构建：`HERDR_CONFIG_PATH` 与目录同样限定在临时目录内（见 `test_dirs`）。
+#[cfg(test)]
+fn config_path_from_env() -> Option<PathBuf> {
+    std::env::var(CONFIG_PATH_ENV_VAR)
+        .ok()
+        .map(|path| test_dirs::confine_config_path(PathBuf::from(path)))
 }
 
 pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
@@ -1015,8 +1469,16 @@ mod tests {
                 && diagnostic.contains("keeping current config")
         }));
 
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    /// 在本线程隔离目录的 config.toml 里写入 `content` 后走启动加载：线程本地覆盖，不经
+    /// 进程级 `HERDR_CONFIG_PATH`，不必持测试环境锁，也不会让并发的别的测试读到这份配置。
+    fn load_startup_config(name: &str, content: impl AsRef<[u8]>) -> LoadedConfig {
+        let dirs = test_dirs::isolate_dirs(name);
+        std::fs::create_dir_all(dirs.config_dir()).unwrap();
+        std::fs::write(config_path(), content).unwrap();
+        Config::load()
     }
 
     #[test]
@@ -1160,22 +1622,10 @@ agent_panel_sort = "priority"
 
     #[test]
     fn startup_config_accepts_removed_priority_sort_without_falling_back() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "herdr-config-removed-priority-sort-{}.toml",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
+        let loaded = load_startup_config(
+            "removed-priority-sort",
             "[ui]\nagent_panel_sort = \"priority\"\nsidebar_width = 31\n",
-        )
-        .unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
-
-        let loaded = Config::load();
-
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_file(path);
+        );
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert_eq!(
@@ -1287,18 +1737,7 @@ omp = [["agent"]]
 
     #[test]
     fn startup_config_ignores_retired_agent_keys_without_falling_back_to_defaults() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "herdr-config-retired-agent-keys-{}.toml",
-            std::process::id()
-        ));
-        std::fs::write(&path, RETIRED_AGENT_KEYS_CONFIG).unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
-
-        let loaded = Config::load();
-
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_file(path);
+        let loaded = load_startup_config("retired-agent-keys", RETIRED_AGENT_KEYS_CONFIG);
 
         assert_retired_agent_keys_were_only_ignored(&loaded);
     }
@@ -1312,40 +1751,20 @@ omp = [["agent"]]
 
     #[test]
     fn startup_config_accepts_legacy_agent_panel_scope_without_warning() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "herdr-config-legacy-agent-panel-scope-{}.toml",
-            std::process::id()
-        ));
-        std::fs::write(&path, "[ui]\nagent_panel_scope = \"all\"\n").unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
-
-        let loaded = Config::load();
-
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_file(path);
+        let loaded = load_startup_config(
+            "legacy-agent-panel-scope",
+            "[ui]\nagent_panel_scope = \"all\"\n",
+        );
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
     }
 
     #[test]
     fn startup_config_accepts_legacy_toggle_usage_dashboard_without_warning() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "herdr-config-legacy-toggle-usage-dashboard-{}.toml",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
+        let loaded = load_startup_config(
+            "legacy-toggle-usage",
             "[keys]\ntoggle_usage_dashboard = \"prefix+a\"\nzoom = \"prefix+shift+z\"\n",
-        )
-        .unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
-
-        let loaded = Config::load();
-
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_file(path);
+        );
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert!(
@@ -1362,13 +1781,8 @@ omp = [["agent"]]
 
     #[test]
     fn startup_config_load_warns_about_unknown_top_level_sections() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "herdr-config-unknown-section-{}.toml",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
+        let loaded = load_startup_config(
+            "unknown-section",
             r#"
 [[plugin]]
 id = "example"
@@ -1376,11 +1790,7 @@ id = "example"
 [ui.toast]
 delivery = "system"
 "#,
-        )
-        .unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
-
-        let loaded = Config::load();
+        );
 
         assert_eq!(
             loaded.diagnostics,
@@ -1390,9 +1800,6 @@ delivery = "system"
             loaded.config.ui.toast.delivery,
             super::super::ToastDelivery::System
         );
-
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1480,22 +1887,10 @@ mouse_capture = false
 
     #[test]
     fn config_load_recovers_from_a_mid_file_bom() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "herdr-config-mid-file-bom-{}.toml",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
+        let loaded = load_startup_config(
+            "mid-file-bom",
             b"onboarding = false\n\xEF\xBB\xBF[terminal]\ndefault_shell = \"pwsh.exe\"\n",
-        )
-        .unwrap();
-        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
-
-        let loaded = Config::load();
-
-        std::env::remove_var(CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_file(path);
+        );
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert_eq!(loaded.config.terminal.default_shell, "pwsh.exe");

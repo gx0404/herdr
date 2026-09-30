@@ -59,7 +59,7 @@ fn next_snapshot(
 ) -> Box<crate::protocol::ClientShellSnapshot> {
     loop {
         let bytes = control_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(LOADED_WAIT)
             .expect("等待快照控制帧");
         if let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) {
             if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
@@ -183,7 +183,7 @@ async fn scheduled_tasks_submit_discovery_and_release_the_slot_on_the_result() {
     let (mut server, pane_id) = server_with_agent_pane();
     let _ = server.handle_scheduled_tasks_headless(Instant::now(), false);
     // 注册表里的 claude 仍是空壳：后台线程回 Err，经 app 事件通道回来。
-    let event = tokio::time::timeout(Duration::from_secs(5), server.app.event_rx.recv())
+    let event = tokio::time::timeout(LOADED_WAIT, server.app.event_rx.recv())
         .await
         .expect("后台发现结果")
         .expect("通道未关闭");
@@ -238,7 +238,7 @@ async fn json_api_activity_reads_answer_asynchronously() {
         &mut server,
         api::schema::Method::AgentActivityRead(AgentActivityReadParams::default()),
     )
-    .recv_timeout(Duration::from_secs(5))
+    .recv_timeout(LOADED_WAIT)
     .expect("同步应答");
     assert!(invalid.contains("invalid_params"), "{invalid}");
 
@@ -250,7 +250,7 @@ async fn json_api_activity_reads_answer_asynchronously() {
             ..AgentActivityReadParams::default()
         }),
     )
-    .recv_timeout(Duration::from_secs(5))
+    .recv_timeout(LOADED_WAIT)
     .expect("异步应答");
     let response: api::schema::ErrorResponse = serde_json::from_str(&response).expect("错误应答");
     assert_eq!(response.id, "api-activity");
@@ -264,7 +264,7 @@ async fn json_api_activity_reads_answer_asynchronously() {
         &mut server,
         api::schema::Method::AgentExternalList(api::schema::EmptyParams::default()),
     )
-    .recv_timeout(Duration::from_secs(5))
+    .recv_timeout(LOADED_WAIT)
     .expect("异步应答");
     let list: api::schema::SuccessResponse = serde_json::from_str(&list).expect("成功应答");
     assert!(matches!(
@@ -296,7 +296,7 @@ impl crate::server::agent_activity::ActivitySource for GatedTree {
         if GATED_DISCOVER_CALLS.fetch_add(1, Ordering::SeqCst) > 0 {
             return Ok(vec![node("a", AgentActivityStatus::Done)]);
         }
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + LOADED_WAIT;
         while !GATED_DISCOVER_OPEN.load(Ordering::SeqCst) {
             if Instant::now() >= deadline {
                 return Err(crate::server::agent_activity::SourceError::Unavailable);
@@ -364,7 +364,7 @@ async fn a_whole_tree_read_keeps_the_discovery_slot_and_outlives_an_older_discov
 
     // 调度发现 D1 开始，停在闸门前。
     let _ = server.handle_scheduled_tasks_headless(Instant::now(), false);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + LOADED_WAIT;
     while GATED_DISCOVER_CALLS.load(Ordering::SeqCst) == 0 {
         assert!(Instant::now() < deadline, "调度发现没有开始");
         std::thread::sleep(Duration::from_millis(5));
@@ -379,10 +379,10 @@ async fn a_whole_tree_read_keeps_the_discovery_slot_and_outlives_an_older_discov
             ..AgentActivityReadParams::default()
         }),
     )
-    .recv_timeout(Duration::from_secs(5))
+    .recv_timeout(LOADED_WAIT)
     .expect("读树应答");
     assert!(response.contains("\"done\""), "{response}");
-    let read_event = tokio::time::timeout(Duration::from_secs(5), server.app.event_rx.recv())
+    let read_event = tokio::time::timeout(LOADED_WAIT, server.app.event_rx.recv())
         .await
         .expect("读树落库事件")
         .expect("通道未关闭");
@@ -395,7 +395,7 @@ async fn a_whole_tree_read_keeps_the_discovery_slot_and_outlives_an_older_discov
 
     // 放行 D1：它更早读到的是旧树。
     GATED_DISCOVER_OPEN.store(true, Ordering::SeqCst);
-    let discovery_event = tokio::time::timeout(Duration::from_secs(5), server.app.event_rx.recv())
+    let discovery_event = tokio::time::timeout(LOADED_WAIT, server.app.event_rx.recv())
         .await
         .expect("调度发现结果")
         .expect("通道未关闭");
@@ -517,9 +517,7 @@ fn endpoint_responses(
 ) -> serde_json::Value {
     let mut data = Vec::new();
     loop {
-        let bytes = control_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("等待端点应答");
+        let bytes = control_rx.recv_timeout(LOADED_WAIT).expect("等待端点应答");
         if let ServerMessage::ClientShellEndpointResponseChunk {
             request_id: chunk_request,
             final_chunk,
@@ -586,7 +584,7 @@ async fn client_endpoint_activity_reads_bypass_the_command_lane() {
         })
     );
     assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
-    let ready = tokio::time::timeout(Duration::from_secs(5), server.server_event_rx.recv())
+    let ready = tokio::time::timeout(LOADED_WAIT, server.server_event_rx.recv())
         .await
         .expect("后台应答")
         .expect("通道未关闭");
@@ -626,7 +624,7 @@ fn recv_surface_within(
     context: &str,
 ) -> crate::protocol::PaneSurfaceFrame {
     let bytes = render_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LOADED_WAIT)
         .unwrap_or_else(|error| panic!("{context}: {error}"));
     match read_server_message(bytes) {
         ServerMessage::PaneSurface(surface) => surface,
@@ -640,7 +638,7 @@ fn recv_patch_within(
     context: &str,
 ) -> crate::protocol::PaneSurfacePatch {
     let bytes = render_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LOADED_WAIT)
         .unwrap_or_else(|error| panic!("{context}: {error}"));
     match read_server_message(bytes) {
         ServerMessage::PaneSurfacePatch(patch) => patch,
@@ -730,9 +728,7 @@ async fn projection_restamp_rides_the_surface_reuse_codec() {
     let mut decoder = crate::protocol::surface_reuse::Decoder::default();
     let ServerMessage::PaneSurface(baseline) = decoder
         .decode(read_server_message(
-            render_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("baseline"),
+            render_rx.recv_timeout(LOADED_WAIT).expect("baseline"),
         ))
         .expect("decode baseline")
     else {
@@ -743,7 +739,7 @@ async fn projection_restamp_rides_the_surface_reuse_codec() {
     server.dispatch_render_tick(true, false, &HashSet::new(), false);
     let snapshot = next_snapshot(&control_rx);
     let bytes = render_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LOADED_WAIT)
         .expect("restamped surface");
     assert!(
         bytes.len() < 4096,

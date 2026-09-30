@@ -1957,11 +1957,13 @@ mod tests {
             .iter()
             .map(|account| (account.id.clone(), fresh_entry(account)))
             .collect();
+        // 毫秒时间戳挡不住同一进程里并发的测试：再带进程内序号，各测试的持久化目录互不相干。
         let state_path = std::env::temp_dir()
             .join(format!(
-                "herdr-usage-state-{}-{}",
+                "herdr-usage-state-{}-{}-{}",
                 std::process::id(),
-                super::super::now_ms()
+                super::super::now_ms(),
+                crate::config::test_dirs::unique_id()
             ))
             .join("state.json");
         ServiceState {
@@ -2959,16 +2961,11 @@ mod tests {
 
     #[test]
     fn unparsable_config_keeps_accounts_and_bindings_until_it_parses_again() {
-        let _guard = crate::config::test_config_env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-usage-config-{}-{}",
-            std::process::id(),
-            super::super::now_ms()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
+        // 线程本地隔离的 config.toml：不经进程级 HERDR_CONFIG_PATH，不必持测试环境锁，
+        // 也不会让并发的别的测试读到这份配置。
+        let dirs = crate::config::test_dirs::isolate_dirs("usage-config");
+        std::fs::create_dir_all(dirs.config_dir()).unwrap();
+        let path = crate::config::config_path();
         let explicit = UsageAccountConfig {
             id: "claude:work".into(),
             label: "工作".into(),
@@ -2991,7 +2988,6 @@ mod tests {
 
         // 真实的坏 TOML 走真实的 Config::load：账号、绑定与身份一律不动。
         std::fs::write(&path, "[account_usage\nenabled = ").unwrap();
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
         state.reload(&|_| false, now);
         assert_eq!(state.config, config, "解析失败沿用上一份配置");
         assert_eq!(state.accounts, vec![explicit.clone()]);
@@ -3009,9 +3005,7 @@ mod tests {
         assert!(state.bindings.is_empty(), "显式删除的账号剪掉绑定");
         assert!(!state.saved.identities.contains_key("claude:work"));
 
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         cleanup(&state);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

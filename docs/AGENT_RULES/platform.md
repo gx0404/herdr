@@ -14,6 +14,12 @@
 - 平台实现的可测试契约（配置文件定位、clipboard、输入路径）在 `mod.rs` 层抽象，
   配套 `*_tests.rs` 就近维护；Windows 分支由 `just windows-lint` 与 CI 的
   Windows job 守护（见 `testing.md`）。
+- Windows 上 herdr 自建的私有条目按名字里的属主 pid 回收：remote 私有目录
+  （`state_dir()/remote` 下的 `ssh-<pid>-<n>`、`herdr-remote-<pid>-…`、bridge endpoint，
+  由 `windows.rs` 的陈旧清扫认领）与 codex PATH shim（`platform::codex_launch`，按可执行
+  文件身份复用于 `state_dir()/codex-shims`，存活进程持租约，陈旧的后台清扫）。新增这类
+  条目时同步清扫的名字匹配（`remote_private_entry` 等），只删确定已退出的属主、不跟随
+  链接；进程存活判定用 `process_exists`（进程对象 signaled 才算退出，句柄已释放）。
 
 ## Windows 交叉编译（上游 Testing 节语义）
 

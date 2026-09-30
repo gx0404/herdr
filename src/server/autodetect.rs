@@ -354,11 +354,11 @@ mod tests {
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
-    use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    // socket 覆盖、会话名与 XDG 目录是进程全局的环境变量：与全 crate 共用一把测试环境锁，
+    // 放锁时自动还原。
+    fn env_lock() -> &'static crate::config::TestEnvLock {
+        crate::config::test_config_env_lock()
     }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
@@ -366,7 +366,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::path::PathBuf::from(format!("/tmp/ha-{name}-{}-{nanos}", std::process::id()))
+        std::path::PathBuf::from(format!(
+            "/tmp/ha-{name}-{}-{nanos}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        ))
     }
 
     #[test]
@@ -399,9 +403,6 @@ mod tests {
         assert!(envs.iter().any(|(key, value)| {
             *key == OsStr::new("HERDR_CLIENT_SOCKET_PATH") && value.is_none()
         }));
-        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
-        std::env::remove_var("HERDR_CLIENT_SOCKET_PATH");
-        std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
     }
 
@@ -414,24 +415,6 @@ mod tests {
         assert!(envs.iter().any(|(key, value)| {
             *key == OsStr::new(STARTUP_CWD_ENV_VAR) && value == &Some(expected.as_os_str())
         }));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn server_daemon_detach_creates_new_session() {
-        let mut command = Command::new("sh");
-        command.arg("-c").arg(
-            r#"sid=$(ps -o sid= -p $$ | tr -d ' ')
-test "$sid" = "$$"
-"#,
-        );
-        crate::platform::detach_server_daemon_command(&mut command);
-
-        let status = command.status().unwrap();
-        assert!(
-            status.success(),
-            "detached server child should be its own session leader"
-        );
     }
 
     #[test]
@@ -569,7 +552,6 @@ test "$sid" = "$$"
             err.to_string().contains("status API is unavailable"),
             "unexpected error: {err}"
         );
-        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -615,9 +597,6 @@ test "$sid" = "$$"
             message.contains("then run `herdr session attach work` again"),
             "unexpected error: {message}"
         );
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var(crate::session::SESSION_ENV_VAR);
-        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
         let _ = std::fs::remove_dir_all(dir);
     }

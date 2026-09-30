@@ -15,8 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::{json, Value};
 use support::{
-    cleanup_test_base, client_shell_handshake, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid, CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL,
+    app_dir_name, cleanup_test_base, client_shell_handshake, register_runtime_dir,
+    register_spawned_herdr_pid, unregister_spawned_herdr_pid,
+    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, INHERITED_DIR_OVERRIDES,
     SERVER_MESSAGE_ENDPOINT_CONTROL, SERVER_MESSAGE_PANE_SURFACE,
     SERVER_MESSAGE_PANE_SURFACE_PATCH,
 };
@@ -99,11 +100,12 @@ fn spawn_server_with_path(
     api_socket_path: &Path,
     path_override: Option<&Path>,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    // 写到被测二进制读取的应用目录：同一 config_home 下的客户端也读这一份。
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
     fs::write(
-        config_home.join("herdr/config.toml"),
+        config_home.join(app_dir_name()).join("config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -133,6 +135,9 @@ fn spawn_server_with_path(
     cmd.env_remove("HERDR_ENV");
     // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD：server 会据此预建启动工作区，破坏用例的工作区/pane 假设。
     cmd.env_remove("HERDR_STARTUP_CWD");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     if let Some(path) = path_override {
         cmd.env("PATH", path);
     }
@@ -165,6 +170,9 @@ fn spawn_client_process(
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
+    for key in INHERITED_DIR_OVERRIDES {
+        cmd.env_remove(key);
+    }
     // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
     // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
     let home = runtime_dir.join("home");

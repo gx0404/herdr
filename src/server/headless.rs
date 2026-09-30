@@ -258,6 +258,10 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// 测试 server 的临时目录（客户端 socket、活动树 home），只为析构时删掉它而持有。必须
+    /// 是最后一个字段：字段按声明顺序析构，socket、客户端与活动树都放下之后才删目录。
+    #[cfg(test)]
+    _test_scratch_dir: Option<tests::ScratchDir>,
 }
 
 #[cfg(windows)]
@@ -391,6 +395,8 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            #[cfg(test)]
+            _test_scratch_dir: None,
         })
     }
 

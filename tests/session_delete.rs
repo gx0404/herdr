@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Owns a unique configuration directory; only child CLIs receive its environment.
+/// Owns a unique config/state root; only child CLIs receive its environment.
 struct SessionConfig {
     root: PathBuf,
 }
@@ -49,6 +49,9 @@ impl SessionConfig {
         Command::new(env!("CARGO_BIN_EXE_herdr"))
             .args(["session", "delete", name, "--json"])
             .env("XDG_CONFIG_HOME", &self.root)
+            // Without this, state_dir() falls back to the real profile
+            // (%LOCALAPPDATA% on Windows, which ignores HOME).
+            .env("XDG_STATE_HOME", self.root.join("state"))
             .env_remove("HERDR_SESSION")
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_CLIENT_SOCKET_PATH")

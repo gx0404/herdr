@@ -381,20 +381,13 @@ fn attention_machine_click_opens_the_detail_overlay() {
     ));
 }
 
-fn with_temp_state_home(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("herdr-machines-test-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp state home");
-    // 线程本地覆盖而不是改进程环境变量：`cargo test` 单进程并发时环境
-    // 变量是全局的，会串到同进程的其它测试（nextest 才是进程隔离）。
-    crate::config::test_dirs::set_state_dir(dir.clone());
-    dir
+fn with_temp_state_home(name: &str) -> crate::config::test_dirs::IsolatedDirs {
+    isolated_state_home(&format!("machines-{name}"))
 }
 
 #[test]
 fn edit_form_updates_group_and_connection_fields() {
-    let dir = with_temp_state_home("edit-save");
+    let _dir = with_temp_state_home("edit-save");
     let saved = profile("Build", "build.example", "30");
     {
         let mut catalog = crate::client::endpoint::EndpointCatalog::default();
@@ -446,12 +439,11 @@ fn edit_form_updates_group_and_connection_fields() {
             }
         ))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn edit_form_updates_session_log_fields() {
-    let dir = with_temp_state_home("edit-session-log");
+    let _dir = with_temp_state_home("edit-session-log");
     {
         let mut catalog = crate::client::endpoint::EndpointCatalog::default();
         catalog
@@ -531,12 +523,11 @@ fn edit_form_updates_session_log_fields() {
             .and_then(|log| log.path_template.as_deref()),
         Some("{pane}.log")
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn detail_card_shows_session_log_status_and_dropped_count() {
-    let dir = with_temp_state_home("detail-session-log");
+    let _dir = with_temp_state_home("detail-session-log");
     {
         let mut catalog = crate::client::endpoint::EndpointCatalog::default();
         let id = catalog
@@ -588,7 +579,6 @@ fn detail_card_shows_session_log_status_and_dropped_count() {
     );
     let dropped_compact: String = dropped.chars().filter(|ch| !ch.is_whitespace()).collect();
     assert!(compact.contains(&dropped_compact), "frame: {text}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -610,7 +600,7 @@ fn session_log_dropped_mirror_tracks_per_profile_changes() {
 
 #[test]
 fn session_log_dropped_counts_render_per_machine() {
-    let dir = with_temp_state_home("detail-session-log-per-machine");
+    let _dir = with_temp_state_home("detail-session-log-per-machine");
     let (id_a, id_b);
     {
         let mut catalog = crate::client::endpoint::EndpointCatalog::default();
@@ -664,12 +654,11 @@ fn session_log_dropped_counts_render_per_machine() {
         .filter(|ch| !ch.is_whitespace())
         .collect();
     assert!(!compact.contains(&dropped_compact), "frame: {compact}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn remove_confirmation_deletes_profile_from_catalog() {
-    let dir = with_temp_state_home("remove");
+    let _dir = with_temp_state_home("remove");
     {
         let mut catalog = crate::client::endpoint::EndpointCatalog::default();
         catalog
@@ -700,12 +689,11 @@ fn remove_confirmation_deletes_profile_from_catalog() {
             }
         ))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn rename_overlay_renames_machine_in_catalog() {
-    let dir = with_temp_state_home("rename");
+    let _dir = with_temp_state_home("rename");
     {
         let mut catalog = crate::client::endpoint::EndpointCatalog::default();
         catalog
@@ -740,7 +728,6 @@ fn rename_overlay_renames_machine_in_catalog() {
 
     let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
     assert_eq!(catalog.ssh[0].label, "Renamed");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -779,7 +766,7 @@ fn copy_fix_command_targets_the_clipboard() {
 
 #[test]
 fn disabling_a_machine_updates_the_catalog_and_context_menu() {
-    let dir = with_temp_state_home("disable");
+    let _dir = with_temp_state_home("disable");
     {
         let mut catalog = crate::client::endpoint::EndpointCatalog::default();
         catalog
@@ -828,7 +815,6 @@ fn disabling_a_machine_updates_the_catalog_and_context_menu() {
     assert!(items
         .iter()
         .any(|item| item.action == ClientContextMenuAction::ReconnectMachine && !item.enabled));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -849,16 +835,15 @@ fn key_routing_ignores_non_machines_overlays() {
 // C1: SSH config import wizard, port-forward editor, forward status card
 // ---------------------------------------------------------------------
 
-fn with_temp_home(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("herdr-machines-c1-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join(".ssh")).expect("temp home");
-    // 线程本地覆盖而不是改进程环境变量（HOME/USERPROFILE/XDG_STATE_HOME
-    // 都是进程全局的，cargo test 单进程并发时会串测试；Windows 上 SSH
-    // 配置发现走 USERPROFILE，HOME 根本不会被读）。
-    crate::config::test_dirs::set_home_dir(dir.clone());
-    crate::config::test_dirs::set_state_dir(dir.join("state"));
-    dir
+/// 隔离的状态目录外加一个假主目录（`.ssh/` 已建好，返回其路径）。SSH 配置发现读线程本地
+/// 的主目录覆盖，不改进程级 HOME / USERPROFILE（Windows 上读的是 USERPROFILE，改 HOME
+/// 根本不生效）；假主目录建在同一个隔离临时根下，随句柄一起删掉。
+fn with_temp_home(name: &str) -> (crate::config::test_dirs::IsolatedDirs, std::path::PathBuf) {
+    let dirs = isolated_state_home(&format!("machines-c1-{name}"));
+    let home = dirs.state_dir().with_file_name("ssh-home");
+    std::fs::create_dir_all(home.join(".ssh")).expect("temp home");
+    crate::config::test_dirs::set_home_dir(home.clone());
+    (dirs, home)
 }
 
 /// Wide CJK glyphs occupy two cells in the composed frame; match on the
@@ -884,8 +869,8 @@ Host *.wild
 
 #[test]
 fn import_wizard_discovers_selects_and_imports() {
-    let dir = with_temp_home("wizard");
-    std::fs::write(dir.join(".ssh").join("config"), IMPORT_FIXTURE).unwrap();
+    let (_dirs, home) = with_temp_home("wizard");
+    std::fs::write(home.join(".ssh").join("config"), IMPORT_FIXTURE).unwrap();
     let mut state = state_with_profiles(&[]);
 
     state.open_machine_import_wizard();
@@ -942,12 +927,11 @@ fn import_wizard_discovers_selects_and_imports() {
     let text = compact_frame(&mut state, 110, 32);
     let imported = crate::i18n::texts().machines.import_result_imported;
     assert!(text.contains(imported), "done step reports: {text}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn import_wizard_empty_config_is_a_clean_empty_state() {
-    let dir = with_temp_home("empty");
+    let _dir = with_temp_home("empty");
     // No config file at all: the fatal empty state must render and close.
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
@@ -969,13 +953,12 @@ fn import_wizard_empty_config_is_a_clean_empty_state() {
             }
         ))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn import_wizard_wildcard_toggle_replans_and_deselect_works() {
-    let dir = with_temp_home("wildcard");
-    std::fs::write(dir.join(".ssh").join("config"), IMPORT_FIXTURE).unwrap();
+    let (_dirs, home) = with_temp_home("wildcard");
+    std::fs::write(home.join(".ssh").join("config"), IMPORT_FIXTURE).unwrap();
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
@@ -1017,12 +1000,11 @@ fn import_wizard_wildcard_toggle_replans_and_deselect_works() {
         panic!("import view");
     };
     assert_eq!(view.summary, (0, 3, 0), "{:?}", view.summary);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn forwards_editor_adds_and_removes_rules_in_the_catalog() {
-    let dir = with_temp_home("forwards");
+    let _dir = with_temp_home("forwards");
     let saved = {
         let mut catalog = crate::client::endpoint::EndpointCatalog::default();
         catalog
@@ -1080,7 +1062,6 @@ fn forwards_editor_adds_and_removes_rules_in_the_catalog() {
     state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
     let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
     assert!(catalog.ssh[0].port_forwards.is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1194,8 +1175,8 @@ fn seed_forward_profile(rules: usize) -> SavedSshEndpoint {
 
 #[test]
 fn import_select_scrolls_so_the_group_input_stays_visible() {
-    let dir = with_temp_home("import-scroll");
-    std::fs::write(dir.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
+    let (_dirs, home) = with_temp_home("import-scroll");
+    std::fs::write(home.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     // discover → select
@@ -1233,13 +1214,12 @@ fn import_select_scrolls_so_the_group_input_stays_visible() {
         !text.contains("host00.internal"),
         "列表已滚动，第一个候选移出窗口：{text}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn import_wizard_rows_track_the_scrolled_window() {
-    let dir = with_temp_home("import-rows");
-    std::fs::write(dir.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
+    let (_dirs, home) = with_temp_home("import-rows");
+    std::fs::write(home.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
@@ -1271,13 +1251,12 @@ fn import_wizard_rows_track_the_scrolled_window() {
             .all(|(rect, _)| rect.y >= popup.y && rect.bottom() <= popup.bottom()),
         "命中矩形不越出弹窗"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn import_done_step_scrolls_through_every_result_row() {
-    let dir = with_temp_home("import-done");
-    std::fs::write(dir.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
+    let (_dirs, home) = with_temp_home("import-done");
+    std::fs::write(home.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
@@ -1290,7 +1269,6 @@ fn import_done_step_scrolls_through_every_result_row() {
     }
     let (text, _) = frame_compact(&mut state, 110, 32);
     assert!(text.contains("host29"), "向下滚动后末条结果可见：{text}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 导入向导的断言快照：步骤、滚动起点、机器浮层的滚动上界、汇总与结果页里的
@@ -1430,8 +1408,8 @@ fn import_done_lists_discovery_skips_with_their_reasons() {
         let _guard = crate::i18n::lang_guard(lang);
         for (cols, rows) in [(80, 24), (93, 32), (160, 48)] {
             let case = format!("{lang:?} {cols}x{rows}");
-            let dir = with_temp_home(&format!("import-done-skips-{lang:?}-{cols}"));
-            std::fs::write(dir.join(".ssh").join("config"), IMPORT_FIXTURE).unwrap();
+            let (_dirs, home) = with_temp_home(&format!("import-done-skips-{lang:?}-{cols}"));
+            std::fs::write(home.join(".ssh").join("config"), IMPORT_FIXTURE).unwrap();
             let mut state = state_with_profiles(&[]);
             state.open_machine_import_wizard();
             // discover → select；焦点从首个候选 bastion 下移到 web 并取消勾选，再导入。
@@ -1474,7 +1452,6 @@ fn import_done_lists_discovery_skips_with_their_reasons() {
                 text.contains(&compact(t.machines.import_skip_unselected)),
                 "{case}：结果页写出未勾选：{text}"
             );
-            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
@@ -1484,10 +1461,10 @@ fn import_done_lists_discovery_skips_with_their_reasons() {
 /// 就停住，反向第一格就动；页脚提示可滚动。窄 / 中 / 宽三档（T1 审查轻 6）。
 #[test]
 fn import_discover_scrolls_to_the_last_host_and_skip_reason() {
-    let dir = with_temp_home("import-discover-scroll");
+    let (_dirs, home) = with_temp_home("import-discover-scroll");
     let mut config = many_hosts_config(60);
     config.push_str("Host *.wild\n");
-    std::fs::write(dir.join(".ssh").join("config"), config).unwrap();
+    std::fs::write(home.join(".ssh").join("config"), config).unwrap();
     let t = crate::i18n::texts();
     let reason_head: String = compact(t.cli_errors.import_skip_wildcard)
         .chars()
@@ -1551,7 +1528,6 @@ fn import_discover_scrolls_to_the_last_host_and_skip_reason() {
         let _ = frame_compact(&mut state, cols, rows);
         assert_eq!(import_probe(&state).scroll, max, "{size:?}：End 到底");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// T1 审查轻 4：导入页的 `G`（到末尾，与 End 同义）以前是死分支——终端把大写 G
@@ -1561,10 +1537,10 @@ fn import_discover_scrolls_to_the_last_host_and_skip_reason() {
 #[test]
 fn import_capital_g_jumps_to_the_end_on_discover_and_select() {
     use super::super::machines_overlay::ClientImportStep;
-    let dir = with_temp_home("import-capital-g");
+    let (_dirs, home) = with_temp_home("import-capital-g");
     let mut config = many_hosts_config(30);
     config.push_str("Host *.wild\n");
-    std::fs::write(dir.join(".ssh").join("config"), config).unwrap();
+    std::fs::write(home.join(".ssh").join("config"), config).unwrap();
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
 
@@ -1599,7 +1575,6 @@ fn import_capital_g_jumps_to_the_end_on_discover_and_select() {
     assert_eq!(import_probe(&state).focus_row, 0);
     raw_key(&mut state, KeyCode::End);
     assert_eq!(import_probe(&state).focus_row, last, "End 与 G 同一落点");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 把 `forward_remove_confirm_fmt` 按给定规则文案压成无空白串，便于在整帧
@@ -1616,7 +1591,7 @@ fn forward_confirm_prompt(rule: &str) -> String {
 
 #[test]
 fn forwards_editor_scrolls_to_the_selected_rule() {
-    let dir = with_temp_home("forwards-scroll");
+    let _dir = with_temp_home("forwards-scroll");
     // 目录上限是每台机器 16 条转发规则，取满额后选中末条。
     let saved = seed_forward_profile(16);
     let mut state = state_with_profiles(std::slice::from_ref(&saved));
@@ -1657,14 +1632,13 @@ fn forwards_editor_scrolls_to_the_selected_rule() {
             .all(|rule| rule.listen_port != 9015),
         "删掉的是被点名的那一条"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 滚轮在转发编辑器里移动选中项，上界是规则条数：此前 `(selected + delta)`
 /// 只有下界，能把 `selected` 推到规则数以外。
 #[test]
 fn forwards_editor_wheel_clamps_the_selection_to_the_rule_count() {
-    let dir = with_temp_home("forwards-wheel");
+    let _dir = with_temp_home("forwards-wheel");
     let saved = seed_forward_profile(4);
     let mut state = state_with_profiles(std::slice::from_ref(&saved));
     state.open_machines_overlay_for(&saved.id);
@@ -1687,7 +1661,6 @@ fn forwards_editor_wheel_clamps_the_selection_to_the_rule_count() {
         _ => panic!("overlay"),
     };
     assert_eq!(selected, 0);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// HERDR-MACH-025 的真实失败模式在 lease 层：长按 `x` 的自动重复不得把
@@ -1697,7 +1670,7 @@ fn forwards_editor_wheel_clamps_the_selection_to_the_rule_count() {
 fn held_x_does_not_walk_the_forward_removal() {
     use crossterm::event::KeyEventKind;
 
-    let dir = with_temp_home("forwards-held-x");
+    let _dir = with_temp_home("forwards-held-x");
     let saved = seed_forward_profile(4);
     let mut state = state_with_profiles(std::slice::from_ref(&saved));
     state.open_machines_overlay_for(&saved.id);
@@ -1730,7 +1703,6 @@ fn held_x_does_not_walk_the_forward_removal() {
         4,
         "连发 x 不得删除任何规则"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 整套长按保护取决于 `step()` 为每个破坏性步进返回不同值（与
@@ -1742,7 +1714,7 @@ fn overlay_step_separates_every_destructive_machine_step() {
         PendingForwardRemoval,
     };
 
-    let dir = with_temp_home("machine-step");
+    let _dir = with_temp_home("machine-step");
     let saved = seed_forward_profile(2);
     let armed = saved.port_forwards[0].clone();
     let forwards = |pending: Option<PendingForwardRemoval>| {
@@ -1794,14 +1766,13 @@ fn overlay_step_separates_every_destructive_machine_step() {
     });
     assert_ne!(idle.step(), confirm_remove.step());
     assert_ne!(pending.step(), confirm_remove.step());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 目录 watcher（`set_endpoint_catalog`）会在浮层打开期间重新镜像规则表：
 /// 武装与确认之间规则变了就取消确认，绝不按下标删掉另一条。
 #[test]
 fn forward_remove_is_cancelled_when_the_rules_change_while_armed() {
-    let dir = with_temp_home("forwards-stale");
+    let _dir = with_temp_home("forwards-stale");
     let saved = seed_forward_profile(3);
     let mut state = state_with_profiles(std::slice::from_ref(&saved));
     state.open_machines_overlay_for(&saved.id);
@@ -1830,12 +1801,11 @@ fn forward_remove_is_cancelled_when_the_rules_change_while_armed() {
         .filter(|ch| !ch.is_whitespace())
         .collect();
     assert!(text.contains(&stale), "给出「规则已变化」提示：{text}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn forward_remove_asks_for_confirmation_before_deleting() {
-    let dir = with_temp_home("forwards-confirm");
+    let _dir = with_temp_home("forwards-confirm");
     let saved = seed_forward_profile(2);
     let mut state = state_with_profiles(std::slice::from_ref(&saved));
     state.open_machines_overlay_for(&saved.id);
@@ -1880,7 +1850,6 @@ fn forward_remove_asks_for_confirmation_before_deleting() {
     let catalog = crate::client::endpoint::EndpointCatalog::load().expect("catalog");
     assert_eq!(catalog.ssh[0].port_forwards.len(), 1, "确认后删除一条");
     assert_eq!(catalog.ssh[0].port_forwards[0].listen_port, 9001);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 宽字符在帧里按显示宽度占两格，`frame_text` 会在它们之间留空格：比对
@@ -2015,7 +1984,7 @@ fn machine_toast_renders_on_the_wide_dashboard() {
 /// 的机器而不是指针悬浮的那台。
 #[test]
 fn wide_list_routes_the_machine_action_keys() {
-    let dir = with_temp_home("machine-action-keys");
+    let _dir = with_temp_home("machine-action-keys");
     let saved = profile("Build", "dev@build.example", "62");
     let mut state = state_with_profiles(std::slice::from_ref(&saved));
     state.open_machines_overlay();
@@ -2098,7 +2067,6 @@ fn wide_list_routes_the_machine_action_keys() {
         matches!(state.overlay, Some(ClientShellOverlay::MachineAuth(_))),
         "List 的 v 应打开失败复核"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// dashboard 不再另画动作网格：页脚就是单机动作与页面动作的唯一入口，
@@ -3007,7 +2975,7 @@ fn wheel_scrolls_the_field_column_and_focus_changes_reveal_the_field() {
 
 #[test]
 fn save_persists_a_new_machine_without_testing() {
-    let dir = with_temp_state_home("form-save");
+    let _dir = with_temp_state_home("form-save");
     let mut state = state_with_profiles(&[]);
     add_form_overlay(&mut state, "build.example", "");
     let outcome = press(&mut state, key(KeyCode::Enter));
@@ -3037,12 +3005,11 @@ fn save_persists_a_new_machine_without_testing() {
     let text = compact(&frame_text(&mut state, 106, 32));
     assert!(text.contains(&compact(&saved)), "保存反馈：{text}");
     assert_eq!(state.saved_profiles.len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn test_connection_runs_the_bootstrap_chain_without_saving() {
-    let dir = with_temp_state_home("form-test-ok");
+    let _dir = with_temp_state_home("form-test-ok");
     let mut state = state_with_profiles(&[]);
     add_form_overlay(&mut state, "build.example", "Build");
     // 第一次只弹确认条，Enter 确认后才下发。
@@ -3107,7 +3074,6 @@ fn test_connection_runs_the_bootstrap_chain_without_saving() {
         machine_form(&state).bootstrap.is_none(),
         "端口改了，结论作废"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -3393,7 +3359,7 @@ fn seed_catalog_machine(label: &str, target: &str) -> SavedSshEndpoint {
 /// 原档案却收不到编辑。键盘、页脚按钮与残留的失败结论都进不了这条路。
 #[test]
 fn edit_form_offers_no_test_connection_or_recovery() {
-    let dir = with_temp_state_home("edit-no-test");
+    let _dir = with_temp_state_home("edit-no-test");
     let saved = seed_catalog_machine("Build", "build.example");
     let mut state = state_with_profiles(std::slice::from_ref(&saved));
     state.open_machine_edit_form(&saved.id);
@@ -3452,7 +3418,6 @@ fn edit_form_offers_no_test_connection_or_recovery() {
         catalog.ssh[0].identity_file,
         vec!["~/.ssh/other".to_owned()]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 从带 `⚠` 的那一行起，取弹窗内框里连续几行的文字（到右边框为止）拼起来
@@ -3614,7 +3579,7 @@ fn esc_after_a_finished_test_only_clears_the_result() {
 /// 放弃后回详情，目录不变。
 #[test]
 fn esc_with_unsaved_changes_asks_before_discarding_the_form() {
-    let dir = with_temp_state_home("form-discard");
+    let _dir = with_temp_state_home("form-discard");
     let f = &crate::i18n::texts().machine_form;
     let mut state = state_with_profiles(&[]);
     state.open_machine_add_form();
@@ -3698,7 +3663,6 @@ fn esc_with_unsaved_changes_asks_before_discarding_the_form() {
             }
         ))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// toast 盖在列表页脚的最后一行上时，那一行的页脚项既看不见也不可点：
@@ -3770,7 +3734,7 @@ fn machine_toast_row_swallows_no_hidden_footer_clicks() {
 /// 里触发的复制修复命令改走通用通知。
 #[test]
 fn machine_toast_stays_off_the_form_footer() {
-    let dir = with_temp_state_home("toast-form");
+    let _dir = with_temp_state_home("toast-form");
     let mut state = state_with_profiles(&[]);
     add_form_overlay(&mut state, "build.example", "");
     press(&mut state, key(KeyCode::Enter));
@@ -3810,7 +3774,6 @@ fn machine_toast_stays_off_the_form_footer() {
     press(&mut state, key(KeyCode::Esc));
     assert!(machines_view_is_list(&state));
     assert!(compact(&frame_text(&mut state, 106, 32)).contains(&saved_text));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -4044,7 +4007,7 @@ Host web
 /// `rect.width - 2` 列里画，超出用省略号收尾。
 #[test]
 fn import_select_row_reserves_the_notes_marker_column_and_ellipsizes() {
-    let dir = with_temp_home("c2-notes-marker");
+    let (_dirs, home) = with_temp_home("c2-notes-marker");
     // HostName 长度精确算过：候选行在 64 列外层终端下宽 58 列，`" [x] "
     // + 标签 + " → " + 37 个 a + ":2222"` 正好把最后 4 位端口号推到行尾，
     // 旧实现会把 "2222" 砍成 "22!"。
@@ -4054,7 +4017,7 @@ Host longhost
     Port 2222
     StrictHostKeyChecking no
 ";
-    std::fs::write(dir.join(".ssh").join("config"), fixture).unwrap();
+    std::fs::write(home.join(".ssh").join("config"), fixture).unwrap();
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
@@ -4079,15 +4042,14 @@ Host longhost
         mark_at > ellipsis_at + 1,
         "notes 记号紧贴在省略号后面，判定仍在争抢同一列：{row:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 导入仍是三步，Select 是带预览的多选清单：表头给出空格 / Enter 提示，
 /// 右侧预览随焦点列出将写入的字段与被丢弃的设置；窄屏省去预览。
 #[test]
 fn import_select_is_a_checklist_with_a_live_preview() {
-    let dir = with_temp_home("import-preview");
-    std::fs::write(dir.join(".ssh").join("config"), IMPORT_PREVIEW_FIXTURE).unwrap();
+    let (_dirs, home) = with_temp_home("import-preview");
+    std::fs::write(home.join(".ssh").join("config"), IMPORT_PREVIEW_FIXTURE).unwrap();
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
@@ -4137,13 +4099,12 @@ fn import_select_is_a_checklist_with_a_live_preview() {
     // 页脚（窄屏可能两行）仍有返回。
     let footer = compact(&machines_footer_text(&mut state, 70, 32));
     assert!(footer.contains(&compact(t.hint_back)), "{footer}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 导入的 discover 空状态走 kit 空状态：说明 + 配置路径，页脚只剩返回。
 #[test]
 fn import_discover_without_hosts_is_an_empty_state_with_the_path() {
-    let dir = with_temp_home("import-empty-state");
+    let _dir = with_temp_home("import-empty-state");
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     let text = compact(&frame_text(&mut state, 110, 30));
@@ -4163,7 +4124,6 @@ fn import_discover_without_hosts_is_an_empty_state_with_the_path() {
             }
         ))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// L19（尺寸）：导入向导与它出发的机器页必须同尺寸，按 `i` 打开导入时浮层
@@ -4173,7 +4133,7 @@ fn import_discover_without_hosts_is_an_empty_state_with_the_path() {
 /// 两页改用同一个尺寸函数后，扫 80–140 列、两种行高逐一核对宽高。
 #[test]
 fn import_wizard_matches_the_machines_page_size_at_every_width() {
-    let dir = with_temp_home("l19-import-size");
+    let _dir = with_temp_home("l19-import-size");
     let build = profile("Build", "dev@build.example", "1");
     for rows in [32u16, 40] {
         for cols in 80u16..=140 {
@@ -4191,7 +4151,6 @@ fn import_wizard_matches_the_machines_page_size_at_every_width() {
             );
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// L19（无主机时的「继续」）：discover 没有可导入的主机时，「enter 继续」
@@ -4200,7 +4159,7 @@ fn import_wizard_matches_the_machines_page_size_at_every_width() {
 /// 干脆不画这一项，页脚只剩「esc 返回」。
 #[test]
 fn import_footer_hides_the_continue_hint_when_there_are_no_hosts() {
-    let dir = with_temp_home("l19-no-continue-hint");
+    let _dir = with_temp_home("l19-no-continue-hint");
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     let footer = compact(&machines_footer_text(&mut state, 90, 26));
@@ -4213,7 +4172,6 @@ fn import_footer_hides_the_continue_hint_when_there_are_no_hosts() {
         footer.contains(&compact(t.hint_back)),
         "返回提示仍要在：{footer}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 把一行单元格还原成 (列, 字形) 序列：宽字符占两格，续格不单独列出——被
@@ -4258,7 +4216,7 @@ fn find_graphemes(graphemes: &[(usize, &str)], needle: &str) -> Option<(usize, u
 /// 部分以「…」收尾；而不是右对齐硬叠上去，把「/」写进「成」的续格。
 #[test]
 fn import_header_reserves_room_for_the_path_next_to_the_step_indicator() {
-    let dir = with_temp_home("m4-path-overlap");
+    let _dir = with_temp_home("m4-path-overlap");
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     let long_path = "/var/tmp/herdr-smoke-20260923121719/home/.ssh/config";
@@ -4321,13 +4279,12 @@ fn import_header_reserves_room_for_the_path_next_to_the_step_indicator() {
         long_path.starts_with(kept) && kept.len() < long_path.len(),
         "省略号之前应当是路径的原样前缀：{path_text:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn import_kitty_capital_g_uses_the_shifted_alternate() {
-    let dir = with_temp_home("import-kitty-g");
-    std::fs::write(dir.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
+    let (_dirs, home) = with_temp_home("import-kitty-g");
+    std::fs::write(home.join(".ssh").join("config"), many_hosts_config(30)).unwrap();
     let mut state = state_with_profiles(&[]);
     state.open_machine_import_wizard();
     let _ = frame_compact(&mut state, 93, 32);
@@ -4342,5 +4299,4 @@ fn import_kitty_capital_g_uses_the_shifted_alternate() {
     state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Key(key)]);
     let probe = import_probe(&state);
     assert_eq!(probe.focus_row, probe.candidates + 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }

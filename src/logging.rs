@@ -578,14 +578,16 @@ mod tests {
     use super::*;
 
     fn temp_log_path(name: &str) -> PathBuf {
+        // 时间戳在并发的测试线程间会撞，再带进程内序号。
         let unique = format!(
-            "herdr-logging-tests-{}-{}-{}",
+            "herdr-logging-tests-{}-{}-{}-{}",
             name,
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            crate::config::test_dirs::unique_id()
         );
         std::env::temp_dir().join(unique).join("herdr.log")
     }

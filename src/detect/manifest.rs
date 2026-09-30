@@ -82,12 +82,7 @@ pub(crate) struct AgentManifestSummary {
 }
 
 pub(crate) fn manifest_summaries() -> Vec<AgentManifestSummary> {
-    let lock = manifest_cache();
-    let guard = match lock.read() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    manifest_summaries_from_cache(&guard)
+    read_manifest_cache(manifest_summaries_from_cache)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,6 +300,15 @@ fn with_fork_rules(agent: Agent, mut manifest: AgentManifest) -> AgentManifest {
 static MANIFEST_CACHE: OnceLock<RwLock<ManifestCache>> = OnceLock::new();
 static MANIFEST_RELOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+// 测试构建按线程隔离 manifest 缓存：`cargo test` 在同一进程里并发跑测试，reload 若写
+// 进程级缓存，一个测试的合成 manifest 会串进别的测试。测试构建里 reload 只写调用线程
+// 自己的这份；没 reload 过的线程读进程级缓存，它只装捆绑 manifest、从不被改写。
+#[cfg(test)]
+thread_local! {
+    static THREAD_MANIFEST_CACHE: std::cell::RefCell<Option<ManifestCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 const MAX_RULES_PER_MANIFEST: usize = 128;
 const MAX_GATE_DEPTH: usize = 8;
 const MAX_TOTAL_GATES: usize = 512;
@@ -319,13 +323,7 @@ pub(crate) fn reload_manifests() -> Vec<AgentManifestSummary> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cache = build_manifest_cache();
     let summaries = manifest_summaries_from_cache(&cache);
-    // DET-04：首次调用时缓存还没有值，`get_or_init` 里克隆整份 cache 是白做
-    // （紧接着就被下面的写入覆盖）。用空缓存占位再写入。
-    let lock = MANIFEST_CACHE.get_or_init(|| RwLock::new(ManifestCache::empty()));
-    match lock.write() {
-        Ok(mut guard) => *guard = cache,
-        Err(poisoned) => *poisoned.into_inner() = cache,
-    }
+    replace_manifest_cache(cache);
     summaries
 }
 
@@ -344,17 +342,71 @@ pub(crate) fn reload_manifests_for_agents(agents: &[Agent]) {
         .filter(|agent| agents.contains(agent))
         .map(|agent| (agent, load_manifest_uncached(agent).map(Arc::new)))
         .collect::<Vec<_>>();
+    update_manifest_cache(lock, |cache| {
+        for (agent, replacement) in replacements {
+            cache.set(agent, replacement);
+        }
+    });
+}
+
+/// 进程级缓存；测试构建里只装捆绑 manifest（见 `THREAD_MANIFEST_CACHE`）。
+fn manifest_cache() -> &'static RwLock<ManifestCache> {
+    #[cfg(not(test))]
+    let build = build_manifest_cache;
+    #[cfg(test)]
+    let build = build_bundled_manifest_cache;
+    MANIFEST_CACHE.get_or_init(|| RwLock::new(build()))
+}
+
+fn read_manifest_cache<R>(read: impl FnOnce(&ManifestCache) -> R) -> R {
+    #[cfg(test)]
+    if let Some(cache) = THREAD_MANIFEST_CACHE.with(|slot| slot.borrow().clone()) {
+        return read(&cache);
+    }
+    let guard = match manifest_cache().read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    read(&guard)
+}
+
+#[cfg(not(test))]
+fn replace_manifest_cache(cache: ManifestCache) {
+    // DET-04：首次调用时缓存还没有值，`get_or_init` 里克隆整份 cache 是白做
+    // （紧接着就被下面的写入覆盖）。用空缓存占位再写入。
+    let lock = MANIFEST_CACHE.get_or_init(|| RwLock::new(ManifestCache::empty()));
+    match lock.write() {
+        Ok(mut guard) => *guard = cache,
+        Err(poisoned) => *poisoned.into_inner() = cache,
+    }
+}
+
+#[cfg(test)]
+fn replace_manifest_cache(cache: ManifestCache) {
+    THREAD_MANIFEST_CACHE.with(|slot| *slot.borrow_mut() = Some(cache));
+}
+
+#[cfg(not(test))]
+fn update_manifest_cache(lock: &RwLock<ManifestCache>, update: impl FnOnce(&mut ManifestCache)) {
     let mut cache = match lock.write() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    for (agent, replacement) in replacements {
-        cache.set(agent, replacement);
-    }
+    update(&mut cache);
 }
 
-fn manifest_cache() -> &'static RwLock<ManifestCache> {
-    MANIFEST_CACHE.get_or_init(|| RwLock::new(build_manifest_cache()))
+/// 测试构建写本线程的缓存；本线程还没 reload 过时从进程级（捆绑）缓存起步，与生产
+/// 「在现有缓存上替换」同口径。
+#[cfg(test)]
+fn update_manifest_cache(lock: &RwLock<ManifestCache>, update: impl FnOnce(&mut ManifestCache)) {
+    let mut cache = THREAD_MANIFEST_CACHE
+        .with(|slot| slot.borrow().clone())
+        .unwrap_or_else(|| match lock.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        });
+    update(&mut cache);
+    replace_manifest_cache(cache);
 }
 
 fn build_manifest_cache() -> ManifestCache {
@@ -364,6 +416,43 @@ fn build_manifest_cache() -> ManifestCache {
         manifests[agent as usize] = load_manifest_uncached(agent).map(Arc::new);
     }
     ManifestCache { manifests }
+}
+
+/// 只装捆绑 manifest（叠加 fork 规则），不读任何目录：与未隔离线程上
+/// `build_manifest_cache` 的结果相同，但不取决于首个调用者所在线程是否隔离。
+#[cfg(test)]
+fn build_bundled_manifest_cache() -> ManifestCache {
+    let mut cache = ManifestCache::empty();
+    for agent in Agent::SCREEN_MANIFEST_AGENTS {
+        let loaded = bundled_manifest(agent)
+            .map(|manifest| Arc::new(bundled_loaded_manifest(agent, manifest, None, None, false)));
+        cache.set(agent, loaded);
+    }
+    cache
+}
+
+/// 测试专用：作用域结束（含 panic 展开）时把本线程的 manifest 缓存还原成进入时的样子，
+/// 隔离目录里 reload 出的合成 manifest 不带出作用域。与线程本地缓存绑定，不能跨线程移动。
+#[cfg(test)]
+pub(crate) struct ThreadManifestCacheScope {
+    previous: Option<ManifestCache>,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(test)]
+impl Drop for ThreadManifestCacheScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        let _ = THREAD_MANIFEST_CACHE.try_with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_thread_manifest_cache() -> ThreadManifestCacheScope {
+    ThreadManifestCacheScope {
+        previous: THREAD_MANIFEST_CACHE.with(|slot| slot.borrow().clone()),
+        _not_send: std::marker::PhantomData,
+    }
 }
 
 fn manifest_summaries_from_cache(cache: &ManifestCache) -> Vec<AgentManifestSummary> {
@@ -620,12 +709,7 @@ fn fallback_explain(
 }
 
 fn load_manifest(agent: Agent) -> Option<Arc<LoadedManifest>> {
-    let lock = manifest_cache();
-    let guard = match lock.read() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    guard.get(agent)
+    read_manifest_cache(|cache| cache.get(agent))
 }
 
 fn load_manifest_uncached(agent: Agent) -> Option<LoadedManifest> {
@@ -784,7 +868,7 @@ fn read_override_manifest(path: &Path) -> Result<AgentManifest, String> {
 }
 
 fn read_remote_manifest(agent: Agent, bundled: &AgentManifest) -> Option<LoadedManifest> {
-    // 测试构建不读开发机状态目录里的远端缓存（口径同 override_path）。
+    // 测试构建只读本线程隔离的状态目录里的远端缓存（口径同 override_path）。
     #[cfg(test)]
     crate::config::test_dirs::isolated_state_dir()?;
     let path = super::manifest_update::remote_manifest_path(agent);
@@ -1162,8 +1246,8 @@ fn validate_region_name(spec: &str) -> Result<(), String> {
 }
 
 fn override_path(agent: Agent) -> Option<PathBuf> {
-    // 测试构建只认隔离到临时目录的配置目录：本地覆盖整份替换捆绑 manifest，开发机上
-    // 的覆盖文件（包括测试泄漏出去的）会让检测测试随机器状态漂移。
+    // 测试构建只认本线程隔离到临时目录的配置目录（`test_dirs::isolate_dirs`）：本地覆盖
+    // 整份替换捆绑 manifest，开发机上或别的测试写的覆盖文件会让检测测试随环境漂移。
     #[cfg(test)]
     let dir = crate::config::test_dirs::isolated_config_dir()?;
     #[cfg(not(test))]

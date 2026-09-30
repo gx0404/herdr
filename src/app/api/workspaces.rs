@@ -391,6 +391,8 @@ mod tests {
         use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
         use crate::config::ShellModeConfig;
 
+        // 先于 app 创建、后于 app 析构：pane 进程退出、放开 cwd 之后才删目录。
+        let focused_cwd = crate::config::test_dirs::TempDir::new("ws-follow");
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
@@ -421,21 +423,12 @@ mod tests {
         // Drop runtimes so cwd resolution deterministically uses cached state.
         shutdown_test_runtimes(&mut app);
 
-        let focused_cwd = std::env::temp_dir().join(format!(
-            "herdr-ws-follow-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&focused_cwd).unwrap();
         let ws = &app.state.workspaces[0];
         let root_cwd = ws.identity_cwd.clone();
         let focused_pane = ws.focused_pane_id().unwrap();
         assert_ne!(focused_pane, ws.tabs[0].root_pane);
         let terminal_id = ws.terminal_id(focused_pane).cloned().unwrap();
-        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = focused_cwd.clone();
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = focused_cwd.to_path_buf();
 
         let response = app.handle_workspace_create(
             "req".into(),
@@ -456,14 +449,13 @@ mod tests {
         let created_cwd = &app.state.workspaces[1].identity_cwd;
         assert_eq!(
             crate::worktree::canonical_or_original(created_cwd),
-            crate::worktree::canonical_or_original(&focused_cwd)
+            crate::worktree::canonical_or_original(focused_cwd.path())
         );
         assert_ne!(
             crate::worktree::canonical_or_original(created_cwd),
             crate::worktree::canonical_or_original(&root_cwd)
         );
         shutdown_test_runtimes(&mut app);
-        let _ = std::fs::remove_dir_all(&focused_cwd);
     }
 
     #[tokio::test]
@@ -471,6 +463,8 @@ mod tests {
         use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
         use crate::config::ShellModeConfig;
 
+        // 先于 app 创建、后于 app 析构：pane 进程退出、放开 cwd 之后才删目录。
+        let source_cwd = crate::config::test_dirs::TempDir::new("ws-explicit-source");
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
@@ -487,15 +481,12 @@ mod tests {
         app.state.ensure_test_terminals();
         shutdown_test_runtimes(&mut app);
 
-        let source_cwd =
-            std::env::temp_dir().join(format!("herdr-ws-explicit-source-{}", std::process::id()));
-        std::fs::create_dir_all(&source_cwd).unwrap();
         let pane_id = app.state.workspaces[1].focused_pane_id().unwrap();
         let terminal_id = app.state.workspaces[1]
             .terminal_id(pane_id)
             .cloned()
             .unwrap();
-        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = source_cwd.clone();
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = source_cwd.to_path_buf();
         let source_workspace_id = app.public_workspace_id(1);
 
         let response = app.handle_workspace_create(
@@ -515,7 +506,7 @@ mod tests {
         ));
         assert_eq!(
             crate::worktree::canonical_or_original(&app.state.workspaces[2].identity_cwd),
-            crate::worktree::canonical_or_original(&source_cwd)
+            crate::worktree::canonical_or_original(source_cwd.path())
         );
 
         let invalid = app.handle_workspace_create(
@@ -535,7 +526,7 @@ mod tests {
             "captured".into(),
             WorkspaceCreateParams {
                 source_workspace_id: Some("w_999".into()),
-                cwd: Some(source_cwd.display().to_string()),
+                cwd: Some(source_cwd.path().display().to_string()),
                 focus: false,
                 label: None,
                 env: Default::default(),
@@ -548,10 +539,9 @@ mod tests {
         ));
         assert_eq!(
             crate::worktree::canonical_or_original(&app.state.workspaces[3].identity_cwd),
-            crate::worktree::canonical_or_original(&source_cwd)
+            crate::worktree::canonical_or_original(source_cwd.path())
         );
         shutdown_test_runtimes(&mut app);
-        let _ = std::fs::remove_dir_all(&source_cwd);
     }
 
     fn app_with_linked_worktree() -> App {

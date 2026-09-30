@@ -57,10 +57,37 @@ ID、workspace/tab/pane 身份、restore/handoff、agent 检测权威或 UI/输�
   命令行包含路径判定，避免误杀 `tail -f` 沙箱日志的旁观进程。参考实现
   `tests/ssh_e2e.rs::spawn_orphan_reaper`、`::sweep_stale_roots`、
   `::belongs_to_root`；新增此类测试须演练「运行中途 SIGKILL 进程组」后零残留。
-- 单测不得读写开发机真实的 herdr 配置/状态目录：用临时目录隔离（`XDG_CONFIG_HOME`/
-  `XDG_STATE_HOME` 或 `config::test_dirs` 线程本地覆盖）。agent 检测的本地覆盖、远端
-  缓存与更新状态在测试构建里只解析到临时目录（`config::io::test_dirs::isolated_config_dir`
-  / `isolated_state_dir`）：未隔离时读按不存在处理，写直接 panic。环境变量隔离依赖
-  nextest 每测一进程；`cargo test` 线程模式下各模块用不同的锁改 `XDG_*`，会互相踩。
 - fixture 是契约（`tests/fixtures/`：endpoint 形状、键盘 TSV、插件 smoke）：
   不得为过门改 fixture；生成物登记与 freshness 纪律见 `docs/README.md`。
+
+## 测试隔离与并发
+
+`just test`（nextest，每测一进程）是标准入口；线程模式的 `cargo test`（同进程多线程）
+也须保持可靠。新测试按以下约定写：
+
+- 目录：单测不得读写开发机真实的 herdr 配置/状态目录。需要时用
+  `config::test_dirs::isolate_dirs(name)`：本线程的 `config_dir()`、`state_dir()`、
+  `config_path()` 与主目录覆盖指向唯一临时根，析构时还原并删除；不改 `XDG_*`。测试构建
+  里这三者永不解析到临时目录之外（兜底是共享沙箱 `herdr-unit-sandbox-<user>`，只作安全网，
+  不应有东西落进去）。agent 检测的本地覆盖、远端缓存与更新状态未隔离时读为空、写即
+  panic，manifest 缓存按线程隔离。覆盖是线程本地的，生产代码自起的线程看不到。
+- 环境变量：全 crate 只有一把锁 `config::test_config_env_lock()`（同线程可重入、不中毒，
+  最外层 guard 释放时整体还原进程环境）。改环境变量的测试全程持锁，辅助函数把 guard
+  交回调用方；持锁时不得等待同样要这把锁的线程。能用线程本地覆盖就不改进程环境：
+  `test_dirs::override_home_dir` / `override_search_path` 只影响进程内的查找，要让子进程
+  看到仍须持锁改环境，且 PATH 往前追加而不整体替换。
+- 命名与清理：临时路径、socket、命名管道名带 `test_dirs::unique_id()`（时间戳在并发线程间
+  会撞）。测试建的临时目录在结束时删除（含 panic）：`test_dirs::TempDir` /
+  `remove_dir_eventually`（Windows 上刚退出的子进程、杀毒扫描会短暂占着句柄，有界重试）；
+  清理前等插件命令、pane 进程退出。测试里删 worktree 走
+  `worktree::run_worktree_remove_command_with_recovery`。
+- 等待：等异步结果用与负载无关的宽上限（30 s `LOADED_WAIT`，条件满足即返回）；验证
+  「不应发生」的短窗口保持短。
+- 集成测试（`tests/**`）：每个被拉起的 herdr 都把 `XDG_CONFIG_HOME` 与 `XDG_STATE_HOME`
+  设在测试根下，配置写进 `<XDG_CONFIG_HOME>/<app 目录>`（debug 为 `herdr-dev`，用
+  `support::app_dir_name()`）；拉起辅助函数清掉 `support::INHERITED_DIR_OVERRIDES`；可能写
+  agent/ssh 目录的命令用隔离的 HOME（cli harness 的 `herdr_command`）。
+- 泄漏审计：先照常构建，再把 `TEMP`/`TMP` 指向真实临时目录下的空私有目录（Windows 须在
+  C: 上，ACL 敏感的 `platform::windows::config_backup` 用例放到 D: 会失败）、
+  `APPDATA`/`LOCALAPPDATA` 指向临时目录外的空目录跑全量；跑完私有临时目录里只应剩测试构建
+  的 codex shim（`herdr-unit-codex-shim`），资料目录保持为空。

@@ -6,16 +6,24 @@
 //! 建目录，保证路径确实位于临时根之下。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 临时根下的唯一路径（不创建）：给 `git worktree add` 这类要求目标不存在的调用使用。
+/// 进程内序号保证 `cargo test` 多线程同进程时同名调用也不撞（时钟分辨率有限，几个线程
+/// 可能拿到同一时间戳）；时间戳区分 pid 被复用的先前进程留下的目录。
 pub(crate) fn unique_temp_path(name: &str) -> PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "herdr-{name}-{}-{nanos}-{sequence}",
+        std::process::id()
+    ))
 }
 
 /// 创建独立的临时测试目录。
@@ -178,7 +186,30 @@ pub(crate) fn run_git(cwd: &Path, args: &[&str]) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_git_version;
+    use super::{parse_git_version, unique_temp_path};
+
+    #[test]
+    fn unique_temp_path_never_repeats_across_threads() {
+        const THREADS: usize = 8;
+        const CALLS: usize = 500;
+        // 同名、同 pid、并发紧凑调用：只靠时间戳时会撞在同一个时钟刻度上。
+        let paths: std::collections::HashSet<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..CALLS)
+                            .map(|_| unique_temp_path("same-name"))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect()
+        });
+        assert_eq!(paths.len(), THREADS * CALLS);
+    }
 
     #[test]
     fn git_version_parses_common_vendor_suffixes() {

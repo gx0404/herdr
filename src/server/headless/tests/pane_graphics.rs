@@ -1,7 +1,7 @@
 use super::*;
 
-fn receive_render(receiver: &std::sync::mpsc::Receiver<Vec<u8>>, timeout: Duration) -> Vec<u8> {
-    receiver.recv_timeout(timeout).unwrap()
+fn receive_render(receiver: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    receiver.recv_timeout(LOADED_WAIT).unwrap()
 }
 
 #[tokio::test]
@@ -16,7 +16,7 @@ async fn unchanged_retained_graphics_leave_the_committed_surface_and_delivery_un
         height_px: 20,
     };
     server.render_and_stream();
-    let _ = receive_render(&client_rx, Duration::from_millis(100));
+    let _ = receive_render(&client_rx);
 
     let before = server.clients[&1]
         .render_state
@@ -50,8 +50,7 @@ async fn unchanged_retained_graphics_leave_the_committed_surface_and_delivery_un
     // Skipping the no-op must not discard the upload cache for the next real update.
     write_shared_test_pane(&mut server, pane_id, b"\x1b[Hchanged");
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let ServerMessage::PaneSurface(updated) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(updated) = read_server_message(receive_render(&client_rx))
     else {
         panic!("expected retained image with changed text");
     };
@@ -73,8 +72,7 @@ async fn first_kitty_image_updates_retained_surface_without_full_redraw() {
         height_px: 20,
     };
     server.render_and_stream();
-    let ServerMessage::PaneSurface(initial) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(initial) = read_server_message(receive_render(&client_rx))
     else {
         panic!("expected text-only baseline");
     };
@@ -86,8 +84,7 @@ async fn first_kitty_image_updates_retained_surface_without_full_redraw() {
         b"\x1b_Ga=T,f=32,t=d,i=7,p=3,s=1,v=1,c=1,r=1,q=2;/wAA/w==\x1b\\",
     );
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let ServerMessage::PaneSurface(repainted) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(repainted) = read_server_message(receive_render(&client_rx))
     else {
         panic!("expected image update without a full redraw");
     };
@@ -98,8 +95,7 @@ async fn first_kitty_image_updates_retained_surface_without_full_redraw() {
     // Text changes while an image is visible must reuse its uploaded pixels.
     write_shared_test_pane(&mut server, pane_id, b"\rupdated text");
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let ServerMessage::PaneSurface(text_update) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(text_update) = read_server_message(receive_render(&client_rx))
     else {
         panic!("expected retained text and image scene");
     };
@@ -112,8 +108,7 @@ async fn first_kitty_image_updates_retained_surface_without_full_redraw() {
 
     write_shared_test_pane(&mut server, pane_id, b"\x1b_Ga=d,d=A\x1b\\");
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let ServerMessage::PaneSurface(deleted) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(deleted) = read_server_message(receive_render(&client_rx))
     else {
         panic!("expected image removal");
     };
@@ -123,7 +118,7 @@ async fn first_kitty_image_updates_retained_surface_without_full_redraw() {
     write_shared_test_pane(&mut server, pane_id, b"\rtext only again");
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
     assert!(matches!(
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100))),
+        read_server_message(receive_render(&client_rx)),
         ServerMessage::PaneSurfacePatch(_)
     ));
 
@@ -142,10 +137,9 @@ async fn first_kitty_image_updates_retained_surface_without_full_redraw() {
         .graphics
         .placements
         .is_empty());
-    let _ = receive_render(&client_rx, Duration::from_millis(100));
+    let _ = receive_render(&client_rx);
     server.render_and_stream();
-    let ServerMessage::PaneSurface(recovered) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(recovered) = read_server_message(receive_render(&client_rx))
     else {
         panic!("expected deferred graphics recovery");
     };
@@ -167,13 +161,11 @@ async fn offscreen_images_keep_text_updates_on_the_retained_path() {
     };
     let sources = HashSet::from([pane_id]);
     server.render_and_stream();
-    let _ = receive_render(&client_rx, Duration::from_millis(100));
+    let _ = receive_render(&client_rx);
 
     write_shared_test_pane(&mut server, pane_id, b"\x1b_Ga=d,d=a,q=2\x1b\\");
     assert!(server.render_retained_pane_surface_and_stream(&sources));
-    let ServerMessage::PaneSurface(hidden) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
-    else {
+    let ServerMessage::PaneSurface(hidden) = read_server_message(receive_render(&client_rx)) else {
         panic!("expected hidden image scene");
     };
     assert!(hidden.graphics.placements.is_empty());
@@ -183,8 +175,7 @@ async fn offscreen_images_keep_text_updates_on_the_retained_path() {
     // arrive in a surface that keeps the hidden image without resending it.
     write_shared_test_pane(&mut server, pane_id, b"\rtext while hidden");
     assert!(server.render_retained_pane_surface_and_stream(&sources));
-    let ServerMessage::PaneSurface(text_update) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(text_update) = read_server_message(receive_render(&client_rx))
     else {
         panic!("expected a surface the client accepts while images are retained");
     };
@@ -198,9 +189,7 @@ async fn offscreen_images_keep_text_updates_on_the_retained_path() {
 
     write_shared_test_pane(&mut server, pane_id, b"\x1b_Ga=p,i=7,c=1,r=1,q=2\x1b\\");
     assert!(server.render_retained_pane_surface_and_stream(&sources));
-    let ServerMessage::PaneSurface(shown) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
-    else {
+    let ServerMessage::PaneSurface(shown) = read_server_message(receive_render(&client_rx)) else {
         panic!("expected the hidden image to return");
     };
     assert_eq!(shown.graphics.placements.len(), 1);
@@ -208,11 +197,10 @@ async fn offscreen_images_keep_text_updates_on_the_retained_path() {
 
     write_shared_test_pane(&mut server, pane_id, b"\x1b_Ga=d,d=a,q=2\x1b\\");
     assert!(server.render_retained_pane_surface_and_stream(&sources));
-    let _ = receive_render(&client_rx, Duration::from_millis(100));
+    let _ = receive_render(&client_rx);
     write_shared_test_pane(&mut server, pane_id, b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
     assert!(server.render_retained_pane_surface_and_stream(&sources));
-    let ServerMessage::PaneSurface(deleted) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(deleted) = read_server_message(receive_render(&client_rx))
     else {
         panic!("expected the deleted image to be released");
     };
@@ -230,7 +218,7 @@ async fn retained_unicode_image_arrives_after_fragmented_upload_without_reupload
         height_px: 20,
     };
     server.render_and_stream();
-    let _ = receive_render(&client_rx, Duration::from_millis(100));
+    let _ = receive_render(&client_rx);
     let sources = HashSet::from([pane_id]);
     // Yazi-style virtual placement: uploading the image and drawing its Unicode cell
     // can happen in separate PTY reads, with no text dirty rows when upload completes.
@@ -253,8 +241,7 @@ async fn retained_unicode_image_arrives_after_fragmented_upload_without_reupload
         "\x1b[2;3H\x1b[38;2;18;52;86m\u{10eeee}\u{0305}\u{0305}\x1b[0m".as_bytes(),
     );
     assert!(server.render_retained_pane_surface_and_stream(&sources));
-    let ServerMessage::PaneSurface(surface) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(surface) = read_server_message(receive_render(&client_rx))
     else {
         panic!("virtual image must arrive without a tab switch");
     };
@@ -268,8 +255,7 @@ async fn retained_unicode_image_arrives_after_fragmented_upload_without_reupload
         b"\x1b_Ga=t,f=32,t=d,i=1193046,s=1,v=1,q=2;AP8A/w==\x1b\\",
     );
     assert!(server.render_retained_pane_surface_and_stream(&sources));
-    let ServerMessage::PaneSurface(removed) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(removed) = read_server_message(receive_render(&client_rx))
     else {
         panic!("retransmission must remove the virtual placement");
     };
@@ -280,8 +266,7 @@ async fn retained_unicode_image_arrives_after_fragmented_upload_without_reupload
         b"\x1b_Ga=p,U=1,i=1193046,c=1,r=1,q=2\x1b\\",
     );
     assert!(server.render_retained_pane_surface_and_stream(&sources));
-    let ServerMessage::PaneSurface(replaced) =
-        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    let ServerMessage::PaneSurface(replaced) = read_server_message(receive_render(&client_rx))
     else {
         panic!("updated image pixels must arrive");
     };
@@ -336,11 +321,11 @@ async fn render_scale_profile_retained_graphics() {
                     );
                 }
                 server.render_and_stream();
-                let _ = receive_render(&client_rx, Duration::from_millis(100));
+                let _ = receive_render(&client_rx);
                 if image == "offscreen" {
                     write_shared_test_pane(&mut server, root, b"\x1b_Ga=d,d=a,q=2\x1b\\");
                     server.render_and_stream();
-                    let _ = receive_render(&client_rx, Duration::from_millis(100));
+                    let _ = receive_render(&client_rx);
                 }
                 let sources = pane_ids.iter().copied().collect();
                 let mut samples = Vec::new();
@@ -396,7 +381,7 @@ async fn client_shell_surface_projects_terminal_kitty_images_from_authoritative_
     };
 
     server.render_and_stream();
-    let message = read_server_message(receive_render(&client_rx, Duration::from_millis(100)));
+    let message = read_server_message(receive_render(&client_rx));
     let ServerMessage::PaneSurface(surface) = message else {
         panic!("expected client shell pane surface");
     };
@@ -427,7 +412,7 @@ async fn client_shell_delivers_equal_pixels_for_distinct_terminal_image_ids() {
     };
 
     server.render_and_stream();
-    let message = read_server_message(receive_render(&client_rx, Duration::from_millis(100)));
+    let message = read_server_message(receive_render(&client_rx));
     let ServerMessage::PaneSurface(surface) = message else {
         panic!("expected client shell pane surface");
     };
@@ -444,7 +429,7 @@ async fn client_shell_delivers_equal_pixels_for_distinct_terminal_image_ids() {
 
     server.clients.get_mut(&1).unwrap().request_repaint();
     server.render_and_stream();
-    let message = read_server_message(receive_render(&client_rx, Duration::from_millis(100)));
+    let message = read_server_message(receive_render(&client_rx));
     let ServerMessage::PaneSurface(surface) = message else {
         panic!("expected replacement client shell pane surface");
     };
@@ -467,7 +452,7 @@ async fn client_shell_keeps_offscreen_terminal_image_loaded_until_the_image_is_d
     };
     let render = |server: &mut HeadlessServer| {
         server.render_and_stream();
-        let message = read_server_message(receive_render(&client_rx, Duration::from_millis(100)));
+        let message = read_server_message(receive_render(&client_rx));
         let ServerMessage::PaneSurface(surface) = message else {
             panic!("expected client shell pane surface");
         };
@@ -550,7 +535,7 @@ async fn client_shell_evicts_least_recently_visible_offscreen_terminal_images() 
     };
     let render = |server: &mut HeadlessServer| {
         server.render_and_stream();
-        let message = read_server_message(receive_render(&client_rx, Duration::from_millis(100)));
+        let message = read_server_message(receive_render(&client_rx));
         let ServerMessage::PaneSurface(surface) = message else {
             panic!("expected client shell pane surface");
         };

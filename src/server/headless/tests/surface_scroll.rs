@@ -33,7 +33,7 @@ async fn surface_scroll_sends_scrolling_output_as_a_shift_and_new_rows() {
     let mut decoder = protocol::surface_reuse::Decoder::new(false, true);
     let ServerMessage::PaneSurface(mut shell) = decoder
         .decode(read_server_message(
-            render_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            render_rx.recv_timeout(LOADED_WAIT).unwrap(),
         ))
         .expect("initial surface")
     else {
@@ -42,7 +42,7 @@ async fn surface_scroll_sends_scrolling_output_as_a_shift_and_new_rows() {
 
     write_shared_test_pane(&mut server, pane_id, &scrolling_lines(40..42));
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let bytes = render_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let bytes = render_rx.recv_timeout(LOADED_WAIT).unwrap();
     let message = read_server_message(bytes.clone());
     assert!(matches!(
         &message,
@@ -79,11 +79,11 @@ async fn surface_scroll_is_not_sent_to_a_peer_that_did_not_negotiate_it() {
     let (mut server, _control_rx, render_rx, pane_id) =
         retained_test_server_with_control(&scrolling_lines(0..40));
     server.render_and_stream();
-    let _ = render_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let _ = render_rx.recv_timeout(LOADED_WAIT).unwrap();
 
     write_shared_test_pane(&mut server, pane_id, &scrolling_lines(40..42));
     assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
-    let message = read_server_message(render_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+    let message = read_server_message(render_rx.recv_timeout(LOADED_WAIT).unwrap());
     assert!(matches!(message, ServerMessage::PaneSurfacePatch(_)));
     shutdown_test_runtimes(&mut server);
 }

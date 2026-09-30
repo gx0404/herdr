@@ -1,7 +1,6 @@
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use portable_pty::CommandBuilder;
 
@@ -109,19 +108,29 @@ pub(crate) fn opencode_state_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn home_dir() -> io::Result<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+    // 测试构建先看线程本地覆盖（`config::test_dirs::override_home_dir` / `isolate_dirs`）：
+    // 改进程级 HOME 会被同进程并发的测试和它们起的子进程看到。
+    #[cfg(test)]
+    if let Some(home) = crate::config::test_dirs::home_dir() {
+        return Ok(home);
+    }
+    home_dir_from_env(|key| std::env::var_os(key))
+}
+
+/// `home_dir` 的解析规则，环境变量经 `var` 读取：测试用假的环境验证回退顺序，不必改
+/// 进程环境。
+pub(super) fn home_dir_from_env(var: impl Fn(&str) -> Option<OsString>) -> io::Result<PathBuf> {
+    let non_empty = |key: &str| var(key).filter(|value| !value.is_empty());
+    if let Some(home) = non_empty("HOME") {
         return Ok(PathBuf::from(home));
     }
 
     #[cfg(windows)]
     {
-        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        if let Some(profile) = non_empty("USERPROFILE") {
             return Ok(PathBuf::from(profile));
         }
-        if let (Some(drive), Some(path)) = (
-            std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty()),
-            std::env::var_os("HOMEPATH").filter(|value| !value.is_empty()),
-        ) {
+        if let (Some(drive), Some(path)) = (non_empty("HOMEDRIVE"), non_empty("HOMEPATH")) {
             let mut home = PathBuf::from(drive);
             home.push(path);
             return Ok(home);
@@ -133,34 +142,16 @@ pub(crate) fn home_dir() -> io::Result<PathBuf> {
     ))
 }
 
+/// 集成测试改 agent 目录变量、APPDATA、XDG_* 时持有的锁：就是全局的
+/// `config::test_config_env_lock`（各模块各用一把锁等于没锁）。最外层 guard 放锁时整体
+/// 还原进程环境；保留这个入口只为沿用既有调用写法。HOME 与 PATH 不再改进程环境，改用
+/// `config::test_dirs::override_home_dir` / `override_search_path` 的线程本地覆盖。
 #[cfg(test)]
-pub(crate) struct IntegrationEnvLock {
-    _guard: MutexGuard<'static, ()>,
-    #[cfg(windows)]
-    appdata: Option<std::ffi::OsString>,
-}
-
-#[cfg(test)]
-impl Drop for IntegrationEnvLock {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        if let Some(appdata) = self.appdata.take() {
-            std::env::set_var("APPDATA", appdata);
-        } else {
-            std::env::remove_var("APPDATA");
-        }
-    }
-}
+pub(crate) type IntegrationEnvLock = crate::config::TestEnvGuard;
 
 #[cfg(test)]
 pub(crate) fn integration_env_lock() -> IntegrationEnvLock {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-    IntegrationEnvLock {
-        _guard: guard,
-        #[cfg(windows)]
-        appdata: std::env::var_os("APPDATA"),
-    }
+    crate::config::test_config_env_lock().lock().unwrap()
 }
 
 #[cfg(test)]
