@@ -10,7 +10,7 @@ use std::collections::HashSet;
 pub(crate) const PROCESS_LINEAGE_DEPTH_LIMIT: usize = 64;
 
 /// 进程表里的一项：pid、父 pid 与可执行文件名（Linux `/proc/<pid>/stat` 的 `comm`、
-/// macOS `pbi_comm`、Windows `szExeFile`）。
+/// macOS `pbsi_comm`、Windows `szExeFile`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProcessParentEntry {
     pub(crate) pid: u32,

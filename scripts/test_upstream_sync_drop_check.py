@@ -161,7 +161,16 @@ class MainTests(unittest.TestCase):
         _write(self.root / ".git/src/detect/manifests/amp.toml")
         target = Path(self._tmp.name) / "elsewhere"
         target.mkdir()
-        (self.root / "src/integration/assets/copilot").symlink_to(target, target_is_directory=True)
+        try:
+            (self.root / "src/integration/assets/copilot").symlink_to(
+                target, target_is_directory=True
+            )
+        except OSError as error:
+            # 与 src/integration/test_support.rs::symlink_file 同口径：非提权的
+            # Windows 本地运行没有 SeCreateSymbolicLinkPrivilege（WinError 1314）。
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows denied SeCreateSymbolicLinkPrivilege")
+            raise
         files = check.repository_files(self.root)
         self.assertIn("src/integration/assets/copilot", files)
         self.assertFalse(any(path.startswith(".git/") for path in files))

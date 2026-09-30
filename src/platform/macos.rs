@@ -930,17 +930,56 @@ fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
 }
 
 fn comm_from_bsdinfo(info: &libc::proc_bsdinfo) -> Option<String> {
-    let end = info
-        .pbi_comm
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(info.pbi_comm.len());
+    comm_from_c_chars(&info.pbi_comm)
+}
+
+fn comm_from_c_chars(comm: &[libc::c_char]) -> Option<String> {
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
     if end == 0 {
         return None;
     }
 
-    let bytes: Vec<u8> = info.pbi_comm[..end].iter().map(|&b| b as u8).collect();
+    let bytes: Vec<u8> = comm[..end].iter().map(|&b| b as u8).collect();
     String::from_utf8(bytes).ok()
+}
+
+/// `struct proc_bsdshortinfo`（`<sys/proc_info.h>`）；锁定的 libc 版本尚未导出它。
+#[repr(C)]
+struct ProcBsdShortInfo {
+    pbsi_pid: u32,
+    pbsi_ppid: u32,
+    pbsi_pgid: u32,
+    pbsi_status: u32,
+    pbsi_comm: [libc::c_char; 16],
+    pbsi_flags: u32,
+    pbsi_uid: libc::uid_t,
+    pbsi_gid: libc::gid_t,
+    pbsi_ruid: libc::uid_t,
+    pbsi_rgid: libc::gid_t,
+    pbsi_svuid: libc::uid_t,
+    pbsi_svgid: libc::gid_t,
+    pbsi_rfu: u32,
+}
+
+const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+
+/// 与 `PROC_PIDTBSDINFO` 不同，内核对这一类不做同用户检查：非 root 进程也能读到
+/// launchd（pid 1，root）等其他用户进程的父 pid。
+fn process_short_bsdinfo(pid: u32) -> Option<ProcBsdShortInfo> {
+    let mut info: ProcBsdShortInfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<ProcBsdShortInfo>() as libc::c_int;
+
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            PROC_PIDT_SHORTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+
+    (ret == size).then_some(info)
 }
 
 fn process_argv(pid: u32) -> Option<Vec<String>> {
@@ -1097,16 +1136,17 @@ pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
     buckets
 }
 
-/// `proc_pidinfo(PROC_PIDTBSDINFO)` 取父 pid（`pbi_ppid`）与可执行文件名（`pbi_comm`）。
+/// `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)` 取父 pid（`pbsi_ppid`）与可执行文件名（`pbsi_comm`）。
+/// 不用 `PROC_PIDTBSDINFO`：它要求同用户，非 root 读不到 launchd，父链永远走不到根。
 pub(crate) fn process_parent_entry(pid: u32) -> Option<ProcessParentEntry> {
     if pid == 0 {
         return None;
     }
-    let info = process_bsdinfo(pid)?;
+    let info = process_short_bsdinfo(pid)?;
     Some(ProcessParentEntry {
         pid,
-        parent_pid: info.pbi_ppid,
-        name: comm_from_bsdinfo(&info).unwrap_or_default(),
+        parent_pid: info.pbsi_ppid,
+        name: comm_from_c_chars(&info.pbsi_comm).unwrap_or_default(),
     })
 }
 
@@ -1119,7 +1159,7 @@ pub(crate) fn process_parent_entries() -> Option<Vec<ProcessParentEntry>> {
     (!entries.is_empty()).then_some(entries)
 }
 
-/// 沿 `pbi_ppid` 上溯（孤儿进程已被挂到 launchd 下）。
+/// 沿 `pbsi_ppid` 上溯（孤儿进程已被挂到 launchd 下）。
 pub(crate) fn process_lineage(pid: u32) -> Option<ProcessLineage> {
     super::walk_process_lineage(pid, process_parent_entry)
 }

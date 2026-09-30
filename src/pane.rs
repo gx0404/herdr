@@ -4467,10 +4467,9 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-ssh-auth-sock-{tag}-{}-{stamp}",
-            std::process::id()
-        ));
+        // 固定短 /tmp：macOS 的 $TMPDIR 会让其下的 agent.sock 超出 sun_path（104 字节）。
+        let dir =
+            std::path::PathBuf::from(format!("/tmp/hsa-{tag}-{}-{stamp}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create ssh auth sock test dir");
         dir
     }

@@ -273,7 +273,15 @@ impl SshAskpassChannel {
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok(stream) => {
+                    Ok(mut stream) => {
+                        // macOS hands out accepted streams with the listener's
+                        // O_NONBLOCK (Linux does not); frame reads need blocking,
+                        // as in attach::prepare_remote_bridge_stream.
+                        if let Err(error) = crate::ipc::set_local_stream_polling(&mut stream, false)
+                        {
+                            tracing::debug!(%error, "SSH askpass stream setup failed");
+                            continue;
+                        }
                         // Each prompt is served on its own thread: answering
                         // may wait for a human, and the accept loop (and the
                         // channel's Drop) must stay responsive meanwhile.

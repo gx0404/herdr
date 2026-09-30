@@ -1746,7 +1746,7 @@ mod tests {
         let (api_tx, responder) =
             spawn_pane_get_responder(crate::api::schema::AgentStatus::Blocked);
 
-        let (mut client, server, _path) = local_stream_pair("api-events-wait-initial");
+        let (mut client, server, _path) = local_stream_pair("api-wait-initial");
         client
             .write_all(br#"{"id":"wait_1","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"pane_1","agent_status":"blocked"},"timeout_ms":1000}}"#)
             .unwrap();
@@ -1773,7 +1773,7 @@ mod tests {
         let (api_tx, responder) =
             spawn_pane_get_responder(crate::api::schema::AgentStatus::Unknown);
 
-        let (mut client, server, _path) = local_stream_pair("api-events-wait-timeout");
+        let (mut client, server, _path) = local_stream_pair("api-wait-timeout");
         client
             .write_all(br#"{"id":"wait_2","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"pane_1","agent_status":"blocked"},"timeout_ms":30}}"#)
             .unwrap();

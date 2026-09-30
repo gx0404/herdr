@@ -863,14 +863,20 @@ mod tests {
     use interprocess::local_socket::traits::Listener as _;
 
     fn wait_test_stream_pair(name: &str) -> (LocalStream, LocalStream, std::path::PathBuf) {
-        let path = std::env::temp_dir().join(format!(
+        let filename = format!(
             "herdr-wait-{name}-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_nanos())
                 .unwrap_or_default()
-        ));
+        );
+        // 同 server::client_transport 的测试 socket：unix 用短 /tmp，macOS 的
+        // $TMPDIR 会让路径超出 sun_path（104 字节）。
+        #[cfg(unix)]
+        let path = std::path::PathBuf::from("/tmp").join(filename);
+        #[cfg(windows)]
+        let path = std::env::temp_dir().join(filename);
         let listener = crate::ipc::bind_local_listener(&path).expect("bind test socket");
         let client = crate::ipc::connect_local_stream(&path).expect("connect test socket");
         let server = listener.accept().expect("accept test socket");
