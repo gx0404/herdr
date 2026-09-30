@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -274,7 +275,13 @@ def _validate_domain_prose(root: Path, routes: RuleRoutes) -> None:
 
 
 def _normalize_scope_path(raw: str, root: Path) -> str:
-    if not raw or "\\" in raw:
+    if not raw:
+        raise RuleManifestError(f"scope 路径无效：{raw!r}")
+    if os.name == "nt":
+        # Windows 调用方按系统习惯传反斜杠绝对路径；分隔符先归一为 /，
+        # 再走与 posix 相同的校验（字面反斜杠在 posix 是非法 scope）。
+        raw = raw.replace("\\", "/")
+    elif "\\" in raw:
         raise RuleManifestError(f"scope 路径无效：{raw!r}")
     candidate = Path(raw)
     if candidate.is_absolute():
@@ -389,6 +396,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Windows CI 的 cp1252 控制台打印中文错误/摘要会 UnicodeEncodeError。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = _parser()
     args = parser.parse_args(argv)
     try:

@@ -702,7 +702,7 @@ pub(super) struct PreparedRemoteHerdr {
 
 #[derive(Clone)]
 pub(super) struct ManagedSshOptions {
-    config_path: PathBuf,
+    pub(super) config_path: PathBuf,
     pinned_known_hosts: Option<PathBuf>,
     /// Multiplexing control socket of the managed config. Callers with
     /// long-lived independent children (saved bridges, port forwards) clear

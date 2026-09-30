@@ -143,6 +143,11 @@ async function startFlakyActivityServer(name: string, dropActivity: number, drop
   const recordingSocketPath = join(tmpdir(), `herdr-${name}-${process.pid}.sock`);
   socketPath = recordingSocketPath;
   await rm(recordingSocketPath, { force: true });
+  // Windows 没有 Unix domain socket：Pi 资产把 HERDR_SOCKET_PATH 当作管道名
+  // 拼到 \\.\pipe\ 后面（见 pi/herdr-agent-state.ts），因此这里监听同一条命名
+  // 管道，并给资产传干净的裸管道名（不能含路径分隔符）。
+  const pipeName = `herdr-${name}-${process.pid}`;
+  const isWindows = process.platform === "win32";
 
   const requests: unknown[] = [];
   let dropped = 0;
@@ -172,9 +177,9 @@ async function startFlakyActivityServer(name: string, dropActivity: number, drop
   server = recordingServer;
   await new Promise<void>((resolve, reject) => {
     recordingServer.once("error", reject);
-    recordingServer.listen(recordingSocketPath, resolve);
+    recordingServer.listen(isWindows ? `\\\\.\\pipe\\${pipeName}` : recordingSocketPath, resolve);
   });
-  configureIntegrationEnvironment(recordingSocketPath);
+  configureIntegrationEnvironment(isWindows ? pipeName : recordingSocketPath);
   return requests;
 }
 

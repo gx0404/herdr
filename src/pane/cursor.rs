@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use super::terminal::TerminalCursorState;
 
 pub(crate) const CURSOR_POSITION_SETTLE: Duration = Duration::from_millis(20);
-const CURSOR_POSITION_MAX_HOLD: Duration = Duration::from_millis(100);
+pub(crate) const CURSOR_POSITION_MAX_HOLD: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Default)]
 pub(crate) struct DecscusrTracker {

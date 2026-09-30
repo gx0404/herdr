@@ -17,15 +17,22 @@ SCRIPT_PATH = PROJECT_ROOT / "scripts" / "setup_zig.py"
 
 
 class PinTableTests(unittest.TestCase):
-    def test_pins_cover_four_platforms_with_valid_shas(self) -> None:
+    def test_pins_cover_all_platforms_with_valid_shas(self) -> None:
         self.assertEqual(
-            {"x86_64-linux", "aarch64-linux", "x86_64-macos", "aarch64-macos"},
+            {
+                "x86_64-linux",
+                "aarch64-linux",
+                "x86_64-macos",
+                "aarch64-macos",
+                "x86_64-windows",
+            },
             set(setup_zig.PINS),
         )
         for key, pin in setup_zig.PINS.items():
             self.assertEqual(len(pin["sha256"]), 64, key)
             int(pin["sha256"], 16)  # 必须是十六进制
-            self.assertEqual(pin["tarball"], f"zig-{key}-{setup_zig.ZIG_VERSION}.tar.xz")
+            suffix = ".zip" if key.endswith("windows") else ".tar.xz"
+            self.assertEqual(pin["tarball"], f"zig-{key}-{setup_zig.ZIG_VERSION}{suffix}")
 
     def test_download_url_points_at_pinned_release(self) -> None:
         self.assertTrue(setup_zig.DOWNLOAD_BASE.startswith("https://ziglang.org/download/0.16.0/"))
@@ -80,6 +87,7 @@ class CheckModeTests(unittest.TestCase):
         self.assertIn(b"MISSING", result.stdout)
         self.assertFalse((self.root / "zig-home").exists(), "check 不得创建目录")
 
+    @unittest.skipIf(os.name == "nt", "伪造的是 unix shell 脚本，Windows 无法执行")
     def test_check_reports_installed_fake_binary(self) -> None:
         zig_dir = self.root / "zig-home" / setup_zig.INSTALL_DIR_NAME
         zig_dir.mkdir(parents=True)
@@ -97,6 +105,7 @@ class CheckModeTests(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn(b"--force", result.stderr)
 
+    @unittest.skipIf(os.name == "nt", "伪造的是 unix shell 脚本，Windows 无法执行")
     def test_install_is_idempotent_when_valid(self) -> None:
         zig_dir = self.root / "zig-home" / setup_zig.INSTALL_DIR_NAME
         zig_dir.mkdir(parents=True)

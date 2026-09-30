@@ -27,6 +27,13 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+
+# Windows cp1252 控制台打印中文状态会 UnicodeEncodeError；check/install 输出
+# 含中文提示，模块级重配保证 CLI 与被测调用都稳定。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ZIG_VERSION = "0.16.0"
 INSTALL_DIR_NAME = f"zig-{ZIG_VERSION}"
@@ -47,6 +54,11 @@ PINS: dict[str, dict[str, str]] = {
     "aarch64-macos": {
         "tarball": f"zig-aarch64-macos-{ZIG_VERSION}.tar.xz",
         "sha256": "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489",
+    },
+    "x86_64-windows": {
+        # 官方 Windows 包是 zip；sha256 取自 ziglang.org download 页钉版。
+        "tarball": f"zig-x86_64-windows-{ZIG_VERSION}.zip",
+        "sha256": "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e",
     },
 }
 DOWNLOAD_BASE = f"https://ziglang.org/download/{ZIG_VERSION}/"
@@ -84,7 +96,9 @@ def platform_key() -> str:
     machine = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(
         platform.machine().lower(), ""
     )
-    system = {"linux": "linux", "darwin": "macos", "macos": "macos"}.get(platform.system().lower(), "")
+    system = {"linux": "linux", "darwin": "macos", "macos": "macos", "windows": "windows"}.get(
+        platform.system().lower(), ""
+    )
     key = f"{machine}-{system}"
     if key not in PINS:
         raise SetupZigError(
@@ -106,7 +120,13 @@ def install_dir() -> Path:
 
 
 def zig_binary() -> Path:
-    return install_dir() / "zig"
+    # Windows 官方包里是 zig.exe；兼容手工布局里无后缀的 zig。
+    names = ("zig.exe", "zig") if os.name == "nt" else ("zig",)
+    for name in names:
+        candidate = install_dir() / name
+        if candidate.is_file():
+            return candidate
+    return install_dir() / names[0]
 
 
 def _run_zig_version(binary: Path | str) -> str | None:
@@ -216,6 +236,13 @@ def _extract(archive: Path, dest: Path) -> None:
         if result.returncode != 0:
             raise SetupZigError(f"tar 解压失败：{result.stderr.strip()}")
         return
+    if archive.suffix == ".zip":
+        # Windows 官方包是 zip：优先系统 tar（bsdtar 可解 zip），后备 python zipfile。
+        import zipfile
+
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(dest)  # 内容已由 sha256 钉版校验
+        return
     # 后备：部分 python 构建缺少 lzma 模块或 filter 参数（3.10 无 filter=）。
     with tarfile.open(archive, "r:xz") as tf:
         try:
@@ -249,8 +276,10 @@ def install(force: bool) -> int:
             raise SetupZigError(f"sha256 校验失败：{digest} != {pin['sha256']}")
         # 解压优先走系统 tar（部分 python 构建缺 lzma）；sha256 已校验完整性。
         _extract(archive, tmp_root)
-        extracted = tmp_root / pin["tarball"].removesuffix(".tar.xz")
-        zig = extracted / "zig"
+        tarball = pin["tarball"]
+        stem = tarball.removesuffix(".tar.xz") if tarball.endswith(".tar.xz") else tarball.removesuffix(".zip")
+        extracted = tmp_root / stem
+        zig = extracted / ("zig.exe" if os.name == "nt" else "zig")
         if not zig.is_file():
             raise SetupZigError(f"tarball 结构异常：缺少 {zig}")
         staged = tmp_root / INSTALL_DIR_NAME

@@ -22,6 +22,8 @@ mod wide_char_tests;
 #[cfg(windows)]
 mod windows_recent_fallback;
 
+#[cfg(all(test, windows))]
+use super::cursor::CURSOR_POSITION_MAX_HOLD;
 #[cfg(test)]
 use super::cursor::CURSOR_POSITION_SETTLE;
 use super::cursor::{CursorPositionSettleState, DecscusrTracker};
@@ -7067,9 +7069,27 @@ mod tests {
         assert!(!expired.visible);
 
         pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l\x1b[?25h", &tx);
-        let after = pane_terminal.cursor_state().expect("批次结束后光标");
-        assert!(after.visible);
-        assert_eq!((after.x, after.y), (9, 9));
+        #[cfg(unix)]
+        {
+            let after = pane_terminal.cursor_state().expect("批次结束后光标");
+            assert!(after.visible);
+            assert_eq!((after.x, after.y), (9, 9));
+        }
+        #[cfg(windows)]
+        {
+            // Windows 的光标沉降会把批次提交的跳变最多压 100ms（ConPTY 在批次
+            // 结束后还会自绘修补）——该语义由
+            // `cursor_settle_ignores_intermediate_synchronized_frame_positions`
+            // 钉住；这里改为断言沉降窗外能读到批次最终位置。
+            let mut core = pane_terminal.core.lock().unwrap();
+            let current = current_cursor_state(&mut core);
+            let settled = core
+                .cursor_settle_state
+                .reported_cursor(current, Instant::now() + CURSOR_POSITION_MAX_HOLD)
+                .expect("沉降窗外有光标");
+            assert!(settled.visible);
+            assert_eq!((settled.x, settled.y), (9, 9));
+        }
     }
 
     /// 从未被渲染过的 pane（刚 attach / 从未聚焦）在批次进行中首次被读光标：
@@ -7096,9 +7116,24 @@ mod tests {
         assert_eq!(pane_terminal.cursor_state(), Some(during));
 
         pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l\x1b[?25h", &tx);
-        let after = pane_terminal.cursor_state().expect("批次结束后光标");
-        assert_eq!((after.x, after.y), (11, 11));
-        assert!(after.visible);
+        #[cfg(unix)]
+        {
+            let after = pane_terminal.cursor_state().expect("批次结束后光标");
+            assert_eq!((after.x, after.y), (11, 11));
+            assert!(after.visible);
+        }
+        #[cfg(windows)]
+        {
+            // 同 cursor_state_reuses：Windows 沉降窗外断言批次最终位置。
+            let mut core = pane_terminal.core.lock().unwrap();
+            let current = current_cursor_state(&mut core);
+            let settled = core
+                .cursor_settle_state
+                .reported_cursor(current, Instant::now() + CURSOR_POSITION_MAX_HOLD)
+                .expect("沉降窗外有光标");
+            assert_eq!((settled.x, settled.y), (11, 11));
+            assert!(settled.visible);
+        }
     }
 
     #[test]

@@ -1472,8 +1472,9 @@ mod tests {
             "首帧可见性未知，必须先隐藏再画"
         );
         assert!(
-            first_str.trim_end().ends_with("\x1b[?25l"),
-            "无光标帧以隐藏光标收尾"
+            first_str.trim_end().ends_with("\x1b[?25l\x1b[?2026l"),
+            "无光标帧以隐藏光标收尾（同步块在光标态之后关闭）: 尾部 {:?}",
+            &first_str[first_str.len().saturating_sub(40)..]
         );
         encoder.commit(frame.clone(), first);
 
@@ -1517,7 +1518,7 @@ mod tests {
         let first = encoder.encode(&visible, true);
         assert!(String::from_utf8(first.bytes.clone())
             .unwrap()
-            .ends_with("\x1b[?25h"));
+            .ends_with("\x1b[?25h\x1b[?2026l"));
         encoder.commit(visible.clone(), first);
 
         let mut changed = visible.clone();

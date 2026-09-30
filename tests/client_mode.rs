@@ -1242,14 +1242,31 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
             "Local input must become usable while the remote bridge remains stopped"
         );
     }
-    input
-        .write_all(&sidebar_row_click(&screen_text(), "remote-ready"))
-        .unwrap();
-    assert!(wait_until(
-        Duration::from_secs(10),
-        Duration::from_millis(20),
-        || screen_text().contains("REMOTE_STILL_SELECTED")
-    ));
+    // 桥刚从 SIGSTOP 恢复：停顿期间侧栏可能显示过 `Endpoint unavailable` 提示框
+    // （见 sidebar_row_click_ignores_notice_borders），恢复后提示框收起会让下方行
+    // 平移，停顿前算出的一次性坐标可能落在别的行上。按最新画面重算行号重发点击，
+    // 直到远端画面回来；重复选中同一工作区是幂等的。
+    assert!(
+        wait_until(Duration::from_secs(15), Duration::from_millis(250), || {
+            let screen = screen_text();
+            if screen.contains("REMOTE_STILL_SELECTED") {
+                return true;
+            }
+            let sidebar_has_row = screen.lines().any(|line| {
+                line.split('│')
+                    .next()
+                    .is_some_and(|sidebar| sidebar.contains("remote-ready"))
+            });
+            if sidebar_has_row {
+                input
+                    .write_all(&sidebar_row_click(&screen, "remote-ready"))
+                    .unwrap();
+            }
+            false
+        }),
+        "selecting the remote after its bridge resumes must show its screen again: {}",
+        screen_text()
+    );
 
     let watermark = output_len(&output);
     remote_server.child.kill().unwrap();

@@ -6,6 +6,11 @@ import { join } from "node:path";
 
 const script = join(import.meta.dir, "herdr-agent-state.sh");
 
+// herdr-agent-state.sh 是 unix 钩子：Windows 安装的是 herdr-agent-state.ps1
+// （src/integration/mod.rs::KIMI_HOOK_ASSET），产品从不在 Windows 上经 Git Bash
+// 运行 .sh（Windows 的 Python 也没有 AF_UNIX）。驱动 .sh 的用例只在 unix 跑。
+const hookTest = process.platform === "win32" ? test.skip : test;
+
 let server: Server | undefined;
 let tempDir: string | undefined;
 
@@ -100,7 +105,7 @@ test("every installed hook event exists at the minimum supported Kimi version", 
   expect(events.filter((event) => !HOOK_EVENTS_AT_MIN_VERSION.has(event))).toEqual([]);
 });
 
-test("a task_id payload maps to a background task node whatever the event is", async () => {
+hookTest("a task_id payload maps to a background task node whatever the event is", async () => {
   const { socketPath, requests } = await listen();
   // TaskStarted is not installed at the current KIMI_MIN_VERSION; the script
   // already handles it so the subscription can come back as a one-line change.
@@ -127,7 +132,7 @@ test("a task_id payload maps to a background task node whatever the event is", a
   });
 });
 
-test("task notifications name the task node, agent-kind tasks send a bare hint", async () => {
+hookTest("task notifications name the task node, agent-kind tasks send a bare hint", async () => {
   const { socketPath, requests } = await listen();
   const notification = {
     hook_event_name: "Notification",
@@ -143,7 +148,7 @@ test("task notifications name the task node, agent-kind tasks send a bare hint",
   expect(requests.map((request) => request.params.hint)).toEqual(["Notification", "Notification"]);
 });
 
-test("subagent events and unreadable payloads still send a hint", async () => {
+hookTest("subagent events and unreadable payloads still send a hint", async () => {
   const { socketPath, requests } = await listen();
 
   await runHook("activity", JSON.stringify({ hook_event_name: "SubagentStop", agent_name: "coder" }), herdrEnv(socketPath));
@@ -164,7 +169,7 @@ test("subagent events and unreadable payloads still send a hint", async () => {
   expect(requests.map((request) => request.params.hint)).toEqual(["SubagentStop", undefined, undefined]);
 });
 
-test("lifecycle actions keep their existing request shapes", async () => {
+hookTest("lifecycle actions keep their existing request shapes", async () => {
   const { socketPath, requests } = await listen();
   const sessionId = "session_0f0f0f0f-1111-4222-8333-444455556666";
 
@@ -177,7 +182,7 @@ test("lifecycle actions keep their existing request shapes", async () => {
   expect(requests[1].params).toMatchObject({ session_start_source: "startup", agent_session_id: sessionId });
 });
 
-test("a turn that ends with an error reports idle, like a completed turn", async () => {
+hookTest("a turn that ends with an error reports idle, like a completed turn", async () => {
   const { socketPath, requests } = await listen();
   const sessionId = "session_0f0f0f0f-1111-4222-8333-444455556666";
   // Kimi fires StopFailure instead of Stop when a turn fails (smoke M3: a
@@ -213,7 +218,7 @@ test("the installed hook table maps every turn-ending event to idle", async () =
   expect(idleEvents.sort()).toEqual(["Interrupt", "Stop", "StopFailure"]);
 });
 
-test("the hook stays silent outside Herdr and for unknown actions", async () => {
+hookTest("the hook stays silent outside Herdr and for unknown actions", async () => {
   const { socketPath, requests } = await listen();
   const payload = JSON.stringify({ hook_event_name: "TaskStarted", task_id: "bash-abc12345" });
 
@@ -239,7 +244,7 @@ async function sessionDirectory(root: string, bucket = "wd_demo_hash", id = sess
   return directory;
 }
 
-test("pane-specific Kimi home reports an ID-bound session directory", async () => {
+hookTest("pane-specific Kimi home reports an ID-bound session directory", async () => {
   const { socketPath, requests } = await listen();
   for (const pane of ["one", "two"]) {
     const root = join(tempDir!, pane);
@@ -250,7 +255,7 @@ test("pane-specific Kimi home reports an ID-bound session directory", async () =
   }
 });
 
-test("late directory discovery supplements the session before the lifecycle with a fresh sequence", async () => {
+hookTest("late directory discovery supplements the session before the lifecycle with a fresh sequence", async () => {
   const { socketPath, requests } = await listen();
   const root = join(tempDir!, "home");
   const env = { ...herdrEnv(socketPath), KIMI_CODE_HOME: root };
@@ -269,7 +274,7 @@ test("late directory discovery supplements the session before the lifecycle with
   }
 });
 
-test("ambiguous directories, mismatched metadata and escaping symlinks never become paths", async () => {
+hookTest("ambiguous directories, mismatched metadata and escaping symlinks never become paths", async () => {
   const { socketPath, requests } = await listen();
   const ambiguous = join(tempDir!, "ambiguous");
   await sessionDirectory(ambiguous, "first");
@@ -287,7 +292,7 @@ test("ambiguous directories, mismatched metadata and escaping symlinks never bec
   }
 });
 
-test("unset home uses absolute HOME but empty and relative overrides never fall back", async () => {
+hookTest("unset home uses absolute HOME but empty and relative overrides never fall back", async () => {
   const { socketPath, requests } = await listen();
   const directory = await sessionDirectory(join(tempDir!, ".kimi-code"));
   const env = { ...herdrEnv(socketPath), HOME: tempDir! };
@@ -299,7 +304,7 @@ test("unset home uses absolute HOME but empty and relative overrides never fall 
   }
 });
 
-test("directory lookup is bounded and legacy metadata remains supported", async () => {
+hookTest("directory lookup is bounded and legacy metadata remains supported", async () => {
   const { socketPath, requests } = await listen();
   const root = join(tempDir!, "bounded");
   const directory = await sessionDirectory(root);
@@ -317,7 +322,7 @@ test("directory lookup is bounded and legacy metadata remains supported", async 
   expect(requests.at(-1)!.params.agent_session_id).toBe(sessionId);
 });
 
-test("oversized metadata and symlinked metadata omit the path without losing state", async () => {
+hookTest("oversized metadata and symlinked metadata omit the path without losing state", async () => {
   const { socketPath, requests } = await listen();
   const root = join(tempDir!, "metadata");
   const directory = await sessionDirectory(root);
@@ -346,7 +351,7 @@ test("PowerShell supplements paths before lifecycle with independent sequence nu
   expect(source.indexOf('$seq++')).toBeLessThan(source.indexOf('& $herdr pane report-agent '));
 });
 
-test("deeply nested malformed metadata cannot suppress lifecycle reports", async () => {
+hookTest("deeply nested malformed metadata cannot suppress lifecycle reports", async () => {
   const { socketPath, requests } = await listen();
   const root = join(tempDir!, "nested");
   const directory = await sessionDirectory(root);

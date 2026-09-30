@@ -537,8 +537,8 @@
       "anchor": "project-infra（构建、配置模型与仓库基础） > 构建与命令面",
       "doc": "docs/AGENT_RULES/project-infra.md",
       "id": "docs-agent-rules-project-infra-md-project-infra-构建-配置模型与仓库基础-构建与命令面",
-      "source_sha256": "f9d042098614784645c8d6f532865ed9ebfad53006c8f20ddca1c5930ab483cb",
-      "text": "## 构建与命令面\n\n- 任务入口是 `just`（无 Makefile）；语义与新增 recipe 见 `docs/MAKE_COMMANDS.md`。\n  修改 recipe 后必须同步该文档与 CI 调用面（`.github/workflows/ci.yml` 等，\n  归 `governance.md`/`release-channels.md`）。\n- **Zig 工具链是钉版受控的**：vendored libghostty-vt 需要 Zig 0.16.0。仓库自包含\n  方案：`scripts/setup_env.sh`（总入口）与 `scripts/setup_zig.py` 把官方 tarball\n  （sha256 钉死）装进 `<repo>/.local/toolchains/zig/`；`build.rs::resolve_zig` 按\n  `$ZIG` > 项目内钉版 > PATH 解析，装完即可裸 `cargo build`。CI 由 workflow 的\n  setup-zig 步骤提供。多 worktree 共享一份时设 `HERDR_ZIG_HOME`。升级 Zig =\n  同步 `setup_zig.py` 钉版表、`build.rs::resolve_zig` 目录名与\n  `vendored-libghostty-vt.md` 版本要求，重跑 `just setup-zig --install --force`。\n- `Cargo.toml` 是版本唯一真源（当前语义见 `release-channels.md`）；`Cargo.lock`\n  直接被 `nix/package.nix` 以 `cargoLock.lockFile` 引入，release 版本 bump 不需\n  要单独更新 Nix cargo hash；若日后加入 Cargo git 依赖，必须随该变更补\n  `cargoLock.outputHashes`。\n- `build.rs` 与 vendored 绑定生成（bindgen/libghostty）流程见\n  `vendored-libghostty-vt.md`；改构建脚本后跑 `just build` 验证两种平台路径。"
+      "source_sha256": "296c4250ecbf7d3469ed29b37334f8de64db51dffce4e9fa2ad9849ee6913a46",
+      "text": "## 构建与命令面\n\n- 任务入口是 `just`（无 Makefile）；语义与新增 recipe 见 `docs/MAKE_COMMANDS.md`。\n  修改 recipe 后必须同步该文档与 CI 调用面（`.github/workflows/ci.yml` 等，\n  归 `governance.md`/`release-channels.md`）。\n- **Zig 工具链是钉版受控的**：vendored libghostty-vt 需要 Zig 0.16.0。仓库自包含\n  方案：`scripts/setup_env.sh`（总入口）与 `scripts/setup_zig.py` 把官方归档（Linux /\n  macOS 为 tarball、Windows 为 zip，sha256 钉死）装进 `<repo>/.local/toolchains/zig/`；\n  `crates/ghostty-vt/build.rs::resolve_zig` 按 `$ZIG` > 项目内钉版 > PATH 解析，装完\n  即可裸 `cargo build`。CI 由 workflow 的 setup-zig 步骤提供。多 worktree 共享一份时设\n  `HERDR_ZIG_HOME`。升级 Zig = 同步 `setup_zig.py` 钉版表、\n  `crates/ghostty-vt/build.rs::resolve_zig` 目录名与\n  `vendored-libghostty-vt.md` 版本要求，重跑 `just setup-zig --install --force`。\n- `Cargo.toml` 是版本唯一真源（当前语义见 `release-channels.md`）；`Cargo.lock`\n  直接被 `nix/package.nix` 以 `cargoLock.lockFile` 引入，release 版本 bump 不需\n  要单独更新 Nix cargo hash；若日后加入 Cargo git 依赖，必须随该变更补\n  `cargoLock.outputHashes`。\n- `build.rs` 与 vendored 绑定生成（bindgen/libghostty）流程见\n  `vendored-libghostty-vt.md`；改构建脚本后跑 `just build` 验证两种平台路径。"
     },
     {
       "anchor": "project-infra（构建、配置模型与仓库基础） > 配置模型（src/config）",
@@ -6459,8 +6459,8 @@
       "anchor": "structure",
       "doc": "src/pane/cursor.rs",
       "id": "src-pane-cursor-rs-structure",
-      "source_sha256": "7d47d9c9d91233e141b095040851e57c5f49e80ef0e32d1bb9fe2732b70775b9",
-      "text": "公开项：\npub(crate) const CURSOR_POSITION_SETTLE: Duration = Duration::from_millis(20);\npub(crate) struct DecscusrTracker {\nimpl DecscusrTracker {\npub(crate) fn observe(&mut self, bytes: &[u8]) {\npub(crate) fn cursor_shape_overridden(&self) -> bool {\npub(crate) fn cursor_shape(&self) -> u8 { — 最近一次 DECSCUSR 参数（0 = 终端默认）。\npub(crate) struct CursorPositionSettleState {\nimpl CursorPositionSettleState {\npub(crate) fn observe(&mut self, current: Option<TerminalCursorState>, now: Instant) {\npub(crate) fn reported_cursor(\npub(crate) fn pending(&self) -> bool {\npub(crate) fn render_delay(&self) -> Option<Duration> {"
+      "source_sha256": "5b08a9d24f327e659098ea7adb18edc31000b962fe60fe5136ba4fe9e8332d4a",
+      "text": "公开项：\npub(crate) const CURSOR_POSITION_SETTLE: Duration = Duration::from_millis(20);\npub(crate) const CURSOR_POSITION_MAX_HOLD: Duration = Duration::from_millis(100);\npub(crate) struct DecscusrTracker {\nimpl DecscusrTracker {\npub(crate) fn observe(&mut self, bytes: &[u8]) {\npub(crate) fn cursor_shape_overridden(&self) -> bool {\npub(crate) fn cursor_shape(&self) -> u8 { — 最近一次 DECSCUSR 参数（0 = 终端默认）。\npub(crate) struct CursorPositionSettleState {\nimpl CursorPositionSettleState {\npub(crate) fn observe(&mut self, current: Option<TerminalCursorState>, now: Instant) {\npub(crate) fn reported_cursor(\npub(crate) fn pending(&self) -> bool {\npub(crate) fn render_delay(&self) -> Option<Duration> {"
     },
     {
       "anchor": "structure",

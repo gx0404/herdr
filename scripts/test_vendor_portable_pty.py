@@ -21,7 +21,7 @@ class VendorPortablePtyTests(unittest.TestCase):
 
     def test_cargo_patch_points_at_vendored_tree(self) -> None:
         project_root = Path(__file__).resolve().parent.parent
-        cargo_toml = (project_root / "Cargo.toml").read_text()
+        cargo_toml = (project_root / "Cargo.toml").read_text(encoding="utf-8")
 
         self.assertIn('portable-pty = "=0.9.0"', cargo_toml)
         self.assertIn("[patch.crates-io]", cargo_toml)
@@ -63,7 +63,7 @@ class VendorPortablePtyTests(unittest.TestCase):
             return
 
         self.assertTrue(index.exists())
-        text = index.read_text()
+        text = index.read_text(encoding="utf-8")
         missing = [
             path.relative_to(project_root).as_posix()
             for path in patches
@@ -74,7 +74,7 @@ class VendorPortablePtyTests(unittest.TestCase):
     def test_listed_local_vendor_patches_exist(self) -> None:
         project_root = Path(__file__).resolve().parent.parent
         index = project_root / "vendor" / "portable-pty.patches.md"
-        text = index.read_text()
+        text = index.read_text(encoding="utf-8")
         listed = [
             line.split("`", 2)[1]
             for line in text.splitlines()
@@ -106,7 +106,7 @@ class VendorPortablePtyTests(unittest.TestCase):
     def test_windows_conpty_loader_uses_only_controlled_sources(self) -> None:
         project_root = Path(__file__).resolve().parent.parent
         source = project_root / "vendor" / "portable-pty" / "src" / "win" / "psuedocon.rs"
-        text = source.read_text()
+        text = source.read_text(encoding="utf-8")
 
         self.assertIn("std::env::current_exe()", text)
         self.assertIn('.join("conpty")', text)

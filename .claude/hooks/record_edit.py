@@ -23,6 +23,10 @@ def _repo_root() -> Path | None:
 
 
 def main() -> int:
+    # Windows cp1252 控制台打印中文决策理由会崩溃，安全门必须稳定输出。
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:

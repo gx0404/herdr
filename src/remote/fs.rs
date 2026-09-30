@@ -617,27 +617,43 @@ mod tests {
         let first = RemoteFs::connect(&profile).expect("connect");
         let second = RemoteFs::connect(&profile).expect("connect");
         let third = RemoteFs::connect(&other).expect("connect");
-        assert_eq!(
-            first.config.options.control_path, second.config.options.control_path,
-            "同档案复用同一个控制路径"
-        );
+        // 共享逻辑按目录等价性检验：同档案的配置落在同一个可复用目录，不同档案
+        // 各自一个目录。ControlPath 只在支持 multiplexing 的平台（Unix）存在；
+        // Windows OpenSSH 没有 ControlMaster，control_path 按设计为 None。
+        let first_dir = first
+            .config
+            .options
+            .config_path
+            .parent()
+            .expect("config dir")
+            .to_path_buf();
+        let second_dir = second
+            .config
+            .options
+            .config_path
+            .parent()
+            .expect("config dir")
+            .to_path_buf();
+        let third_dir = third
+            .config
+            .options
+            .config_path
+            .parent()
+            .expect("config dir")
+            .to_path_buf();
+        assert_eq!(first_dir, second_dir, "同档案复用同一个控制路径目录");
+        #[cfg(unix)]
         assert!(first.config.options.control_path.is_some());
-        assert_ne!(
-            first.config.options.control_path, third.config.options.control_path,
-            "不同档案不共享控制路径"
+        #[cfg(windows)]
+        assert!(
+            first.config.options.control_path.is_none(),
+            "Windows 无 ControlMaster，control_path 按设计为 None"
         );
+        assert_ne!(first_dir, third_dir, "不同档案不共享控制路径目录");
 
         // 复用目录按设计不随进程退出删除，测试自己收拾（独立复审 轻级）。
-        for path in [
-            first.config.options.control_path.as_ref(),
-            third.config.options.control_path.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::remove_dir_all(dir);
-            }
+        for dir in [first_dir, third_dir] {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 
