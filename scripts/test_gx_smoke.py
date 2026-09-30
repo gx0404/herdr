@@ -18,6 +18,10 @@ from scripts import gx_smoke_runtime as smoke
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# 运行时的进程身份与回收只实现了 Linux（/proc + pidfd）与 Windows（Win32 句柄）：
+# GX 只为这两类主机出包（release-channels.md），其他主机（macOS）跳过依赖它的用例。
+SMOKE_HOST = os.name == "nt" or sys.platform.startswith("linux")
+SMOKE_HOST_REASON = "GX smoke runtime supports only Linux and Windows hosts"
 
 
 class IsolationTests(unittest.TestCase):
@@ -38,6 +42,7 @@ class IsolationTests(unittest.TestCase):
         self.assertIn("allow_nested = true", smoke.CONFIG)
         self.assertIn("version_check = true", smoke.CONFIG)
 
+    @unittest.skipUnless(SMOKE_HOST, SMOKE_HOST_REASON)
     def test_current_process_identity_and_reused_pid_are_distinguished(self):
         identity = smoke.process_identity(os.getpid())
         self.assertIsNotNone(identity)
@@ -45,6 +50,7 @@ class IsolationTests(unittest.TestCase):
         self.assertFalse(smoke.same_process(identity + ":different-birth"))
         self.assertFalse(smoke.same_process(None))
 
+    @unittest.skipUnless(SMOKE_HOST, SMOKE_HOST_REASON)
     def test_stale_sweep_preserves_live_and_unmarked_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -265,6 +271,7 @@ class LinuxPidfdTests(unittest.TestCase):
             mocks["close"].assert_called_once_with(self.pidfd)
 
 
+@unittest.skipUnless(SMOKE_HOST, SMOKE_HOST_REASON)
 class WatchdogTests(unittest.TestCase):
     def test_detached_guard_preserves_worker_failure_diagnostics(self):
         result = subprocess.run(

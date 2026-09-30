@@ -7,6 +7,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -353,8 +354,16 @@ class GXPackageTests(unittest.TestCase):
         self.assertIn("changed during packaging", stderr.getvalue())
         self.assertFalse(dest.exists())
 
+    def native_package_kind(self) -> str:
+        # preflight 只接受原生主机：GX 只出 Windows EXE 与 Linux deb（release-channels.md）。
+        if os.name == "nt":
+            return "windows"
+        if sys.platform == "linux":
+            return "linux"
+        self.skipTest("GX packaging runs only on native Windows or Linux hosts")
+
     def test_preflight_checks_installed_toolchain_without_installing(self) -> None:
-        kind = "windows" if os.name == "nt" else "linux"
+        kind = self.native_package_kind()
         (self.root / "packaging/windows").mkdir()
         (self.root / "packaging/windows/herdr-gx.iss").write_text("[Setup]\n", encoding="utf-8")
         (self.root / "packaging/windows/conpty.json").write_text("{}", encoding="utf-8")
@@ -372,7 +381,7 @@ class GXPackageTests(unittest.TestCase):
         self.assertIn("--installed", calls[2].args[0])
 
     def test_preflight_missing_target_fails_without_installing(self) -> None:
-        kind = "windows" if os.name == "nt" else "linux"
+        kind = self.native_package_kind()
         results = ["rustc 1.96.1 (hash date)", "cargo 1.96.1 (hash date)", "unrelated-target"]
         with mock.patch.object(package.platform, "machine", return_value="x86_64"), mock.patch.object(package, "tool", side_effect=lambda name, root: Path(name)), mock.patch.object(package, "output", side_effect=results), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(ValueError, "not installed"):
