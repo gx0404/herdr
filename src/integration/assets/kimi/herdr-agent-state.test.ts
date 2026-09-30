@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,7 +29,9 @@ afterEach(async () => {
 type Request = { id: string; method: string; params: Record<string, unknown> };
 
 async function listen(): Promise<{ socketPath: string; requests: Request[] }> {
-  tempDir = await mkdtemp(join(tmpdir(), "herdr-kimi-hook-"));
+  // 钩子按规范路径（realpath）上报会话目录；macOS 的 tmpdir 在符号链接 /var ->
+  // /private/var 之下，期望值也要从规范路径推出。
+  tempDir = await realpath(await mkdtemp(join(tmpdir(), "herdr-kimi-hook-")));
   const socketPath = join(tempDir, "herdr.sock");
   const requests: Request[] = [];
   const listening = createServer((socket) => {
