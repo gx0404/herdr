@@ -135,6 +135,10 @@ pub enum ResponseResult {
         workspace_id: String,
         path: String,
         forced: bool,
+        /// Git 已注销该 worktree，但检出目录里有删不掉的文件、目录仍在磁盘上时给出该目录，
+        /// 需要手动删除；目录已删掉、只剩仍被占用的空目录（Git 可复用）或旧 server 时省略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leftover_path: Option<String>,
     },
     TabInfo {
         tab: TabInfo,

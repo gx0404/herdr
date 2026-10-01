@@ -243,6 +243,8 @@ pub const TEXTS: Texts = Texts {
         no_worktrees_found: "此仓库没有找到 Git 工作树。",
         unexpected_result: "端点返回了意外的工作树结果",
         prunable_cannot_open: "该检出目录已不存在，请运行 git worktree prune 清理。",
+        removed_with_leftovers: "工作树已移除，但部分文件未能删除",
+        leftover_path_fmt: "请手动删除残留目录：{path}",
     },
     settings: SettingsTexts {
         title: " 设置",

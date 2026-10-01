@@ -1111,7 +1111,11 @@ pub fn process_session_id(pid: u32) -> Option<ProcessSessionId> {
         return None;
     }
     let session = unsafe { libc::getsid(pid as libc::pid_t) };
-    (session > 0).then(|| ProcessSessionId(i64::from(session)))
+    (session > 0).then(|| ProcessSessionId {
+        id: i64::from(session),
+        instance: 0,
+        captured: 0,
+    })
 }
 
 /// 一次进程表遍历取出整批会话的成员 pid，返回与 `sessions` 一一对应的桶：关 N 个 pane
@@ -1128,7 +1132,7 @@ pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
             continue;
         }
         for (bucket, wanted) in buckets.iter_mut().zip(sessions) {
-            if wanted.0 == i64::from(session) {
+            if wanted.id == i64::from(session) {
                 bucket.push(pid);
             }
         }

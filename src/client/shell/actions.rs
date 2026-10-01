@@ -405,12 +405,14 @@ impl ClientShellState {
     ) -> bool {
         let kind = key.kind;
         let body = body.into();
-        // Rejected and Success are direct answers to a user action: they
-        // re-present on every occurrence instead of deduping into the seen
-        // set (a repeated identical notice restarts its lifetime).
+        // Rejected, Success and Warning are direct answers to a user action:
+        // they re-present on every occurrence instead of deduping into the
+        // seen set (a repeated identical notice restarts its lifetime).
         let transient = matches!(
             kind,
-            ClientEndpointNoticeKind::Rejected | ClientEndpointNoticeKind::Success
+            ClientEndpointNoticeKind::Rejected
+                | ClientEndpointNoticeKind::Success
+                | ClientEndpointNoticeKind::Warning
         );
         if transient {
             if self

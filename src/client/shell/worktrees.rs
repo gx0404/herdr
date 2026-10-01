@@ -514,12 +514,26 @@ impl ClientShellState {
                 );
                 true
             }
-            (PendingEndpointKind::WorktreeOpen, Ok(ResponseResult::WorktreeOpened { .. }))
-            | (
+            (PendingEndpointKind::WorktreeOpen, Ok(ResponseResult::WorktreeOpened { .. })) => {
+                self.overlay = None;
+                true
+            }
+            (
                 PendingEndpointKind::WorktreeRemove { .. },
-                Ok(ResponseResult::WorktreeRemoved { .. }),
+                Ok(ResponseResult::WorktreeRemoved { leftover_path, .. }),
             ) => {
                 self.overlay = None;
+                // git 已注销 worktree，但检出目录没删干净：不提示的话用户不知道要手动删，
+                // 之后在默认路径重建同一分支会被 git 以 already exists 拒绝。
+                if let Some(path) = leftover_path {
+                    let t = &crate::i18n::texts().worktree;
+                    self.push_endpoint_notice(
+                        ClientEndpointNoticeKind::Warning,
+                        "worktree_leftover",
+                        t.removed_with_leftovers,
+                        crate::i18n::fill(t.leftover_path_fmt, &[("path", &path)]),
+                    );
+                }
                 true
             }
             (PendingEndpointKind::WorktreeCreate, Err(error)) => {

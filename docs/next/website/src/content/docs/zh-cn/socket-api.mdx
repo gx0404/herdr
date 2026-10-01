@@ -137,7 +137,7 @@ CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSO
 
 `pane.current` 返回单个 `PaneInfo`。带有 `caller_pane_id` 时,Herdr 返回那个窗格。省略时,Herdr 返回当前聚焦的活动窗格。
 
-`pane.close` 在窗格被摘除后立即返回。Herdr 在后台按 SIGHUP、SIGTERM、SIGKILL 的顺序终止窗格内的进程,赖着不退的进程不再拖住同一连接或其它连接上的请求。需要确认这些进程已退出的调用方应轮询检查(例如对仍存活的窗格调用 `pane.process_info`,或自行检查进程),而不是假定响应返回时它们已经结束。
+`pane.close` 在窗格被摘除后立即返回。Herdr 在后台按 SIGHUP、SIGTERM、SIGKILL 的顺序终止窗格内的进程(Windows 上是先发控制台关闭事件、再终止进程,见 [Windows 支持](/zh-cn/docs/windows-beta/)),赖着不退的进程不再拖住同一连接或其它连接上的请求。需要确认这些进程已退出的调用方应轮询检查(例如对仍存活的窗格调用 `pane.process_info`,或自行检查进程),而不是假定响应返回时它们已经结束。
 
 终端滚动指标可用时,`PaneInfo` 包含 `scroll`:
 
@@ -274,7 +274,7 @@ herdr notification show "build failed" --body "api workspace" --position top-lef
 
 `client.window_title.clear` 把标题交还给 `ui.window_title`。响应是 `type: "client_window_title"`,带 `changed` 和 `set`、`cleared` 或 `no_foreground_client` 之一的 reason。
 
-Worktree 方法把 Git 检出作为 Herdr 工作区管理。`worktree.create` 创建检出,并返回新的 `workspace`、`tab`、`root_pane` 和 `worktree` 记录。请求的分支已在本地存在时检出它;否则从请求的 base 或 `HEAD` 创建分支。`worktree.open` 打开已有检出,或返回已打开的工作区。`worktree.remove` 对关联的子工作区运行 `git worktree remove`,从不删除分支。`worktree.list` 结果中的 `is_prunable` 标记目录已缺失但 Git 仍登记的关联检出;Herdr 在任何 Git 版本上都根据检出状态推导它,而不只依赖 Git 2.31+ 才输出的 `prunable` 行。
+Worktree 方法把 Git 检出作为 Herdr 工作区管理。`worktree.create` 创建检出,并返回新的 `workspace`、`tab`、`root_pane` 和 `worktree` 记录。请求的分支已在本地存在时检出它;否则从请求的 base 或 `HEAD` 创建分支。`worktree.open` 打开已有检出,或返回已打开的工作区。`worktree.remove` 对关联的子工作区运行 `git worktree remove`,从不删除分支。如果 Git 已注销该 worktree,但检出目录里有文件删不掉,删除仍算成功,`worktree_removed` 结果会带上 `leftover_path`,即仍留在磁盘上、需要手动删除的目录;没有文件残留（可能留下仍被其他程序占用的空目录，Git 可以复用）或 server 较旧时省略该字段。`worktree.list` 结果中的 `is_prunable` 标记目录已缺失但 Git 仍登记的关联检出;Herdr 在任何 Git 版本上都根据检出状态推导它,而不只依赖 Git 2.31+ 才输出的 `prunable` 行。
 
 从来源工作区创建 worktree:
 
@@ -821,7 +821,7 @@ server 只保留有界的近期事件环形缓冲。如果订阅方落后到**�
 窗格事件订阅包括 `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.agent_activity_changed`、`pane.output_matched`、`pane.agent_status_changed` 和 `pane.scroll_changed`。`pane.focused` 也会上报任意连接到此服务器的客户端手动选择窗格的变化，不会移动其他客户端的视图，且载荷不包含客户端身份。重复选择已选中的窗格不会再次发出事件。终端标题变化可能发出 `pane.updated`,但如果原始标题只有旋转指示符发生变化且 `terminal_title_stripped` 不变,则不会发出。`pane.scroll_changed` 只针对一个 `pane_id`,每当 Herdr 观察到滚动快照变化时,都会发出 `pane_id`、`workspace_id` 和当前 `scroll` 指标。
 布局事件订阅包括 `layout.updated`。该事件携带一个标签页更新后的 `PaneLayoutSnapshot`。使用 `session.snapshot` 维护缓存的客户端应将该事件作为重新读取受影响布局的通知；延迟到达的载荷可能早于最新快照。
 
-Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree.removed`。Worktree 事件描述 Git 检出的生命周期。`worktree.created` 包含打开的 `workspace` 和创建的 `worktree`。`worktree.opened` 包含目标 `workspace`、打开的 `worktree` 和 `already_open`。`worktree.removed` 包含 `workspace_id`、被移除的 `worktree` 和 `forced`。
+Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree.removed`。Worktree 事件描述 Git 检出的生命周期。`worktree.created` 包含打开的 `workspace` 和创建的 `worktree`。`worktree.opened` 包含目标 `workspace`、打开的 `worktree` 和 `already_open`。`worktree.removed` 包含 `workspace_id`、被移除的 `worktree` 和 `forced`，有文件残留时还会带上与 `worktree.remove` 结果相同的可选字段 `leftover_path`。
 
 生命周期事件用 `events.subscribe`。支持一次性等待时,专门的等待辅助命令会单独在文档中说明。
 

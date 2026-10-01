@@ -172,14 +172,80 @@ pub enum Signal {
 }
 
 /// 一棵 pane 进程树的锚点：Unix 上是会话 id（session leader 退出后仍然有效），Windows
-/// 没有会话语义、用 pane 自己的 child pid 代指这棵树。
+/// 没有会话语义、用 pane 自己的 child 进程实例代指这棵树。
 ///
 /// 终止阶梯在事件循环里对 child 快照一次锚点（[`process_session_id`]，单次廉价查询），
-/// 之后后台线程凭锚点枚举成员（[`session_processes_batch`]）。这样即便 child 在投递到
+/// 之后后台线程凭锚点枚举成员（`session_members_batch`）。这样即便 child 在投递到
 /// 执行之间被 `wait` 回收、进程表条目消失，会话里的孙进程仍然找得到，也不会因为 pid
 /// 被复用而误伤无关进程（HSR-01）。
+///
+/// Windows 的 pid 在进程退出、最后一个句柄关闭后就可能被复用，单靠 pid 认不出原来那个进程，
+/// 所以锚点还带着两个时刻（FILETIME，100 ns 刻度）：
+///
+/// - `instance`：根进程的创建时间。枚举时 pid 当前的主人创建时间对得上才算根进程本身。
+/// - `captured`：快照锚点的时刻。读它时根进程还占着这个 pid，此后拿到这个 pid 的进程（连同
+///   它的子进程）都创建于这一刻之后；根进程核对不上时（已退出且 pid 已空出，或 pid 已换了
+///   主人），只有创建于 `[instance, captured)` 之间、父 pid 指向它的进程才认作根进程留下的孤儿。
+///
+/// Unix 上两者恒为 0：会话 id 在会话还有成员时不会被复用，不需要核对。同一个根进程两次快照
+/// 的 `captured` 不同，比较是否同一个根用 [`ProcessSessionId::same_root`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ProcessSessionId(pub i64);
+pub struct ProcessSessionId {
+    /// Unix：会话 id。Windows：pane 根进程（child）的 pid。
+    pub id: i64,
+    pub instance: u64,
+    pub captured: u64,
+}
+
+impl ProcessSessionId {
+    /// 两个锚点是否指向同一个根进程实例（不比较快照时刻）。
+    pub fn same_root(self, other: Self) -> bool {
+        self.id == other.id && self.instance == other.instance
+    }
+}
+
+/// 终止阶梯里的一个会话成员：pid 加上枚举时读到的进程实例标记。
+///
+/// 成员集合在阶梯开始前枚举一次，之后要等几百毫秒才升级信号；其间成员可能已经退出、pid 被
+/// 别的进程拿走。Windows 上 `instance` 是成员的创建时间，判活与发信号都先按它核对，pid 换了
+/// 主人就当成员已退出、不发信号。Unix 上恒为 0、不核对，行为与按 pid 发信号相同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProcessSessionMember {
+    pub pid: u32,
+    pub instance: u64,
+}
+
+/// 一次扫描取出整批会话的成员，桶与 `sessions` 一一对应。Unix 成员不带实例标记。
+#[cfg(not(windows))]
+pub(crate) fn session_members_batch(
+    sessions: &[ProcessSessionId],
+) -> Vec<Vec<ProcessSessionMember>> {
+    session_processes_batch(sessions)
+        .into_iter()
+        .map(|pids| {
+            pids.into_iter()
+                .map(|pid| ProcessSessionMember { pid, instance: 0 })
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn signal_session_members(members: &[ProcessSessionMember], signal: Signal) {
+    let pids: Vec<u32> = members.iter().map(|member| member.pid).collect();
+    signal_processes(&pids, signal);
+}
+
+/// 成员是否仍需等待它退出，语义同 `process_alive_excluding_zombies`。
+#[cfg(not(windows))]
+pub(crate) fn session_member_alive(member: ProcessSessionMember) -> bool {
+    process_alive_excluding_zombies(member.pid)
+}
+
+/// server 启动时调用：脱离控制台的 daemon 向 pane 进程树的枚举表明身份，免得随拉起它的
+/// pane 一起被终止。Unix 的 daemon 用 setsid 脱离了 pane 的会话，什么都不用做。
+#[cfg(not(windows))]
+pub(crate) fn announce_detached_server_daemon() {}
 
 /// Why a pane runtime ended, before application persistence policy is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

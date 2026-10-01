@@ -569,6 +569,10 @@ pub enum EventData {
         workspace: Option<WorkspaceInfo>,
         worktree: WorktreeInfo,
         forced: bool,
+        /// 同 `worktree.remove` 响应的 `leftover_path`：检出目录删不干净、仍在磁盘上时给出
+        /// 该目录；目录已删掉、只剩仍被占用的空目录（Git 可复用）或旧 server 时省略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        leftover_path: Option<String>,
     },
     TabCreated {
         tab: TabInfo,

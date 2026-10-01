@@ -373,6 +373,10 @@ pub struct WorktreeTexts {
     pub no_worktrees_found: &'static str,
     pub unexpected_result: &'static str,
     pub prunable_cannot_open: &'static str,
+    /// 删除成功、但检出目录里有删不掉的文件时的提示标题。
+    pub removed_with_leftovers: &'static str,
+    /// 上述提示的正文（args: path）：需要手动删除的残留目录。
+    pub leftover_path_fmt: &'static str,
 }
 
 pub struct SettingsTexts {

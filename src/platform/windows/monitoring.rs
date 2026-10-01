@@ -257,26 +257,25 @@ pub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
-    let pids = super::session_processes(child.id());
-    for pid in pids.into_iter().rev() {
-        if let Ok(token) = process_instance_token(pid) {
-            let _ = terminate_monitored_process(pid, &token, true);
-        }
-    }
+    terminate_process_tree(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
 
 pub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {
     if let Some(root) = child.process_id() {
-        for pid in super::session_processes(root).into_iter().rev() {
-            if let Ok(token) = process_instance_token(pid) {
-                let _ = terminate_monitored_process(pid, &token, true);
-            }
-        }
+        terminate_process_tree(root);
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// 先子后父终止一棵进程树。调用方还握着根进程（尚未 wait）；成员按创建时间核对过身份，pid 被
+/// 复用后挂到根进程名下的无关进程不会被误杀，终止前再按同一个创建时间核对一次。
+fn terminate_process_tree(root: u32) {
+    for member in super::process_tree_members(root).into_iter().rev() {
+        let _ = terminate_monitored_process(member.pid, &member.instance.to_string(), true);
+    }
 }
 
 struct ProcessHandle(HANDLE);

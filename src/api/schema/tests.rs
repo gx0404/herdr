@@ -1109,6 +1109,7 @@ fn worktree_lifecycle_events_round_trip() {
                     ..worktree.clone()
                 },
                 forced: false,
+                leftover_path: None,
             },
         },
         EventEnvelope {
@@ -1123,6 +1124,81 @@ fn worktree_lifecycle_events_round_trip() {
         let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, event);
     }
+}
+
+#[test]
+fn worktree_removed_leftover_path_is_optional_on_the_wire() {
+    // 旧 server 不带 leftover_path：缺省为 None；None 时序列化省略字段，与旧响应逐字节一致。
+    let legacy = serde_json::json!({
+        "id": "req_1",
+        "result": {
+            "type": "worktree_removed",
+            "workspace_id": "w_2",
+            "path": "/worktrees/herdr/worktree-api",
+            "forced": false
+        }
+    });
+    let restored: SuccessResponse = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(
+        &restored.result,
+        ResponseResult::WorktreeRemoved {
+            leftover_path: None,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_value(&restored).unwrap(), legacy);
+
+    let response = SuccessResponse {
+        id: "req_2".into(),
+        result: ResponseResult::WorktreeRemoved {
+            workspace_id: "w_2".into(),
+            path: "/worktrees/herdr/worktree-api".into(),
+            forced: false,
+            leftover_path: Some("/worktrees/herdr/worktree-api".into()),
+        },
+    };
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        json["result"]["leftover_path"],
+        "/worktrees/herdr/worktree-api"
+    );
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(json).unwrap(),
+        response
+    );
+
+    let worktree = WorktreeInfo {
+        path: "/worktrees/herdr/worktree-api".into(),
+        branch: Some("worktree/api".into()),
+        is_bare: false,
+        is_detached: false,
+        is_prunable: false,
+        is_linked_worktree: true,
+        open_workspace_id: None,
+        label: "herdr".into(),
+    };
+    let removed = |leftover_path: Option<String>| EventEnvelope {
+        event: EventKind::WorktreeRemoved,
+        data: EventData::WorktreeRemoved {
+            workspace_id: "w_2".into(),
+            workspace: None,
+            worktree: worktree.clone(),
+            forced: true,
+            leftover_path,
+        },
+    };
+    let json = serde_json::to_value(removed(None)).unwrap();
+    assert!(json["data"].get("leftover_path").is_none());
+    let event = removed(Some("/worktrees/herdr/worktree-api".into()));
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        json["data"]["leftover_path"],
+        "/worktrees/herdr/worktree-api"
+    );
+    assert_eq!(
+        serde_json::from_value::<EventEnvelope>(json).unwrap(),
+        event
+    );
 }
 
 #[test]

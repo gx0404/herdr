@@ -30,6 +30,9 @@ pub fn run_server() -> io::Result<()> {
         }
     }
     crate::platform::raise_server_nofile_limit();
+    // 尽早表明 daemon 身份：拉起本进程的客户端若在某个 pane 里，关那个 pane 时不能连本进程
+    // 及其整个会话一起终止。
+    crate::platform::announce_detached_server_daemon();
 
     if handoff_import {
         let socket_path = args

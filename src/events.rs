@@ -49,7 +49,9 @@ pub struct WorktreeRemoveResult {
     pub worktree: Option<Box<crate::api::schema::WorktreeInfo>>,
     pub forced: bool,
     pub api_request: Option<ApiWorktreeRemoveRequest>,
-    pub result: Result<(), String>,
+    /// `Ok(Some(path))`: Git unregistered the worktree, but its checkout
+    /// directory is still on disk because entries in it could not be deleted.
+    pub result: Result<Option<std::path::PathBuf>, String>,
 }
 
 #[derive(Debug)]

@@ -5893,7 +5893,7 @@ fn terminal_attach_client_exits_when_worktree_remove_succeeds() {
                     shutdown_panes: vec![pane_id],
                     respond_to,
                 }),
-                result: Ok(()),
+                result: Ok(None),
             }
         )))
     );

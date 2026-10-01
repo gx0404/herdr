@@ -133,6 +133,8 @@ Grouped worktrees still behave like normal Herdr workspaces: they can be focused
 
 To delete a worktree checkout, use `Delete worktree checkout...` on a grouped child workspace. Herdr runs `git worktree remove`, first asking Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. That second confirmation is deliberately not on Enter: press `y` (or `ctrl+↵`), or click `y delete anyway`, so a held or double-tapped Enter from the first step cannot walk into the forced remove. Cancel is the emphasized default in that step. Branches are not deleted.
 
+If Git removes the worktree but some files in its folder cannot be deleted (for example, because another program still holds a subfolder), the dialog closes as usual and a warning toast names the folder that is left behind. Delete that folder by hand: while files remain in it, Git refuses to create a new worktree at the same path. The warning is also kept in the notification history.
+
 ## Remote attach
 
 Remote attach manages its SSH connection with temporary keepalives and, where supported, connection reuse by default.

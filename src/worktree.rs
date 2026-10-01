@@ -367,14 +367,17 @@ pub(crate) fn run_worktree_command(command: &WorktreeCommand) -> Result<(), Stri
     })
 }
 
+/// 成功时返回仍留在磁盘上的检出目录：git 已注销该 worktree，但目录里有 herdr 不删的残留，
+/// 要由用户手动清理（见 `recover_failed_delete_remove`）；检出目录已删掉、或只剩仍被占用的
+/// 空目录时为 `None`。
 pub(crate) fn run_worktree_remove_command_with_recovery(
     command: &WorktreeCommand,
     repo_root: &Path,
     path: &Path,
     force: bool,
     trust_repository: bool,
-) -> Result<(), String> {
-    run_worktree_command(command).or_else(|err| {
+) -> Result<Option<PathBuf>, String> {
+    run_worktree_command(command).map(|()| None).or_else(|err| {
         recover_worktree_remove_error(
             err,
             repo_root,
@@ -394,7 +397,7 @@ fn recover_worktree_remove_error(
     force: bool,
     trust_repository: bool,
     failed_delete_timeout: Duration,
-) -> Result<(), String> {
+) -> Result<Option<PathBuf>, String> {
     if is_failed_delete_remove_error(&err) {
         return recover_failed_delete_remove(
             err,
@@ -421,7 +424,7 @@ fn recover_worktree_remove_error(
             )
         })?;
     }
-    Ok(())
+    Ok(None)
 }
 
 /// git 删除中途失败后仍会接着删管理目录，所以报 `failed to delete` 时 worktree 通常已注销，
@@ -433,15 +436,17 @@ fn recover_worktree_remove_error(
 /// git 已退出、herdr 也不 prune，注册状态之后不会再变：只查一次，仍注册就原样返回 git 的
 /// 报错。已注销则在时限内收尾残留（见 `clean_up_unregistered_leftovers`）：只删空目录，文件
 /// 一律保留——可能是删除期间新写入的真实数据，也可能是 git 在第一处失败后没再删到的检出
-/// 内容。检出路径消失即成功；到时仍有残留也算成功并告警（git 视角已删除，保持 herdr
-/// workspace 状态一致更重要）。
+/// 内容。检出路径消失即成功；到时仍有残留也算成功（git 视角已删除，保持 herdr workspace
+/// 状态一致更重要）。检出根目录里还有任何条目时告警并返回该检出路径：用户要知道去手动删，
+/// 否则之后在同一路径重建 worktree 会被 git 以 already exists 拒绝；根目录已空、只是仍被
+/// 占用时不返回（git 可以在空目录上重建）。
 fn recover_failed_delete_remove(
     err: String,
     repo_root: &Path,
     path: &Path,
     trust_repository: bool,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<Option<PathBuf>, String> {
     let registered = worktree_list_contains_path(repo_root, path, trust_repository)
         .map_err(|list_err| format!("{err}; failed to check worktree registration: {list_err}"))?;
     if registered {
@@ -455,18 +460,39 @@ fn recover_failed_delete_remove(
             sweeps = cleanup.sweeps,
             "worktree removal recovered after git failed to delete part of it"
         );
-    } else {
-        tracing::warn!(
+        return Ok(None);
+    }
+    // 只按检出根目录的最终状态判定，不看 `kept`：时限截断的重扫、删不掉的嵌套空目录都会让
+    // `kept` 为空而根目录仍非空。根目录已空（多半仍是某个进程的 cwd，放开后可删）时 git 能在
+    // 原路径重建 worktree，不必让用户处理；里面还有任何条目就报给调用方。
+    if checkout_left_empty(path) {
+        tracing::info!(
             path = %path.display(),
-            kept_entry = ?cleanup.kept,
             err = %err,
             sweeps = cleanup.sweeps,
-            "worktree was removed from git, but leftover entries remain in its checkout \
-             directory {}; they were kept and the directory must be removed by hand",
-            path.display()
+            "worktree was removed from git; only its empty checkout directory, still in use, remains"
         );
+        return Ok(None);
     }
-    Ok(())
+    tracing::warn!(
+        path = %path.display(),
+        kept_entry = ?cleanup.kept,
+        err = %err,
+        sweeps = cleanup.sweeps,
+        "worktree was removed from git, but leftover entries remain in its checkout \
+         directory {}; they were kept and the directory must be removed by hand",
+        path.display()
+    );
+    Ok(Some(path.to_path_buf()))
+}
+
+/// 检出根目录已不存在或为空。读不了目录（例如没有权限）时无法确认，按非空处理，宁可多报
+/// 一次残留。
+fn checkout_left_empty(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 /// 已注销 worktree 的残留收尾结果。
@@ -1284,7 +1310,10 @@ prunable stale
         );
 
         let remove = build_worktree_remove_command(&repo, &checkout, false, false);
-        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, false, false).unwrap();
+        assert_eq!(
+            run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, false, false),
+            Ok(None)
+        );
         assert!(!checkout.exists());
 
         let _ = std::fs::remove_dir_all(repo);
@@ -1575,7 +1604,10 @@ prunable stale
         .unwrap();
         std::fs::write(checkout.join("leftover"), "leftover\n").unwrap();
 
-        run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true, false).unwrap();
+        assert_eq!(
+            run_worktree_remove_command_with_recovery(&remove, &repo, &checkout, true, false),
+            Ok(None)
+        );
 
         assert!(!checkout.exists());
         let _ = std::fs::remove_dir_all(repo);
@@ -1670,7 +1702,8 @@ prunable stale
                     GENEROUS_RECOVERY_TIMEOUT,
                 );
 
-                assert_eq!(result, Ok(()), "{reason}, force={force}");
+                // 检出目录收尾干净：不报残留。
+                assert_eq!(result, Ok(None), "{reason}, force={force}");
                 assert!(!checkout.exists(), "{reason}, force={force}");
             }
         }
@@ -1684,7 +1717,7 @@ prunable stale
             false,
             GENEROUS_RECOVERY_TIMEOUT,
         );
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(None));
         // 不跑 `git worktree prune`：孤儿管理目录留给 `git gc`。
         assert!(orphan_admin_dir.join("logs/HEAD").exists());
         let _ = std::fs::remove_dir_all(repo);
@@ -1713,7 +1746,7 @@ prunable stale
         );
         release.join().unwrap();
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(None));
         assert!(!checkout.exists());
         let _ = std::fs::remove_dir_all(repo);
     }
@@ -1736,11 +1769,35 @@ prunable stale
             SHORT_RECOVERY_TIMEOUT,
         );
 
-        // git 视角已注销：照样成功（残留只告警），文件原样保留，空目录清掉。
-        assert_eq!(result, Ok(()));
+        // git 视角已注销：照样成功，但报告仍在磁盘上的检出目录；文件原样保留，空目录清掉。
+        assert_eq!(result, Ok(Some(checkout.clone())));
         assert_eq!(std::fs::read_to_string(&kept).unwrap(), "keep me\n");
         assert!(!checkout.join("src/empty").exists());
         assert!(!checkout.join("target").exists());
+        let _ = std::fs::remove_dir_all(checkout);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// 时限在一轮扫描完成前就用尽（重扫被截断，没记下任何保留条目）时，仍按检出根目录的
+    /// 实际内容报告残留，不能当成「只剩空目录」。
+    #[test]
+    fn failed_delete_recovery_reports_leftovers_when_the_sweep_is_cut_short() {
+        let repo = create_committed_repo("worktree-failed-delete-cut-short-repo");
+        let checkout = unique_temp_path("worktree-failed-delete-cut-short-checkout");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::write(checkout.join("src/lib.rs"), "fn main() {}\n").unwrap();
+
+        let result = recover_worktree_remove_error(
+            failed_delete_error(&checkout, "Directory not empty"),
+            &repo,
+            &checkout,
+            false,
+            false,
+            Duration::ZERO,
+        );
+
+        assert_eq!(result, Ok(Some(checkout.clone())));
+        assert!(checkout.join("src/lib.rs").exists());
         let _ = std::fs::remove_dir_all(checkout);
         let _ = std::fs::remove_dir_all(repo);
     }
@@ -1979,7 +2036,8 @@ prunable stale
     }
 
     /// 真实 git：检出根被占用时，git 删光里面的内容、删根失败，但照样删掉管理目录。占用在
-    /// 时限内释放就收尾成功；一直不释放也按已注销成功，空的根留着。
+    /// 时限内释放就收尾成功；一直不释放也按已注销成功，空的根留着但不报残留（git 能在空
+    /// 目录上重建 worktree，用户不必处理）。
     #[cfg(windows)]
     #[test]
     fn failed_delete_recovery_handles_checkout_held_by_exiting_process() {
@@ -2015,7 +2073,7 @@ prunable stale
                     GENEROUS_RECOVERY_TIMEOUT,
                 );
                 release.join().unwrap();
-                assert_eq!(result, Ok(()));
+                assert_eq!(result, Ok(None));
                 assert!(!checkout.exists());
             } else {
                 let started = Instant::now();
@@ -2028,7 +2086,7 @@ prunable stale
                     SHORT_RECOVERY_TIMEOUT,
                 );
                 assert!(started.elapsed() >= SHORT_RECOVERY_TIMEOUT);
-                assert_eq!(result, Ok(()));
+                assert_eq!(result, Ok(None));
                 assert!(std::fs::read_dir(&checkout).unwrap().next().is_none());
                 drop(held);
                 let _ = std::fs::remove_dir(&checkout);
@@ -2039,7 +2097,7 @@ prunable stale
     }
 
     /// 真实 git：被占用的是检出里的子目录时，git 在第一处失败就停手，排在它后面的检出内容
-    /// 没删到。恢复只删空目录，这些文件原样保留，到时按已注销成功（告警）。
+    /// 没删到。恢复只删空目录，这些文件原样保留，到时按已注销成功并报告残留的检出目录。
     #[cfg(windows)]
     #[test]
     fn failed_delete_recovery_keeps_files_git_did_not_reach() {
@@ -2075,10 +2133,37 @@ prunable stale
             SHORT_RECOVERY_TIMEOUT,
         );
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(Some(checkout.clone())));
         assert!(!held_dir.exists());
         assert!(readme.is_file());
         assert!(!worktree_list_contains_path(&repo, &checkout, false).unwrap());
+        let _ = std::fs::remove_dir_all(checkout);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// 被占用的是嵌套的空子目录时，它删不掉，检出根目录也就不空：git 不会在非空目录上重建
+    /// worktree，所以要报告残留，哪怕没有任何文件。
+    #[cfg(windows)]
+    #[test]
+    fn failed_delete_recovery_reports_a_held_nested_empty_directory() {
+        let repo = create_committed_repo("worktree-held-nested-repo");
+        let checkout = unique_temp_path("worktree-held-nested-checkout");
+        let nested = checkout.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let held = hold_dir_like_process_cwd(&nested);
+
+        let result = recover_worktree_remove_error(
+            failed_delete_error(&checkout, "Permission denied"),
+            &repo,
+            &checkout,
+            false,
+            false,
+            SHORT_RECOVERY_TIMEOUT,
+        );
+
+        assert_eq!(result, Ok(Some(checkout.clone())));
+        assert!(nested.is_dir());
+        drop(held);
         let _ = std::fs::remove_dir_all(checkout);
         let _ = std::fs::remove_dir_all(repo);
     }

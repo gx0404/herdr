@@ -389,12 +389,14 @@ use windows_sys::{
                 MEMORY_BASIC_INFORMATION,
             },
             Ole::{CF_DIB, CF_DIBV5, CF_LOCALE, CF_OEMTEXT, CF_TEXT, CF_UNICODETEXT},
+            SystemInformation::GetSystemTimeAsFileTime,
             Threading::{
-                GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, IsWow64Process2,
-                OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread,
-                TerminateProcess, CREATE_NO_WINDOW, CREATE_SUSPENDED, DETACHED_PROCESS,
-                PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, THREAD_SUSPEND_RESUME,
+                CreateEventW, GetCurrentProcess, GetExitCodeProcess, GetProcessTimes,
+                IsWow64Process2, OpenEventW, OpenProcess, OpenThread, QueryFullProcessImageNameW,
+                ResumeThread, TerminateProcess, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+                DETACHED_PROCESS, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_READ,
+                SYNCHRONIZATION_SYNCHRONIZE, THREAD_SUSPEND_RESUME,
             },
         },
         UI::{
@@ -418,7 +420,8 @@ use windows_sys::{
 };
 
 use super::{
-    ClipboardImage, ForegroundJob, ProcessLineage, ProcessParentEntry, ProcessSessionId, Signal,
+    ClipboardImage, ForegroundJob, ProcessLineage, ProcessParentEntry, ProcessSessionId,
+    ProcessSessionMember, Signal,
 };
 
 const STILL_ACTIVE: u32 = 259;
@@ -1145,6 +1148,15 @@ impl ProcessSnapshot {
             .map(|&index| &self.entries[index])
     }
 
+    /// 快照里父 pid 记为 `pid` 的进程。父进程退出后 pid 会被复用，这只是候选。
+    fn child_pids(&self, pid: u32) -> impl Iterator<Item = u32> + '_ {
+        self.children_by_parent
+            .get(&pid)
+            .into_iter()
+            .flatten()
+            .map(|&index| self.entries[index].pid)
+    }
+
     fn descendant_signatures(&self, root_pid: u32) -> Vec<ProcessSignature> {
         let mut signatures = descendant_entries(root_pid, self)
             .into_iter()
@@ -1646,6 +1658,71 @@ pub fn current_process_is_detached_server_daemon() -> bool {
 
     // Job membership alone does not tie the daemon lifetime to its launcher.
     matches!(current_job_kills_processes_on_close(), Ok(false))
+}
+
+/// 本进程挂着的 server daemon 标记，握到进程退出（见 [`announce_detached_server_daemon`]）。
+static SERVER_DAEMON_MARKER: OnceLock<OwnedHandle> = OnceLock::new();
+
+/// 脱离控制台的 server daemon 在整个生命周期里挂一个命名事件，名字带 pid 与进程创建时间。
+///
+/// 普通启动时 daemon 的父进程就是拉起它的客户端：客户端若跑在某个 pane 里，daemon 就挂在这个
+/// pane 的进程树下，关 pane 时会连同它下面整个嵌套会话一起被终止。Unix 的 daemon 用 setsid
+/// 脱离会话，不受影响；这里用标记让 pane 进程树的枚举认出 daemon、把它连同子树留下。daemon
+/// 退出时内核关掉句柄、标记随之消失；名字带创建时间，pid 被复用后也对不上，别人也无法替未来的
+/// daemon 预先占名。
+pub(crate) fn announce_detached_server_daemon() {
+    if !current_process_is_detached_server_daemon() {
+        return;
+    }
+    let Some(instance) = process_creation_time(unsafe { GetCurrentProcess() }) else {
+        tracing::warn!(
+            err = %std::io::Error::last_os_error(),
+            "server daemon could not read its creation time; pane trees may still contain it"
+        );
+        return;
+    };
+    let name = server_daemon_marker_name(ProcessSessionMember {
+        pid: std::process::id(),
+        instance,
+    });
+    let marker = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
+    if marker.is_null() {
+        tracing::warn!(
+            err = %std::io::Error::last_os_error(),
+            "server daemon could not announce itself; closing the pane that started it may stop it"
+        );
+        return;
+    }
+    let _ = SERVER_DAEMON_MARKER.set(unsafe { OwnedHandle::from_raw_handle(marker) });
+}
+
+fn server_daemon_marker_name(member: ProcessSessionMember) -> Vec<u16> {
+    format!(
+        "Local\\herdr-server-daemon-{}-{}",
+        member.pid, member.instance
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect()
+}
+
+/// 这个（已核对身份的）进程是否挂着 server daemon 标记。只有「名字不存在」才算没有：拒绝访问
+/// （daemon 以别的用户或更高权限运行）等错误按存在处理，多留一个进程的代价远小于误杀 daemon
+/// 丢掉整个嵌套会话。
+fn server_daemon_marker_exists(member: ProcessSessionMember) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+
+    let name = server_daemon_marker_name(member);
+    let marker = unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) };
+    if !marker.is_null() {
+        drop(unsafe { OwnedHandle::from_raw_handle(marker) });
+        return true;
+    }
+    let error = std::io::Error::last_os_error().raw_os_error();
+    let missing = [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]
+        .iter()
+        .any(|&code| error == i32::try_from(code).ok());
+    !missing
 }
 
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -2360,7 +2437,11 @@ fn process_creation_time(process: HANDLE) -> Option<u64> {
     {
         return None;
     }
-    Some((u64::from(creation_time.dwHighDateTime) << 32) | u64::from(creation_time.dwLowDateTime))
+    Some(filetime_ticks(creation_time))
+}
+
+fn filetime_ticks(time: FILETIME) -> u64 {
+    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
 }
 
 fn process_runtime_marker_from_handle(process: HANDLE) -> Option<Option<String>> {
@@ -2542,7 +2623,7 @@ fn read_process_command_line(process: HANDLE) -> Option<String> {
         .filter(|command_line| !command_line.is_empty())
 }
 
-fn read_process_parameters(process: HANDLE) -> Option<RtlUserProcessParameters> {
+fn process_basic_information(process: HANDLE) -> Option<PROCESS_BASIC_INFORMATION> {
     let mut basic_info = MaybeUninit::<PROCESS_BASIC_INFORMATION>::uninit();
     let status = unsafe {
         NtQueryInformationProcess(
@@ -2556,8 +2637,11 @@ fn read_process_parameters(process: HANDLE) -> Option<RtlUserProcessParameters> 
     if status != STATUS_SUCCESS as NTSTATUS {
         return None;
     }
+    Some(unsafe { basic_info.assume_init() })
+}
 
-    let basic_info = unsafe { basic_info.assume_init() };
+fn read_process_parameters(process: HANDLE) -> Option<RtlUserProcessParameters> {
+    let basic_info = process_basic_information(process)?;
     if basic_info.PebBaseAddress.is_null() {
         return None;
     }
@@ -2611,27 +2695,31 @@ fn nul_terminated_utf16_to_string(buffer: &[u16]) -> String {
     String::from_utf16_lossy(&buffer[..len])
 }
 
-pub fn session_processes(child_pid: u32) -> Vec<u32> {
-    if child_pid == 0 {
-        return Vec::new();
-    }
-
-    let snapshot = ProcessSnapshot::new(snapshot_processes());
-    session_processes_from_snapshot(child_pid, &snapshot)
-}
-
-/// pane 进程树的锚点。Windows 没有 Unix 的会话语义，进程树按父子关系枚举，所以锚点就是
-/// pane 自己的 child pid；这里只确认它当下确实存在（见 [`ProcessSessionId`]）。
+/// pane 进程树的锚点：pane 自己的 child pid 加上它的创建时间与快照时刻（见
+/// [`ProcessSessionId`]）。Windows 没有 Unix 的会话语义，进程树按父子关系枚举。
+///
+/// 只认句柄当下指向的进程：调用方要确认这个 pid 那一刻仍属于自己的子进程（还没被 `wait`
+/// 回收、句柄还握着），否则读到的可能是复用了 pid 的无关进程。已退出但句柄未释放的进程照样
+/// 给出锚点，它留下的孤儿仍归这棵树。
 pub fn process_session_id(pid: u32) -> Option<ProcessSessionId> {
-    if pid == 0 || !process_exists(pid) {
-        return None;
-    }
-    Some(ProcessSessionId(i64::from(pid)))
+    let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let instance = process_creation_time(process.0)?;
+    // 必须在握着句柄时读时钟：这一刻 pid 还属于根进程，之后才可能被复用。用粗粒度时钟：它
+    // 不晚于此刻的精确时间，进程创建时间无论是精确值还是时钟节拍值，之后创建的进程都不早于它。
+    let mut now = FILETIME::default();
+    unsafe { GetSystemTimeAsFileTime(&mut now) };
+    Some(ProcessSessionId {
+        id: i64::from(pid),
+        instance,
+        captured: filetime_ticks(now),
+    })
 }
 
-/// 一次进程快照取出整批进程树的成员 pid，返回与 `sessions` 一一对应的桶：关 N 个 pane
-/// 只拍一次快照，而不是 N 次。
-pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
+/// 一次进程快照取出整批进程树的成员，返回与 `sessions` 一一对应的桶：关 N 个 pane 只拍
+/// 一次快照，而不是 N 次。成员按 [`verified_session_members`] 的规则逐个核对身份。
+pub(crate) fn session_members_batch(
+    sessions: &[ProcessSessionId],
+) -> Vec<Vec<ProcessSessionMember>> {
     if sessions.is_empty() {
         return Vec::new();
     }
@@ -2640,41 +2728,248 @@ pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
     sessions
         .iter()
         .map(|session| {
-            let Ok(root) = u32::try_from(session.0) else {
-                return Vec::new();
-            };
-            session_processes_from_snapshot(root, &snapshot)
+            verified_session_members(*session, &snapshot, inspect_process, is_herdr_server_daemon)
         })
         .collect()
 }
 
-fn session_processes_from_snapshot(child_pid: u32, snapshot: &ProcessSnapshot) -> Vec<u32> {
-    if snapshot.entry(child_pid).is_none() {
+/// 以 `root_pid` 为根的进程树成员（根进程在前）。调用方必须还握着根进程的句柄（尚未 `wait`
+/// 的子进程），否则 pid 可能已经属于别的进程。
+pub(crate) fn process_tree_members(root_pid: u32) -> Vec<ProcessSessionMember> {
+    let Some(session) = process_session_id(root_pid) else {
+        return Vec::new();
+    };
+    let snapshot = ProcessSnapshot::new(snapshot_processes());
+    verified_session_members(session, &snapshot, inspect_process, is_herdr_server_daemon)
+}
+
+/// 已核对身份（句柄还握着）的候选是不是 herdr 自己的 server daemon：挂着标记的（见
+/// [`announce_detached_server_daemon`]），或者还不会挂标记的旧版、上游构建——映像与命令行
+/// 按 [`is_legacy_server_daemon_command`] 认，都从同一个句柄读。
+fn is_herdr_server_daemon(member: ProcessSessionMember, process: &ProcessHandle) -> bool {
+    if server_daemon_marker_exists(member) {
+        return true;
+    }
+    let Some(image) = process_executable_path(process.0) else {
+        return false;
+    };
+    // 先看映像名再读命令行：绝大多数候选第一步就排除，不多读一次进程信息。
+    if !image_file_name_starts_with_herdr(&image) {
+        return false;
+    }
+    read_process_command_line(process.0)
+        .is_some_and(|command_line| is_legacy_server_daemon_command(&image, &command_line))
+}
+
+fn image_file_name_starts_with_herdr(image_path: &str) -> bool {
+    std::path::Path::new(image_path)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.get(..5))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("herdr"))
+}
+
+/// 没挂标记的 server daemon 的保守认法：映像文件名以 `herdr` 开头（不分大小写），命令行恰好是
+/// `<exe> server`——`build_server_daemon_command` 拉起 daemon 的形态：只有两个参数，第二个是
+/// `server`，第一个指向同一个映像文件（按文件名比，不分大小写，路径写法不同也认）。别的子命令、
+/// 多余或缺少的参数都不算：宁可漏认（照常终止），也不放过别的程序。在 PowerShell 里前台敲的
+/// `herdr server` 形态相同也会被留下，它照样收到控制台关闭事件。
+fn is_legacy_server_daemon_command(image_path: &str, command_line: &str) -> bool {
+    if !image_file_name_starts_with_herdr(image_path) {
+        return false;
+    }
+    let Some(argv) = command_line_to_argv(command_line) else {
+        return false;
+    };
+    let [program, subcommand] = argv.as_slice() else {
+        return false;
+    };
+    let file_name = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(OsStr::to_str)
+            .map(str::to_owned)
+    };
+    subcommand == "server"
+        && file_name(program)
+            .zip(file_name(image_path))
+            .is_some_and(|(program, image)| program.eq_ignore_ascii_case(&image))
+}
+
+/// 通过同一个进程句柄读到的身份：父 pid 与创建时间都属于这个句柄指向的进程对象。握着 `pin`
+/// 期间这个 pid 不会被复用（生产里是句柄本身，纯逻辑测试里是测试替身）。
+struct InspectedProcess<P> {
+    parent_pid: u32,
+    created: u64,
+    pin: P,
+}
+
+fn inspect_process(pid: u32) -> Option<InspectedProcess<ProcessHandle>> {
+    let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let created = process_creation_time(process.0)?;
+    let basic = process_basic_information(process.0)?;
+    let parent_pid = u32::try_from(basic.InheritedFromUniqueProcessId).ok()?;
+    Some(InspectedProcess {
+        parent_pid,
+        created,
+        pin: process,
+    })
+}
+
+/// 一个已核对进程的子进程，创建时间须落在的范围：`[since, before)`，`before` 为空表示不设上限。
+struct ChildWindow {
+    since: u64,
+    before: Option<u64>,
+}
+
+impl ChildWindow {
+    fn contains(&self, created: u64) -> bool {
+        created >= self.since && self.before.is_none_or(|before| created < before)
+    }
+}
+
+/// 核对一棵 pane 进程树的成员（根进程在前）。
+///
+/// 快照的 `th32ParentProcessID` 只用来发现候选：父进程退出后 pid 会被复用，快照里挂在某个 pid
+/// 下的进程未必是它当前主人的子进程。候选的父 pid 与创建时间都经 `inspect` 从它自己的句柄读出，
+/// 读不出来的进程不算成员（也就永远不会收到信号），也不再往下找。
+///
+/// - 根进程：pid 当前主人的创建时间等于 `session.instance` 才算根进程本身。
+/// - 已核对的成员握着句柄，其 pid 在核对子进程期间不会被复用；父 pid 指向它、且创建不早于它
+///   的进程只能是它创建的，算成员。早于它创建的是 pid 上一任主人留下的子进程，排除。
+/// - 根进程核对不上（已退出且 pid 已空出、pid 已换了主人，或读不出来）：根进程不算成员。
+///   锚点时刻根进程还占着 pid，此后拿到这个 pid 的进程及其子进程都创建于 `session.captured`
+///   之后，排除；只认创建于 `[instance, captured)`、父 pid 指向它的孤儿，再从孤儿往下照常
+///   核对。中间一级已经退出的进程（启动器先退出）接不上，留在原处。
+/// - 已退出但进程对象还被句柄引用的根进程 pid 不会被复用，照常算根进程本身。
+/// - herdr 自己的 server daemon（`is_server_daemon` 拿核对过的身份与还握着的句柄认）连同它下面
+///   的整个嵌套会话都不算成员：它不该随拉起它的那个 pane 一起终止。根进程不查：pane 的 shell
+///   跑在 ConPTY 里、有控制台，不会是脱离控制台的 daemon。
+fn verified_session_members<P>(
+    session: ProcessSessionId,
+    snapshot: &ProcessSnapshot,
+    mut inspect: impl FnMut(u32) -> Option<InspectedProcess<P>>,
+    is_server_daemon: impl Fn(ProcessSessionMember, &P) -> bool,
+) -> Vec<ProcessSessionMember> {
+    let Ok(root_pid) = u32::try_from(session.id) else {
+        return Vec::new();
+    };
+    if root_pid == 0 {
         return Vec::new();
     }
 
-    let mut pids = vec![child_pid];
-    pids.extend(
-        descendant_entries(child_pid, snapshot)
-            .into_iter()
-            .map(|entry| entry.pid),
-    );
-    pids
-}
-
-pub fn signal_processes(pids: &[u32], signal: Signal) {
-    if signal == Signal::Hangup {
-        return;
-    }
-
-    for &pid in pids {
-        let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
-            continue;
-        };
-        unsafe {
-            TerminateProcess(process.0, 1);
+    let mut members = Vec::new();
+    let mut visited = HashSet::from([root_pid]);
+    // 待展开的进程、它的子进程须落在的创建时间范围，以及它的句柄：句柄一直留到子进程核对完。
+    let mut queue = VecDeque::new();
+    match inspect(root_pid).filter(|root| root.created == session.instance) {
+        Some(root) => {
+            members.push(ProcessSessionMember {
+                pid: root_pid,
+                instance: root.created,
+            });
+            let window = ChildWindow {
+                since: root.created,
+                before: None,
+            };
+            queue.push_back((root_pid, window, Some(root.pin)));
+        }
+        None => {
+            let window = ChildWindow {
+                since: session.instance,
+                before: Some(session.captured),
+            };
+            queue.push_back((root_pid, window, None));
         }
     }
+
+    while let Some((pid, window, _pin)) = queue.pop_front() {
+        for child in snapshot.child_pids(pid) {
+            if !visited.insert(child) {
+                continue;
+            }
+            let Some(found) = inspect(child) else {
+                continue;
+            };
+            if found.parent_pid != pid || !window.contains(found.created) {
+                continue;
+            }
+            let member = ProcessSessionMember {
+                pid: child,
+                instance: found.created,
+            };
+            if is_server_daemon(member, &found.pin) {
+                tracing::debug!(
+                    pid = child,
+                    "leaving a herdr server daemon in a pane process tree running with its sessions"
+                );
+                continue;
+            }
+            members.push(member);
+            let window = ChildWindow {
+                since: found.created,
+                before: None,
+            };
+            queue.push_back((child, window, Some(found.pin)));
+        }
+    }
+    members
+}
+
+/// 给会话成员发信号，只有 `Kill` 真的终止进程（`TerminateProcess`）。`Hangup` 什么都不做：关掉
+/// ConPTY 时控制台里的进程已经收到 CTRL_CLOSE_EVENT。`Terminate` 也什么都不做：Windows 没有可以
+/// 捕获的终止请求，提前硬杀只会砍掉宽限期——处理关闭事件的控制台程序（agent CLI 保存会话、git
+/// 释放 `index.lock`）多等一级，图形界面程序本来就收不到任何通知；硬杀落在与 Unix SIGKILL 相同
+/// 的那一级。
+pub(crate) fn signal_session_members(members: &[ProcessSessionMember], signal: Signal) {
+    if signal != Signal::Kill {
+        return;
+    }
+    for member in members {
+        terminate_session_member(*member);
+    }
+}
+
+/// 核对身份与终止用同一个句柄：pid 已换了主人、创建时间读不出来，都不终止。
+fn terminate_session_member(member: ProcessSessionMember) {
+    if member.pid == std::process::id() {
+        return;
+    }
+    let access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION;
+    let Some(process) = ProcessHandle::open(member.pid, access) else {
+        tracing::debug!(
+            pid = member.pid,
+            err = %std::io::Error::last_os_error(),
+            "pane process could not be opened for termination"
+        );
+        return;
+    };
+    let created = process_creation_time(process.0);
+    if created != Some(member.instance) {
+        tracing::debug!(
+            pid = member.pid,
+            expected = member.instance,
+            found = ?created,
+            "pane process id now names another process; not terminating it"
+        );
+        return;
+    }
+    if unsafe { TerminateProcess(process.0, 1) } == 0 {
+        tracing::debug!(
+            pid = member.pid,
+            err = %std::io::Error::last_os_error(),
+            "failed to terminate pane process"
+        );
+    }
+}
+
+/// 成员是否仍需等待它退出：pid 已换了主人（创建时间对不上或读不出来）就算原来的成员已退出。
+/// 核对与判活是两次打开，其间若刚好被复用只会多等一轮，发信号前还会再核对一次。
+pub(crate) fn session_member_alive(member: ProcessSessionMember) -> bool {
+    let instance_matches = ProcessHandle::open(member.pid, PROCESS_QUERY_LIMITED_INFORMATION)
+        .and_then(|process| process_creation_time(process.0))
+        == Some(member.instance);
+    instance_matches && process_alive_excluding_zombies(member.pid)
 }
 
 /// 进程在进程对象 signaled 之前都算存在。Windows 先公布退出码，再结束其余线程、关掉句柄表
@@ -3822,6 +4117,331 @@ mod tests {
         assert!(super::process_exists(std::process::id()));
         assert!(!super::process_has_exited(0));
         assert!(super::process_has_exited(4_294_967_292));
+    }
+
+    /// 测试结束（含 panic）时终止登记过的进程，不留下孤儿。
+    struct KillOnDrop(Vec<super::ProcessSessionMember>);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            super::signal_session_members(&self.0, super::Signal::Kill);
+        }
+    }
+
+    fn spawn_ping() -> std::process::Child {
+        Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ping")
+    }
+
+    fn live_member(pid: u32) -> super::ProcessSessionMember {
+        let session = super::process_session_id(pid).expect("anchor for a live process");
+        super::ProcessSessionMember {
+            pid,
+            instance: session.instance,
+        }
+    }
+
+    fn wait_until_members_exit(members: &[super::ProcessSessionMember]) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while let Some(alive) = members
+            .iter()
+            .find(|member| super::session_member_alive(**member))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "process {} never exited",
+                alive.pid
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// 身份核对不过的成员收不到信号：创建时间对不上（pid 已换了主人）、不带实例标记、或者是
+    /// 本进程自己。`Hangup` 与 `Terminate` 在 Windows 上什么都不发，只有 `Kill` 真的终止进程。
+    #[test]
+    fn only_verified_session_members_are_terminated() {
+        let mut child = spawn_ping();
+        let genuine = live_member(child.id());
+        let _cleanup = KillOnDrop(vec![genuine]);
+        let recycled = super::ProcessSessionMember {
+            instance: genuine.instance + 1,
+            ..genuine
+        };
+        let untracked = super::ProcessSessionMember {
+            instance: 0,
+            ..genuine
+        };
+        let this_process = live_member(std::process::id());
+
+        assert!(super::session_member_alive(genuine));
+        assert!(!super::session_member_alive(recycled));
+        assert!(!super::session_member_alive(untracked));
+
+        super::signal_session_members(&[genuine], super::Signal::Hangup);
+        super::signal_session_members(&[genuine], super::Signal::Terminate);
+        super::signal_session_members(&[recycled, untracked, this_process], super::Signal::Kill);
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            child.try_wait().expect("poll child").is_none(),
+            "neither Hangup, Terminate nor an unverified member may terminate the process"
+        );
+
+        super::signal_session_members(&[genuine], super::Signal::Kill);
+        let status = child.wait().expect("wait for child");
+        assert_eq!(status.code(), Some(1));
+        assert!(!super::session_member_alive(genuine));
+    }
+
+    const ORPHAN_ROOT_ENV: &str = "HERDR_TEST_PANE_TREE_ORPHAN_ROOT";
+    const ORPHAN_ROOT_READY: &str = "herdr-pane-tree-orphan-root-ready";
+
+    /// 根进程（pane shell）先退出、本测试已释放它的句柄：它退出前拉起的子进程（好比
+    /// `start notepad` 之后 shell 先收到关闭事件退出）仍凭锚点归这棵树，并且真的被终止。根进程
+    /// 对象若还被别人（例如杀毒软件）引用，它作为已退出的成员列出；否则走孤儿规则。
+    #[test]
+    fn orphans_of_an_exited_pane_root_are_still_terminated() {
+        if std::env::var_os(ORPHAN_ROOT_ENV).is_some() {
+            // 留下孤儿正是本测试要造的局面：根进程退出时故意不等它。Windows 没有僵尸进程，丢掉
+            // `Child` 只是关掉句柄，测试最后会终止它。
+            #[allow(clippy::zombie_processes)]
+            let orphan = spawn_ping();
+            println!("{ORPHAN_ROOT_READY} {}", orphan.id());
+            // 测试关掉 stdin 后才退出，ping 留下成为孤儿。
+            let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
+            return;
+        }
+
+        let mut root = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "platform::windows::tests::orphans_of_an_exited_pane_root_are_still_terminated",
+                "--nocapture",
+            ])
+            .env(ORPHAN_ROOT_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn pane root");
+        let mut stdout = std::io::BufReader::new(root.stdout.take().expect("pane root stdout"));
+        let orphan_pid = std::io::BufRead::lines(&mut stdout)
+            .map_while(Result::ok)
+            .find_map(|line| {
+                line.strip_prefix(ORPHAN_ROOT_READY)
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            });
+        let Some(orphan_pid) = orphan_pid else {
+            let _ = root.kill();
+            let _ = root.wait();
+            panic!("pane root did not start its child");
+        };
+        let orphan = live_member(orphan_pid);
+        let _cleanup = KillOnDrop(vec![orphan]);
+        // 让锚点时刻落在孤儿创建之后的时钟节拍里（粗粒度时钟一拍最长约 16 ms）。
+        thread::sleep(Duration::from_millis(50));
+        let session = super::process_session_id(root.id()).expect("anchor for the live root");
+
+        // 不读到 EOF：ping 继承了根进程的 stdout 管道，要等它退出才会 EOF。
+        drop(stdout);
+        drop(root.stdin.take());
+        root.wait().expect("wait for pane root");
+        let root_pid = root.id();
+        // 释放根进程句柄：此后 pid 可能被复用，只剩锚点认得原来的根进程。
+        drop(root);
+
+        let members = super::session_members_batch(&[session])
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        assert!(
+            members.contains(&orphan),
+            "the orphan of the exited root must stay reachable: {members:?}"
+        );
+        assert!(
+            members
+                .iter()
+                .filter(|member| member.pid == root_pid)
+                .all(|member| !super::session_member_alive(*member)),
+            "the root has exited: {members:?}"
+        );
+        super::signal_session_members(&members, super::Signal::Kill);
+        wait_until_members_exit(&members);
+    }
+
+    const DAEMON_TREE_ENV: &str = "HERDR_TEST_PANE_TREE_DAEMON";
+    const DAEMON_TREE_READY: &str = "herdr-pane-tree-daemon-ready";
+
+    fn relaunch_daemon_tree_test(role: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "platform::windows::tests::herdr_server_daemons_survive_the_pane_that_started_them",
+                "--nocapture",
+            ])
+            .env(DAEMON_TREE_ENV, role)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// 把本进程换进一个关闭时不终止进程的作业，返回作业句柄（握到进程退出）。测试运行器可能用
+    /// 关闭即终止的作业包住测试进程，那样就不算脱离的 daemon；生产里 daemon 在这种作业里时会改走
+    /// WMI 拉起，根本不在 pane 的进程树下。
+    fn enter_non_killing_job() -> std::os::windows::io::OwnedHandle {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+        let job = unsafe { super::CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        assert!(!job.is_null(), "create test job");
+        let job = unsafe { OwnedHandle::from_raw_handle(job) };
+        assert_ne!(
+            unsafe {
+                super::AssignProcessToJobObject(job.as_raw_handle(), super::GetCurrentProcess())
+            },
+            0,
+            "assign to test job"
+        );
+        job
+    }
+
+    /// pane 里的 herdr 客户端拉起的 server daemon（脱离控制台、挂着标记）不随这个 pane 一起终止：
+    /// 它连同它下面的嵌套会话都留着，同一个 pane 里的其它进程照常终止。普通进程没有标记，daemon
+    /// 退出后标记随之消失。
+    #[test]
+    fn herdr_server_daemons_survive_the_pane_that_started_them() {
+        match std::env::var(DAEMON_TREE_ENV).as_deref() {
+            Ok("client") => {
+                // daemon 本来就要比拉起它的客户端活得久，这里故意不等它。
+                #[allow(clippy::zombie_processes)]
+                let daemon = {
+                    let mut command = relaunch_daemon_tree_test("daemon");
+                    command.stdout(Stdio::null());
+                    super::detach_server_daemon_command(&mut command);
+                    command.spawn().expect("spawn server daemon")
+                };
+                let mut sibling = spawn_ping();
+                println!("{DAEMON_TREE_READY} {} {}", daemon.id(), sibling.id());
+                thread::sleep(Duration::from_secs(60));
+                let _ = sibling.kill();
+                let _ = sibling.wait();
+                return;
+            }
+            Ok("daemon") => {
+                use std::os::windows::process::CommandExt;
+
+                let _job = enter_non_killing_job();
+                super::announce_detached_server_daemon();
+                // daemon 自己的 pane。daemon 没有控制台，不让 ping 弹出窗口。
+                let mut nested = Command::new("ping")
+                    .args(["-n", "60", "127.0.0.1"])
+                    .creation_flags(super::CREATE_NO_WINDOW)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn nested pane process");
+                thread::sleep(Duration::from_secs(60));
+                let _ = nested.kill();
+                let _ = nested.wait();
+                return;
+            }
+            _ => {}
+        }
+
+        let mut client = relaunch_daemon_tree_test("client")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn pane client");
+        let stdout = client.stdout.take().expect("pane client stdout");
+        let ready = std::io::BufRead::lines(std::io::BufReader::new(stdout))
+            .map_while(Result::ok)
+            .find_map(|line| {
+                let mut pids = line.strip_prefix(DAEMON_TREE_READY)?.split_whitespace();
+                let daemon = pids.next()?.parse::<u32>().ok()?;
+                let sibling = pids.next()?.parse::<u32>().ok()?;
+                Some((daemon, sibling))
+            });
+        let Some((daemon_pid, sibling_pid)) = ready else {
+            let _ = client.kill();
+            let _ = client.wait();
+            panic!("pane client did not start the daemon");
+        };
+        let client_member = live_member(client.id());
+        let daemon = live_member(daemon_pid);
+        let sibling = live_member(sibling_pid);
+        let mut cleanup = KillOnDrop(vec![client_member, sibling, daemon]);
+
+        // 等 daemon 挂上标记、拉起自己的 pane。
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let nested_session = loop {
+            let daemon_tree = super::process_tree_members(daemon_pid);
+            if super::server_daemon_marker_exists(daemon) && daemon_tree.len() >= 2 {
+                break daemon_tree;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon never announced itself: {daemon_tree:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        cleanup.0.extend(nested_session.iter().copied());
+        assert!(nested_session.contains(&daemon));
+        for plain in [client_member, sibling, live_member(std::process::id())] {
+            assert!(
+                !super::server_daemon_marker_exists(plain),
+                "process {} is not a server daemon",
+                plain.pid
+            );
+        }
+        // 生产判定读真实进程的映像与命令行：客户端的映像同样以 herdr 开头，但命令行不是
+        // `<exe> server`，不算 daemon。
+        let open = |member: super::ProcessSessionMember| {
+            super::ProcessHandle::open(member.pid, super::PROCESS_QUERY_LIMITED_INFORMATION)
+                .expect("open live process")
+        };
+        assert!(super::is_herdr_server_daemon(daemon, &open(daemon)));
+        for plain in [client_member, sibling] {
+            assert!(
+                !super::is_herdr_server_daemon(plain, &open(plain)),
+                "process {} is not a server daemon",
+                plain.pid
+            );
+        }
+
+        let session = super::process_session_id(client.id()).expect("anchor for the pane root");
+        let members = super::session_members_batch(&[session])
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        assert!(
+            members.contains(&client_member) && members.contains(&sibling),
+            "the pane's own processes are members: {members:?}"
+        );
+        assert!(
+            nested_session.iter().all(|kept| !members.contains(kept)),
+            "the daemon and its sessions are not pane members: {members:?}"
+        );
+        super::signal_session_members(&members, super::Signal::Kill);
+        wait_until_members_exit(&members);
+        assert!(
+            nested_session
+                .iter()
+                .all(|kept| super::session_member_alive(*kept)),
+            "closing the pane must leave the daemon and its sessions running"
+        );
+        let _ = client.wait();
+
+        super::signal_session_members(&nested_session, super::Signal::Kill);
+        wait_until_members_exit(&nested_session);
+        assert!(
+            !super::server_daemon_marker_exists(daemon),
+            "the marker goes away with the daemon"
+        );
     }
 
     #[test]
@@ -5198,20 +5818,307 @@ mod tests {
         assert_eq!(job.processes[0].name, "powershell.exe");
     }
 
+    /// 纯逻辑地核对一棵 pane 进程树。`snapshot` 是 Toolhelp 快照里的 (pid, 父 pid)；`handles`
+    /// 是经进程句柄读到的 (pid, 父 pid, 创建时间)，不在表里表示打不开或读不出创建时间。
+    fn verified_members(
+        session: super::ProcessSessionId,
+        snapshot: &[(u32, u32)],
+        handles: &[(u32, u32, u64)],
+    ) -> Vec<(u32, u64)> {
+        verified_members_with_daemons(session, snapshot, handles, &[], &[])
+    }
+
+    /// 同上，另给出 daemon 线索：`markers` 里的 (pid, 创建时间) 挂着 server daemon 标记；
+    /// `commands` 是经句柄读到的 (pid, 映像路径, 命令行)，没列出的进程两者都为空。认法与生产
+    /// 相同：标记，或旧版 daemon 的映像与命令行。
+    fn verified_members_with_daemons(
+        session: super::ProcessSessionId,
+        snapshot: &[(u32, u32)],
+        handles: &[(u32, u32, u64)],
+        markers: &[(u32, u64)],
+        commands: &[(u32, &str, &str)],
+    ) -> Vec<(u32, u64)> {
+        let snapshot = super::ProcessSnapshot::new(
+            snapshot
+                .iter()
+                .map(|&(pid, parent)| test_entry(pid, parent, "process.exe", &["process.exe"]))
+                .collect(),
+        );
+        let handles: std::collections::HashMap<u32, (u32, u64)> = handles
+            .iter()
+            .map(|&(pid, parent, created)| (pid, (parent, created)))
+            .collect();
+        let commands: std::collections::HashMap<u32, (&str, &str)> = commands
+            .iter()
+            .map(|&(pid, image, command_line)| (pid, (image, command_line)))
+            .collect();
+        let mut members: Vec<(u32, u64)> = super::verified_session_members(
+            session,
+            &snapshot,
+            |pid| {
+                handles
+                    .get(&pid)
+                    .map(|&(parent_pid, created)| super::InspectedProcess {
+                        parent_pid,
+                        created,
+                        pin: commands.get(&pid).copied().unwrap_or(("", "")),
+                    })
+            },
+            |member, &(image, command_line): &(&str, &str)| {
+                markers.contains(&(member.pid, member.instance))
+                    || super::is_legacy_server_daemon_command(image, command_line)
+            },
+        )
+        .into_iter()
+        .map(|member| (member.pid, member.instance))
+        .collect();
+        members.sort_unstable();
+        members
+    }
+
     #[test]
-    fn windows_session_processes_collects_shell_and_descendants() {
-        let entries = vec![
-            test_entry(10, 1, "powershell.exe", &["powershell.exe"]),
-            test_entry(20, 10, "cmd.exe", &["cmd.exe"]),
-            test_entry(30, 20, "node.exe", &["node.exe"]),
-            test_entry(40, 1, "unrelated.exe", &["unrelated.exe"]),
-        ];
+    fn pane_tree_members_leave_herdr_server_daemons_and_their_sessions_running() {
+        // 20 是 pane 里的 herdr 客户端，30 是它拉起的 server daemon，35 是 daemon 自己的 pane，
+        // 37 是那个 pane 里的程序。daemon 连同整个嵌套会话都留着，客户端与 40 照常终止。
+        let members = verified_members_with_daemons(
+            ROOT_ANCHOR,
+            &[(10, 1), (20, 10), (30, 20), (35, 30), (37, 35), (40, 10)],
+            &[
+                (10, 1, 100),
+                (20, 10, 110),
+                (30, 20, 120),
+                (35, 30, 130),
+                (37, 35, 140),
+                (40, 10, 150),
+            ],
+            &[(30, 120)],
+            &[],
+        );
+        assert_eq!(members, vec![(10, 100), (20, 110), (40, 150)]);
+    }
 
-        let snapshot = super::ProcessSnapshot::new(entries);
-        let mut pids = super::session_processes_from_snapshot(10, &snapshot);
-        pids.sort_unstable();
+    #[test]
+    fn pane_tree_members_leave_orphaned_herdr_server_daemons_running() {
+        // 根进程已退出：孤儿里的 daemon（20）及其子进程同样留着，别的孤儿照常算成员。
+        let members = verified_members_with_daemons(
+            ROOT_ANCHOR,
+            &[(20, 10), (25, 20), (30, 10)],
+            &[(20, 10, 150), (25, 20, 160), (30, 10, 170)],
+            &[(20, 150)],
+            &[],
+        );
+        assert_eq!(members, vec![(30, 170)]);
+    }
 
-        assert_eq!(pids, vec![10, 20, 30]);
+    #[test]
+    fn pane_tree_members_ignore_a_daemon_marker_of_another_process_instance() {
+        // 标记按核对过的 pid 与创建时间认：pid 30 当前的主人创建于 120，创建于 90 的旧 daemon
+        // 的标记与它无关。
+        let members = verified_members_with_daemons(
+            ROOT_ANCHOR,
+            &[(10, 1), (30, 10)],
+            &[(10, 1, 100), (30, 10, 120)],
+            &[(30, 90)],
+            &[],
+        );
+        assert_eq!(members, vec![(10, 100), (30, 120)]);
+    }
+
+    #[test]
+    fn pane_tree_members_leave_legacy_herdr_server_daemons_running() {
+        // 30 是旧版 herdr 拉起的 server daemon：不挂标记，映像与命令行就是 `<exe> server`。它连同
+        // 它的 pane（35）都留着；同一个映像的客户端（20）与带多余参数的 40 照常终止。
+        let image = r"C:\Users\me\.herdr\packages\standalone\releases\0.8.0\herdr.exe";
+        let client = format!(r#""{image}""#);
+        let daemon = format!(r#""{image}" server"#);
+        let extra = format!(r#""{image}" server --verbose"#);
+        let members = verified_members_with_daemons(
+            ROOT_ANCHOR,
+            &[(10, 1), (20, 10), (30, 20), (35, 30), (40, 10)],
+            &[
+                (10, 1, 100),
+                (20, 10, 110),
+                (30, 20, 120),
+                (35, 30, 130),
+                (40, 10, 140),
+            ],
+            &[],
+            &[
+                (20, image, &client),
+                (30, image, &daemon),
+                (40, image, &extra),
+            ],
+        );
+        assert_eq!(members, vec![(10, 100), (20, 110), (40, 140)]);
+    }
+
+    #[test]
+    fn legacy_server_daemons_need_a_herdr_image_and_exactly_the_server_subcommand() {
+        let image = r"C:\Users\me\AppData\Local\Programs\Herdr\bin\herdr.exe";
+        let quoted = r#""C:\Users\me\AppData\Local\Programs\Herdr\bin\herdr.exe""#;
+        for (image, command_line, expected) in [
+            (image, format!("{quoted} server"), true),
+            // 引号、多余空白与路径写法（按文件名、不分大小写比）的差异都认。
+            (
+                image,
+                r"C:\Users\me\AppData\Local\Programs\Herdr\bin\herdr.exe   server".to_owned(),
+                true,
+            ),
+            (image, r#""D:\copy\HERDR.EXE" server"#.to_owned(), true),
+            (
+                r"D:\src\herdr\target\debug\Herdr-Dev.EXE",
+                r#""D:\src\herdr\target\debug\herdr-dev.exe" server"#.to_owned(),
+                true,
+            ),
+            // 别的子命令、多余或缺少的参数都不算。
+            (image, quoted.to_owned(), false),
+            (image, format!("{quoted} Server"), false),
+            (
+                image,
+                format!("{quoted} server --handoff-import pipe token"),
+                false,
+            ),
+            (
+                image,
+                format!("{quoted} api usage-report --agent claude"),
+                false,
+            ),
+            (image, String::new(), false),
+            // argv[0] 指向别的程序，或映像名不以 herdr 开头。
+            (image, r#""C:\tools\node.exe" server"#.to_owned(), false),
+            (
+                r"C:\tools\node.exe",
+                r#""C:\tools\node.exe" server"#.to_owned(),
+                false,
+            ),
+            (
+                r"C:\tools\notherdr.exe",
+                r#""C:\tools\notherdr.exe" server"#.to_owned(),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                super::is_legacy_server_daemon_command(image, &command_line),
+                expected,
+                "{image} | {command_line}"
+            );
+        }
+    }
+
+    /// pid 10 的根进程创建于 100，锚点快照于 500。
+    const ROOT_ANCHOR: super::ProcessSessionId = super::ProcessSessionId {
+        id: 10,
+        instance: 100,
+        captured: 500,
+    };
+
+    #[test]
+    fn pane_tree_members_follow_parents_created_no_later_than_their_children() {
+        let members = verified_members(
+            ROOT_ANCHOR,
+            &[(10, 1), (20, 10), (30, 20), (40, 10), (50, 1)],
+            &[
+                (10, 1, 100),
+                (20, 10, 150),
+                (30, 20, 200),
+                // 与根进程同一时刻创建（时钟精度内）仍算它的子进程。
+                (40, 10, 100),
+                (50, 1, 120),
+            ],
+        );
+        assert_eq!(members, vec![(10, 100), (20, 150), (30, 200), (40, 100)]);
+    }
+
+    #[test]
+    fn pane_tree_members_skip_children_older_than_their_parent() {
+        // 20 与 35 早于父进程创建：它们的父 pid 属于上一任主人，不是这棵树的成员，也不从
+        // 它们往下找。
+        let members = verified_members(
+            ROOT_ANCHOR,
+            &[(10, 1), (20, 10), (25, 20), (30, 10), (35, 30)],
+            &[
+                (10, 1, 100),
+                (20, 10, 50),
+                (25, 20, 60),
+                (30, 10, 120),
+                (35, 30, 110),
+            ],
+        );
+        assert_eq!(members, vec![(10, 100), (30, 120)]);
+    }
+
+    #[test]
+    fn pane_tree_members_skip_processes_whose_identity_cannot_be_read() {
+        // 20 打不开或读不出创建时间：不算成员（永远不会收到信号），它下面的 30 也接不上。
+        let members = verified_members(
+            ROOT_ANCHOR,
+            &[(10, 1), (20, 10), (30, 20), (40, 10)],
+            &[(10, 1, 100), (30, 20, 200), (40, 10, 130)],
+        );
+        assert_eq!(members, vec![(10, 100), (40, 130)]);
+    }
+
+    #[test]
+    fn pane_tree_members_reject_a_candidate_whose_pid_changed_owner_after_the_snapshot() {
+        // 快照说 20 是根进程的子进程，但读句柄时 pid 20 已属于别的父进程创建的新进程。
+        let members = verified_members(
+            ROOT_ANCHOR,
+            &[(10, 1), (20, 10)],
+            &[(10, 1, 100), (20, 77, 300)],
+        );
+        assert_eq!(members, vec![(10, 100)]);
+    }
+
+    #[test]
+    fn pane_tree_members_keep_orphans_of_an_exited_root() {
+        // 根进程已退出，pid 10 已空出。只认锚点之前由它创建的孤儿（及孤儿的后代）；创建于
+        // 锚点时刻及之后的，可能是 pid 10 的下一任主人（已退出）留下的，排除；早于根进程的
+        // 是上一任主人留下的，同样排除。
+        let members = verified_members(
+            ROOT_ANCHOR,
+            &[(20, 10), (25, 20), (30, 10), (40, 10), (60, 10)],
+            &[
+                (20, 10, 150),
+                (25, 20, 160),
+                (30, 10, 520),
+                (40, 10, 500),
+                (60, 10, 50),
+            ],
+        );
+        assert_eq!(members, vec![(20, 150), (25, 160)]);
+    }
+
+    #[test]
+    fn pane_tree_members_exclude_a_recycled_root_and_its_new_children() {
+        // pid 10 已属于创建于 600 的新进程：它本身和它的子进程（30）都不算成员，原根进程的
+        // 孤儿（20）仍然算。
+        let members = verified_members(
+            ROOT_ANCHOR,
+            &[(10, 4), (20, 10), (30, 10), (35, 30)],
+            &[(10, 4, 600), (20, 10, 150), (30, 10, 650), (35, 30, 700)],
+        );
+        assert_eq!(members, vec![(20, 150)]);
+    }
+
+    #[test]
+    fn pane_tree_members_stop_at_parent_cycles() {
+        let members = verified_members(
+            ROOT_ANCHOR,
+            &[(10, 30), (20, 10), (30, 20)],
+            &[(10, 30, 100), (20, 10, 110), (30, 20, 120)],
+        );
+        assert_eq!(members, vec![(10, 100), (20, 110), (30, 120)]);
+    }
+
+    #[test]
+    fn pane_tree_members_reject_anchors_without_a_usable_root_pid() {
+        for id in [0, -1, i64::from(u32::MAX) + 1] {
+            let session = super::ProcessSessionId { id, ..ROOT_ANCHOR };
+            assert!(
+                verified_members(session, &[(20, 0)], &[(0, 0, 100), (20, 0, 150)]).is_empty(),
+                "{id}"
+            );
+        }
     }
 
     #[test]

@@ -2169,8 +2169,8 @@ fn publish_reported_cwd(
 impl PaneRuntime {
     /// 关闭 pane：同步摘除 I/O 与后台任务，进程终止阶梯交给 reaper 线程。
     ///
-    /// 调用方是事件循环，必须立刻返回：信号阶梯最坏要等 750 ms，同步执行会把 PTY 输出、
-    /// 输入、渲染与其它 API 一起冻住（HSR-01）。
+    /// 调用方是事件循环，必须立刻返回：信号阶梯最坏要等 [`PANE_SHUTDOWN_LADDER_WORST_CASE`]，
+    /// 同步执行会把 PTY 输出、输入、渲染与其它 API 一起冻住（HSR-01）。
     pub fn shutdown(mut self) {
         // 会话锚点必须在关掉 PTY **之前**快照：`io.shutdown()` 关掉 master 后 shell 会在
         // 几毫秒内退出并被 wait 回收，进程表条目一消失就再也认不出这棵进程树，会话里的

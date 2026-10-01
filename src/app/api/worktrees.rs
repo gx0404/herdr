@@ -494,6 +494,7 @@ impl App {
         workspace: Option<crate::api::schema::WorkspaceInfo>,
         worktree: WorktreeInfo,
         forced: bool,
+        leftover_path: Option<String>,
     ) {
         self.emit_event(EventEnvelope {
             event: EventKind::WorktreeRemoved,
@@ -502,6 +503,7 @@ impl App {
                 workspace,
                 worktree,
                 forced,
+                leftover_path,
             },
         });
     }
@@ -2298,6 +2300,7 @@ mod tests {
                     workspace: Some(workspace),
                     worktree,
                     forced,
+                    leftover_path: None,
                 } if workspace_id == &child_id
                     && workspace.workspace_id == child_id
                     && worktree.branch.as_deref() == Some("worktree/api-remove-event")
@@ -2790,7 +2793,7 @@ mod tests {
                 shutdown_panes: vec![child_pane_id],
                 respond_to,
             }),
-            result: Ok(()),
+            result: Ok(None),
         });
 
         let response = response_rx
@@ -2861,7 +2864,7 @@ mod tests {
                 shutdown_panes: vec![child_pane_id],
                 respond_to,
             }),
-            result: Ok(()),
+            result: Ok(None),
         });
 
         let response = response_rx
@@ -2891,5 +2894,79 @@ mod tests {
             app.state.terminals[&child_terminal_id].cwd,
             PathBuf::from("/repo/other")
         );
+    }
+
+    #[test]
+    fn worktree_remove_with_leftover_checkout_reports_it_in_response_and_event() {
+        let _dirs = isolate_test_dirs();
+        let event_hub = crate::api::EventHub::default();
+        let mut app = test_app_with_event_hub(event_hub.clone());
+        let checkout = PathBuf::from("/repo/herdr-leftover");
+        let membership = crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: checkout.clone(),
+            is_linked_worktree: true,
+        };
+        let mut child = Workspace::test_new("child");
+        child.worktree_space = Some(membership.clone());
+        let child_id = child.id.clone();
+        app.state.workspaces.push(child);
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let workspace_snapshot = app.workspace_info(0);
+        let worktree_snapshot = app.worktree_info_for_membership(&membership, None);
+        let checkout_key = crate::worktree::canonical_or_original(&checkout);
+        app.pending_api_worktree_removes.insert(child_id.clone(), 7);
+        app.pending_api_worktree_remove_paths
+            .insert(checkout_key.clone(), 7);
+        let (respond_to, response_rx) = response_channel();
+
+        // git 已注销该 worktree，但检出目录里有删不掉的文件，恢复把目录报了回来。
+        let _ = app.handle_api_worktree_remove_finished(WorktreeRemoveResult {
+            workspace_id: child_id.clone(),
+            path: checkout.clone(),
+            workspace: Some(Box::new(workspace_snapshot)),
+            worktree: Some(Box::new(worktree_snapshot)),
+            forced: false,
+            api_request: Some(ApiWorktreeRemoveRequest {
+                id: "req".into(),
+                operation_id: 7,
+                checkout_key,
+                shutdown_panes: Vec::new(),
+                respond_to,
+            }),
+            result: Ok(Some(checkout.clone())),
+        });
+
+        let expected = checkout.display().to_string();
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("removal with leftovers should still answer with success");
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorktreeRemoved {
+            path,
+            leftover_path,
+            ..
+        } = success.result
+        else {
+            panic!("expected worktree_removed response");
+        };
+        assert_eq!(path, expected);
+        assert_eq!(leftover_path.as_deref(), Some(expected.as_str()));
+        // 删除照常收尾：工作区关闭，事件同样带上残留目录。
+        assert!(app.state.workspaces.is_empty());
+        assert!(event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                EventData::WorktreeRemoved {
+                    workspace_id,
+                    leftover_path: Some(leftover),
+                    ..
+                } if workspace_id == &child_id && leftover == &expected
+            )
+        }));
     }
 }

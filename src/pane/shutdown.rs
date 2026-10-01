@@ -9,12 +9,13 @@
 //! - **进程树的身份在事件循环里就固定下来**。请求携带投递时刻快照的
 //!   [`ProcessSessionId`]，reaper 凭它枚举成员；否则 child 在投递与执行之间被 `wait`
 //!   回收后锚点就消失了，孙进程再也找不到（漏杀），而回退到裸 `child_pid` 又可能打到
-//!   被复用的无关进程（误杀）。
+//!   被复用的无关进程（误杀）。成员带着枚举时的实例标记（[`ProcessSessionMember`]），
+//!   升级信号时成员可能早已退出、pid 被别的进程拿走，平台据此核对后才发信号。
 //! - **进程退出前等阶梯收尾**（[`drain_pending`]），否则 pane 进程会被留成孤儿。
 //!
 //! reaper 用**一个**轮询循环驱动所有在办 pane，每个 pane 有自己的阶梯进度：新投递的
 //! 请求立刻并入当前循环（不必等上一批走完），所以任何一个请求的最坏耗时都是一轮阶梯
-//! （≤750 ms），与同时关掉多少个 pane 无关。
+//! （[`LADDER_WORST_CASE`]：unix ≤750 ms，Windows ≤2.5 s），与同时关掉多少个 pane 无关。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,18 +25,24 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::layout::PaneId;
-use crate::platform::{ProcessSessionId, Signal};
+use crate::platform::{ProcessSessionId, ProcessSessionMember, Signal};
 
 /// 信号阶梯：每个 pane 依次收到三级信号，每级之间等一个宽限窗口。
 const SIGNAL_LADDER: [(Signal, Duration); 3] = [
     (Signal::Hangup, Duration::from_millis(250)),
     (Signal::Terminate, Duration::from_millis(250)),
-    (Signal::Kill, Duration::from_millis(250)),
+    (Signal::Kill, Duration::from_millis(KILL_GRACE_MS)),
 ];
+
+/// 最后一级（SIGKILL；Windows 上是 TerminateProcess）之后等进程真正退出的宽限。Windows 的
+/// 进程要等进程对象 signaled（句柄、cwd 都已释放）才算退出，负载下被终止后还要半秒以上；
+/// 宽限太短会误报「强杀后仍存活」，`drain_pending` 也会在句柄释放前返回。轮询在进程退出时
+/// 立即摘除它，正常情况下等不满。
+const KILL_GRACE_MS: u64 = if cfg!(windows) { 2000 } else { 250 };
 
 /// 一个请求从被 reaper 取走到走完阶梯的上限：整条阶梯的宽限之和。调用方据此设置
 /// [`drain_pending`] 的超时。
-pub(crate) const LADDER_WORST_CASE: Duration = Duration::from_millis(750);
+pub(crate) const LADDER_WORST_CASE: Duration = Duration::from_millis(500 + KILL_GRACE_MS);
 
 /// 首级几乎总是在几毫秒内命中（shell 收到 SIGHUP 立刻退出），所以首级用 [`FAST_POLL`]
 /// 轮询做到「命中即摘除」；升级到 SIGTERM/SIGKILL 的进程本来就不会很快退出，后续级别
@@ -62,12 +69,22 @@ impl PaneShutdownRequest {
     /// 在事件循环里构造：会话锚点**必须**在这里快照。这是一次廉价查询（Linux 上是单个
     /// `/proc/<pid>/stat` 读），不是计划要求移出事件循环的全表扫描；但它必须发生在
     /// child 还活着的时候，否则 reaper 拿到请求时进程树就没有可靠身份了。
+    ///
+    /// 快照**之后**才看 `child_wait_completed`：已经置位说明 child 已被回收、pid 可能已被
+    /// 复用，读到的锚点可能属于无关进程，宁可不发信号。Windows 的 wait 线程先置位、再释放
+    /// child 句柄（pid 要等句柄释放才会被复用），所以此时仍未置位就说明快照那一刻 pid 还属于
+    /// child。Unix 回收时 pid 就已释放，这里挡不住置位前的那一小段，但 Unix 的 pid 递增分配，
+    /// 不会在这么短的时间里被复用。
     pub(crate) fn new(
         pane_id: PaneId,
         child_pid: u32,
         child_wait_completed: Option<Arc<AtomicBool>>,
     ) -> Self {
         let session = crate::platform::process_session_id(child_pid);
+        let child_reaped = child_wait_completed
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        let session = session.filter(|_| !child_reaped);
         Self {
             pane_id,
             child_pid,
@@ -117,10 +134,11 @@ trait ProcessControl {
     /// 进程当前所属会话；进程已消失时返回 `None`。
     fn session_id(&self, pid: u32) -> Option<ProcessSessionId>;
     /// 一次扫描取出整批会话的成员，返回与 `sessions` 一一对应的桶。
-    fn session_processes(&self, sessions: &[ProcessSessionId]) -> Vec<Vec<u32>>;
-    fn signal_processes(&self, pids: &[u32], signal: Signal);
-    /// 进程是否仍需等待它退出：僵尸（已退出未被回收）按已退出处理，见 HSR-02。
-    fn process_alive(&self, pid: u32) -> bool;
+    fn session_processes(&self, sessions: &[ProcessSessionId]) -> Vec<Vec<ProcessSessionMember>>;
+    fn signal_processes(&self, members: &[ProcessSessionMember], signal: Signal);
+    /// 成员是否仍需等待它退出：僵尸（已退出未被回收）按已退出处理，见 HSR-02；pid 已换了
+    /// 主人也按已退出处理。
+    fn process_alive(&self, member: ProcessSessionMember) -> bool;
 }
 
 struct PlatformProcessControl;
@@ -130,25 +148,25 @@ impl ProcessControl for PlatformProcessControl {
         crate::platform::process_session_id(pid)
     }
 
-    fn session_processes(&self, sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
-        crate::platform::session_processes_batch(sessions)
+    fn session_processes(&self, sessions: &[ProcessSessionId]) -> Vec<Vec<ProcessSessionMember>> {
+        crate::platform::session_members_batch(sessions)
     }
 
-    fn signal_processes(&self, pids: &[u32], signal: Signal) {
-        crate::platform::signal_processes(pids, signal);
+    fn signal_processes(&self, members: &[ProcessSessionMember], signal: Signal) {
+        crate::platform::signal_session_members(members, signal);
     }
 
-    fn process_alive(&self, pid: u32) -> bool {
-        crate::platform::process_alive_excluding_zombies(pid)
+    fn process_alive(&self, member: ProcessSessionMember) -> bool {
+        crate::platform::session_member_alive(member)
     }
 }
 
-/// 阶梯执行期间的一个 pane：进程集合在进入阶梯前扫描一次，之后每轮只摘除已退出的 pid。
+/// 阶梯执行期间的一个 pane：进程集合在进入阶梯前扫描一次，之后每轮只摘除已退出的成员。
 struct ReapTarget {
     pane_id: PaneId,
     child_pid: u32,
     child_wait_completed: Option<Arc<AtomicBool>>,
-    pids: Vec<u32>,
+    members: Vec<ProcessSessionMember>,
     /// 已经发出的信号级数，即下一次要发 `ladder[stage]`。
     stage: usize,
     last_signal: Option<Signal>,
@@ -157,7 +175,7 @@ struct ReapTarget {
 }
 
 impl ReapTarget {
-    /// 摘掉已经退出的 pid；全部退出时返回 true。
+    /// 摘掉已经退出的成员；全部退出时返回 true。
     ///
     /// 每级发信号前都先摘一遍：已被 `wait` 回收（pid 可能已被复用）或已经退出的进程
     /// 不该再收到信号。
@@ -167,12 +185,12 @@ impl ReapTarget {
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire));
         let child_pid = self.child_pid;
-        self.pids.retain(|pid| {
-            process_alive_for_shutdown(*pid, child_pid, child_wait_completed, |pid| {
-                control.process_alive(pid)
+        self.members.retain(|member| {
+            process_alive_for_shutdown(member.pid, child_pid, child_wait_completed, |_| {
+                control.process_alive(*member)
             })
         });
-        self.pids.is_empty()
+        self.members.is_empty()
     }
 }
 
@@ -247,26 +265,32 @@ fn prepare_targets(
     let mut targets = Vec::with_capacity(anchored.len());
     // 平台实现返回的桶数与 sessions 等长；万一更短也不能 panic，缺的按「扫不到成员」处理。
     let buckets = buckets.into_iter().chain(std::iter::repeat_with(Vec::new));
-    for ((request, session), mut pids) in anchored.into_iter().zip(buckets) {
-        if pids.is_empty() {
-            if control.session_id(request.child_pid) == Some(session) {
-                pids.push(request.child_pid);
-            } else {
-                debug!(
-                    pane = request.pane_id.raw(),
-                    pid = request.child_pid,
-                    "pane session had no live processes left"
-                );
-                continue;
+    for ((request, session), mut members) in anchored.into_iter().zip(buckets) {
+        if members.is_empty() {
+            match control.session_id(request.child_pid) {
+                Some(current) if current.same_root(session) => {
+                    members.push(ProcessSessionMember {
+                        pid: request.child_pid,
+                        instance: current.instance,
+                    });
+                }
+                _ => {
+                    debug!(
+                        pane = request.pane_id.raw(),
+                        pid = request.child_pid,
+                        "pane session had no live processes left"
+                    );
+                    continue;
+                }
             }
         }
-        pids.sort_unstable();
-        pids.dedup();
+        members.sort_unstable();
+        members.dedup();
         targets.push(ReapTarget {
             pane_id: request.pane_id,
             child_pid: request.child_pid,
             child_wait_completed: request.child_wait_completed,
-            pids,
+            members,
             stage: 0,
             last_signal: None,
             stage_started: now,
@@ -297,15 +321,16 @@ fn advance_targets(
             return true;
         }
         let Some((signal, grace)) = ladder.get(target.stage) else {
+            let pids: Vec<u32> = target.members.iter().map(|member| member.pid).collect();
             warn!(
                 pane = target.pane_id.raw(),
                 pid = target.child_pid,
-                pids = ?target.pids,
+                pids = ?pids,
                 "pane session still alive after forced shutdown"
             );
             return false;
         };
-        control.signal_processes(&target.pids, *signal);
+        control.signal_processes(&target.members, *signal);
         target.stage += 1;
         target.last_signal = Some(*signal);
         target.stage_started = now;
@@ -511,7 +536,7 @@ impl Reaper {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FakeState {
@@ -524,6 +549,8 @@ mod tests {
     #[derive(Clone, Copy)]
     struct FakeProcess {
         session: i64,
+        /// 进程实例标记（对应 Windows 的创建时间）：pid 被复用后换成另一个值。
+        instance: u64,
         state: FakeState,
         dies_on: Option<Signal>,
         zombies_on: Option<Signal>,
@@ -535,6 +562,8 @@ mod tests {
         signals: Mutex<Vec<(Vec<u32>, Signal)>>,
         alive_probes: AtomicUsize,
         panic_on_next_signal: AtomicBool,
+        /// 每次读锚点都给出新的快照时刻（与 Windows 一样），同一个根只能靠 `same_root` 相认。
+        captures: AtomicU64,
     }
 
     impl FakeProcesses {
@@ -544,6 +573,7 @@ mod tests {
                 signals: Mutex::new(Vec::new()),
                 alive_probes: AtomicUsize::new(0),
                 panic_on_next_signal: AtomicBool::new(false),
+                captures: AtomicU64::new(0),
             }
         }
 
@@ -555,6 +585,7 @@ mod tests {
                     *pid,
                     FakeProcess {
                         session,
+                        instance: 0,
                         state: FakeState::Running,
                         dies_on,
                         zombies_on: None,
@@ -609,47 +640,61 @@ mod tests {
         fn session_id(&self, pid: u32) -> Option<ProcessSessionId> {
             let procs = self.procs.lock().ok()?;
             let process = procs.get(&pid)?;
-            (process.state != FakeState::Gone).then_some(ProcessSessionId(process.session))
+            (process.state != FakeState::Gone).then(|| ProcessSessionId {
+                id: process.session,
+                instance: process.instance,
+                captured: self.captures.fetch_add(1, Ordering::Relaxed) + 1,
+            })
         }
 
-        fn session_processes(&self, sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
+        fn session_processes(
+            &self,
+            sessions: &[ProcessSessionId],
+        ) -> Vec<Vec<ProcessSessionMember>> {
             let Ok(procs) = self.procs.lock() else {
                 return vec![Vec::new(); sessions.len()];
             };
             sessions
                 .iter()
                 .map(|session| {
-                    let mut pids: Vec<u32> = procs
+                    let mut members: Vec<ProcessSessionMember> = procs
                         .iter()
                         .filter(|(_, process)| {
-                            process.session == session.0 && process.state != FakeState::Gone
+                            process.session == session.id && process.state != FakeState::Gone
                         })
-                        .map(|(pid, _)| *pid)
+                        .map(|(pid, process)| ProcessSessionMember {
+                            pid: *pid,
+                            instance: process.instance,
+                        })
                         .collect();
-                    pids.sort_unstable();
-                    pids
+                    members.sort_unstable();
+                    members
                 })
                 .collect()
         }
 
-        fn signal_processes(&self, pids: &[u32], signal: Signal) {
+        fn signal_processes(&self, members: &[ProcessSessionMember], signal: Signal) {
             if self.panic_on_next_signal.swap(false, Ordering::SeqCst) {
                 panic!("injected reaper panic");
             }
             if let Ok(mut log) = self.signals.lock() {
-                log.push((pids.to_vec(), signal));
+                log.push((members.iter().map(|member| member.pid).collect(), signal));
             }
             let updates: Vec<(u32, FakeState)> = {
                 let Ok(procs) = self.procs.lock() else {
                     return;
                 };
-                pids.iter()
-                    .filter_map(|pid| {
-                        let process = procs.get(pid)?;
+                members
+                    .iter()
+                    .filter_map(|member| {
+                        // 平台按实例核对后才发信号：pid 换了主人的进程收不到。
+                        let process = procs
+                            .get(&member.pid)
+                            .filter(|process| process.instance == member.instance)?;
                         if process.dies_on == Some(signal) {
-                            Some((*pid, FakeState::Gone))
+                            Some((member.pid, FakeState::Gone))
                         } else if process.zombies_on == Some(signal) {
-                            Some((*pid, FakeState::Zombie))
+                            Some((member.pid, FakeState::Zombie))
                         } else {
                             None
                         }
@@ -661,14 +706,14 @@ mod tests {
             }
         }
 
-        fn process_alive(&self, pid: u32) -> bool {
+        fn process_alive(&self, member: ProcessSessionMember) -> bool {
             self.alive_probes.fetch_add(1, Ordering::Relaxed);
             self.procs
                 .lock()
                 .map(|procs| {
-                    procs
-                        .get(&pid)
-                        .is_some_and(|process| process.state == FakeState::Running)
+                    procs.get(&member.pid).is_some_and(|process| {
+                        process.instance == member.instance && process.state == FakeState::Running
+                    })
                 })
                 .unwrap_or(false)
         }
@@ -682,13 +727,17 @@ mod tests {
         ]
     }
 
+    /// 不带实例标记的锚点（Unix 会话 id 的形态）。
+    fn anchor(session: i64) -> ProcessSessionId {
+        ProcessSessionId {
+            id: session,
+            instance: 0,
+            captured: 0,
+        }
+    }
+
     fn request(pane: u32, pid: u32, session: i64) -> PaneShutdownRequest {
-        PaneShutdownRequest::with_session(
-            PaneId::from_raw(pane),
-            pid,
-            None,
-            Some(ProcessSessionId(session)),
-        )
+        PaneShutdownRequest::with_session(PaneId::from_raw(pane), pid, None, Some(anchor(session)))
     }
 
     fn target_in_stage(stage: usize, stage_started: Instant) -> ReapTarget {
@@ -696,7 +745,10 @@ mod tests {
             pane_id: PaneId::from_raw(1),
             child_pid: 7,
             child_wait_completed: None,
-            pids: vec![7],
+            members: vec![ProcessSessionMember {
+                pid: 7,
+                instance: 0,
+            }],
             stage,
             last_signal: None,
             stage_started,
@@ -780,6 +832,7 @@ mod tests {
             7,
             FakeProcess {
                 session: 5,
+                instance: 0,
                 state: FakeState::Running,
                 dies_on: None,
                 zombies_on: Some(Signal::Hangup),
@@ -790,6 +843,57 @@ mod tests {
             control.signal_log(),
             vec![Signal::Hangup],
             "僵尸不应把阶梯拖到 SIGTERM/SIGKILL"
+        );
+    }
+
+    #[test]
+    fn shutdown_ladder_prunes_a_member_whose_pid_now_names_another_instance() {
+        // 成员在两级信号之间退出、pid 被无关进程拿走：按实例核对它已退出，不能把下一级
+        // 信号发给新主人。
+        let control = FakeProcesses::new();
+        control.insert(
+            7,
+            FakeProcess {
+                session: 5,
+                instance: 2,
+                state: FakeState::Running,
+                dies_on: Some(Signal::Terminate),
+                zombies_on: None,
+            },
+        );
+        let now = Instant::now();
+        let mut targets = vec![ReapTarget {
+            members: vec![ProcessSessionMember {
+                pid: 7,
+                instance: 1,
+            }],
+            ..target_in_stage(1, now)
+        }];
+        advance_targets(&mut targets, &test_ladder(), &control, now);
+        assert!(targets.is_empty(), "原来的成员已经退出，pane 应当收尾");
+        assert!(control.signal_log().is_empty(), "新主人不得收到信号");
+    }
+
+    #[test]
+    fn shutdown_request_drops_the_anchor_once_the_child_was_reaped() {
+        // 锚点快照之后 child 已被回收：pid 可能已经属于无关进程，读到的锚点不可信。
+        let pid = std::process::id();
+        let pane = PaneId::from_raw(1);
+        let unreaped = Arc::new(AtomicBool::new(false));
+        assert!(
+            PaneShutdownRequest::new(pane, pid, Some(unreaped))
+                .session
+                .is_some(),
+            "child 未被回收时应快照到锚点"
+        );
+        let reaped = Arc::new(AtomicBool::new(true));
+        assert_eq!(
+            PaneShutdownRequest::new(pane, pid, Some(reaped)).session,
+            None
+        );
+        assert!(
+            PaneShutdownRequest::new(pane, pid, None).session.is_some(),
+            "没有回收标志的 pane（handoff 导入）照旧快照"
         );
     }
 
@@ -818,22 +922,26 @@ mod tests {
             self.0.session_id(pid)
         }
 
-        fn session_processes(&self, sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
+        fn session_processes(
+            &self,
+            sessions: &[ProcessSessionId],
+        ) -> Vec<Vec<ProcessSessionMember>> {
             vec![Vec::new(); sessions.len()]
         }
 
-        fn signal_processes(&self, pids: &[u32], signal: Signal) {
-            self.0.signal_processes(pids, signal);
+        fn signal_processes(&self, members: &[ProcessSessionMember], signal: Signal) {
+            self.0.signal_processes(members, signal);
         }
 
-        fn process_alive(&self, pid: u32) -> bool {
-            self.0.process_alive(pid)
+        fn process_alive(&self, member: ProcessSessionMember) -> bool {
+            self.0.process_alive(member)
         }
     }
 
     #[test]
     fn shutdown_ladder_falls_back_to_the_child_pid_when_the_scan_finds_nothing() {
-        // 扫不到会话成员，但 child 仍属于请求携带的会话：回退到 child_pid 是安全的。
+        // 扫不到会话成员，但 child 仍属于请求携带的会话：回退到 child_pid 是安全的。假进程表
+        // 每次给出新的快照时刻，回退也要认得出同一个根。
         let control = FakeProcesses::session(5, &[4242], Some(Signal::Hangup));
         run_ladder_blocking(
             vec![request(1, 4242, 5)],
@@ -845,6 +953,39 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_ladder_does_not_fall_back_to_another_instance_of_the_child_pid() {
+        // Windows 的锚点 id 就是 child pid：child 被回收后 pid 落到新进程手里，id 对得上、
+        // 实例对不上，回退必须放弃。
+        let control = FakeProcesses::new();
+        control.insert(
+            4242,
+            FakeProcess {
+                session: 4242,
+                instance: 2,
+                state: FakeState::Running,
+                dies_on: Some(Signal::Hangup),
+                zombies_on: None,
+            },
+        );
+        let anchored = ProcessSessionId {
+            id: 4242,
+            instance: 1,
+            captured: 3,
+        };
+        run_ladder_blocking(
+            vec![PaneShutdownRequest::with_session(
+                PaneId::from_raw(1),
+                4242,
+                None,
+                Some(anchored),
+            )],
+            &test_ladder(),
+            &EmptyScan(&control),
+        );
+        assert!(control.signal_log().is_empty());
+    }
+
+    #[test]
     fn shutdown_ladder_drops_a_request_whose_child_pid_was_recycled() {
         // child 在投递与执行之间被回收、pid 被另一个会话复用：既扫不到原会话成员，
         // session_id(child) 也对不上，必须整条丢弃而不是对无辜进程发信号。
@@ -853,6 +994,7 @@ mod tests {
             7,
             FakeProcess {
                 session: 99,
+                instance: 0,
                 state: FakeState::Running,
                 dies_on: None,
                 zombies_on: None,
@@ -874,6 +1016,7 @@ mod tests {
             7,
             FakeProcess {
                 session: 5,
+                instance: 0,
                 state: FakeState::Gone,
                 dies_on: None,
                 zombies_on: None,
@@ -883,6 +1026,7 @@ mod tests {
             9,
             FakeProcess {
                 session: 5,
+                instance: 0,
                 state: FakeState::Running,
                 dies_on: Some(Signal::Terminate),
                 zombies_on: None,
@@ -894,7 +1038,7 @@ mod tests {
                 PaneId::from_raw(1),
                 7,
                 Some(child_wait_completed),
-                Some(ProcessSessionId(5)),
+                Some(anchor(5)),
             )],
             &test_ladder(),
             &control,
@@ -920,7 +1064,7 @@ mod tests {
                 PaneId::from_raw(1),
                 7,
                 Some(child_wait_completed),
-                Some(ProcessSessionId(5)),
+                Some(anchor(5)),
             )],
             &test_ladder(),
             &control,
@@ -969,6 +1113,7 @@ mod tests {
                 pane,
                 FakeProcess {
                     session: i64::from(pane),
+                    instance: 0,
                     state: FakeState::Running,
                     dies_on: Some(Signal::Terminate),
                     zombies_on: None,
@@ -1016,6 +1161,7 @@ mod tests {
             7,
             FakeProcess {
                 session: 5,
+                instance: 0,
                 state: FakeState::Running,
                 dies_on: None,
                 zombies_on: None,
@@ -1025,6 +1171,7 @@ mod tests {
             8,
             FakeProcess {
                 session: 6,
+                instance: 0,
                 state: FakeState::Running,
                 dies_on: Some(Signal::Hangup),
                 zombies_on: None,
@@ -1110,5 +1257,135 @@ mod tests {
             assert!(reaper.drain(Duration::from_secs(5)));
             reaper.stop();
         });
+    }
+
+    #[cfg(windows)]
+    const LADDER_TREE_ENV: &str = "HERDR_TEST_LADDER_TREE";
+    #[cfg(windows)]
+    const LADDER_TREE_READY: &str = "herdr-ladder-tree-ready";
+
+    /// 重新拉起本测试二进制，只跑真实进程树的阶梯测试，`mode` 决定它在树里扮演哪一层。
+    #[cfg(windows)]
+    fn relaunch_ladder_tree_test(mode: &str) -> std::process::Command {
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "pane::shutdown::tests::platform_ladder_terminates_a_real_windows_process_tree",
+                "--nocapture",
+            ])
+            .env(LADDER_TREE_ENV, mode)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command
+    }
+
+    /// 真实的 Windows 进程树（测试二进制 → 测试二进制 → ping）走一遍平台阶梯：前两级在 Windows
+    /// 上什么都不发，末级 `TerminateProcess` 把三层都终止干净、不留孤儿。中间一层拉起 ping
+    /// 之后才报就绪，阶梯枚举成员时整棵树都在。
+    #[cfg(windows)]
+    #[test]
+    fn platform_ladder_terminates_a_real_windows_process_tree() {
+        use std::process::Stdio;
+
+        match std::env::var(LADDER_TREE_ENV).as_deref() {
+            Ok("root") => {
+                // 中间一层继承 stdout，就绪行直接交给测试。
+                let middle = relaunch_ladder_tree_test("middle")
+                    .stdout(Stdio::inherit())
+                    .spawn();
+                if let Ok(mut middle) = middle {
+                    let _ = middle.wait();
+                }
+                return;
+            }
+            Ok("middle") => {
+                let mut leaf = std::process::Command::new("ping")
+                    .args(["-n", "60", "127.0.0.1"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn ping");
+                println!("{LADDER_TREE_READY}");
+                std::thread::sleep(Duration::from_secs(60));
+                // 正常情况下阶梯早已终止这一层；走到这里说明测试没有收尾，自己收拾叶子。
+                let _ = leaf.kill();
+                let _ = leaf.wait();
+                return;
+            }
+            _ => {}
+        }
+
+        let mut root = relaunch_ladder_tree_test("root")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn root");
+        let stdout = root.stdout.take().expect("root stdout");
+        let ready = std::io::BufRead::lines(std::io::BufReader::new(stdout))
+            .map_while(Result::ok)
+            .any(|line| line.contains(LADDER_TREE_READY));
+        let request = PaneShutdownRequest::new(
+            PaneId::from_raw(1),
+            root.id(),
+            Some(Arc::new(AtomicBool::new(false))),
+        );
+        let members = request
+            .session
+            .and_then(|session| crate::platform::session_members_batch(&[session]).pop())
+            .unwrap_or_default();
+        if !ready || members.len() < 3 {
+            crate::platform::signal_session_members(&members, Signal::Kill);
+            let _ = root.kill();
+            let _ = root.wait();
+            panic!("process tree did not come up: ready={ready} members={members:?}");
+        }
+
+        // 只走挂断与终止两级时整棵树都还在：Windows 的硬杀只落在末级，与 Unix 的 SIGKILL
+        // 同一级。
+        let soft_ladder = [
+            (Signal::Hangup, Duration::from_millis(20)),
+            (Signal::Terminate, Duration::from_millis(20)),
+        ];
+        let soft_request = PaneShutdownRequest::new(
+            PaneId::from_raw(1),
+            root.id(),
+            Some(Arc::new(AtomicBool::new(false))),
+        );
+        run_ladder_blocking(vec![soft_request], &soft_ladder, &PlatformProcessControl);
+        let ended_early: Vec<ProcessSessionMember> = members
+            .iter()
+            .copied()
+            .filter(|member| !crate::platform::session_member_alive(*member))
+            .collect();
+
+        let ladder_started = Instant::now();
+        run_ladder_blocking(vec![request], &SIGNAL_LADDER, &PlatformProcessControl);
+        // 阶梯在末级之后只再等一个宽限窗口；负载重时被终止的进程可能还没拆完（进程对象尚未
+        // signaled）。用宽上限等它们退出：没收到信号的成员要活满 60 s，照样等不到而失败。
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let survivors = loop {
+            let survivors: Vec<ProcessSessionMember> = members
+                .iter()
+                .copied()
+                .filter(|member| crate::platform::session_member_alive(*member))
+                .collect();
+            if survivors.is_empty() || Instant::now() >= deadline {
+                break survivors;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let elapsed = ladder_started.elapsed();
+        crate::platform::signal_session_members(&survivors, Signal::Kill);
+        let _ = root.wait();
+        assert!(
+            ended_early.is_empty(),
+            "Hangup and Terminate must not end Windows pane processes: {ended_early:?}"
+        );
+        assert!(
+            survivors.is_empty(),
+            "pane process tree must not outlive the ladder ({elapsed:?} after it started): {survivors:?}"
+        );
     }
 }

@@ -729,7 +729,11 @@ pub fn process_session_id(pid: u32) -> Option<ProcessSessionId> {
     if pid == 0 {
         return None;
     }
-    process_session_id_raw(pid).map(|sid| ProcessSessionId(i64::from(sid)))
+    process_session_id_raw(pid).map(|sid| ProcessSessionId {
+        id: i64::from(sid),
+        instance: 0,
+        captured: 0,
+    })
 }
 
 /// 一次 `/proc` 遍历取出整批会话的成员 pid，返回与 `sessions` 一一对应的桶。
@@ -761,7 +765,7 @@ pub fn session_processes_batch(sessions: &[ProcessSessionId]) -> Vec<Vec<u32>> {
         // 会话数是 pane 数量级（个位到十几），线性比对比建哈希表更便宜，也天然容忍
         // 同一会话被多个 pane 引用。
         for (bucket, session) in buckets.iter_mut().zip(sessions) {
-            if session.0 == i64::from(session_id) {
+            if session.id == i64::from(session_id) {
                 bucket.push(pid);
             }
         }
@@ -2342,7 +2346,12 @@ mod tests {
     #[test]
     fn session_processes_batch_buckets_every_session_in_one_scan() {
         let session = process_session_id(std::process::id()).expect("本进程应有会话 id");
-        let buckets = session_processes_batch(&[session, ProcessSessionId(-1)]);
+        let missing = ProcessSessionId {
+            id: -1,
+            instance: 0,
+            captured: 0,
+        };
+        let buckets = session_processes_batch(&[session, missing]);
         assert_eq!(buckets.len(), 2, "桶与请求的会话一一对应");
         assert!(
             buckets[0].contains(&std::process::id()),

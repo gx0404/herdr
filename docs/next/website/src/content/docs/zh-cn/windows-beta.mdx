@@ -49,6 +49,8 @@ Windows 构建同时通过稳定版和预览版更新通道提供。新安装默
 
 本地持久会话会在客户端分离或终端窗口关闭后继续运行。通过 Windows OpenSSH 启动的服务器和窗格进程也会在注销后继续运行;再次运行 `herdr` 即可重新连接。
 
+关闭窗格会结束从它启动的程序。关闭窗格的 ConPTY 会向控制台程序发送关闭事件;短暂宽限后,Herdr 会终止窗格进程树里剩下的所有进程,包括从窗格启动的图形界面程序,例如 `start notepad`。Windows 没有 Unix 会话,所以 Herdr 从窗格 shell 沿子进程找出这棵树,并核对进程启动时间,被复用的进程 ID 不会把无关程序卷进来。启动器已经退出的程序与窗格不再关联,会继续运行。Herdr 自己的后台服务器不受影响:在窗格里由 `herdr` 命令启动的服务器会连同它的全部会话继续运行。要让程序在窗格关闭后继续运行,请在 Herdr 之外启动它,或者通过立即退出的启动器启动,例如 `cmd /c start notepad`。
+
 Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接运行的智能体和常见的命令包装器,包括 npm/Node 和 Git Bash 进程链。它会跨越模拟的 `exec` 边界跟踪从 Git Bash 启动的智能体,但这和 Unix 前台进程组检测不是一回事。
 
 Windows 支持安装全部五家官方集成:Pi、Claude Code、Codex、OpenCode 和 Kimi Code CLI。子 agent 活动信号只在 Unix 上提供:Windows 上 Claude Code 与 Codex 集成只安装会话钩子,Kimi Code CLI 的钩子会忽略活动事件,因此这些智能体的活动树只随 Herdr 的定期刷新更新。

@@ -222,6 +222,8 @@ pub const TEXTS: Texts = Texts {
         unexpected_result: "endpoint returned an unexpected worktree result",
         prunable_cannot_open:
             "This checkout folder is missing on disk. Run `git worktree prune` to clear it.",
+        removed_with_leftovers: "Worktree removed, but some files could not be deleted",
+        leftover_path_fmt: "Delete the leftover folder by hand: {path}",
     },
     settings: SettingsTexts {
         title: " settings",

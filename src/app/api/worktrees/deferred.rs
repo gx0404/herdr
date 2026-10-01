@@ -551,21 +551,26 @@ impl App {
         self.pending_api_worktree_remove_paths
             .remove(&api.checkout_key);
 
-        if let Err(message) = result.result {
-            let pane_updates = self.restore_shutdown_worktree_panes(
-                &api.shutdown_panes,
-                api.operation_id,
-                &result.path,
-            );
-            let code =
-                if !result.forced && crate::worktree::is_dirty_worktree_remove_error(&message) {
+        let leftover_path = match result.result {
+            // git 已注销、检出目录却没删干净：照常按删除成功收尾，只把留下的目录报给调用方。
+            Ok(leftover_path) => leftover_path.map(|path| path.display().to_string()),
+            Err(message) => {
+                let pane_updates = self.restore_shutdown_worktree_panes(
+                    &api.shutdown_panes,
+                    api.operation_id,
+                    &result.path,
+                );
+                let code = if !result.forced
+                    && crate::worktree::is_dirty_worktree_remove_error(&message)
+                {
                     "dirty_worktree_requires_force"
                 } else {
                     "worktree_remove_failed"
                 };
-            Self::send_api_response(api.respond_to, encode_error(api.id, code, message));
-            return pane_updates;
-        }
+                Self::send_api_response(api.respond_to, encode_error(api.id, code, message));
+                return pane_updates;
+            }
+        };
 
         let mut workspace_id = result.workspace_id.clone();
         let mut workspace_snapshot = result.workspace.as_deref().cloned();
@@ -628,6 +633,7 @@ impl App {
             workspace_snapshot,
             worktree,
             result.forced,
+            leftover_path.clone(),
         );
         let response = encode_success(
             api.id,
@@ -635,6 +641,7 @@ impl App {
                 workspace_id,
                 path: result.path.display().to_string(),
                 forced: result.forced,
+                leftover_path,
             },
         );
         Self::send_api_response(api.respond_to, response);

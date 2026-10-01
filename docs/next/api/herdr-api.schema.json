@@ -301,6 +301,13 @@
                 "forced": {
                   "type": "boolean"
                 },
+                "leftover_path": {
+                  "description": "同 `worktree.remove` 响应的 `leftover_path`：检出目录删不干净、仍在磁盘上时给出\n该目录；目录已删掉、只剩仍被占用的空目录（Git 可复用）或旧 server 时省略。",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "type": {
                   "const": "worktree_removed",
                   "type": "string"
@@ -8535,6 +8542,13 @@
                 "forced": {
                   "type": "boolean"
                 },
+                "leftover_path": {
+                  "description": "同 `worktree.remove` 响应的 `leftover_path`：检出目录删不干净、仍在磁盘上时给出\n该目录；目录已删掉、只剩仍被占用的空目录（Git 可复用）或旧 server 时省略。",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "type": {
                   "const": "worktree_removed",
                   "type": "string"
@@ -10553,6 +10567,13 @@
               "properties": {
                 "forced": {
                   "type": "boolean"
+                },
+                "leftover_path": {
+                  "description": "同 `worktree.remove` 响应的 `leftover_path`：检出目录删不干净、仍在磁盘上时给出\n该目录；目录已删掉、只剩仍被占用的空目录（Git 可复用）或旧 server 时省略。",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "type": {
                   "const": "worktree_removed",
@@ -13656,6 +13677,13 @@
               "properties": {
                 "forced": {
                   "type": "boolean"
+                },
+                "leftover_path": {
+                  "description": "Git 已注销该 worktree，但检出目录里有删不掉的文件、目录仍在磁盘上时给出该目录，\n需要手动删除；目录已删掉、只剩仍被占用的空目录（Git 可复用）或旧 server 时省略。",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "path": {
                   "type": "string"

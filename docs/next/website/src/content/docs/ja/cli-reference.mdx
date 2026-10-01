@@ -265,7 +265,7 @@ herdr worktree remove --workspace ID [--force] [--trust-repository]
 
 worktree は、Git チェックアウトの出自情報を持つ通常の Herdr ワークスペースです。`worktree create` は Git worktree のチェックアウトを作成し、ワークスペースとして開き、親リポジトリのワークスペースとグループ化します。`--branch` が既存のローカルブランチを指す場合はそれをチェックアウトし、そうでなければ `--base` または `HEAD` からブランチを作成します。`--path` がない場合、チェックアウトは `<worktrees.directory>/<repo>/<branch-slug>` の下に作成されます。
 
-`workspace close` は Herdr の状態だけを閉じます。リンクされた worktree ワークスペースが開いている間に親ワークスペースを閉じるには `--group` が必要です。指定しない場合、グループは開いたままになり `workspace_group_close_required` が返されます。`worktree remove` が明示的なチェックアウト削除の経路です。`git worktree remove` を実行し、ブランチは決して削除せず、Git がダーティなチェックアウトを拒否する場合は `--force` が必要です。
+`workspace close` は Herdr の状態だけを閉じます。リンクされた worktree ワークスペースが開いている間に親ワークスペースを閉じるには `--group` が必要です。指定しない場合、グループは開いたままになり `workspace_group_close_required` が返されます。`worktree remove` が明示的なチェックアウト削除の経路です。`git worktree remove` を実行し、ブランチは決して削除せず、Git がダーティなチェックアウトを拒否する場合は `--force` が必要です。Git が worktree の登録を解除したもののフォルダー内の一部のファイルを削除できなかった場合でもコマンドは成功し、JSON の結果に手動で削除すべきフォルダーを示す `leftover_path` が含まれます。
 
 Git はデフォルトで、別のユーザーが所有するリポジトリを拒否します。リポジトリを別途確認済みの場合は `--trust-repository` を渡すと、解決されたパスをそのコマンドでのみ信頼します。Herdr は Git 設定を変更しません。
 
@@ -309,7 +309,7 @@ herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--f
 herdr pane close <pane_id>
 ```
 
-`pane close` はペインを切り離した時点で応答します。ペイン内のプロセスは SIGHUP、SIGTERM、SIGKILL の順にバックグラウンドで終了させるため、終了しないプロセスがあっても他のリクエストが止まりません。これらのプロセスの終了を前提とするスクリプトは、応答が返った時点で終了したとみなさず、ポーリングして確認してください。
+`pane close` はペインを切り離した時点で応答します。ペイン内のプロセスは SIGHUP、SIGTERM、SIGKILL の順にバックグラウンドで終了させるため（Windows ではコンソールの終了イベントの後にプロセスを終了します。[Windows のサポート](/ja/docs/windows-beta/)を参照）、終了しないプロセスがあっても他のリクエストが止まりません。これらのプロセスの終了を前提とするスクリプトは、応答が返った時点で終了したとみなさず、ポーリングして確認してください。
 
 `--current` を受け付けるペインコマンドは、Herdr ペイン内から実行した場合、呼び出し元の `HERDR_PANE_ID` を使います。`pane split` では、明示したペイン ID または `--pane ID` がそのペインを分割します。対象を省略すると `HERDR_PANE_ID` があれば呼び出し元ペインを、なければフォーカス中のペインを使います。`--current` は呼び出し元ペインを必須とし、`HERDR_PANE_ID` がない場合はエラーになります。分割レスポンスでは、新しいペイン ID は `.result.pane.pane_id` にあります。
 

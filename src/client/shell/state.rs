@@ -1262,6 +1262,9 @@ pub(super) enum ClientEndpointNoticeKind {
     Unavailable,
     /// Client-local success feedback (snippet run summaries, scene actions).
     Success,
+    /// An action succeeded but left something for the user to clean up
+    /// (a removed worktree whose folder kept files).
+    Warning,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

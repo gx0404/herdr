@@ -122,9 +122,11 @@ impl ClientToastLevel {
 
     pub(super) fn from_notice_kind(kind: ClientEndpointNoticeKind) -> Self {
         match kind {
-            ClientEndpointNoticeKind::Unsupported | ClientEndpointNoticeKind::Rejected => {
-                Self::Error
-            }
+            // There is no warning level: warnings ask the user to act, so they
+            // borrow the error style instead of blending in as info.
+            ClientEndpointNoticeKind::Unsupported
+            | ClientEndpointNoticeKind::Rejected
+            | ClientEndpointNoticeKind::Warning => Self::Error,
             ClientEndpointNoticeKind::Timeout | ClientEndpointNoticeKind::Unavailable => Self::Info,
             ClientEndpointNoticeKind::Success => Self::Success,
         }

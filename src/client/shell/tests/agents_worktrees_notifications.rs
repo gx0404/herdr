@@ -1558,6 +1558,100 @@ fn worktree_remove_escalates_recoverable_failure_to_force_confirmation() {
     }
 }
 
+/// 删除成功但检出目录没删干净（响应带 `leftover_path`）：浮层照常关闭，另弹一条带路径的
+/// 警示 toast 并记进通知历史；干净删除不弹。
+#[test]
+fn worktree_remove_with_leftover_folder_warns_with_its_path() {
+    for leftover_path in [None, Some("/repo-feature")] {
+        let mut snapshot = snapshot();
+        snapshot.workspaces[0].worktree = Some(ClientShellWorktree {
+            key: "repo-key".into(),
+            label: "repo".into(),
+            is_linked_worktree: true,
+        });
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(snapshot));
+        state.set_pane_surface(surface());
+        let mut prepare = ClientShellInput::default();
+        state.record_binding(
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::RemoveWorktree),
+            &mut prepare,
+        );
+        let [ClientShellAction::Endpoint { request, .. }] = &prepare.actions[..] else {
+            panic!("remove worktree should prepare through worktree.list");
+        };
+        let request_id = request.id.clone();
+        state.handle_endpoint_result(
+            "boot-1",
+            &request_id,
+            Ok(worktree_list_result(Some("ws_1"))),
+        );
+        let remove = state.handle_input_bytes(b"\r");
+        let [ClientShellAction::Endpoint { request, .. }] = &remove.actions[..] else {
+            panic!("worktree remove should use endpoint API");
+        };
+        let request_id = request.id.clone();
+        let history_before = state.notification_history.len();
+
+        let (repaint, actions) = state.handle_endpoint_result(
+            "boot-1",
+            &request_id,
+            Ok(crate::api::schema::ResponseResult::WorktreeRemoved {
+                workspace_id: "ws_1".into(),
+                path: "/repo-feature".into(),
+                forced: false,
+                leftover_path: leftover_path.map(str::to_owned),
+            }),
+        );
+
+        assert!(repaint);
+        assert!(actions.is_empty());
+        assert!(
+            state.overlay.is_none(),
+            "a successful remove closes the dialog"
+        );
+        let Some(path) = leftover_path else {
+            assert!(state.visible_endpoint_notice.is_none());
+            assert_eq!(state.notification_history.len(), history_before);
+            continue;
+        };
+        let t = &crate::i18n::texts().worktree;
+        let body = crate::i18n::fill(t.leftover_path_fmt, &[("path", path)]);
+        let notice = state
+            .visible_endpoint_notice
+            .as_ref()
+            .expect("leftover toast shows");
+        assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Warning);
+        assert_eq!(notice.title, t.removed_with_leftovers);
+        assert_eq!(notice.body, body);
+        assert_eq!(state.notification_history.len(), history_before + 1);
+        let record = state.notification_history.back().expect("history entry");
+        assert_eq!(
+            record.level,
+            super::super::feedback::ClientToastLevel::Error
+        );
+        assert_eq!(record.title, t.removed_with_leftovers);
+        assert_eq!(record.body.as_deref(), Some(body.as_str()));
+
+        let frame = state.compose(106, 30).expect("leftover toast frame");
+        let compact: String = frame
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        let compact_title: String = t
+            .removed_with_leftovers
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(compact.contains(&compact_title), "frame: {compact}");
+        assert!(compact.contains(path), "frame: {compact}");
+    }
+}
+
 /// TOOL-01：普通删除失败后浮层被推进到「强制删除」确认，长按回车残余的
 /// Repeat 不得替用户按下这一步；回车本身也不再是这一步的确认键（换键后即使在
 /// 不支持 kitty 事件类型、自动重复只发普通 Press 的宿主上也穿不过去），必须按 y。

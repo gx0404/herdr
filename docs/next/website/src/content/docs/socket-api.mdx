@@ -170,9 +170,10 @@ back to its pane menu. Right-clicking the pane frame always opens Herdr's menu.
 pane.
 
 `pane.close` answers as soon as the pane is detached. Herdr terminates the
-pane's processes in the background with SIGHUP, then SIGTERM, then SIGKILL, so
-a process that refuses to exit no longer stalls other requests on the same
-connection or on other connections. Callers that need those processes gone
+pane's processes in the background with SIGHUP, then SIGTERM, then SIGKILL (on
+Windows, a console close event and then process termination; see
+[Windows support](/docs/windows-beta/)), so a process that refuses to exit no
+longer stalls other requests on the same connection or on other connections. Callers that need those processes gone
 should poll (for example with `pane.process_info` on a surviving pane, or their
 own process check) instead of assuming they exited when the response arrived.
 
@@ -367,7 +368,7 @@ Set or clear the foreground client's outer terminal window title:
 `type: "client_window_title"` with `changed` and reason `set`, `cleared`, or
 `no_foreground_client`.
 
-Worktree methods manage Git checkouts as Herdr workspaces. `worktree.create` creates a checkout and returns the new `workspace`, `tab`, `root_pane`, and `worktree` records. If the requested branch already exists locally, it checks out that branch; otherwise it creates the branch from the requested base or `HEAD`. `worktree.open` opens an existing checkout or returns the already-open workspace. `worktree.remove` runs `git worktree remove` against a linked child workspace and never deletes the branch. In `worktree.list` results, `is_prunable` marks linked checkouts whose folder is missing but that Git still registers; Herdr derives it from the checkout state on every Git version, not only from the `prunable` line that Git 2.31+ prints.
+Worktree methods manage Git checkouts as Herdr workspaces. `worktree.create` creates a checkout and returns the new `workspace`, `tab`, `root_pane`, and `worktree` records. If the requested branch already exists locally, it checks out that branch; otherwise it creates the branch from the requested base or `HEAD`. `worktree.open` opens an existing checkout or returns the already-open workspace. `worktree.remove` runs `git worktree remove` against a linked child workspace and never deletes the branch. If Git unregisters the worktree but some files in the checkout folder cannot be deleted, the removal still succeeds and the `worktree_removed` result carries `leftover_path`, the folder left on disk that must be deleted by hand; the field is omitted when no files are left (an empty folder that another program still uses may remain, and Git can reuse it) and by older servers. In `worktree.list` results, `is_prunable` marks linked checkouts whose folder is missing but that Git still registers; Herdr derives it from the checkout state on every Git version, not only from the `prunable` line that Git 2.31+ prints.
 
 Create a worktree from a source workspace:
 
@@ -1087,7 +1088,7 @@ updated `PaneLayoutSnapshot` for one tab. Clients maintaining a cache with
 `session.snapshot` should use this event to refresh the affected layout through
 an authoritative read; a delayed payload may predate their latest snapshot.
 
-Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
+Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`, plus the same optional `leftover_path` as the `worktree.remove` result when files were left behind.
 
 Use `events.subscribe` for lifecycle events. Dedicated wait helpers are documented separately when a one-shot wait is supported.
 

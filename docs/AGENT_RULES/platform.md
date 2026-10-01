@@ -20,6 +20,10 @@
   文件身份复用于 `state_dir()/codex-shims`，存活进程持租约，陈旧的后台清扫）。新增这类
   条目时同步清扫的名字匹配（`remote_private_entry` 等），只删确定已退出的属主、不跟随
   链接；进程存活判定用 `process_exists`（进程对象 signaled 才算退出，句柄已释放）。
+- Windows 上不按裸 pid 终止或判定进程：pid 会被复用，必须带创建时间并在同一句柄上核对
+  （pane 终止阶梯用 `ProcessSessionId` / `ProcessSessionMember`，成员按父子关系与创建
+  时间验证）。pane 关闭会终止整棵 pane 进程树（含从 pane 启动的 GUI 程序），herdr 自己的
+  后台 server 守护进程以 `Local\herdr-server-daemon-<pid>-<创建时间>` 标记豁免，连同其子树。
 
 ## Windows 交叉编译（上游 Testing 节语义）
 
