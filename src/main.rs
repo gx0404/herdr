@@ -680,6 +680,10 @@ fn main() -> io::Result<()> {
     {
         return server::observability::run_probe_helper();
     }
+    #[cfg(windows)]
+    if let Some(result) = platform::maybe_activate_desktop_notification(&raw_args) {
+        return result;
+    }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);
     }

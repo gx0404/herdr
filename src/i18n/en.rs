@@ -1719,6 +1719,7 @@ pub const TEXTS: Texts = Texts {
         session_col_socket: "socket",
         session_state_running: "running",
         session_state_stopped: "stopped",
+        session_state_unavailable: "unavailable",
         plugin_installed_fmt: "Installed {plugin} from {source}.",
         plugin_config_label: "Config: ",
         plugin_uninstalled_fmt: "Uninstalled {plugin}.",

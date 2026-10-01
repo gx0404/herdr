@@ -1258,10 +1258,20 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
             assert!(hooks["hooks"][event][0].get("matcher").is_none(), "{event}");
         }
     }
-    assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
+    assert!(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains(" working"));
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
-    assert!(hooks["hooks"].get("Stop").is_none());
+    assert!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains(" idle"));
+    assert!(hooks["hooks"]["Interrupt"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains(" idle"));
     assert!(config.contains("model = \"gpt-5.4\""));
     assert!(config.contains("[features]"));
     assert!(config.contains("hooks = true"));
@@ -1315,10 +1325,14 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
         assert_eq!(hooks["hooks"]["SubagentStart"].as_array().unwrap().len(), 1);
         assert_eq!(hooks["hooks"]["SubagentStop"].as_array().unwrap().len(), 1);
     }
-    assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
+    assert_eq!(
+        hooks["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
+        1
+    );
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
-    assert!(hooks["hooks"].get("Stop").is_none());
+    assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    assert_eq!(hooks["hooks"]["Interrupt"].as_array().unwrap().len(), 1);
     assert_eq!(config.matches("hooks = true").count(), 1);
     assert!(!config.contains("codex_hooks"));
     assert!(config.contains("other = true"));
@@ -1373,7 +1387,8 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
             "SubagentStop": [{"hooks": [
                 {"type": "command", "command": format!("bash '{}' activity", hook_path.display()), "timeout": 10},
                 {"type": "command", "command": "echo keep-stop", "timeout": 10}
-            ]}]
+            ]}],
+            "Interrupt": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}]
         }
     });
     fs::write(
@@ -1412,6 +1427,7 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
         hooks["hooks"]["SubagentStop"][0]["hooks"][0]["command"],
         "echo keep-stop"
     );
+    assert!(hooks["hooks"].get("Interrupt").is_none());
     assert_eq!(
         hooks["hooks"]["UserPromptSubmit"][0]["hooks"]
             .as_array()
@@ -1491,10 +1507,17 @@ fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
     for (event, command) in codex_managed_hooks(&hook_path) {
         let label = match event {
             "SessionStart" => "session_start",
+            "UserPromptSubmit" => "user_prompt_submit",
+            "Stop" => "stop",
             "SubagentStart" => "subagent_start",
-            _ => "subagent_stop",
+            "SubagentStop" => "subagent_stop",
+            // Interrupt/SessionEnd：codex 不为其持久化信任状态（hash 为 None）。
+            "Interrupt" | "SessionEnd" => continue,
+            other => panic!("unmapped codex hook event: {other}"),
         };
-        let hash = super::codex_trust::codex_hook_trust_hash(event, &command, 10).unwrap();
+        let Some(hash) = super::codex_trust::codex_hook_trust_hash(event, &command, 10) else {
+            continue;
+        };
         config.push_str(&format!(
             "\n[hooks.state.{}]\ntrusted_hash = \"{hash}\"\n",
             super::config_edit::toml_basic_string(&format!("{}:{label}:0:0", hooks_path.display()))

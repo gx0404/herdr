@@ -58,7 +58,7 @@ Every integration tells Herdr which session the agent is in, so Herdr can resume
 | Integration type | Agents | Effect |
 | --- | --- | --- |
 | Lifecycle authority | Pi, Kimi Code CLI, OpenCode | When installed and actively reporting for the pane, hook or plugin events author `idle`, `working`, and `blocked`. Herdr does not also use screen manifest fallback for that same lifecycle authority. |
-| Session identity | Claude Code, Codex | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection. |
+| Session identity | Claude Code, Codex | The integration reports native session references for restore. State still comes from Herdr's screen manifest detection; Codex also reports turn state when run with `--no-daemon`, and screen detection still handles its visible blockers. |
 
 Native session restore requires current Herdr integrations: Pi integration version `2`, OMP version `3`, Claude Code version `6`, Codex version `5`, GitHub Copilot CLI version `2`, Devin CLI version `2`, Droid version `2`, Kimi Code CLI version `3`, Qoder CLI version `2`, Qwen Code version `1`, Letta Code version `1`, Cursor Agent CLI version `1`, Grok CLI version `2`, OpenCode version `5`, Kilo Code CLI version `1`, Hermes Agent version `5`, MastraCode version `1`, or Antigravity CLI version `1`. Check installed versions with `herdr integration status`.
 
@@ -141,7 +141,7 @@ Install the Codex hook:
 herdr integration install codex
 ```
 
-The Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.
+When Codex runs with `--no-daemon`, the hook reports session identity and turn start/stop state through Herdr's local socket API. Screen detection still handles visible blockers and fills gaps when hooks are unavailable. A shared Codex daemon can route hooks to the wrong pane, so use `--no-daemon` for reliable reports; disabling daemon auto-start alone does not stop an existing daemon.
 
 Codex integration v9 also subscribes to `SubagentStart` and `SubagentStop` on macOS and Linux. These hooks only tell the local Herdr socket that a Codex sub-agent thread started or stopped; they do not report agent state, and Herdr rebuilds the activity tree from Codex's own session files. Codex 0.157 enables hooks by default. Herdr still writes `[features] hooks = true` explicitly for older versions; an explicit false value disables hooks. The activity hooks are not installed on Windows. Reinstall the Codex integration after upgrading to add them.
 

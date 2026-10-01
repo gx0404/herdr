@@ -101,7 +101,13 @@ const INSTALL_CODEX_ACTIVITY_HOOKS: bool = !cfg!(windows);
 
 /// herdr 在 codex `hooks.json` 里应当装好的钩子（事件名、命令），按写入顺序。
 pub(crate) fn codex_managed_hooks(hook_path: &Path) -> Vec<(&'static str, String)> {
-    let mut hooks = vec![("SessionStart", hook_command(hook_path, Some("session")))];
+    let mut hooks = vec![
+        ("SessionStart", hook_command(hook_path, Some("session"))),
+        // 上游 4b4705db：turn 开始/结束/中断经钩子直报，屏幕检测仍兜底可见阻塞。
+        ("UserPromptSubmit", hook_command(hook_path, Some("working"))),
+        ("Stop", hook_command(hook_path, Some("idle"))),
+        ("Interrupt", hook_command(hook_path, Some("idle"))),
+    ];
     if INSTALL_CODEX_ACTIVITY_HOOKS {
         for event in CODEX_ACTIVITY_HOOK_EVENTS {
             hooks.push((event, hook_command(hook_path, Some("activity"))));
@@ -318,6 +324,7 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
                 remove_hook_commands(hooks, "SubagentStart", &hook_path, Some("activity"))?;
             updated_hooks |=
                 remove_hook_commands(hooks, "SubagentStop", &hook_path, Some("activity"))?;
+            updated_hooks |= remove_hook_commands(hooks, "Interrupt", &hook_path, Some("idle"))?;
         }
 
         if updated_hooks {

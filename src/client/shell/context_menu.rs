@@ -386,18 +386,13 @@ impl ClientShellState {
         let worktree = workspace.worktree.as_ref();
         let has_worktree_children = worktree.is_some_and(|worktree| {
             !worktree.is_linked_worktree
-                && snapshot
-                    .workspaces
-                    .iter()
-                    .filter(|candidate| {
-                        candidate
-                            .worktree
-                            .as_ref()
-                            .is_some_and(|candidate| candidate.key == worktree.key)
+                && snapshot.workspaces.iter().any(|candidate| {
+                    candidate.worktree.as_ref().is_some_and(|candidate| {
+                        candidate.key == worktree.key && candidate.is_linked_worktree
                     })
-                    .count()
-                    >= 2
+                })
         });
+        let close_group = super::sidebar::workspace_close_is_group(snapshot, workspace);
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
@@ -406,6 +401,7 @@ impl ClientShellState {
             is_git: worktree.is_some() || workspace.branch.is_some(),
             is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
             has_worktree_children,
+            close_group,
             collapsed,
             env: self.context_env(ContextKind::Workspace),
         };
@@ -671,9 +667,16 @@ impl ClientShellState {
 /// 右键对象 → 动作表的对象种类与执行目标。
 fn context_action_target(target: ClientContextMenuTarget) -> (ContextKind, ActionTarget) {
     match target {
-        ClientContextMenuTarget::Workspace { workspace_id, .. } => (
+        ClientContextMenuTarget::Workspace {
+            workspace_id,
+            close_group,
+            ..
+        } => (
             ContextKind::Workspace,
-            ActionTarget::Workspace { workspace_id },
+            ActionTarget::Workspace {
+                workspace_id,
+                close_group,
+            },
         ),
         ClientContextMenuTarget::Tab {
             tab_id,

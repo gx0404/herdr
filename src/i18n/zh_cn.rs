@@ -1710,6 +1710,7 @@ pub const TEXTS: Texts = Texts {
         session_col_socket: "socket",
         session_state_running: "运行中",
         session_state_stopped: "已停止",
+        session_state_unavailable: "不可用",
         plugin_installed_fmt: "已从 {source} 安装 {plugin}。",
         plugin_config_label: "配置目录：",
         plugin_uninstalled_fmt: "已卸载 {plugin}。",

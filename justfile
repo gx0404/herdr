@@ -126,8 +126,13 @@ install-hooks:
     @echo "installed git hooks from .githooks"
 
 # Build release binary
+[unix]
 build:
     cargo build --release --locked
+
+[windows]
+build:
+    python scripts/package_windows_conpty.py build-local
 
 [windows]
 package-windows *args:

@@ -39,7 +39,7 @@ pub(crate) fn run_remote_client_bridge(args: &[String]) -> io::Result<()> {
 
 fn ensure_remote_server_running() -> io::Result<()> {
     let socket_path = crate::server::socket_paths::client_socket_path();
-    if let Some(server) = crate::server::autodetect::find_running_server(&socket_path) {
+    if let Some(server) = crate::server::autodetect::find_running_server(&socket_path)? {
         let status = server
             .into_status(Duration::from_millis(500))?
             .ok_or_else(|| io::Error::other("remote server status API is unavailable"))?;

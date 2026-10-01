@@ -543,14 +543,27 @@ impl ClientShellState {
         {
             return None;
         }
+        let snapshot = self.snapshot.as_deref()?;
         let mut slots = self
             .hits
             .workspaces
             .iter()
             .filter(|hit| hit.endpoint_id == self.active_endpoint_id && !hit.indented)
+            .filter(|hit| {
+                hit.group_toggle.as_ref().is_none_or(|(_, key)| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .find(|workspace| {
+                            workspace.worktree.as_ref().is_some_and(|worktree| {
+                                worktree.key == *key && !worktree.is_linked_worktree
+                            })
+                        })
+                        .is_some_and(|workspace| workspace.workspace_id == hit.workspace_id)
+                })
+            })
             .map(|hit| (Some(hit.workspace_id.clone()), hit.rect.y.saturating_sub(1)))
             .collect::<Vec<_>>();
-        let snapshot = self.snapshot.as_deref()?;
         let empty_collapsed_groups = HashSet::new();
         let collapsed_groups = self
             .collapsed_groups_for_endpoint(&self.active_endpoint_id)
@@ -569,7 +582,15 @@ impl ClientShellState {
                 .is_some_and(|workspace| workspace.workspace_id == last_hit.workspace_id)
         })?;
         let next = entries.get(last_position + 1);
-        if !next.is_some_and(|entry| entry.indented) {
+        if !next.is_some_and(|entry| {
+            entry.indented
+                || last_hit.group_toggle.as_ref().is_some_and(|(_, key)| {
+                    snapshot.workspaces[entry.index]
+                        .worktree
+                        .as_ref()
+                        .is_some_and(|worktree| worktree.key == *key)
+                })
+        }) {
             let before = next.and_then(|entry| {
                 snapshot
                     .workspaces
@@ -627,7 +648,80 @@ impl ClientShellState {
             }
             None => remaining().count(),
         };
+        // 上游 6262b491：worktree 父级放回根部原位仍可能要发块移动（分组归属
+        // 可能变化）；普通工作区原位放下是空操作。但块当前已完整贴在原位时，
+        // 放下同样什么都不变——不建立拖拽，保留 HERDR-UX-004 的点击语义。
+        let source_has_worktree = snapshot.workspaces.iter().any(|workspace| {
+            workspace.workspace_id == source_workspace_id && workspace.worktree.is_some()
+        });
         insert_position != source_position
+            || (source_has_worktree && !self.workspace_block_already_in_place(source_workspace_id))
+    }
+
+    /// 源所属 worktree 块当前是否已完整贴在源槽位上：快照顺序里同 key 成员
+    /// 紧邻源连续排列。是则原位放下是彻底空操作（`workspace_drop_reorders`
+    /// 用）；纯判定、无分配，供指针移动的每个事件调用。
+    fn workspace_block_already_in_place(&self, source_workspace_id: &str) -> bool {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        let Some(source_index) = snapshot
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.workspace_id == source_workspace_id)
+        else {
+            return false;
+        };
+        let Some(key) = snapshot.workspaces[source_index]
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.key.as_str())
+        else {
+            return false;
+        };
+        // 同 key 成员必须恰好占据 [source_index, source_index + count) 连续段。
+        let mut next_slot = source_index;
+        for (index, workspace) in snapshot.workspaces.iter().enumerate() {
+            let is_member = workspace
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| worktree.key == key);
+            if is_member {
+                if index != next_slot {
+                    return false;
+                }
+                next_slot += 1;
+            }
+        }
+        next_slot > source_index
+    }
+
+    /// 落点是否落在源自身所在的 worktree 块里（`workspace_move_method` 的块内
+    /// 禁投同一种情况，供抬起分支区分「空拖拽退化成点击」与「非法目标整体
+    /// 无操作」——上游 6262b491：拖到自身块上不得有任何动作）。
+    fn workspace_drop_hits_own_block(
+        &self,
+        source_workspace_id: &str,
+        before_workspace_id: Option<&str>,
+    ) -> bool {
+        let (Some(before), Some(snapshot)) = (before_workspace_id, self.snapshot.as_deref()) else {
+            return false;
+        };
+        let Some(worktree) = snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == source_workspace_id)
+            .and_then(|source| source.worktree.as_ref())
+        else {
+            return false;
+        };
+        snapshot.workspaces.iter().any(|workspace| {
+            workspace.workspace_id == before
+                && workspace
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.key == worktree.key)
+        })
     }
 
     /// 把 `tab_id` 插到 `insert_index` 是否真的改变顺序。判据不在这里重写，
@@ -696,7 +790,11 @@ impl ClientShellState {
                         })
                         .map(|workspace| workspace.workspace_id.clone()),
                 )
-                .collect();
+                .collect::<Vec<_>>();
+            if before_workspace_id.is_some_and(|target| workspace_ids.iter().any(|id| id == target))
+            {
+                return None;
+            }
             Some(crate::api::schema::Method::WorkspaceMoveBlock(
                 crate::api::schema::WorkspaceMoveBlockParams {
                     workspace_ids,
@@ -1435,8 +1533,16 @@ impl ClientShellState {
                             ) {
                                 Some(method) => self.push_endpoint_method(method, outcome),
                                 None => {
-                                    if let Some(press) = workspace_press {
-                                        self.finish_endpoint_workspace_press(press, outcome);
+                                    // 落在源自身的 worktree 块上是非法目标：拖拽指示
+                                    // 已建立、用户意图是移动而非切换，整体无操作
+                                    // （上游 6262b491）。其余空操作照旧退化成点击。
+                                    if !self.workspace_drop_hits_own_block(
+                                        &source_workspace_id,
+                                        before_workspace_id.as_deref(),
+                                    ) {
+                                        if let Some(press) = workspace_press {
+                                            self.finish_endpoint_workspace_press(press, outcome);
+                                        }
                                     }
                                 }
                             }

@@ -247,6 +247,10 @@ pub(super) enum ActionTarget {
     Focused,
     Workspace {
         workspace_id: String,
+        /// 打开菜单时算好的「关闭是否关整组」（`workspace_close_is_group`）：
+        /// 执行时快照可能已变（上游 6262b491 的测试固定了这个时序），菜单车道
+        /// 必须把打开时的判定随车带过去，不能在执行时重算。
+        close_group: bool,
     },
     Tab {
         tab_id: String,
@@ -1174,6 +1178,7 @@ pub(super) fn context_action_state(id: ActionId, target: &ClientContextMenuTarge
             is_git,
             is_linked_worktree,
             has_worktree_children,
+            close_group,
             collapsed,
             ..
         } => {
@@ -1186,8 +1191,10 @@ pub(super) fn context_action_state(id: ActionId, target: &ClientContextMenuTarge
                 ActionId::RemoveWorktree if !linked => ActionState::HIDDEN,
                 ActionId::ToggleWorkspaceGroup if !parent => ActionState::HIDDEN,
                 ActionId::ToggleWorkspaceGroup => ActionState::checked(*collapsed),
+                // 与打开菜单时算好的 close_group 同口径（workspace_close_is_group），
+                // 执行侧 request_workspace_close(None) 会按同一谓词重算。
                 ActionId::CloseWorkspace => ActionState {
-                    alternate: parent,
+                    alternate: *close_group,
                     ..ActionState::ENABLED
                 },
                 _ => ActionState::ENABLED,
@@ -1413,7 +1420,7 @@ impl ClientShellState {
                 }
             }
             ActionId::RenameWorkspace => {
-                let ActionTarget::Workspace { workspace_id } = target else {
+                let ActionTarget::Workspace { workspace_id, .. } = target else {
                     return;
                 };
                 let label = self
@@ -1435,23 +1442,19 @@ impl ClientShellState {
                 }
             }
             ActionId::CloseWorkspace => {
-                let ActionTarget::Workspace { workspace_id } = target else {
+                let ActionTarget::Workspace {
+                    workspace_id,
+                    close_group,
+                } = target
+                else {
                     return;
                 };
-                if self.config.confirm_close {
-                    self.open_confirm_close_overlay(workspace_id);
-                } else {
-                    self.push_endpoint_method(
-                        Method::WorkspaceClose(crate::api::schema::WorkspaceCloseParams {
-                            workspace_id,
-                            close_group: true,
-                        }),
-                        outcome,
-                    );
-                }
+                // close_group 随目标从打开菜单时带来（上游 6262b491：仓库父级不算
+                // worktree 子级），确认弹窗同样带这个值。
+                self.request_workspace_close(workspace_id, Some(close_group), outcome);
             }
             ActionId::NewWorktree | ActionId::OpenWorktree | ActionId::RemoveWorktree => {
-                let ActionTarget::Workspace { workspace_id } = target else {
+                let ActionTarget::Workspace { workspace_id, .. } = target else {
                     return;
                 };
                 let binding = match id {
@@ -1462,7 +1465,7 @@ impl ClientShellState {
                 self.begin_worktree_action_for(binding, workspace_id, outcome);
             }
             ActionId::ToggleWorkspaceGroup => {
-                let ActionTarget::Workspace { workspace_id } = target else {
+                let ActionTarget::Workspace { workspace_id, .. } = target else {
                     return;
                 };
                 let key = self.snapshot.as_deref().and_then(|snapshot| {

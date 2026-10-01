@@ -32,8 +32,8 @@ ZCode は読み取り専用の外部ソースとして、最近の実行中ル�
 これらのエージェントは自分の状態を Herdr に報告します。インストールするものはありません。Herdr のペインで実行するだけです。
 
 <ul class="agent-logos">
-  <li><a href="https://github.com/charmbracelet/crush"><span class="agent-logo" style={{ '--logo': "url('/assets/agent-icons/crush.svg')" }} aria-hidden="true"></span>Crush</a></li>
   <li><a href="https://commandcode.ai"><span class="agent-logo" style={{ '--logo': "url('/assets/agent-icons/command-code.svg')" }} aria-hidden="true"></span>Command Code</a></li>
+  <li><a href="https://github.com/charmbracelet/crush"><span class="agent-logo" style={{ '--logo': "url('/assets/agent-icons/crush.svg')" }} aria-hidden="true"></span>Crush</a></li>
   <li><a href="https://dev.meta.ai/products/muse-code"><span class="agent-logo" style={{ '--logo': "url('/assets/agent-icons/muse-code.svg')" }} aria-hidden="true"></span>Muse Code</a></li>
   <li><a href="https://github.com/PrimeIntellect-ai/prime-agent"><span class="agent-logo" style={{ '--logo': "url('/assets/agent-icons/prime-agent.svg')" }} aria-hidden="true"></span>Prime Agent</a></li>
 </ul>
@@ -56,11 +56,9 @@ Linux と macOS では、ホストから見えるラッパーが実際のエー�
 
 ## blocked 状態
 
-スクリーンマニフェスト方式のエージェントでは、blocked の検出は意図的に厳格です。Herdr が `blocked` と判定するのは、ライブの下部バッファスナップショットが既知の承認・質問・許可 UI にマッチしたときだけです。Codex 以外の既知エージェントでどのマニフェストルールにもマッチしない場合、Herdr は `idle` にフォールバックし、explain の出力ではそのフォールバックに `default_known_agent_idle_fallback` というラベルを付けます。Codex は、タイトルとコンポーザーがアクティブなターン中と応答後で同じに見える場合があるため、`unknown` にフォールバックします。
+スクリーンマニフェスト方式のエージェントでは、blocked の検出は意図的に厳格です。Herdr が `blocked` と判定するのは、ライブの下部バッファスナップショットが既知の承認・質問・許可 UI にマッチしたときだけです。既知のエージェントでどのマニフェストルールにもマッチしない場合、Herdr は `idle` にフォールバックし、explain の出力ではそのフォールバックに `default_known_agent_idle_fallback` というラベルを付けます。
 
-それら Codex 以外のエージェントでは、見慣れない新しいプロンプトが、Herdr がその画面の形を学習するまで、最初は `blocked` ではなく `idle` と表示されることがあります。誤分類の影響は表示上の状態と wait だけです。これによって Herdr が入力を送ったり破壊的な操作をしたりすることはありません。
-
-Codex では、表示中のスピナーや稼働中のアクティビティタイマーから `working` を、表示中の承認プロンプトから `blocked` を判定できます。通常のタイトルやコンポーザー、スピナーがないことだけでは、ターンの終了を判定できません。そのため、Codex は応答後も `unknown` のままになることがあり、`idle` または完了を待つ処理はタイムアウトする場合があります。管理対象の起動では、初期コンポーザーをプロンプト受付可能になったかの判定にのみ使います。この観測によってターン状態は変わりません。
+つまり、見慣れない新しいエージェントプロンプトは、Herdr がその画面の形を学習するまで、最初は `blocked` ではなく `idle` と表示されることがあります。こうしたやり取りによって Herdr が入力を送ったり破壊的な操作をしたりすることはありません。影響するのは表示上の状態と wait だけです。
 
 エージェントのセッションが始まる前に判断を求める起動時のプロンプトも、ブロックする UI として扱います。たとえば Codex の「Hooks need review」の選択画面や、Kimi Code CLI の「Trust this folder?」プロンプトです。こうしたプロンプトが開いている間、ペインは `blocked` になり、`herdr agent start` は成功を返す代わりにエージェントがまだ準備できていないと報告します。Herdr がこうしたプロンプトを開いているとみなすのは、それが画面の最後の内容であるあいだだけです。そのため、エージェントが出力の中でプロンプトの文面を引用しても `blocked` にはなりません。
 

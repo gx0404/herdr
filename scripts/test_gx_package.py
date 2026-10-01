@@ -365,7 +365,9 @@ class GXPackageTests(unittest.TestCase):
         self.assertTrue(json.loads(metadata.read_text(encoding="utf-8"))["source_dirty"])
 
     def test_cli_does_not_reuse_existing_installer(self) -> None:
-        artifact = self.root / package.artifact_name("windows", VERSION)
+        # main() 的版本来自真实 Cargo.toml（cargo_version()），随上游版本 bump 变化；
+        # 这里必须与 main 看到的版本一致，不能钉死 VERSION 常量。
+        artifact = self.root / package.artifact_name("windows", package.cargo_version())
         artifact.write_bytes(b"old installer")
         with mock.patch.object(package, "source_info", return_value=(SHA, False)), mock.patch.object(package, "preflight", return_value=TOOLS), mock.patch.object(package, "build_binary") as build, contextlib.redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(package.main(["--platform", "windows", "--output-dir", str(self.root)]), 1)

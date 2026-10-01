@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session|activity) ;;
+  session|activity|working|idle) ;;
   *) exit 0 ;;
 esac
 
@@ -99,18 +99,20 @@ if action == "activity":
     })
     raise SystemExit(0)
 
-if hook_event_name and hook_event_name != "SessionStart":
+expected_events = {"session": ("SessionStart",), "working": ("UserPromptSubmit",), "idle": ("Stop", "Interrupt")}[action]
+if hook_event_name and hook_event_name not in expected_events:
     raise SystemExit(0)
 
 session_id = hook_input.get("session_id")
 agent_session_id = session_id if isinstance(session_id, str) and session_id else None
-transcript_path = hook_input.get("transcript_path")
-if not isinstance(transcript_path, str) or not transcript_path.strip():
-    raise SystemExit(0)
+if action == "session":
+    transcript_path = hook_input.get("transcript_path")
+    if not isinstance(transcript_path, str) or not transcript_path.strip():
+        raise SystemExit(0)
 inherited_session_id = os.environ.get("CODEX_THREAD_ID")
 if inherited_session_id and inherited_session_id != agent_session_id:
     raise SystemExit(0)
-session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
+session_start_source = hook_input.get("source") if action == "session" else None
 if not isinstance(session_start_source, str) or not session_start_source:
     session_start_source = None
 if agent_session_id:
@@ -120,13 +122,20 @@ if agent_session_id:
         "agent": "codex",
         "seq": report_seq,
         "agent_session_id": agent_session_id,
-        "agent_session_path": transcript_path,
     }
-    if session_start_source:
-        params["session_start_source"] = session_start_source
+    if action == "session":
+        # fork：会话上报连同 transcript 路径，CODEX_HOME 只设在 pane 里时活动发现
+        # 仍能跟上；working/idle 分支不定义 transcript_path，不能带进 params。
+        params["agent_session_path"] = transcript_path
+        if session_start_source:
+            params["session_start_source"] = session_start_source
+        method = "pane.report_agent_session"
+    else:
+        params["state"] = action
+        method = "pane.report_agent"
     request = {
         "id": request_id,
-        "method": "pane.report_agent_session",
+        "method": method,
         "params": params,
     }
 else:

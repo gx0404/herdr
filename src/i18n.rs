@@ -2301,6 +2301,7 @@ pub struct CliOutputTexts {
     pub session_col_socket: &'static str,
     pub session_state_running: &'static str,
     pub session_state_stopped: &'static str,
+    pub session_state_unavailable: &'static str,
     pub plugin_installed_fmt: &'static str,
     pub plugin_config_label: &'static str,
     pub plugin_uninstalled_fmt: &'static str,
