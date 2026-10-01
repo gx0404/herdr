@@ -313,9 +313,20 @@ def _registered_hook_commands() -> list[tuple[str, str, str]]:
 class RegisteredEntryProbeTests(unittest.TestCase):
     """按三份配置里的原样 command 经 `bash -c` 验证独立仓入口与安全决策。"""
 
+    def test_registered_probe_uses_path_resolved_bash(self) -> None:
+        from unittest.mock import patch
+
+        with patch.object(subprocess, "run", wraps=subprocess.run) as run:
+            result = self._run_registered("printf resolved-bash", {})
+        self.assertEqual(shutil.which("bash"), run.call_args.args[0][0])
+        self.assertEqual(0, result.returncode, result.stderr.decode("utf-8", "replace"))
+        self.assertEqual(b"resolved-bash", result.stdout)
+
     def _run_registered(self, command: str, payload: dict) -> subprocess.CompletedProcess[bytes]:
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "bash is required to exercise the registered hooks")
         return subprocess.run(
-            ["bash", "-c", command],
+            [bash, "-c", command],
             input=json.dumps(payload).encode("utf-8"),
             capture_output=True,
             check=False,
@@ -345,7 +356,7 @@ class RegisteredEntryProbeTests(unittest.TestCase):
             with self.subTest(tool=tool, event=event):
                 probe, replaced = re.subn(r"^(?:bash|python3)\s+", "test -f ", command)
                 self.assertEqual(1, replaced, f"无法识别的解释器：{command}")
-                result = subprocess.run(["bash", "-c", probe], capture_output=True, check=False, cwd=PROJECT_ROOT)
+                result = self._run_registered(probe, {})
                 self.assertEqual(0, result.returncode, f"{tool} {event} 登记的脚本不存在：{command}")
 
 

@@ -75,6 +75,7 @@ fn is_server_listening_at(socket_path: &Path) -> bool {
     }
 }
 
+#[cfg(windows)]
 fn read_server_status() -> io::Result<Option<crate::api::RuntimeStatus>> {
     crate::api::read_runtime_status_at(&crate::api::socket_path(), STATUS_REQUEST_TIMEOUT)
 }
