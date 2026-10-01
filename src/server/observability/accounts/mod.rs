@@ -289,6 +289,12 @@ impl ServiceState {
         }
     }
 
+    /// 立即按已安装厂商重算账号清单（显式刷新用），不等下一个 `AVAILABILITY_TTL` 扫描周期。
+    fn rescan(&mut self, installed: &dyn Fn(&registry::Provider) -> bool, now: Instant) {
+        self.scanned_at = None;
+        self.reload(installed, now);
+    }
+
     /// 把新的账号清单并入状态。两种「消失」区别对待：
     /// - 用户在配置里显式删除的账号（`removed_explicit`）：删缓存、剪绑定与公开身份并落盘；
     /// - 隐式默认账号只是官方 CLI 暂时检测不到：宽限期内保留在清单里，期满只移出清单，
@@ -399,6 +405,13 @@ impl ServiceState {
     /// 或成功的回落探测替换它。返回被改写的账号 id，供调用方推送给订阅者。
     fn age_out_callbacks(&mut self, now_ms: u64) -> Vec<String> {
         age_out_callbacks(&mut self.cache, now_ms)
+    }
+
+    /// 是否有已派发、尚未并入结果的探测：有就要按节拍收取完成回报。
+    fn probes_pending(&self) -> bool {
+        self.cache
+            .values()
+            .any(|entry| entry.in_flight || entry.queued)
     }
 
     /// 处理一次查询线程回报；返回是否并入了新结果（调用方据此决定是否落盘）。
@@ -587,6 +600,64 @@ impl ServiceState {
     }
 }
 
+/// 有订阅或在途探测时服务循环的节拍：订阅按它推进轮询，完成的探测按它并入。
+const SERVICE_TICK: Duration = Duration::from_millis(100);
+
+/// 服务循环每轮（以及空闲阻塞醒来后、处理命令之前）先做的到期维护：配置与已安装厂商
+/// 复查、终态自愈、并入完成的探测、回调闩锁到期。
+struct Maintenance {
+    reload_at: Instant,
+    heal_at: Instant,
+}
+
+impl Maintenance {
+    fn new(now: Instant) -> Self {
+        Self {
+            reload_at: now + RELOAD_INTERVAL,
+            heal_at: now + registry::AVAILABILITY_TTL,
+        }
+    }
+
+    fn run(
+        &mut self,
+        state: &mut ServiceState,
+        subscribers: &mut Subscribers,
+        completed: &mpsc::Receiver<Outcome>,
+        now: Instant,
+    ) {
+        if now >= self.reload_at {
+            self.reload_at = now + RELOAD_INTERVAL;
+            state.reload(&registry::provider_installed, now);
+        }
+        if now >= self.heal_at {
+            // 指纹计算走缓存的 PATH 解析 + 几次 stat，按扫描 TTL 而不是 5 s 跑。
+            self.heal_at = now + registry::AVAILABILITY_TTL;
+            state.heal_terminal_entries();
+        }
+        let mut merged = false;
+        while let Ok(outcome) = completed.try_recv() {
+            merged |= state.complete(outcome, subscribers);
+        }
+        if merged {
+            state.persist();
+        }
+        // 回调闩锁到期的账号降为缓存态，并像探测完成一样推送给订阅者；放在命令处理之前，
+        // 读路径与事件通道看到的是同一次改写。
+        for id in state.age_out_callbacks(super::now_ms()) {
+            if let Some(entry) = state.cache.get(&id) {
+                notify_subscribers(
+                    subscribers,
+                    entry,
+                    &state.accounts,
+                    &state.config,
+                    &state.bindings,
+                    state.callback_probe,
+                );
+            }
+        }
+    }
+}
+
 pub(super) struct Service {
     commands: mpsc::SyncSender<Command>,
 }
@@ -635,41 +706,23 @@ impl Service {
                 let mut state = ServiceState::load();
                 let mut subscribers = Subscribers::new();
                 let mut next_subscription = 1_u64;
-                let mut reload_at = Instant::now() + RELOAD_INTERVAL;
-                let mut heal_at = Instant::now() + registry::AVAILABILITY_TTL;
+                let mut maintenance = Maintenance::new(Instant::now());
                 loop {
-                    let now = Instant::now();
-                    if now >= reload_at {
-                        reload_at = now + RELOAD_INTERVAL;
-                        state.reload(&registry::provider_installed, now);
+                    maintenance.run(&mut state, &mut subscribers, &completed, Instant::now());
+                    // 没有订阅、也没有在途探测时没有要按节拍推进的事：阻塞到下一条命令，
+                    // 醒来先补做到期的维护再处理，而不是每 100 ms 空转一次。
+                    let idle = subscribers.is_empty() && !state.probes_pending();
+                    let received = if idle {
+                        input
+                            .recv()
+                            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                    } else {
+                        input.recv_timeout(SERVICE_TICK)
+                    };
+                    if idle && received.is_ok() {
+                        maintenance.run(&mut state, &mut subscribers, &completed, Instant::now());
                     }
-                    if now >= heal_at {
-                        // 指纹计算走缓存的 PATH 解析 + 几次 stat，按扫描 TTL 而不是 5 s 跑。
-                        heal_at = now + registry::AVAILABILITY_TTL;
-                        state.heal_terminal_entries();
-                    }
-                    let mut merged = false;
-                    while let Ok(outcome) = completed.try_recv() {
-                        merged |= state.complete(outcome, &mut subscribers);
-                    }
-                    if merged {
-                        state.persist();
-                    }
-                    // 回调闩锁到期的账号降为缓存态，并像探测完成一样推送给订阅者；放在命令
-                    // 处理之前，读路径与事件通道看到的是同一次改写。
-                    for id in state.age_out_callbacks(super::now_ms()) {
-                        if let Some(entry) = state.cache.get(&id) {
-                            notify_subscribers(
-                                &mut subscribers,
-                                entry,
-                                &state.accounts,
-                                &state.config,
-                                &state.bindings,
-                                state.callback_probe,
-                            );
-                        }
-                    }
-                    let command = match input.recv_timeout(Duration::from_millis(100)) {
+                    let command = match received {
                         Ok(command) => command,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
                             subscribers.retain(|_, (_, _, reply)| reply.alive());
@@ -692,6 +745,14 @@ impl Service {
                     };
                     let id = request.id;
                     let manual_refresh = matches!(&request.method, Method::AccountUsageRefresh(_));
+                    // 显式刷新与厂商列表请求（打开账号页）不等 `AVAILABILITY_TTL`：刚装好的
+                    // CLI 立即计入已安装厂商与账号清单（限速见 `forget_cached_lookups`）。
+                    if (manual_refresh
+                        || matches!(&request.method, Method::AccountUsageProviders(_)))
+                        && registry::forget_cached_lookups(Instant::now())
+                    {
+                        state.rescan(&registry::provider_installed, Instant::now());
+                    }
                     let result = match request.method {
                         Method::AccountUsageProviders(_) => {
                             Ok(ResponseResult::AccountUsageProviders {
@@ -1987,6 +2048,44 @@ mod tests {
         if let Some(dir) = state.state_path.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    /// 服务循环空闲判定：只有已派发、未并入的探测（或订阅）让它保持 100 ms 节拍；阻塞醒来后
+    /// 的维护照常并入期间完成的探测，读路径看不到过期的在途态。
+    #[test]
+    fn service_loop_idles_without_pending_probes_and_catches_up_after_waking() {
+        let account = claude_account();
+        let mut state = test_state(AccountUsageConfig::default(), vec![account.clone()]);
+        assert!(!state.probes_pending(), "冷缓存没有在途探测：空闲阻塞");
+        if let Some(entry) = state.cache.get_mut(&account.id) {
+            entry.in_flight = true;
+            entry.queued = true;
+            entry.generation = 7;
+        }
+        assert!(state.probes_pending());
+
+        let (results, completed) = mpsc::channel();
+        let mut subscribers = Subscribers::new();
+        let mut maintenance = Maintenance::new(Instant::now());
+        results.send(Outcome::Started(7)).unwrap();
+        maintenance.run(&mut state, &mut subscribers, &completed, Instant::now());
+        assert!(state.probes_pending(), "开始执行只清 queued");
+        results
+            .send(Outcome::Completed(
+                7,
+                probed(ready_snapshot(3.0, 1_000), false),
+            ))
+            .unwrap();
+        maintenance.run(&mut state, &mut subscribers, &completed, Instant::now());
+        assert!(!state.probes_pending(), "结果并入后回到空闲");
+        assert_eq!(
+            state
+                .cache
+                .get(&account.id)
+                .map(|entry| entry.snapshot.status),
+            Some(ObservationStatus::Ready)
+        );
+        cleanup(&state);
     }
 
     /// 派发一次并返回是否入队。

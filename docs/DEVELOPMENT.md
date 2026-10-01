@@ -62,7 +62,47 @@
 
 ## 分支与上游
 
-本 fork（origin `gx0404/herdr`）跟踪 upstream `herdrdev/herdr`：日常开发在
-feature 分支；合并上游后按 `AGENT_RULES/README.md` 的章节映射表移植 AGENTS.md
-变化到领域文档。对上游的 issue/PR 行为遵守 `AGENT_RULES/governance.md` 守门。
-较大特性建议独立 worktree（见 governance 维护者工作流小节的布局约定）。
+本 fork（origin `gx0404/herdr`）跟踪 upstream `herdrdev/herdr`：维护分支为 `feature/gx_herdr`，
+特性分支从 `feature/gx_herdr` 派生；合并上游后按 `AGENT_RULES/README.md` 的章节映射表移植
+AGENTS.md 变化到领域文档。对上游的 issue/PR 行为遵守 `AGENT_RULES/governance.md`
+守门。较大特性建议独立 worktree（见 governance 维护者工作流小节的布局约定）。
+
+## GX Shell 外部源码消费
+
+GX Shell 是编排仓，不保存 herdr 源码。Oh My Zsh 外部 builder 消费本仓的独立
+checkout 或源码归档；无须旧 `gx_shell` Git 对象、父目录文件或单仓路径前缀。
+源码根必须直接包含 `Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`build.rs`、
+`src/`、`crates/ghostty-vt/`、`vendor/`、`LICENSE` 和 Windows ConPTY 打包输入。
+
+下游 manifest/依赖锁必须记录：
+
+| 字段 | 约定 |
+|---|---|
+| `repository` | `https://github.com/gx0404/herdr` |
+| `branch_provenance` | `feature/gx_herdr`，仅作来源说明，不用于选择构建时的移动分支 |
+| `revision` | 本仓完整 40 位 commit SHA，不是 GX Shell 或 Oh My Zsh 的 SHA |
+| `version` | 该 revision 的 `Cargo.toml` package version |
+| `source.url` / `filename` / `sha256` / `size` | 完整 SHA 对应的归档及实际下载字节的摘要/长度；删除旧 `monorepo_path` |
+| `rust` / `zig` | `rust-toolchain.toml` 精确版本与 `scripts/gx_package.py::ZIG_VERSION` |
+| `targets` | `windows-x64` → `x86_64-pc-windows-msvc`；`ubuntu-amd64` → `x86_64-unknown-linux-musl` |
+| `conpty` | 保留钉版 NuGet、许可摘要及七文件布局；不得因外置而放宽校验 |
+
+- checkout 必须核对独立仓根、完整 HEAD、干净状态和未跟踪源码；支持 `.git` 为文件的
+  worktree。`scripts/gx_package.py::source_info` 拒绝把外层仓库的 HEAD 当作源码身份。
+- 归档先验证锁中的 SHA256/size，再安全解包并剥掉唯一的归档顶层目录；拒绝路径穿越、
+  意外符号链接和本机 `.cargo/config.local.toml`。无 `.git` 的归档由外部 builder
+  处理，不能靠向安装包脚本传一个自报 SHA 来代替来源验证。
+- GitHub 按完整 SHA 的归档与本地 `git archive` 字节不一定相同：分别计算摘要，
+  不把本地摘要写到未经下载验证的远端 URL。候选尚未推送时，远端归档摘要记 PENDING。
+- 构建传入 `HERDR_BUILD_COMMIT=<revision>` 及 `HERDR_PACKAGE_MANAGER=windows-installer`
+  或 `deb`；二进制 `--version` 必须为 `herdr <version>-gx.<manager>.<revision>`。
+  包身份仍禁止上游自更新/切换渠道。使用锁定 Rust/Zig、`--locked` 和经过验证的
+  Cargo vendor/离线构建，不能依赖开发机加速配置。
+- 外部 builder 继续核对根许可、Cargo/path/workspace 许可、vendored libghostty-vt、
+  Zig 依赖及 ConPTY 许可；保留 `redistribution/BUILD.json`、许可证清单和源码归档。
+  receipt 的 `repository`、`branch_provenance`、`revision`、`source_sha256`、
+  `version`、`target`、`rust`、`zig`、`package_manager`、文件与许可摘要必须与锁一致。
+  不生成占位 receipt，也不以静态检查替代真实构建。
+- 本机构建只用外部 builder 的 `GX_LOCAL_BUILD_ROOT` 隔离入口，receipt 必须是
+  `builder=local` 且不可发布；只有真实一次性 CI 构建可记 `builder=github-actions`。
+  迁移不改写已发布 tag/release；Windows 安装和 deb 冒烟只在一次性 runner/容器运行。

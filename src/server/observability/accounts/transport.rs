@@ -198,6 +198,54 @@ fn prepend_layout_path(
         .ok()
 }
 
+/// What a probe starts. Detached servers may not see the CLI on their own PATH (version
+/// managers, desktop-bundled CLIs, installs made after the server started), so the executable
+/// detection resolved is started directly, which also reaches Windows `.cmd` shims a bare-name
+/// spawn misses; a PowerShell shim starts through its script host
+/// (`platform::cli_invocation`), `leading_args` included. `path` is the child PATH when it
+/// differs from the server's: the platform child PATH (Windows appends the current registry
+/// `PATH` entries the server lacks, `platform::cli_child_path`), with the resolved directory
+/// first when that PATH does not list it yet.
+struct ProbeProgram {
+    program: std::ffi::OsString,
+    leading_args: Vec<std::ffi::OsString>,
+    path: Option<std::ffi::OsString>,
+}
+
+impl ProbeProgram {
+    fn resolve(provider: &Provider) -> Self {
+        Self::from_resolved(
+            provider.command,
+            super::registry::command_path(provider.command),
+            &std::env::var_os("PATH").unwrap_or_default(),
+            crate::platform::cli_child_path(),
+        )
+    }
+
+    fn from_resolved(
+        command: &str,
+        resolved: Option<std::path::PathBuf>,
+        process_path: &std::ffi::OsStr,
+        child_path: Option<std::ffi::OsString>,
+    ) -> Self {
+        let base = child_path.as_deref().unwrap_or(process_path);
+        let prepended = resolved
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .filter(|dir| !std::env::split_paths(base).any(|entry| entry == *dir))
+            .and_then(|dir| prepend_layout_path(base, dir));
+        let (program, leading_args) = match resolved.as_deref() {
+            Some(executable) => crate::platform::cli_invocation(executable),
+            None => (command.into(), Vec::new()),
+        };
+        Self {
+            program,
+            leading_args,
+            path: prepended.or(child_path),
+        }
+    }
+}
+
 fn command(
     provider: &Provider,
     account: &UsageAccountConfig,
@@ -209,26 +257,11 @@ fn command(
             probe_texts().profile_unsupported.into(),
         ));
     }
-    // Detached servers may not inherit version-manager PATHs; fall back to
-    // the layout-resolved binary for CLIs installed outside PATH.
-    let layout_fallback = if crate::integration::command_available(provider.command) {
-        None
-    } else if provider.command == "codex" {
-        crate::integration::codex_layout_binary_path()
-    } else {
-        None
-    };
-    let program = match &layout_fallback {
-        Some(path) => std::borrow::Cow::Owned(path.to_string_lossy().into_owned()),
-        None => std::borrow::Cow::Borrowed(provider.command),
-    };
-    let mut command = crate::noninteractive_process::command(program.as_ref());
-    if let Some(dir) = layout_fallback.as_ref().and_then(|path| path.parent()) {
-        if let Some(prefixed) =
-            prepend_layout_path(&std::env::var_os("PATH").unwrap_or_default(), dir)
-        {
-            command.env("PATH", prefixed);
-        }
+    let probe = ProbeProgram::resolve(provider);
+    let mut command = crate::noninteractive_process::command(&probe.program);
+    command.args(&probe.leading_args);
+    if let Some(path) = probe.path {
+        command.env("PATH", path);
     }
     crate::platform::configure_usage_probe_command(&mut command);
     command
@@ -1474,7 +1507,12 @@ fn interactive_direct(
                 probe_texts().pty_create_failed.into(),
             )
         })?;
-    let mut builder = portable_pty::CommandBuilder::new(provider.command);
+    let probe = ProbeProgram::resolve(provider);
+    let mut builder = portable_pty::CommandBuilder::new(&probe.program);
+    builder.args(&probe.leading_args);
+    if let Some(path) = probe.path {
+        builder.env("PATH", path);
+    }
     builder.cwd(&directory.path);
     builder.env("TERM", "xterm-256color");
     builder.env("HERDR_USAGE_PROBE", "1");
@@ -2110,6 +2148,97 @@ mod tests {
         );
         assert_eq!(split[1], std::path::Path::new("/usr/bin"));
         assert_eq!(split[2], std::path::Path::new("/bin"));
+    }
+
+    /// Probes start the executable detection resolved; only a directory outside the child PATH
+    /// is put first on it, the platform child PATH (registry entries the server lacks) reaches
+    /// the child even when nothing is prepended, and an unresolved CLI keeps its bare name (the
+    /// spawn then reports the CLI missing).
+    #[test]
+    fn probes_start_the_resolved_executable_and_extend_path_only_when_needed() {
+        let on_path = std::path::PathBuf::from("/usr/bin");
+        let bundled = std::path::PathBuf::from("/opt/desktop/claude-code/2.1.284");
+        let registry = std::path::PathBuf::from("/opt/registry/bin");
+        let process_path = std::env::join_paths([&on_path]).expect("join fixture path");
+        let split = |path: Option<std::ffi::OsString>| {
+            std::env::split_paths(&path.expect("child PATH is set")).collect::<Vec<_>>()
+        };
+
+        let missing = ProbeProgram::from_resolved("claude", None, &process_path, None);
+        assert_eq!(missing.program, std::ffi::OsString::from("claude"));
+        assert!(missing.leading_args.is_empty());
+        assert_eq!(missing.path, None);
+
+        let visible = ProbeProgram::from_resolved(
+            "claude",
+            Some(on_path.join("claude")),
+            &process_path,
+            None,
+        );
+        assert_eq!(visible.program, on_path.join("claude").into_os_string());
+        assert!(visible.leading_args.is_empty());
+        assert_eq!(
+            visible.path, None,
+            "a directory already on PATH is not repeated"
+        );
+
+        let outside = ProbeProgram::from_resolved(
+            "claude",
+            Some(bundled.join("claude")),
+            &process_path,
+            None,
+        );
+        assert_eq!(outside.program, bundled.join("claude").into_os_string());
+        assert_eq!(
+            split(outside.path),
+            [bundled.clone(), on_path.clone()],
+            "bundled directory goes first on the child PATH"
+        );
+
+        let child_path =
+            std::env::join_paths([&on_path, &registry]).expect("join child fixture path");
+        let refreshed = ProbeProgram::from_resolved(
+            "claude",
+            Some(on_path.join("claude")),
+            &process_path,
+            Some(child_path.clone()),
+        );
+        assert_eq!(
+            refreshed.path,
+            Some(child_path.clone()),
+            "registry PATH entries reach the child without a prepended directory"
+        );
+        let bundled_refreshed = ProbeProgram::from_resolved(
+            "claude",
+            Some(bundled.join("claude")),
+            &process_path,
+            Some(child_path),
+        );
+        assert_eq!(split(bundled_refreshed.path), [bundled, on_path, registry]);
+    }
+
+    /// A PowerShell shim is started through `powershell.exe -File`, never handed to
+    /// `CreateProcess` directly; its directory still goes first on the child PATH.
+    #[cfg(windows)]
+    #[test]
+    fn probes_start_powershell_shims_through_the_script_host() {
+        let process_path = std::ffi::OsString::from(r"C:\Windows\System32");
+        let shim = std::path::PathBuf::from(r"C:\Users\someone\AppData\Roaming\npm\claude.ps1");
+        let probe = ProbeProgram::from_resolved("claude", Some(shim.clone()), &process_path, None);
+        assert_eq!(probe.program, std::ffi::OsString::from("powershell.exe"));
+        assert_eq!(
+            probe.leading_args.last(),
+            Some(&shim.clone().into_os_string())
+        );
+        assert!(probe
+            .leading_args
+            .iter()
+            .any(|arg| arg == std::ffi::OsStr::new("-File")));
+        let path = probe.path.expect("shim directory goes first");
+        assert_eq!(
+            std::env::split_paths(&path).next().as_deref(),
+            shim.parent()
+        );
     }
 
     fn claude() -> &'static Provider {

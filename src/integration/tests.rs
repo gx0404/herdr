@@ -300,6 +300,31 @@ fn retired_integration_targets_get_a_retired_error_and_stay_out_of_listings() {
 }
 
 #[test]
+fn command_availability_search_path_override_is_scoped() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let executable = bin.join(if cfg!(windows) {
+        "herdr-merge-test-agent.cmd"
+    } else {
+        "herdr-merge-test-agent"
+    });
+    fs::write(&executable, "").unwrap();
+    make_executable(&executable).unwrap();
+    let original_path = std::env::var_os("PATH");
+    let _path = override_search_path(&bin);
+    assert!(command_available("herdr-merge-test-agent"));
+    {
+        let _empty = override_search_path("");
+        assert!(!command_available("herdr-merge-test-agent"));
+    }
+    assert!(command_available("herdr-merge-test-agent"));
+    assert_eq!(std::env::var_os("PATH"), original_path);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 #[cfg(unix)]
 fn command_available_requires_executable_file_on_path() {
     use std::os::unix::fs::PermissionsExt;
@@ -338,6 +363,109 @@ fn command_available_finds_windows_command_shims_on_path() {
 
     assert!(!command_available("missing-agent"));
 
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A long-running server's PATH misses CLIs installed later, registry-only PATH updates and
+/// desktop-bundled CLIs; availability must still see them (fake profile, injected registry
+/// PATH, no process PATH).
+#[test]
+#[cfg(windows)]
+fn command_available_searches_windows_install_locations_outside_path() {
+    struct Pinned;
+    impl Drop for Pinned {
+        fn drop(&mut self) {
+            crate::platform::set_test_command_search_environment(None);
+        }
+    }
+
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let write = |relative: &str| {
+        let path = base.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "").unwrap();
+    };
+    write(r"registry-bin\kimi.cmd");
+    write(r"roaming\npm\opencode.cmd");
+    write(r"local\Microsoft\WinGet\Links\pi.exe");
+    write(r"local\OpenAI\Codex\bin\faa963e871dd422c\codex.exe");
+    write(
+        r"local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code\2.1.284\claude.exe",
+    );
+    fs::create_dir_all(base.join("profile")).unwrap();
+
+    let environment = crate::platform::CommandSearchEnvironment {
+        registry_path: vec![base.join("registry-bin").into_os_string()],
+        user_profile: Some(base.join("profile")),
+        app_data: Some(base.join("roaming")),
+        local_app_data: Some(base.join("local")),
+        ..Default::default()
+    };
+    crate::platform::set_test_command_search_environment(Some(environment));
+    let _pinned = Pinned;
+
+    for command in ["kimi", "opencode", "pi", "codex", "claude"] {
+        assert!(command_available(command), "{command}");
+    }
+    for target in [
+        crate::api::schema::IntegrationTarget::Claude,
+        crate::api::schema::IntegrationTarget::Codex,
+        crate::api::schema::IntegrationTarget::Kimi,
+        crate::api::schema::IntegrationTarget::Opencode,
+        crate::api::schema::IntegrationTarget::Pi,
+    ] {
+        assert!(integration_target_available(target), "{target:?}");
+    }
+    assert!(!command_available("missing-agent"));
+
+    crate::platform::set_test_command_search_environment(Some(
+        crate::platform::CommandSearchEnvironment::default(),
+    ));
+    assert!(
+        !command_available("kimi"),
+        "nothing is found without a PATH or install locations"
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+/// An extensionless shell shim (npm and Unix-style installers write one) shows the CLI is
+/// installed when no launchable file sits next to it; it only counts after every launchable
+/// candidate in every search directory, and an explicit extension has no such fallback.
+#[test]
+#[cfg(windows)]
+fn command_available_counts_extensionless_windows_shims_as_installed() {
+    struct Pinned;
+    impl Drop for Pinned {
+        fn drop(&mut self) {
+            crate::platform::set_test_command_search_environment(None);
+        }
+    }
+
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    crate::platform::set_test_command_search_environment(Some(
+        crate::platform::CommandSearchEnvironment {
+            process_path: Some(bin.clone().into_os_string()),
+            ..Default::default()
+        },
+    ));
+    let _pinned = Pinned;
+
+    assert!(!command_available("pi"));
+    fs::write(bin.join("pi"), "#!/bin/sh\n").unwrap();
+    assert!(command_available("pi"));
+    assert!(integration_target_available(
+        crate::api::schema::IntegrationTarget::Pi
+    ));
+    assert!(!command_available("pi.exe"));
+    fs::create_dir_all(bin.join("claude")).unwrap();
+    assert!(
+        !command_available("claude"),
+        "a directory named like the CLI is not a shim"
+    );
     let _ = fs::remove_dir_all(base);
 }
 

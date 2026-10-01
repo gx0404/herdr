@@ -53,6 +53,8 @@ Windows 构建同时通过稳定版和预览版更新通道提供。新安装默
 
 Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接运行的智能体和常见的命令包装器,包括 npm/Node 和 Git Bash 进程链。它会跨越模拟的 `exec` 边界跟踪从 Git Bash 启动的智能体,但这和 Unix 前台进程组检测不是一回事。
 
+进程扫描不占用 server 的异步工作线程,同一个检测节拍里扫描的窗格共用一份进程快照。每个进程实例(进程 ID 加创建时间)只分类一次,长期存在的 shell 辅助进程不会在每次扫描时被重新读取;读不到命令行的进程约 1 秒后会再检查一次,因为经 `node.exe` 等运行时启动的智能体只能从命令行认出。没有智能体的安静窗格大约每 2 秒重新扫描一次;窗格一有输出,下一个节拍就会扫描,所以开始绘制界面的智能体仍会和以前一样快被识别。
+
 Windows 支持安装全部五家官方集成:Pi、Claude Code、Codex、OpenCode 和 Kimi Code CLI。子 agent 活动信号只在 Unix 上提供:Windows 上 Claude Code 与 Codex 集成只安装会话钩子,Kimi Code CLI 的钩子会忽略活动事件,因此这些智能体的活动树只随 Herdr 的定期刷新更新。
 
 插件以预览状态支持在清单中声明 `windows` 平台。GitHub 安装、本地链接、构建命令、动作、事件和插件窗格在 Windows 上尽力而为。命令是 argv 命令,必须兼容 Windows;`npm`、`bun`、`node` 之类的 Node 包 shim 只要在 `PATH` 上就应该能用,而使用 `sh` 或 Bash 的 Unix 专用示例需要 Windows 专用的替代方案。平台过滤器会跳过不支持的构建命令,并对不支持的动作或窗格返回 `platform_unsupported`。
@@ -106,6 +108,8 @@ host_cursor = "native"
 ### 键盘和鼠标
 
 Windows 终端并不都以相同形式报告带修饰键的按键。Herdr 在 Windows Terminal 和 Windows 上的 Alacritty 中保留鼠标报告和 `ctrl+j`。原生 Windows 输入路径还会通过默认 ConPTY 窗格保留物理按键的按下、重复、释放、独立 Escape 和 `shift+enter`。带修饰键的输入仍依赖外层终端报告可区分的按键事件;如果它把 `shift+enter` 报告为普通 Enter,Herdr 也只能转发普通 Enter。
+
+`ctrl` 加字母(不带 `alt` 或 AltGr)送到窗格时总会带上对应的控制字符,例如 `ctrl+c` 是 `0x03`,即使外层终端、按键重映射工具或输入法报告的是普通字母或没有字符。MSYS2 和 Cygwin 程序(例如 MSYS2 zsh 窗格里的 `sleep`)只根据这个字符产生 SIGINT,因此 `ctrl+c` 能像中断原生程序一样中断它们。
 
 旧版 Windows 10 的系统 ConPTY 会丢弃 Kimi 和 Pi 等智能体使用的 Kitty 键盘协议序列，因此 Windows 包包含 Microsoft 当前的应用本地 ConPTY 运行时。仅在诊断捆绑运行时的兼容性问题时，才应在启动 Herdr 前设置 `HERDR_WINDOWS_CONPTY=system`。
 

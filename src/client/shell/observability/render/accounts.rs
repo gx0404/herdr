@@ -871,9 +871,18 @@ fn empty_accounts_hint(state: &State, scope: &AccountsScope<'_>) -> &'static str
         .filter(|provider| provider_listed(provider))
         .peekable();
     if !state.providers.is_empty() && listed.peek().is_none() {
+        // 说明查过哪些位置并给出安装提示；「刷新」会让服务端立即重扫一次。
         return tr(
-            "No installed agent CLI or configured account was found on this host.",
-            "此主机未检测到已安装的 agent CLI，也没有配置账号。",
+            "No installed agent CLI or configured account was found on this host.\n\
+             Searched PATH and, on Windows, the registry PATH, ~/.local/bin,\n\
+             ~/.kimi-code/bin, %APPDATA%\\npm, pnpm/Bun/Volta/Scoop shims,\n\
+             WinGet links and the CLIs bundled with the Codex and Claude apps.\n\
+             Install an agent CLI (e.g. npm i -g @openai/codex), then press Refresh.",
+            "此主机未检测到已安装的 agent CLI，也没有配置账号。\n\
+             已搜索 PATH；Windows 上还搜索注册表 PATH、~/.local/bin、\n\
+             ~/.kimi-code/bin、%APPDATA%\\npm、pnpm/Bun/Volta/Scoop 的 shim、\n\
+             WinGet 链接目录以及 Codex、Claude 桌面应用自带的 CLI。\n\
+             安装 agent CLI（例如 npm i -g @openai/codex）后按「刷新」。",
         );
     }
     if listed.peek().is_some() && listed.all(|provider| disabled(&provider.agent)) {

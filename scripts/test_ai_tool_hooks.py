@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -287,51 +288,134 @@ class CodexConfigShapeTests(unittest.TestCase):
         self.assertTrue(agent_path.is_file())
 
 
+def _registered_hook_commands() -> list[tuple[str, str, str]]:
+    """三份工具配置登记的全部 hook 命令：(工具, 事件, 原样 command)。"""
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 回退已装的 tomli
+        import tomli as tomllib
+    claude = json.loads((PROJECT_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    zcode = json.loads((PROJECT_ROOT / ".zcode" / "config.json").read_text(encoding="utf-8"))
+    codex = tomllib.loads((PROJECT_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8"))
+    commands: list[tuple[str, str, str]] = []
+    for tool, events in (
+        ("claude", claude["hooks"]),
+        ("zcode", zcode["hooks"]["events"]),
+        ("codex", codex["hooks"]),
+    ):
+        for event, blocks in events.items():
+            for block in blocks:
+                for hook in block["hooks"]:
+                    commands.append((tool, event, hook["command"]))
+    return commands
+
+
+class RegisteredEntryProbeTests(unittest.TestCase):
+    """按三份配置里的原样 command 经 `bash -c` 验证独立仓入口与安全决策。"""
+
+    def _run_registered(self, command: str, payload: dict) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["bash", "-c", command],
+            input=json.dumps(payload).encode("utf-8"),
+            capture_output=True,
+            check=False,
+            cwd=PROJECT_ROOT,
+        )
+
+    def test_pre_tool_use_entries_gate_as_configured(self) -> None:
+        # 危险字面量拆分构造：宿主会话可能挂着同一安全门，命令文本不得整串出现。
+        probes = [
+            ("Bash", {"command": "gh pr mer" + "ge 12"}, "deny"),
+            ("Edit", {"file_path": str(PROJECT_ROOT / "CHANGELOG.md")}, "deny"),
+            ("Edit", {"file_path": str(PROJECT_ROOT / "src" / "app" / "state.rs")}, "allow"),
+        ]
+        entries = [(tool, command) for tool, event, command in _registered_hook_commands() if event == "PreToolUse"]
+        self.assertEqual({"claude", "zcode", "codex"}, {tool for tool, _ in entries})
+        for tool, command in entries:
+            for tool_name, tool_input, expected in probes:
+                with self.subTest(tool=tool, probe=tool_name, expected=expected):
+                    result = self._run_registered(command, {"tool_name": tool_name, "tool_input": tool_input})
+                    self.assertEqual(0, result.returncode, result.stderr.decode("utf-8", "replace"))
+                    self.assertEqual(expected, _decision(result)[0])
+
+    def test_registered_scripts_resolve_inside_standalone_checkout(self) -> None:
+        # 只把解释器换成 test -f：路径与 $(git rev-parse ...) 仍按原样经 shell 求值，
+        # 但不真正执行会写本机状态的 PostToolUse/Stop 信号钩子。
+        for tool, event, command in _registered_hook_commands():
+            with self.subTest(tool=tool, event=event):
+                probe, replaced = re.subn(r"^(?:bash|python3)\s+", "test -f ", command)
+                self.assertEqual(1, replaced, f"无法识别的解释器：{command}")
+                result = subprocess.run(["bash", "-c", probe], capture_output=True, check=False, cwd=PROJECT_ROOT)
+                self.assertEqual(0, result.returncode, f"{tool} {event} 登记的脚本不存在：{command}")
+
+
 class SignalHookTests(unittest.TestCase):
+    """信号钩子按自身文件位置推导组件根：拷进临时「单仓/herdr」布局再跑，不写真实工作区。"""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-        subprocess.run(["git", "init", "-q", str(self.root)], check=True, capture_output=True)
+        self.monorepo = Path(self._tmp.name)
+        self.root = self.monorepo / "herdr"
+        subprocess.run(["git", "init", "-q", str(self.monorepo)], check=True, capture_output=True)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def _install(self, root: Path, script: Path) -> Path:
+        hooks = root / ".claude" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        target = hooks / script.name
+        shutil.copy2(script, target)
+        return target
+
     def test_record_edit_appends_log(self) -> None:
+        hook = self._install(self.root, RECORD_EDIT)
         stdin = json.dumps({"tool_name": "Write", "tool_input": {"file_path": "src/app/state.rs"}})
         result = subprocess.run(
-            [sys.executable, str(RECORD_EDIT)],
+            [sys.executable, str(hook)],
             input=stdin.encode("utf-8"),
             capture_output=True,
             check=False,
-            cwd=self.root,
+            cwd=self.monorepo,
         )
         self.assertEqual(0, result.returncode)
         log = (self.root / ".claude" / "live-edits.log").read_text(encoding="utf-8")
         self.assertIn("src/app/state.rs", log)
         self.assertIn("Write", log)
+        # cwd 的 git 顶层是单仓根：日志必须落在组件内而不是单仓根。
+        self.assertFalse((self.monorepo / ".claude").exists())
 
     def test_notify_review_writes_ready_json(self) -> None:
+        hook = self._install(self.root, NOTIFY_REVIEW)
         (self.root / "src").mkdir()
         (self.root / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        (self.monorepo / "other").mkdir()
+        (self.monorepo / "other" / "notes.md").write_text("x\n", encoding="utf-8")
         subprocess.run(
-            ["git", "-C", str(self.root), "add", "src/main.rs"], check=True, capture_output=True
+            ["git", "-C", str(self.monorepo), "add", "herdr/src/main.rs", "other/notes.md"],
+            check=True,
+            capture_output=True,
         )
         result = subprocess.run(
-            [sys.executable, str(NOTIFY_REVIEW)],
+            [sys.executable, str(hook)],
             input=b"{}",
             capture_output=True,
             check=False,
-            cwd=self.root,
+            cwd=self.monorepo,
         )
         self.assertEqual(0, result.returncode)
         payload = json.loads((self.root / ".claude" / "review" / "READY.json").read_text(encoding="utf-8"))
         self.assertTrue(payload["ready"])
+        # 清单只含本组件改动且为组件相对路径，单仓其他目录的改动不混入。
         self.assertIn("src/main.rs", payload["changed"])
+        self.assertNotIn("other/notes.md", payload["changed"])
+        self.assertFalse((self.monorepo / ".claude").exists())
 
     def test_notify_review_outside_repo_is_silent(self) -> None:
         with tempfile.TemporaryDirectory() as outside:
+            hook = self._install(Path(outside), NOTIFY_REVIEW)
             result = subprocess.run(
-                [sys.executable, str(NOTIFY_REVIEW)],
+                [sys.executable, str(hook)],
                 input=b"{}",
                 capture_output=True,
                 check=False,
@@ -339,6 +423,7 @@ class SignalHookTests(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode)
             self.assertEqual(b"", result.stdout)
+            self.assertFalse((Path(outside) / ".claude" / "review").exists())
 
 
 if __name__ == "__main__":

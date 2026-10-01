@@ -250,7 +250,7 @@ pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
 
 /// True when the pane's own shell is at its prompt with nothing running in it.
 pub fn pane_shell_is_idle(child_pid: u32) -> bool {
-    crate::platform::available_pane_shell(child_pid).is_some()
+    crate::platform::pane_shell_is_idle(child_pid)
 }
 
 fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> String {

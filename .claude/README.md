@@ -4,7 +4,8 @@
 `sessions/`、`live-edits.log`）由根 `.gitignore` 保持本机。
 
 - `settings.json`：权限与 hooks。hooks 是安全门，不是规则加载器；命令经
-  `git rev-parse --show-toplevel` 定位仓库根，ZCode 侧复用同一批脚本。
+  `$(git rev-parse --show-toplevel)/` 定位独立 herdr 仓库根；脚本自身按文件
+  位置推导组件根，ZCode 侧复用同一批脚本。
 - `rules/*.md`：带 `paths:` frontmatter 的薄适配，只提醒运行
   `python3 scripts/resolve_agent_rules.py <paths...>`，不复制领域规则。
 - `hooks/`：`dangerous_patterns.conf` 是危险模式唯一真源（SHELL/FILE 两段，

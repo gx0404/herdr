@@ -42,9 +42,12 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   规则在 fork 分支进行；同步上游时按 `docs/AGENT_RULES/README.md` 的章节映射
   表移植 AGENTS.md 变更。官方集成只保留六家：同步时不合入上游对其余集成商的
   新增与修改，口径见同一 README 的「fork 已删除的集成」。
-- fork 只启用 `ci.yml` 与 `gx-release.yml`；其余 workflow 原样保存在
-  `.github/workflows-archive/`，同步上游时不要重新启用。安装包入口为
-  `scripts/gx_package.py`，仅发布到 `gx0404/herdr`，边界见 `release-channels.md`。
+- fork 在独立仓库 `gx0404/herdr` 的默认分支 `feature/gx_herdr` 维护，只启用 `ci.yml` 与
+  `gx-release.yml`；其余 workflow 原样保存在 `.github/workflows-archive/`，
+  同步上游时不要重新启用。GX Shell 只锁定本仓完整 commit 与源码归档摘要，
+  不保留组件源码；Oh My Zsh 外部 builder 负责包身份、许可证清单与 build receipt，
+  合并安装包由 `gx0404/gx_shell` 发布。独立手动打包链与消费契约见
+  `release-channels.md` 和 `docs/DEVELOPMENT.md`。
 
 ## 项目模型
 

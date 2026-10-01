@@ -53,6 +53,8 @@ Closing a pane ends the programs started from it. Closing the pane's ConPTY send
 
 Windows agent process detection scans descendants of the pane shell and recognizes direct agents plus common command wrappers, including npm/Node and Git Bash process chains. It follows Git Bash-launched agents across emulated `exec` boundaries, but it is not the same as Unix foreground process-group detection.
 
+Process scans run off the server's async workers, and panes that scan within the same detection tick share one process snapshot. A process is classified once per instance (process ID plus creation time), so long-lived shell helpers are not re-read on every scan; a process whose command line could not be read is checked again after about a second, because an agent started through a runtime such as `node.exe` is only recognizable from its command line. A quiet pane without an agent is re-scanned about every 2 seconds; any pane output triggers a scan on the next tick, so an agent that starts drawing its interface is recognized as quickly as before.
+
 Windows integration installation supports all five official integrations: Pi, Claude Code, Codex, OpenCode, and Kimi Code CLI. Sub-agent activity signals are Unix-only: on Windows the Claude Code and Codex integrations install only their session hook and the Kimi Code CLI hook ignores activity events, so those agents' activity trees update only on Herdr's periodic refresh.
 
 Plugins support `windows` as a manifest platform in preview. GitHub install, local link, build commands, actions, events, and plugin panes are best-effort on Windows. Commands are argv commands and must be Windows-compatible; Node package shims such as `npm`, `bun`, and `node` are expected to work when they are on `PATH`, while Unix-only examples using `sh` or Bash need Windows-specific alternatives. Platform filters skip unsupported build commands and return `platform_unsupported` for unsupported actions or panes.
@@ -106,6 +108,8 @@ Native mode restores the IME anchor, but it can reintroduce occasional cursor fl
 ### Keyboard and mouse
 
 Windows terminals do not all report modified keys in the same shape. Herdr preserves mouse reporting and `ctrl+j` in Windows Terminal and Alacritty on Windows. The native Windows input path also preserves physical key presses, repeats, releases, standalone Escape, and `shift+enter` through default ConPTY panes. Modified keys still depend on the outer terminal reporting a distinct key event; if it reports `shift+enter` as plain Enter, Herdr can only forward plain Enter.
+
+`ctrl` plus a letter (without `alt` or AltGr) always reaches the pane with its control character, for example `0x03` for `ctrl+c`, even when the outer terminal, a key remapper or an input method reports the plain letter or no character. MSYS2 and Cygwin programs (such as `sleep` in an MSYS2 zsh pane) raise SIGINT only from that character, so `ctrl+c` interrupts them as it does native programs.
 
 Windows packages include Microsoft's current app-local ConPTY runtime because the system ConPTY on older Windows 10 builds drops Kitty keyboard protocol sequences used by agents such as Kimi and Pi. Set `HERDR_WINDOWS_CONPTY=system` before starting Herdr only when diagnosing a compatibility problem with the bundled runtime.
 

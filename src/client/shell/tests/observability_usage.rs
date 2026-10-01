@@ -7123,8 +7123,8 @@ fn overview_without_listed_providers_explains_instead_of_blaming_settings() {
     assert!(!state.observability.refreshing(), "强意图已消费");
     let message = state.observability.message.clone().unwrap_or_default();
     assert!(
-        message.contains("未检测到") || message.contains("No installed"),
-        "文案说明未检测到 agent CLI，而不是指向设置页: {message}"
+        message.contains("agent CLI") && !message.contains("设置") && !message.contains("settings"),
+        "文案说明在重新检测 agent CLI，而不是指向设置页: {message}"
     );
 
     // 对照：已列出但全部被本机关闭，才是「已在设置中关闭」。
@@ -7138,6 +7138,75 @@ fn overview_without_listed_providers_explains_instead_of_blaming_settings() {
     assert!(
         message.contains("设置") || message.contains("settings"),
         "本机关闭才指向设置页: {message}"
+    );
+}
+
+/// 没有已列出厂商时的「刷新」改为重拉厂商列表：服务端收到即重扫本机 CLI（不等
+/// 30 秒缓存），刚装好的 CLI 按一次刷新就能列出；列表到达后页脚照实说明结果。
+#[test]
+fn refresh_without_listed_providers_rescans_the_host_for_agent_clis() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = usage_ready();
+    let mut missing = provider("codex", &[]);
+    missing.installed = Some(false);
+    deliver_providers(&mut state, vec![missing.clone()]);
+    let t0 = Instant::now() + Duration::from_secs(1);
+    // 打开页面即拉一次列表；显式选「全部厂商」本身就是强意图刷新。
+    open_accounts_overview(&mut state, t0 - Duration::from_millis(500));
+    deliver_providers(&mut state, vec![missing.clone()]);
+
+    let refresh = tick(&mut state, t0);
+    assert!(usage_calls(&refresh).is_empty(), "空集不发用量请求");
+    assert!(
+        !state.observability.refreshing(),
+        "强意图已消费，不卡在刷新中"
+    );
+    assert_eq!(
+        state.observability.message.as_deref(),
+        Some("正在重新检测此主机上的 agent CLI…")
+    );
+    assert_eq!(
+        providers_calls(&tick(&mut state, t0 + Duration::from_millis(200))),
+        1,
+        "200 ms 后重拉厂商列表，服务端据此立即重扫"
+    );
+
+    // 重扫仍然一无所获：页脚说明结果，正文空态列出搜索过的位置与安装提示。
+    deliver_providers(&mut state, vec![missing]);
+    assert_eq!(
+        state.observability.message.as_deref(),
+        Some("重新检测完成：此主机仍未检测到已安装的 agent CLI。")
+    );
+    state.observability.message = None;
+    state.compose(133, 32).expect("账号页");
+    let region = state.observability.page_rect;
+    let text = region_text(&state, region);
+    for needle in [
+        "此主机未检测到已安装的 agent CLI",
+        "已搜索 PATH",
+        "WinGet 链接目录",
+    ] {
+        assert!(
+            find_in(&state, region, needle).is_some(),
+            "{needle}\n{text}"
+        );
+    }
+
+    // 再按一次刷新，这次 CLI 已装好：列表到达即撤掉说明，逐厂商请求照常发出。
+    state.observation_action(Action::Refresh, &mut ClientShellInput::default());
+    let t1 = t0 + Duration::from_secs(5);
+    tick(&mut state, t1);
+    assert_eq!(
+        providers_calls(&tick(&mut state, t1 + Duration::from_millis(200))),
+        1
+    );
+    deliver_providers(&mut state, vec![provider("codex", &[])]);
+    assert_eq!(state.observability.message, None);
+    let calls = usage_calls(&tick(&mut state, t1 + Duration::from_secs(1)));
+    assert_eq!(
+        sorted_agents(&calls),
+        [Some("codex".to_string())],
+        "列出的厂商照常查询: {calls:?}"
     );
 }
 

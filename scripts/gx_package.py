@@ -64,6 +64,12 @@ def rust_toolchain(root: Path = ROOT) -> str:
 
 
 def source_info(root: Path = ROOT) -> tuple[str, bool]:
+    toplevel = output(["git", "--no-optional-locks", "-C", root, "rev-parse", "--show-toplevel"])
+    if Path(toplevel).resolve() != root.resolve():
+        raise ValueError(
+            "package source must be a standalone herdr checkout; "
+            "source archives require an external builder with a verified revision and archive checksum"
+        )
     sha = output(["git", "--no-optional-locks", "-C", root, "rev-parse", "HEAD"])
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("HEAD must resolve to a full 40-character lowercase Git SHA")

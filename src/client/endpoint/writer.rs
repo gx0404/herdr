@@ -14,6 +14,17 @@ const MAX_BATCH_BYTES: usize = 64 * 1024;
 const MAX_QUEUED_BYTES: usize = 2 * crate::protocol::MAX_GRAPHICS_FRAME_SIZE;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_POLL_INTERVAL: Duration = Duration::from_millis(2);
+/// Largest nonblocking write on Windows. A nonblocking pipe write that neither fits the
+/// free pipe buffer nor meets a pending read writes nothing, so a chunk must fit the
+/// buffer; pipes from `crate::ipc::bind_local_listener` hold many of these.
+#[cfg(windows)]
+const WINDOWS_WRITE_CHUNK: usize = 64 * 1024;
+/// Pipes created by older servers keep interprocess's 512-byte buffers, so a larger
+/// chunk that made no progress is retried at this size before the writer waits.
+#[cfg(windows)]
+const WINDOWS_FALLBACK_WRITE_CHUNK: usize = 512;
+#[cfg(windows)]
+const _: () = assert!(WINDOWS_WRITE_CHUNK <= crate::ipc::WINDOWS_PIPE_BUFFER_BYTES as usize);
 
 #[derive(Default)]
 struct FrameBatch {
@@ -222,11 +233,11 @@ fn write_frame(
     let deadline = Instant::now() + WRITE_TIMEOUT;
     #[cfg(windows)]
     let mut deadline = deadline;
+    #[cfg(windows)]
+    let mut chunk_limit = WINDOWS_WRITE_CHUNK;
     while !frame.is_empty() && !stopped.load(Ordering::Acquire) {
-        // Match interprocess's 512-byte pipe buffer hint: larger nonblocking Windows
-        // writes can make no progress when the peer polls instead of blocking on read.
         #[cfg(windows)]
-        let chunk = &frame[..frame.len().min(512)];
+        let chunk = &frame[..frame.len().min(chunk_limit)];
         #[cfg(not(windows))]
         let chunk = frame;
         match writer.write(chunk) {
@@ -236,12 +247,21 @@ fn write_frame(
                 #[cfg(windows)]
                 {
                     deadline = Instant::now() + WRITE_TIMEOUT;
+                    chunk_limit = WINDOWS_WRITE_CHUNK;
                 }
                 continue;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
+        }
+        #[cfg(windows)]
+        {
+            if chunk.len() > WINDOWS_FALLBACK_WRITE_CHUNK {
+                chunk_limit = WINDOWS_FALLBACK_WRITE_CHUNK;
+                continue;
+            }
+            chunk_limit = WINDOWS_WRITE_CHUNK;
         }
         if Instant::now() >= deadline {
             return Err(io::Error::new(
@@ -439,6 +459,95 @@ mod tests {
         write_frame(&mut writer, b"first frame", &AtomicBool::new(false)).unwrap();
         write_frame(&mut writer, b"second frame", &AtomicBool::new(false)).unwrap();
         assert_eq!(writer.0, b"first framesecond frame");
+    }
+
+    #[cfg(windows)]
+    #[derive(Default)]
+    struct RecordingPipe {
+        buffer_limit: usize,
+        written: Vec<u8>,
+        attempts: Vec<usize>,
+    }
+
+    #[cfg(windows)]
+    impl io::Write for RecordingPipe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.attempts.push(bytes.len());
+            // A nonblocking pipe write that does not fit the buffer writes nothing.
+            if bytes.len() > self.buffer_limit {
+                return Ok(0);
+            }
+            self.written.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_frames_are_written_in_large_chunks() {
+        let frame: Vec<u8> = (0..300_000_u32).map(|index| index as u8).collect();
+        let mut pipe = RecordingPipe {
+            buffer_limit: usize::MAX,
+            ..Default::default()
+        };
+        write_frame(&mut pipe, &frame, &AtomicBool::new(false)).unwrap();
+        assert_eq!(pipe.written, frame);
+        assert_eq!(
+            pipe.attempts.len(),
+            frame.len().div_ceil(WINDOWS_WRITE_CHUNK)
+        );
+        assert!(pipe.attempts[..pipe.attempts.len() - 1]
+            .iter()
+            .all(|&attempt| attempt == WINDOWS_WRITE_CHUNK));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_small_pipe_buffers_fall_back_to_small_chunks() {
+        let frame: Vec<u8> = (0..100_000_u32).map(|index| index as u8).collect();
+        let mut pipe = RecordingPipe {
+            buffer_limit: WINDOWS_FALLBACK_WRITE_CHUNK,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        write_frame(&mut pipe, &frame, &AtomicBool::new(false)).unwrap();
+        assert_eq!(pipe.written, frame);
+        assert_eq!(pipe.attempts[0], WINDOWS_WRITE_CHUNK);
+        assert_eq!(pipe.attempts[1], WINDOWS_FALLBACK_WRITE_CHUNK);
+        // Falling back is immediate; only a write that makes no progress at all waits.
+        assert!(started.elapsed() < WRITE_TIMEOUT);
+    }
+
+    #[test]
+    fn native_endpoint_writer_delivers_megabyte_frames_to_a_blocking_reader() {
+        let (stream, mut peer, path) = streams();
+        let mut transport = NativeEndpointTransport::with_lifetime(stream, ()).unwrap();
+        let (done, received) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let first: ClientMessage =
+                crate::protocol::read_message(&mut peer, crate::protocol::MAX_GRAPHICS_FRAME_SIZE)
+                    .unwrap();
+            let second: ClientMessage =
+                crate::protocol::read_message(&mut peer, crate::protocol::MAX_FRAME_SIZE).unwrap();
+            done.send((first, second)).unwrap();
+        });
+        let input = ClientMessage::Input {
+            data: (0..3 * 1024 * 1024_u32).map(|index| index as u8).collect(),
+        };
+        transport.send(&input).unwrap();
+        transport.send(&ClientMessage::Detach).unwrap();
+        transport
+            .flush(Instant::now() + Duration::from_secs(30))
+            .unwrap();
+        let (first, second) = received.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(first == input, "megabyte input frame corrupted");
+        assert_eq!(second, ClientMessage::Detach);
+        reader.join().unwrap();
+        drop(transport);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

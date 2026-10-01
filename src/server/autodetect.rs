@@ -1,8 +1,10 @@
 //! Auto-detect launch behavior for the `herdr` command.
 //!
 //! When the user runs `herdr` with no subcommand:
-//! 1. Check if a server is already listening on the client socket
-//! 2. If no server → spawn one as a background daemon → wait for socket readiness (up to 15s)
+//! 1. Check whether a server is running: Unix connects to the client socket, Windows
+//!    reads the server status from the JSON API and keeps it for the compatibility check
+//! 2. If no server → spawn one as a background daemon → wait until its client socket
+//!    accepts connections (up to 15s)
 //! 3. Attach as a client to the server
 
 use std::io;
@@ -38,57 +40,37 @@ pub(crate) const STARTUP_CWD_ENV_VAR: &str = "HERDR_STARTUP_CWD";
 // Server detection
 // ---------------------------------------------------------------------------
 
-/// Checks whether a herdr server is currently listening on the client socket.
+/// Checks whether a herdr server is listening on the client socket at `socket_path`.
 ///
-/// This works by attempting to connect to the client socket. If the connection
-/// succeeds, a server is running. If the socket file doesn't exist or the
-/// connection is refused, no server is running. Stale sockets (from a crashed
-/// server) are detected because connect returns `ConnectionRefused`
-/// when nobody is listening.
-#[allow(dead_code)] // Public API for external use and testing
-pub fn is_server_listening() -> bool {
-    is_server_listening_at(&client_socket_path())
-}
-
-/// Checks whether a herdr server is listening at a specific socket path.
+/// Connecting succeeds only while a server listens. A missing socket file, or a stale
+/// one left by a crashed server (connect returns `ConnectionRefused`), means no server
+/// is running. The server sees the probe as a client that disconnects before its
+/// handshake.
+#[cfg(not(windows))]
 fn is_server_listening_at(socket_path: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        let _ = socket_path;
-        read_server_status().ok().flatten().is_some()
+    if !socket_path.exists() {
+        return false;
     }
 
-    #[cfg(not(windows))]
-    {
-        if !socket_path.exists() {
-            return false;
+    match crate::ipc::connect_local_stream(socket_path) {
+        Ok(_) => true,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
+            ) =>
+        {
+            // Socket file exists but nobody is listening — stale socket.
+            false
         }
-
-        match crate::ipc::connect_local_stream(socket_path) {
-            Ok(_) => {
-                // Server is listening. Close the test connection immediately.
-                // The server's handshake handler will time out on this connection
-                // since we don't send a handshake, which is fine.
-                true
-            }
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
-                ) =>
-            {
-                // Socket file exists but nobody is listening — stale socket.
-                false
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                // Socket file disappeared between exists() and connect().
-                false
-            }
-            Err(err) => {
-                // Other errors (permission denied, etc.) — assume not listening.
-                tracing::warn!(err = %err, "unexpected error checking server socket");
-                false
-            }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            // Socket file disappeared between exists() and connect().
+            false
+        }
+        Err(err) => {
+            // Other errors (permission denied, etc.) — assume not listening.
+            tracing::warn!(err = %err, "unexpected error checking server socket");
+            false
         }
     }
 }
@@ -97,58 +79,61 @@ fn read_server_status() -> io::Result<Option<crate::api::RuntimeStatus>> {
     crate::api::read_runtime_status_at(&crate::api::socket_path(), STATUS_REQUEST_TIMEOUT)
 }
 
-#[cfg(windows)]
-fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
-    if !socket_path.exists() {
-        return Ok(false);
-    }
+/// A running server found by [`find_running_server`].
+pub(crate) struct RunningServer {
+    /// Status read while detecting the server. Windows detects through the status API,
+    /// so callers reuse it instead of pinging again.
+    status: Option<crate::api::RuntimeStatus>,
+}
 
-    let mut stream = match crate::ipc::connect_local_stream(socket_path) {
-        Ok(stream) => stream,
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::ConnectionRefused
-                    | io::ErrorKind::NotFound
-                    | io::ErrorKind::TimedOut
-                    | io::ErrorKind::WouldBlock
-            ) =>
-        {
-            return Ok(false);
+impl RunningServer {
+    /// The status read during detection, or a status read now within `timeout`.
+    pub(crate) fn into_status(
+        self,
+        timeout: Duration,
+    ) -> io::Result<Option<crate::api::RuntimeStatus>> {
+        match self.status {
+            Some(status) => Ok(Some(status)),
+            None => crate::api::read_runtime_status_at(&crate::api::socket_path(), timeout),
         }
-        Err(err) => return Err(err),
-    };
-
-    let hello = crate::protocol::ClientMessage::TerminalHello {
-        version: crate::protocol::PROTOCOL_VERSION,
-        cols: 80,
-        rows: 24,
-        cell_width_px: 0,
-        cell_height_px: 0,
-        pixel_mouse: false,
-    };
-
-    match crate::protocol::write_message(&mut stream, &hello) {
-        Ok(()) => Ok(true),
-        Err(crate::protocol::FramingError::Io(err))
-            if matches!(
-                err.kind(),
-                io::ErrorKind::ConnectionRefused
-                    | io::ErrorKind::NotFound
-                    | io::ErrorKind::TimedOut
-                    | io::ErrorKind::WouldBlock
-                    | io::ErrorKind::BrokenPipe
-                    | io::ErrorKind::ConnectionReset
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(err) => Err(io::Error::other(err.to_string())),
     }
 }
 
-fn validate_running_server_compatibility(saved_federation: bool) -> io::Result<()> {
-    let Some(status) = read_server_status()? else {
+/// Finds a running server: Unix connects to the client socket at `socket_path`,
+/// Windows reads the server status from the JSON API.
+pub(crate) fn find_running_server(socket_path: &Path) -> Option<RunningServer> {
+    #[cfg(windows)]
+    {
+        let _ = socket_path;
+        read_server_status()
+            .ok()
+            .flatten()
+            .map(|status| RunningServer {
+                status: Some(status),
+            })
+    }
+
+    #[cfg(not(windows))]
+    {
+        is_server_listening_at(socket_path).then_some(RunningServer { status: None })
+    }
+}
+
+fn validate_running_server_compatibility(
+    saved_federation: bool,
+    server: RunningServer,
+) -> io::Result<()> {
+    validate_server_status_compatibility(
+        server.into_status(STATUS_REQUEST_TIMEOUT)?,
+        saved_federation,
+    )
+}
+
+fn validate_server_status_compatibility(
+    status: Option<crate::api::RuntimeStatus>,
+    saved_federation: bool,
+) -> io::Result<()> {
+    let Some(status) = status else {
         return Err(io::Error::other(format!(
             "a herdr server is listening, but its status API is unavailable.\n\n{}\nIf that fails, stop the old server process manually.",
             crate::session::active_restart_after_update_guidance()
@@ -251,17 +236,18 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
 
 /// Waits for the server's client socket to become ready for connections.
 ///
-/// Polls the socket path at regular intervals until a connection succeeds
-/// or the timeout elapses. Returns an error if the server doesn't become
-/// ready within the timeout.
+/// Polls the socket path at regular intervals until the listener accepts
+/// connections or the timeout elapses: Unix connects, Windows checks for a
+/// listening pipe instance without connecting. Returns an error if the server
+/// doesn't become ready within the timeout.
 pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Result<()> {
     let started = std::time::Instant::now();
     let deadline = started + timeout;
 
     while std::time::Instant::now() < deadline {
         #[cfg(windows)]
-        if client_protocol_accepts_hello(socket_path)? {
-            info!(path = %socket_path.display(), "server client protocol ready");
+        if crate::ipc::local_listener_accepting(socket_path)? {
+            info!(path = %socket_path.display(), "server client pipe listening");
             return Ok(());
         }
 
@@ -321,17 +307,20 @@ pub fn auto_detect_launch(
     let socket_path = client_socket_path();
     info!(path = %socket_path.display(), "auto-detect launch starting");
 
-    let startup = if is_server_listening_at(&socket_path) {
-        info!("server already running, attaching as client");
-        if saved_federation {
-            Ok(())
-        } else {
-            validate_running_server_compatibility(false)
+    let startup = match find_running_server(&socket_path) {
+        Some(server) => {
+            info!("server already running, attaching as client");
+            if saved_federation {
+                Ok(())
+            } else {
+                validate_running_server_compatibility(false, server)
+            }
         }
-    } else {
-        info!("no server running, spawning server daemon");
-        spawn_server_daemon()
-            .and_then(|_| wait_for_server_socket(&socket_path, SERVER_READY_TIMEOUT))
+        None => {
+            info!("no server running, spawning server daemon");
+            spawn_server_daemon()
+                .and_then(|_| wait_for_server_socket(&socket_path, SERVER_READY_TIMEOUT))
+        }
     };
     if let Err(error) = startup {
         if !saved_federation {
@@ -347,6 +336,137 @@ pub fn auto_detect_launch(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Uses the crate-wide lock and restores process environment variables on drop.
+#[cfg(test)]
+fn env_lock() -> &'static crate::config::TestEnvLock {
+    crate::config::test_config_env_lock()
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn status(
+        endpoint_protocol_generation: Option<u32>,
+        surface_interest: bool,
+    ) -> crate::api::RuntimeStatus {
+        crate::api::RuntimeStatus {
+            version: Some("0.9.2".into()),
+            protocol: Some(crate::protocol::PROTOCOL_VERSION),
+            capabilities: Some(crate::api::schema::ServerCapabilities {
+                live_handoff: false,
+                detached_server_daemon: true,
+                endpoint_protocol_generation,
+                surface_interest,
+                health_check: true,
+                ssh_agent_registration: false,
+            }),
+        }
+    }
+
+    fn compatible_status() -> crate::api::RuntimeStatus {
+        status(
+            Some(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION),
+            true,
+        )
+    }
+
+    #[test]
+    fn status_from_detection_is_reused_without_another_ping() {
+        let _guard = env_lock().lock().unwrap();
+        // A second ping would find no status API here and fail the check.
+        let missing = std::env::temp_dir().join(format!(
+            "herdr-autodetect-no-api-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, &missing);
+
+        let reused = validate_running_server_compatibility(
+            false,
+            RunningServer {
+                status: Some(compatible_status()),
+            },
+        );
+        let read_again =
+            validate_running_server_compatibility(false, RunningServer { status: None });
+
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        assert!(reused.is_ok(), "unexpected error: {reused:?}");
+        let error = read_again.unwrap_err().to_string();
+        assert!(
+            error.contains("status API is unavailable"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn status_compatibility_requires_the_stable_endpoint_generation() {
+        assert!(validate_server_status_compatibility(Some(compatible_status()), false).is_ok());
+        assert!(validate_server_status_compatibility(Some(compatible_status()), true).is_ok());
+
+        let missing = validate_server_status_compatibility(None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("status API is unavailable"), "{missing}");
+
+        let old = validate_server_status_compatibility(Some(status(None, false)), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            old.contains("the stable endpoint generation is incompatible"),
+            "{old}"
+        );
+
+        let without_surface_interest = validate_server_status_compatibility(
+            Some(status(
+                Some(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION),
+                false,
+            )),
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            without_surface_interest.contains("saved SSH machines require surface lifecycle"),
+            "{without_surface_interest}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_readiness_wait_leaves_no_probe_connection_behind() {
+        use interprocess::local_socket::traits::Listener as _;
+        use interprocess::local_socket::ListenerNonblockingMode;
+
+        let path = std::env::temp_dir().join(format!(
+            "herdr-autodetect-ready-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let timed_out = wait_for_server_socket(&path, Duration::from_millis(50)).unwrap_err();
+        assert_eq!(timed_out.kind(), io::ErrorKind::TimedOut);
+
+        let listener = crate::ipc::bind_local_listener(&path).unwrap();
+        listener
+            .set_nonblocking(ListenerNonblockingMode::Accept)
+            .unwrap();
+        wait_for_server_socket(&path, Duration::from_secs(2)).unwrap();
+
+        let pending = listener.accept();
+        assert!(
+            matches!(&pending, Err(err) if err.kind() == io::ErrorKind::WouldBlock),
+            "readiness must not reach the server as a client"
+        );
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -546,7 +666,8 @@ mod tests {
         let path = dir.join("api.sock");
         std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, &path);
 
-        let err = validate_running_server_compatibility(false).unwrap_err();
+        let err = validate_running_server_compatibility(false, RunningServer { status: None })
+            .unwrap_err();
 
         assert!(
             err.to_string().contains("status API is unavailable"),
@@ -581,7 +702,8 @@ mod tests {
             stream.flush().unwrap();
         });
 
-        let err = validate_running_server_compatibility(false).unwrap_err();
+        let err = validate_running_server_compatibility(false, RunningServer { status: None })
+            .unwrap_err();
         let message = err.to_string();
 
         let _ = handle.join();

@@ -157,14 +157,17 @@ enum RenderImpact {
 #[allow(dead_code)]
 const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often the idle headless loop wakes to poll the local listener for new
-/// client connections.
+/// Longest the headless loop sleeps without an event or a scheduled deadline.
 ///
-/// The listener is non-blocking and not integrated into `tokio::select!`, so
-/// a low-frequency wake is required to notice new thin-client attaches while
-/// otherwise idle. Keep this much slower than the old resize-poll cadence to
-/// avoid reintroducing the idle CPU spin.
-const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// On Unix the non-blocking client listener is not integrated into
+/// `tokio::select!`, so this wake notices new thin-client attaches. Windows
+/// accepts on a dedicated thread but still needs the wake: per-round work with
+/// no deadline in `next_headless_loop_deadline_with_git_refresh` depends on it,
+/// such as the agent activity scheduler (`agent_activity::Service::tick`), the
+/// plugin registry refresh and native graphics and text snapshot expiry. Keep
+/// this much slower than the old resize-poll cadence to avoid reintroducing the
+/// idle CPU spin.
+const IDLE_LOOP_WAKE_INTERVAL: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // Headless server
@@ -627,8 +630,8 @@ impl HeadlessServer {
                     needs_render,
                     self.has_app_client(),
                 )
-                .map(|deadline| deadline.min(now + CLIENT_ACCEPT_POLL_INTERVAL))
-                .or(Some(now + CLIENT_ACCEPT_POLL_INTERVAL));
+                .map(|deadline| deadline.min(now + IDLE_LOOP_WAKE_INTERVAL))
+                .or(Some(now + IDLE_LOOP_WAKE_INTERVAL));
             let next_deadline = self
                 .pending_alt_screen_reads
                 .iter()
