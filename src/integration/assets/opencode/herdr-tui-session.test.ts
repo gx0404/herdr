@@ -550,16 +550,25 @@ test("V1 a delayed home settlement cannot overwrite the next selected session", 
 });
 
 test("V2 ignores events without data", async () => {
-  const plugin = await loadPlugin();
-  const tui = v2Api();
-  const dispose = await plugin.setup(tui.api);
-  activeDisposers.push(dispose);
-  await flushReports();
-  requests.length = 0;
-  expect(() => tui.emit("legacy.event")).not.toThrow();
-  tui.emit("session.execution.started", { sessionID: "a" });
-  await flushReports();
-  expect(states()).toEqual(["working"]);
+  const originalNow = Date.now;
+  const now = originalNow();
+  Date.now = () => now;
+  try {
+    const plugin = await loadPlugin();
+    const tui = v2Api();
+    const dispose = await plugin.setup(tui.api);
+    activeDisposers.push(dispose);
+    await flushReports();
+    requests.length = 0;
+    expect(() => tui.emit("legacy.event")).not.toThrow();
+    await flushReports();
+    expect(states()).toEqual([]);
+    tui.emit("session.execution.started", { sessionID: "a" });
+    await flushReports();
+    expect(states()).toEqual(["working"]);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("V2 completes and interrupts without legacy idle events", async () => {

@@ -225,14 +225,17 @@ fn write_batch(
     Ok(())
 }
 
-fn write_frame(
+fn write_frame(writer: &mut impl io::Write, frame: &[u8], stopped: &AtomicBool) -> io::Result<()> {
+    write_frame_with_clock(writer, frame, stopped, Instant::now)
+}
+
+fn write_frame_with_clock(
     writer: &mut impl io::Write,
     mut frame: &[u8],
     stopped: &AtomicBool,
+    now: impl Fn() -> Instant,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + WRITE_TIMEOUT;
-    #[cfg(windows)]
-    let mut deadline = deadline;
+    let mut deadline = now() + WRITE_TIMEOUT;
     #[cfg(windows)]
     let mut chunk_limit = WINDOWS_WRITE_CHUNK;
     while !frame.is_empty() && !stopped.load(Ordering::Acquire) {
@@ -244,9 +247,9 @@ fn write_frame(
             Ok(0) => {}
             Ok(written) => {
                 frame = &frame[written..];
+                deadline = now() + WRITE_TIMEOUT;
                 #[cfg(windows)]
                 {
-                    deadline = Instant::now() + WRITE_TIMEOUT;
                     chunk_limit = WINDOWS_WRITE_CHUNK;
                 }
                 continue;
@@ -263,7 +266,7 @@ fn write_frame(
             }
             chunk_limit = WINDOWS_WRITE_CHUNK;
         }
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "endpoint write timed out",
@@ -459,6 +462,63 @@ mod tests {
         write_frame(&mut writer, b"first frame", &AtomicBool::new(false)).unwrap();
         write_frame(&mut writer, b"second frame", &AtomicBool::new(false)).unwrap();
         assert_eq!(writer.0, b"first framesecond frame");
+    }
+
+    #[test]
+    fn write_timeout_restarts_after_progress() {
+        struct SlowWriter<'a> {
+            now: &'a std::cell::Cell<Instant>,
+            written: Vec<u8>,
+            blocked: bool,
+        }
+        impl io::Write for SlowWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.now.set(self.now.get() + WRITE_TIMEOUT / 2);
+                self.blocked = !self.blocked;
+                if !self.blocked {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                self.written.push(bytes[0]);
+                Ok(1)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let started = Instant::now();
+        let now = std::cell::Cell::new(started);
+        let mut writer = SlowWriter {
+            now: &now,
+            written: Vec::new(),
+            blocked: false,
+        };
+        write_frame_with_clock(&mut writer, b"input", &AtomicBool::new(false), || now.get())
+            .unwrap();
+        assert_eq!(writer.written, b"input");
+        assert!(now.get().duration_since(started) > WRITE_TIMEOUT);
+    }
+
+    #[test]
+    fn write_timeout_expires_without_progress() {
+        struct StalledWriter<'a>(&'a std::cell::Cell<Instant>);
+        impl io::Write for StalledWriter<'_> {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                self.0.set(self.0.get() + WRITE_TIMEOUT);
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let now = std::cell::Cell::new(Instant::now());
+        let error = write_frame_with_clock(
+            &mut StalledWriter(&now),
+            b"input",
+            &AtomicBool::new(false),
+            || now.get(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     #[cfg(windows)]

@@ -5094,8 +5094,8 @@
       "anchor": "structure",
       "doc": "src/client/endpoint/writer.rs",
       "id": "src-client-endpoint-writer-rs-structure",
-      "source_sha256": "5a355c178e4fcc830be154005d34d61dcac0b4e26571d91bedb40cbe74b494f8",
-      "text": "公开项：\npub(crate) struct NativeEndpointTransport { — The UI batches complete frames until the worker claims them, so a short burst of tiny input frames does not exhaust command slots. Frames retain their individual write boundaries. A worker owns partial writes, cancellation, and the bridge lifetime; socket backpressure and\nimpl NativeEndpointTransport {\npub(crate) fn with_lifetime(\npub(crate) fn stop_handle(&self) -> Arc<AtomicBool> {\nimpl EndpointTransport for NativeEndpointTransport {\nimpl Drop for NativeEndpointTransport {\nimpl io::Read for PollingPeer {\nimpl Drop for Lifetime {\nimpl io::Write for PartialWriter {\nimpl io::Write for RecordingPipe {\nimpl io::Write for StalledWriter {"
+      "source_sha256": "ebd304d69199483c47454f47957968b9b636d0a840b6d7b8ffa1de3cf735277c",
+      "text": "公开项：\npub(crate) struct NativeEndpointTransport { — The UI batches complete frames until the worker claims them, so a short burst of tiny input frames does not exhaust command slots. Frames retain their individual write boundaries. A worker owns partial writes, cancellation, and the bridge lifetime; socket backpressure and\nimpl NativeEndpointTransport {\npub(crate) fn with_lifetime(\npub(crate) fn stop_handle(&self) -> Arc<AtomicBool> {\nimpl EndpointTransport for NativeEndpointTransport {\nimpl Drop for NativeEndpointTransport {\nimpl io::Read for PollingPeer {\nimpl Drop for Lifetime {\nimpl io::Write for PartialWriter {\nimpl io::Write for SlowWriter<'_> {\nimpl io::Write for StalledWriter<'_> {\nimpl io::Write for RecordingPipe {\nimpl io::Write for StalledWriter {"
     },
     {
       "anchor": "structure",
