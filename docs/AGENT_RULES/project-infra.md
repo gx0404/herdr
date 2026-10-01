@@ -45,3 +45,24 @@ update/release_notes/product_announcements/plugins/render_prof 等）、采集�
   `app-render.md`（TUI 交互模式复用既有设置界面）。
 - 运行时行为类模块（update、product_announcements、release_notes、sound）改动
   属于用户可见行为：走 `docs/next` 文档与发布纪律，不得手改 `distribution/*.json`。
+
+## 构建本地性（fork 硬规则）
+
+编译、构建产生的一切必须落在本项目文件夹内，不得写到项目外：
+
+- 默认落点：`target/`（cargo 默认，不改 `CARGO_TARGET_DIR` 指向外部）与 gitignored
+  的 `.local/`——Zig 工具链 `.local/toolchains/zig/`、Windows 交叉 SDK
+  `.local/windows-cross/`、本机工具 shim `.local/tool-shims/`、性能基线
+  `.local/perf-baseline/`、临时 worktree 放 `target/tmp/`。
+- 禁止：把构建产物、下载的工具链/SDK、测试沙箱、打包产物写到 `%USERPROFILE%`、
+  `%TEMP%` 根、其他磁盘目录等项目外位置（测试运行期的系统临时目录除外，且必须
+  自清，见 `testing.md`）。
+- 例外（用户级包管理器缓存，只读复用、项目脚本不主动写入）：cargo registry
+  （`~/.cargo/registry`）、rustup 工具链、uv/bun 全局缓存。
+- Windows 交叉 SDK 默认根为 `<repo>/.local/windows-cross/`
+  （`scripts/windows_cross.py::SDK_ROOT`）；跨 worktree/机器共享时设
+  `HERDR_WINDOWS_CROSS_ROOT` 显式指向项目外路径；`LIBGHOSTTY_VT_WINDOWS_LIBC`
+  覆盖语义不变。
+- 用户级运行时（如 Node.js 用户目录安装、uv tool）属例外；本机 shim 只进
+  `.local/tool-shims/`（如 graphify 钉版经 uvx 运行 0.9.20 的转发脚本），
+  用 `PATH="$PWD/.local/tool-shims:$PATH"` 前缀注入，不污染用户级目录。

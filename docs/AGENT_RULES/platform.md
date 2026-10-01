@@ -29,8 +29,10 @@
 
 Unix 上做 Windows MSVC 交叉编译需要 SDK/CRT 头与库：`cargo install xwin
 --locked` 安装 xwin，运行一次 `just setup-windows-cross` 并接受 Microsoft SDK
-许可（直接从 Microsoft 下载，无需 Windows 机器）。SDK 与 Zig libc 配置位于
-`~/.local/share/herdr/windows-cross/`，worktree 共享；`just windows-lint` 与
+许可（直接从 Microsoft 下载，无需 Windows 机器）。SDK 与 Zig libc 配置默认位于
+仓库内 `.local/windows-cross/`（gitignored，fork 构建本地性规则，见
+`project-infra.md`）；跨 worktree 共享时设 `HERDR_WINDOWS_CROSS_ROOT` 显式指向；
+`just windows-lint` 与
 `just check` 的 Windows 阶段自动使用。换 SDK 时设 `LIBGHOSTTY_VT_WINDOWS_LIBC`
 指向其 Zig libc 配置文件。setup 支持 `--accept-license` 非交互接受；常规检查
 不下载 SDK。原生 Windows 构建自动探测已装 SDK；原生 Linux/macOS 构建不需要。

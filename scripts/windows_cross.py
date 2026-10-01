@@ -9,7 +9,12 @@ import sys
 import tempfile
 
 
-SDK_ROOT = Path.home() / ".local/share/herdr/windows-cross"
+# 构建本地性（fork 硬规则，docs/AGENT_RULES/project-infra.md）：SDK 默认落在仓库内
+# .local/（gitignored）；跨 worktree/机器共享时用 HERDR_WINDOWS_CROSS_ROOT 显式指定。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+SDK_ROOT = Path(
+    os.environ.get("HERDR_WINDOWS_CROSS_ROOT", str(_REPO_ROOT / ".local" / "windows-cross"))
+)
 LIBC_ENV = "LIBGHOSTTY_VT_WINDOWS_LIBC"
 TARGET = "x86_64-pc-windows-msvc"
 

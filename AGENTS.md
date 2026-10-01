@@ -101,6 +101,9 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   （`docs-pipeline.md`、`release-channels.md`）。
 - **生成物纪律**：受控产物默认只检查，有意变更才重建并审 diff
   （`docs/README.md` 的生成物登记）。
+- **构建本地性**：编译/构建产物、项目拉取的工具链与 SDK、本机 shim 一律落在
+  项目文件夹内（`target/`、gitignored 的 `.local/`），不写项目外；例外与覆盖
+  方式见 `project-infra.md`。
 
 ## 提交规范
 

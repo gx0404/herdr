@@ -42,6 +42,26 @@ class WindowsCrossTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "just setup-windows-cross"):
                         windows_cross.libc_path()
 
+    def test_sdk_root_defaults_inside_repo(self):
+        # 构建本地性（fork 硬规则）：无显式覆盖时 SDK 根必须落在仓库 .local/ 内。
+        if os.environ.get("HERDR_WINDOWS_CROSS_ROOT"):
+            self.skipTest("HERDR_WINDOWS_CROSS_ROOT 显式覆盖时默认值不生效")
+        self.assertEqual(
+            windows_cross.SDK_ROOT,
+            windows_cross._REPO_ROOT / ".local" / "windows-cross",
+        )
+
+    def test_sdk_root_env_override_leaves_repo(self):
+        import importlib
+
+        try:
+            with patch.dict(os.environ, {"HERDR_WINDOWS_CROSS_ROOT": "D:/shared/sdk"}, clear=True):
+                importlib.reload(windows_cross)
+                self.assertEqual(windows_cross.SDK_ROOT, Path("D:/shared/sdk"))
+        finally:
+            with patch.dict(os.environ, dict(os.environ), clear=True):
+                importlib.reload(windows_cross)
+
     def test_missing_setup_does_not_run_build_or_download(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(windows_cross, "SDK_ROOT", Path(directory)), \
