@@ -296,10 +296,29 @@ fn clamp_to_pane(screen_col: u16, screen_row: u16, pane_inner: Rect) -> (u16, u1
     (clamped_row - pane_inner.y, clamped_col - pane_inner.x)
 }
 
-fn osc52_sequence(bytes: &[u8]) -> String {
+fn osc52_sequence_for_env(
+    bytes: &[u8],
+    term: Option<&OsStr>,
+    kitty_window_id: Option<&OsStr>,
+) -> String {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    format!("\x1b]52;c;{encoded}\x07")
+    let reset = if kitty_window_id.is_some() || term == Some(OsStr::new("xterm-kitty")) {
+        // Older kitty versions concatenate successive OSC 52 writes until an
+        // invalid base64 payload resets their extension buffer.
+        "\x1b]52;c;!\x07"
+    } else {
+        ""
+    };
+    format!("{reset}\x1b]52;c;{encoded}\x07")
+}
+
+fn osc52_sequence(bytes: &[u8]) -> String {
+    osc52_sequence_for_env(
+        bytes,
+        std::env::var_os("TERM").as_deref(),
+        std::env::var_os("KITTY_WINDOW_ID").as_deref(),
+    )
 }
 
 fn contains_wsl_marker(value: &str) -> bool {
@@ -423,7 +442,30 @@ mod tests {
 
     #[test]
     fn osc52_sequence_uses_bel_terminator() {
-        assert_eq!(osc52_sequence(b"hello"), "\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(
+            osc52_sequence_for_env(b"hello", None, None),
+            "\x1b]52;c;aGVsbG8=\x07"
+        );
+    }
+
+    #[test]
+    fn osc52_sequence_resets_kitty_concatenation_and_uses_bel_terminators() {
+        assert_eq!(
+            osc52_sequence_for_env(b"hello", Some(OsStr::new("xterm-kitty")), None),
+            "\x1b]52;c;!\x07\x1b]52;c;aGVsbG8=\x07"
+        );
+    }
+
+    #[test]
+    fn osc52_sequence_resets_kitty_concatenation_with_custom_term() {
+        assert_eq!(
+            osc52_sequence_for_env(
+                b"hello",
+                Some(OsStr::new("xterm-256color")),
+                Some(OsStr::new("1"))
+            ),
+            "\x1b]52;c;!\x07\x1b]52;c;aGVsbG8=\x07"
+        );
     }
 
     #[test]
