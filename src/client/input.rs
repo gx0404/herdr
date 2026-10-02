@@ -1124,8 +1124,6 @@ mod tests {
 
     #[test]
     fn captured_mouse_report_split_after_csi_survives_idle_gap() {
-        let timeouts = StdinFlushTimeouts::from_ui_config(&crate::config::UiConfig::default());
-        let now = std::time::Instant::now();
         let mut framer = crate::raw_input::RawInputByteFramer::for_host_input();
         framer.enable_host_appearance_query_on_focus();
         assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
