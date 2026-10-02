@@ -1357,9 +1357,59 @@ pub struct ExternalAgentRecord {
     pub summary: ActivitySummary,
 }
 
+/// 后台活动任务提交时捕获的 pane 身份；`generation` 使释放后的 A/B/A 结果失效，
+/// 终端、agent、来源与会话引用在结果应用前还会逐项匹配。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentActivityIdentity {
+    pub(crate) terminal_id: crate::terminal::TerminalId,
+    pub(crate) generation: u64,
+    pub(crate) agent: String,
+    pub(crate) source: Option<String>,
+    pub(crate) session: Option<crate::agent_resume::AgentSessionRef>,
+}
+
+impl AgentActivityIdentity {
+    fn source(terminal: &crate::terminal::TerminalState) -> Option<&str> {
+        terminal
+            .hook_authority
+            .as_ref()
+            .map(|authority| authority.source.as_str())
+            .or_else(|| {
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| session.source.as_str())
+            })
+    }
+
+    fn session(
+        terminal: &crate::terminal::TerminalState,
+    ) -> Option<&crate::agent_resume::AgentSessionRef> {
+        terminal
+            .hook_authority
+            .as_ref()
+            .and_then(|authority| authority.session_ref.as_ref())
+            .or_else(|| {
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|session| &session.session_ref)
+            })
+    }
+
+    fn matches(&self, terminal: &crate::terminal::TerminalState) -> bool {
+        terminal.is_agent_terminal()
+            && terminal.id == self.terminal_id
+            && activity_agent_key(terminal) == Some(self.agent.as_str())
+            && Self::source(terminal) == self.source.as_deref()
+            && Self::session(terminal) == self.session.as_ref()
+    }
+}
+
 /// 刷新一个 pane 的活动树所需的 agent 身份（交给后台适配器的入参，全部自有）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentActivitySubject {
+    pub identity: AgentActivityIdentity,
     /// 规范化的 agent 名（`"claude"`、`"codex"` 等），用于查找来源适配器。
     pub agent: String,
     pub session: Option<crate::agent_resume::AgentSessionRef>,
@@ -1368,17 +1418,14 @@ pub(crate) struct AgentActivitySubject {
     pub latest_hint: Option<std::sync::Arc<str>>,
 }
 
-/// agent 启动序号与活动树的存储：纯数据，随 `AppState` 走，无 PTY 可测。
-///
-/// 启动序号在 pane 首次获得 agent 身份时分配（进程内单调计数，不持久化、跨
-/// server 不可比），agent 释放或 pane 关闭后作废，重新识别取新号；`0` 表示未知。
-/// 活动树按 pane 存放，每个 agent 最多 [`MAX_AGENT_ACTIVITY_NODES`] 个节点；外部
-/// 来源条目按 `(source, external_id)` 排序存放，整源替换。`hinted` 是钩子提示的
-/// 收件箱：只记「哪个 pane 报过有变化」，刷新调度（限频、后台读取）在 server 侧
-/// 取走后执行；`latest_hints` 另存每个 pane 最近一份 hint 文本（pi 的树整份装在
-/// 里面），交给来源适配器读取。
+/// agent 启动序号与活动树的存储：纯数据，随 `AppState` 走，无 PTY 可测。身份代次
+/// 只供活动树后台任务校验，不进入客户端投影；会话或 agent 身份变更及释放时递增，
+/// 终端、来源、会话引用也会在应用结果前逐项核对。释放后代次保留到 pane 关闭，
+/// 防止 A/B/A 的迟到结果重新命中旧身份。
 #[derive(Debug, Default)]
 pub struct AgentActivityStore {
+    next_identity_generation: u64,
+    identity_generations: std::collections::HashMap<PaneId, u64>,
     next_launch_seq: u64,
     launch_seqs: std::collections::HashMap<PaneId, u64>,
     activity: std::collections::HashMap<PaneId, AgentActivitySnapshot>,
@@ -1395,6 +1442,19 @@ pub struct AgentActivityStore {
 }
 
 impl AgentActivityStore {
+    pub(crate) fn advance_identity(&mut self, pane_id: PaneId) {
+        self.next_identity_generation = self.next_identity_generation.saturating_add(1);
+        self.identity_generations
+            .insert(pane_id, self.next_identity_generation);
+    }
+
+    fn identity_generation(&self, pane_id: PaneId) -> u64 {
+        self.identity_generations
+            .get(&pane_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// 该 pane 的启动序号；未分配为 `0`。
     pub fn launch_seq(&self, pane_id: PaneId) -> u64 {
         self.launch_seqs.get(&pane_id).copied().unwrap_or(0)
@@ -1410,7 +1470,8 @@ impl AgentActivityStore {
         true
     }
 
-    /// agent 释放或 pane 关闭：作废该 pane 的序号、活动树与未处理的提示。返回
+    /// agent 释放或 pane 关闭时作废该 pane 的启动序号、活动树与未处理提示；
+    /// 身份代次不在这里清掉，直到 `retain_transcripts` 确认 pane 已关闭。返回
     /// 投影可见的内容（序号或活动树）是否有被移除。
     pub fn forget_pane(&mut self, pane_id: PaneId) -> bool {
         self.hinted.remove(&pane_id);
@@ -1562,9 +1623,11 @@ impl AgentActivityStore {
             .map(|transcript| &transcript.path)
     }
 
-    /// 只保留 `exists` 判定为真的 pane 的转录路径（pane 关闭后清理）。
+    /// 只保留仍存在的 pane 的转录路径与身份代次；agent 暂时释放不清代次。
     pub fn retain_transcripts(&mut self, mut exists: impl FnMut(PaneId) -> bool) {
         self.transcripts.retain(|pane_id, _| exists(*pane_id));
+        self.identity_generations
+            .retain(|pane_id, _| exists(*pane_id));
     }
 
     pub fn has_hints(&self) -> bool {
@@ -2059,35 +2122,48 @@ impl AppState {
             return None;
         }
         let agent = activity_agent_key(terminal)?.to_owned();
-        let session = terminal
-            .hook_authority
-            .as_ref()
-            .and_then(|authority| authority.session_ref.clone())
-            .or_else(|| {
-                terminal
-                    .persisted_agent_session
-                    .as_ref()
-                    .map(|session| session.session_ref.clone())
-            })
-            .map(|session| {
-                // 钩子随这个会话上报过转录路径（claude/codex）：按路径定位会话文件，pane 里单独
-                // 设置的配置目录也能跟上（路径是 CLI 自己给的）；会话已换时不用旧路径。
-                match session.kind {
-                    crate::agent_resume::AgentSessionRefKind::Id => self
-                        .agent_activity
-                        .transcript(pane_id, &agent, &session.value)
-                        .cloned()
-                        .unwrap_or(session),
-                    crate::agent_resume::AgentSessionRefKind::Path => session,
-                }
-            });
+        let identity = AgentActivityIdentity {
+            terminal_id: pane.attached_terminal_id.clone(),
+            generation: self.agent_activity.identity_generation(pane_id),
+            agent: agent.clone(),
+            source: AgentActivityIdentity::source(terminal).map(str::to_owned),
+            session: AgentActivityIdentity::session(terminal).cloned(),
+        };
+        let session = identity.session.clone().map(|session| {
+            // 转录路径只是适配器定位信息，不改变会话身份。
+            match session.kind {
+                crate::agent_resume::AgentSessionRefKind::Id => self
+                    .agent_activity
+                    .transcript(pane_id, &agent, &session.value)
+                    .cloned()
+                    .unwrap_or(session),
+                crate::agent_resume::AgentSessionRefKind::Path => session,
+            }
+        });
         let cwd = (!terminal.cwd.as_os_str().is_empty()).then(|| terminal.cwd.clone());
         Some(AgentActivitySubject {
+            identity,
             agent,
             session,
             cwd,
             latest_hint: self.agent_activity.latest_hint(pane_id),
         })
+    }
+
+    pub(crate) fn agent_activity_is_current(
+        &self,
+        pane_id: PaneId,
+        identity: &AgentActivityIdentity,
+    ) -> bool {
+        if self.agent_activity.identity_generation(pane_id) != identity.generation {
+            return false;
+        }
+        self.workspaces
+            .iter()
+            .find_map(|workspace| workspace.pane_state(pane_id))
+            .filter(|pane| pane.attached_terminal_id == identity.terminal_id)
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .is_some_and(|terminal| identity.matches(terminal))
     }
 
     pub(crate) fn mark_session_dirty(&mut self) {

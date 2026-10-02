@@ -60,7 +60,14 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 - 平台行为隔离在 `src/platform/<os>.rs`（`platform.md`）；Windows 交叉编译与
   ConPTY 打包自成工具链。
 - 工具链：`just` 是命令入口；测试用 cargo nextest + `python3 -m unittest` 脚本
-  清单 + bun 契约测试。
+  清单 + bun 契约测试。`just test` 编排五个阶段，合并 worker budget 默认
+  `min(8, cpu_count)`（`HERDR_TEST_BUDGET` / `--test-budget`）；phase 并发默认
+  `min(2, 5, budget)`（`HERDR_TEST_PHASE_JOBS` / `--phase-jobs` / `--jobs`），
+  maintenance 默认 `min(4, budget)`（`HERDR_MAINTENANCE_JOBS` /
+  `--maintenance-jobs`），nextest 默认使用剩余的 `max(1, budget-maintenance)`
+  （`HERDR_NEXTEST_JOBS` / `--nextest-jobs`）。命令行值优先于环境变量，显式 worker
+  值必须为正整数；每次运行的日志与原子 manifest 按 run-id 落在项目内
+  `target/test-suite-logs/<run-id>/`。
 
 ## 常用命令
 
@@ -72,7 +79,8 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 | `just docs-contract-test` / `just integration-assets-test` | bun 契约测试 |
 | `just agent-rules` / `just framework-check` | resolver 用法 / 框架守门聚合 |
 | `just graph` / `just graph-check` / `just kb` / `just kb-check` | 图谱与知识库 |
-| `just bench-render-scale` / `just bench-release-smoke` | 渲染扩展 / 发布性能 smoke |
+| `just bench-render-scale` / `just bench-terminal-targets` / `just bench-bsp-layout` | 渲染、终端目标查找、BSP 布局画像 |
+| `just bench-retained-graphics` / `just bench-api-fairness` / `just bench-release-smoke` | retained graphics、API 公平性、发布性能 smoke |
 | `just release-docs-check` / `just pre-release-check` / `just release` | 发布链（维护者） |
 
 全表与前置/副作用见 `docs/MAKE_COMMANDS.md`。
@@ -88,6 +96,11 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   retained-render 早退；加宽工作量需 1 与 ≥15 pane 的扩展证据（`app-render.md`）。
 - **runtime/client 边界**：共享 runtime 事实进 server 并走 JSON API/事件；TUI
   呈现状态留在客户端；不新增私有 socket-only 行为；中性命名（`protocol-api.md`）。
+- **队列与握手预算**：Windows PTY 输入为 1024 项/16 MiB、响应为 256 项/1 MiB；
+  server 外部事件每批最多处理 64 条。客户端握手有 4 秒绝对 deadline、2 MiB 首帧上限、
+  32 个并发槽，分片读取不得续期（`terminal-core.md`、`protocol-api.md`）。
+- **配置写入**：配置更新必须同目录临时写入、同步文件、原子替换并同步父目录；符号链接
+  更新其目标而不是替换链接（`project-infra.md`、`platform.md`）。
 - **稳定端点契约**：generation 1 codec 与方法不可变；冻结 fixture 是契约，
   永不重写期望；wire 变更按 `PROTOCOL_VERSION` 规则 bump（`protocol-api.md`）。
 - **平台隔离**：核心模块不得出现 `#[cfg(target_os)]`；平台代码只进
@@ -104,6 +117,14 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 - **构建本地性**：编译/构建产物、项目拉取的工具链与 SDK、本机 shim 一律落在
   项目文件夹内（`target/`、gitignored 的 `.local/`），不写项目外；例外与覆盖
   方式见 `project-infra.md`。
+- **测试与性能状态隔离**：测试编排 manifest 记录 `run_id`、`status`、`manifest`、
+  `test_budget`、`phase_jobs`、`maintenance_jobs`、`nextest_jobs`、每个 phase 的
+  `recipe`/`status`/`exit_code`/`seconds`/`log` 以及 `failures`。`bench-release-smoke`
+  只在 Linux/macOS 运行；每个 `.local/perf-baseline/run-*/` 将 `HOME`、`USERPROFILE`、
+  `XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、
+  `XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、
+  `KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）指向 run 内临时根，
+  只清理临时运行态，保留命令、原始采样、摘要与退出码。
 
 ## 提交规范
 

@@ -50,6 +50,8 @@ pub(super) struct State {
     pub pending: bool,
     next_request: Instant,
     last_focus: Option<String>,
+    #[cfg(test)]
+    pub(super) compose_count: usize,
 }
 
 /// 工作台的整帧内容区：顶栏（首行）与页脚 / 模式条（末行）之间。停靠几何与
@@ -202,6 +204,8 @@ impl State {
             pending: false,
             next_request: Instant::now(),
             last_focus: None,
+            #[cfg(test)]
+            compose_count: 0,
         }
     }
 
@@ -609,6 +613,19 @@ impl ClientShellState {
         }
         self.discard_invalid_copied_selection();
         true
+    }
+
+    /// Feeds consecutive views through the existing per-view generation and revision
+    /// checks, returning whether at least one view was accepted.
+    pub(crate) fn receive_view_batch<I>(&mut self, generation: u64, views: I) -> bool
+    where
+        I: IntoIterator<Item = crate::protocol::views::DecodedView>,
+    {
+        let mut accepted = false;
+        for view in views {
+            accepted |= self.receive_view(generation, view);
+        }
+        accepted
     }
 
     pub(crate) fn view_request(&self, request: ClientMessage) -> Option<ClientMessage> {

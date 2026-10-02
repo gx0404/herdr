@@ -7,6 +7,10 @@
 
 - workspace/tab/pane 是共享的会话组织身份（当前仍由 server 拥有，见
   `protocol-api.md` 的边界约束），但不得把三者做成无关 runtime 特性的强制身份。
+- 会话保存护栏按 workspace/tab/pane 的公共编号集合追踪布局身份，而不只比较数量；
+  pane 级级联退出期间，未显式授权的收缩或等量替换都不写小快照。用户/API 已完成的
+  布局变更可显式授权；默认 workspace 替换只在单 workspace、单 tab、单 pane 时放行，
+  护栏到期后才接受未授权的身份丢失。
 - 身份是持久化与恢复的键：ID 生成（`src/app/ids.rs`）、快照（`persist/snapshot.rs`）
   与恢复（`persist/restore.rs`）必须对「旧数据、旧 ID、跨版本快照」保持兼容；
   破坏兼容需要显式迁移与回滚说明。

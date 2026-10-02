@@ -113,11 +113,15 @@ Windows 终端并不都以相同形式报告带修饰键的按键。Herdr 在 Wi
 
 旧版 Windows 10 的系统 ConPTY 会丢弃 Kimi 和 Pi 等智能体使用的 Kitty 键盘协议序列，因此 Windows 包包含 Microsoft 当前的应用本地 ConPTY 运行时。仅在诊断捆绑运行时的兼容性问题时，才应在启动 Herdr 前设置 `HERDR_WINDOWS_CONPTY=system`。
 
+初始本地客户端握手有 4 秒期限。服务器最多同时接纳 32 个握手；未完成初始 hello 的连接会被关闭，超出的尝试会在槽位释放前被拒绝。这是连接安全上限，不能通过设置调整。
+
 ## 复制与粘贴
 
 Herdr 的窗格文本复制在 Windows 上可用。在窗格内拖选文本即可通过 Herdr 复制。
 
 文本粘贴请在 Windows Terminal 中使用 `ctrl+shift+v`。多行文本粘贴是带括号的 (bracketed),因此 shell 和智能体提示符会把它作为一次粘贴接收,而不是逐行提交。按住 `shift` 再右键,可以使用外层终端的粘贴操作,而不把点击发给 Herdr。
+
+分块到达的 bracketed 粘贴仍会保留 Unicode 文本和结束标记。完整粘贴超过 1 MiB 时会显示拒绝通知，但不会断开客户端；其它超限输入可能关闭连接。
 
 ## Windows 不支持
 

@@ -115,11 +115,15 @@ Windows terminals do not all report modified keys in the same shape. Herdr prese
 
 Windows packages include Microsoft's current app-local ConPTY runtime because the system ConPTY on older Windows 10 builds drops Kitty keyboard protocol sequences used by agents such as Kimi and Pi. Set `HERDR_WINDOWS_CONPTY=system` before starting Herdr only when diagnosing a compatibility problem with the bundled runtime.
 
+Initial local-client handshakes have a four-second deadline. A server admits at most 32 handshakes at once; connections that never complete the initial hello are closed, and excess attempts are refused until a slot is released. This is a connection-safety limit, not a setting to tune.
+
 ## Copy and paste
 
 Herdr's pane text copy works on Windows. Drag-select text inside a pane to copy through Herdr.
 
 For text paste, use `ctrl+shift+v` in Windows Terminal. Multiline text paste is bracketed so shells and agent prompts receive it as one paste instead of submitting each line separately. Hold `shift` and right-click to use the outer terminal paste action instead of sending the click through Herdr.
+
+Chunked bracketed pastes preserve Unicode text and the closing paste marker. A complete paste larger than 1 MiB shows a rejection notice without disconnecting the client; other oversized input can close the connection.
 
 Windows clients also recover text when WezTerm wraps a complete sequence of Win32 character press/release pairs in raw paste markers. Mixed text and incomplete reports are not decoded by this compatibility rule. Literal clipboard text consisting entirely of matching Win32 reports is indistinguishable from this encoding and is decoded too.
 

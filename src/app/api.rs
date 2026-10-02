@@ -64,9 +64,29 @@ impl App {
                 self.handle_internal_event(ev);
                 false
             }
+            AppEvent::AgentActivityRefreshedFor {
+                pane_id,
+                identity,
+                result,
+                ..
+            } => {
+                self.state.agent_activity_is_current(pane_id, &identity)
+                    && self.apply_agent_activity_refresh(pane_id, result)
+            }
+            AppEvent::AgentActivityReadFor {
+                pane_id,
+                identity,
+                nodes,
+                ..
+            } => {
+                self.state.agent_activity_is_current(pane_id, &identity)
+                    && self.apply_agent_activity_refresh(pane_id, Ok(nodes))
+            }
+            #[cfg(test)]
             AppEvent::AgentActivityRefreshed {
                 pane_id, result, ..
             } => self.apply_agent_activity_refresh(pane_id, result),
+            #[cfg(test)]
             AppEvent::AgentActivityRead { pane_id, nodes, .. } => {
                 self.apply_agent_activity_refresh(pane_id, Ok(nodes))
             }
@@ -206,6 +226,32 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::AgentActivityRefreshedFor {
+            pane_id,
+            identity,
+            result,
+            ..
+        } = ev
+        {
+            if self.state.agent_activity_is_current(pane_id, &identity) {
+                self.apply_agent_activity_refresh(pane_id, result);
+            }
+            return Vec::new();
+        }
+        if let AppEvent::AgentActivityReadFor {
+            pane_id,
+            identity,
+            nodes,
+            ..
+        } = ev
+        {
+            if self.state.agent_activity_is_current(pane_id, &identity) {
+                self.apply_agent_activity_refresh(pane_id, Ok(nodes));
+            }
+            return Vec::new();
+        }
+
+        #[cfg(test)]
         if let AppEvent::AgentActivityRefreshed {
             pane_id, result, ..
         } = ev
@@ -213,7 +259,7 @@ impl App {
             self.apply_agent_activity_refresh(pane_id, result);
             return Vec::new();
         }
-
+        #[cfg(test)]
         if let AppEvent::AgentActivityRead { pane_id, nodes, .. } = ev {
             self.apply_agent_activity_refresh(pane_id, Ok(nodes));
             return Vec::new();

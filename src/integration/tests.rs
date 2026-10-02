@@ -1364,6 +1364,240 @@ fn install_codex_only_migrates_top_level_feature_flags() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[cfg(test)]
+fn assert_codex_feature_edit_preserves_config(features: &str) {
+    let prefix = r#"# User settings
+model = "gpt-5.4"
+profile = "work"
+
+"#;
+    let suffix = r#"
+# Profile overrides and hook trust must remain untouched.
+[profiles.work.features]
+hooks = false
+codex_hooks = false
+
+[hooks.state."user:session_start:0:0"]
+trusted_hash = "keep-me"
+"#;
+    let content = format!("{prefix}{features}{suffix}");
+    let mut expected: toml::Value =
+        toml::from_str(&content).expect("input Codex config must be valid TOML");
+    expected["features"]
+        .as_table_mut()
+        .unwrap()
+        .insert("hooks".to_string(), toml::Value::Boolean(true));
+
+    let updated = super::config_edit::build_codex_config_with_hooks(&content)
+        .expect("valid Codex config must be editable");
+    let parsed: toml::Value = toml::from_str(&updated).unwrap_or_else(|error| {
+        panic!("updated Codex config must be valid TOML: {error}\n{updated}")
+    });
+    assert_eq!(parsed["features"]["hooks"].as_bool(), Some(true));
+    assert_eq!(parsed, expected, "only top-level features.hooks may change");
+    assert!(
+        updated.starts_with(prefix),
+        "user settings must be preserved"
+    );
+    assert!(
+        updated.ends_with(suffix),
+        "profile overrides and hook trust must be preserved"
+    );
+
+    let repeated = super::config_edit::build_codex_config_with_hooks(&updated)
+        .expect("repeated Codex config update must succeed");
+    let reparsed: toml::Value =
+        toml::from_str(&repeated).expect("repeated Codex config update must remain valid TOML");
+    assert_eq!(reparsed, expected);
+    assert_eq!(repeated, updated, "Codex config edits must be idempotent");
+}
+
+#[test]
+fn build_codex_config_with_hooks_accepts_quoted_hook_keys() {
+    for key in ["hooks", "\"hooks\"", "'hooks'"] {
+        let features = format!("[features]\n{key} = false\nother = true\n");
+        assert_codex_feature_edit_preserves_config(&features);
+    }
+}
+
+#[test]
+fn build_codex_config_with_hooks_accepts_quoted_feature_tables() {
+    for table in ["\"features\"", "'features'"] {
+        let features = format!("[{table}]\nhooks = false\nother = true\n");
+        assert_codex_feature_edit_preserves_config(&features);
+    }
+}
+
+#[test]
+fn build_codex_config_with_hooks_accepts_dotted_and_inline_features() {
+    for features in [
+        "features.hooks = false\nfeatures.other = true\n",
+        "features = { hooks = false, other = true }\n",
+        "features.other = true\n",
+        "features = { other = true }\n",
+        "[features]\nother = true\n",
+        "[features.future]\nflag = true\n",
+    ] {
+        assert_codex_feature_edit_preserves_config(features);
+    }
+}
+
+#[test]
+fn build_codex_config_with_hooks_preserves_comments_and_migrates_deprecated_flags() {
+    for (input, expected) in [
+        (
+            "['features'] # table\n# user note\n'codex_hooks'\t= false # migration note\nother = true\n",
+            "['features'] # table\n# user note\nhooks\t= true # migration note\nother = true\n",
+        ),
+        (
+            "[features]\n# old note\ncodex_hooks = false # keep this note\n\"hooks\" = false # hook note\nother = true\n",
+            "[features]\n# old note\n # keep this note\n\"hooks\" = true # hook note\nother = true\n",
+        ),
+        (
+            "features.'codex_hooks' = false # old note\nmodel = 'keep'\nfeatures.hooks = false # hook note\n",
+            " # old note\nmodel = 'keep'\nfeatures.hooks = true # hook note\n",
+        ),
+        (
+            "features = { codex_hooks = false, hooks = false, other = true } # table note\n",
+            "features = {  hooks = true, other = true } # table note\n",
+        ),
+        (
+            "features = { other = true, hooks = false, 'codex_hooks' = false } # table note\n",
+            "features = { other = true, hooks = true } # table note\n",
+        ),
+        (
+            "features = { 'codex_hooks' = false, other = true } # table note\n",
+            "features = { hooks = true, other = true } # table note\n",
+        ),
+        (
+            "model = 'keep'\r\n[\"features\"] # table note\r\n\"hooks\" = false # hook note\r\n",
+            "model = 'keep'\r\n[\"features\"] # table note\r\n\"hooks\" = true # hook note\r\n",
+        ),
+        (
+            "[features]\nhooks = false # no final newline",
+            "[features]\nhooks = true # no final newline",
+        ),
+        (
+            "instructions = '''\n[features]\nhooks = false\ncodex_hooks = false\n'''\n[features]\n'hooks' = false\n",
+            "instructions = '''\n[features]\nhooks = false\ncodex_hooks = false\n'''\n[features]\n'hooks' = true\n",
+        ),
+    ] {
+        let mut expected_value: toml::Value = toml::from_str(input).unwrap();
+        let features = expected_value["features"].as_table_mut().unwrap();
+        features.remove("codex_hooks");
+        features.insert("hooks".to_string(), toml::Value::Boolean(true));
+        let updated = super::config_edit::build_codex_config_with_hooks(input)
+            .unwrap_or_else(|error| panic!("{error}\n{input}"));
+        assert_eq!(updated, expected, "{input}");
+        assert_eq!(toml::from_str::<toml::Value>(&updated).unwrap(), expected_value);
+        assert_eq!(
+            super::config_edit::build_codex_config_with_hooks(&updated).unwrap(),
+            updated
+        );
+    }
+    for input in ["", "# user note\n", "model = 'keep'", "model = 'keep'\n"] {
+        let mut expected: toml::Table = toml::from_str(input).unwrap();
+        expected.insert(
+            "features".to_string(),
+            toml::Value::Table(toml::Table::from_iter([(
+                "hooks".to_string(),
+                toml::Value::Boolean(true),
+            )])),
+        );
+        let updated = super::config_edit::build_codex_config_with_hooks(input).unwrap();
+        assert!(updated.contains(input));
+        assert_eq!(toml::from_str::<toml::Table>(&updated).unwrap(), expected);
+        assert_eq!(
+            super::config_edit::build_codex_config_with_hooks(&updated).unwrap(),
+            updated
+        );
+    }
+}
+
+#[cfg(test)]
+fn assert_codex_install_rejection_preserves_files(
+    config: Option<&str>,
+    hooks: Option<&str>,
+    installed: bool,
+) -> std::io::Error {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let _home = override_home_dir(&home);
+    if let Some(config) = config {
+        fs::write(codex_dir.join("config.toml"), config).unwrap();
+    }
+    if let Some(hooks) = hooks {
+        fs::write(codex_dir.join("hooks.json"), hooks).unwrap();
+    }
+    if installed {
+        for name in [CODEX_HOOK_INSTALL_NAME, "herdr-agent-state.sh"] {
+            fs::write(codex_dir.join(name), format!("previous asset: {name}\n")).unwrap();
+        }
+    }
+    let snapshot = || {
+        fs::read_dir(&codex_dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+    let result = install_codex();
+    let after = snapshot();
+    fs::remove_dir_all(&base).unwrap();
+    assert_eq!(
+        after, before,
+        "rejection must not create, replace or remove files"
+    );
+    result.expect_err("invalid Codex settings must reject installation")
+}
+
+#[test]
+fn install_codex_rejects_invalid_or_unsafe_config_before_writing_files() {
+    for config in [
+        "[features\n",
+        "[features]\nhooks = false\n\"hooks\" = true\n",
+        "features = false\n",
+        "features = [{ hooks = false }]\n",
+        "[[features]]\nhooks = false\n",
+        "[features]\nhooks = 'false'\n",
+        "[features]\nhooks = []\n",
+        "[features.hooks]\ncustom = true\n",
+        "[features]\ncodex_hooks = 'false'\n",
+        "[features.codex_hooks]\ncustom = true\n",
+        "features.other = true\nmodel = 'keep'\nfeatures.future = false\n",
+    ] {
+        for (hooks, installed) in [(None, false), (Some("{ \"hooks\": {} }\n"), true)] {
+            let error =
+                assert_codex_install_rejection_preserves_files(Some(config), hooks, installed);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{config}");
+            assert!(error.to_string().contains("config.toml"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn install_codex_rejects_invalid_hooks_before_writing_files() {
+    for hooks in [
+        "{",
+        "[]",
+        r#"{"hooks": false}"#,
+        r#"{"hooks": {"SessionStart": {}}}"#,
+        r#"{"hooks": {"Interrupt": {}}}"#,
+    ] {
+        for (config, installed) in [(None, false), (Some("[features]\nhooks = false\n"), true)] {
+            let error =
+                assert_codex_install_rejection_preserves_files(config, Some(hooks), installed);
+            assert!(!error.to_string().is_empty());
+        }
+    }
+}
+
 #[test]
 fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
     let _lock = integration_env_lock();

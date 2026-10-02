@@ -73,6 +73,7 @@ struct ReconnectState {
     next_attempt: Option<Instant>,
     in_flight: bool,
     generation: Option<u64>,
+    attempt_cancel: crate::remote::TaskCancellation,
     online_since: Option<Instant>,
 }
 
@@ -84,6 +85,7 @@ impl ReconnectState {
             next_attempt: Some(now),
             in_flight: false,
             generation: None,
+            attempt_cancel: crate::remote::TaskCancellation::default(),
             online_since: None,
         }
     }
@@ -100,7 +102,9 @@ pub(crate) struct EndpointSupervisors {
         Arc<std::sync::Mutex<HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>>>,
     /// Running SSH port forwards per endpoint: rebuilt after every successful
     /// connect and reconciled in place when catalog rules change underneath a
-    /// healthy connection.
+    /// healthy connection. A connection generation is prepared before its
+    /// attempt and must still be current before that attempt may rebuild; this
+    /// prevents a retired or cancelled connection from resurrecting old rules.
     forwards: Arc<std::sync::Mutex<crate::remote::PortForwardManager>>,
     /// Snapshot workers for profiles with session logging enabled; follows
     /// the same profile lifecycle as the connections themselves.
@@ -147,11 +151,18 @@ impl EndpointSupervisors {
         state.generation = Some(generation);
         state.next_attempt = None;
         state.in_flight = true;
+        let attempt_cancel = state.attempt_cancel.clone();
         self.endpoints.insert(endpoint_id.clone(), state);
+        lock_forwards(&self.forwards).prepare_generation(&profile, generation);
+        let profile_id = profile.id.clone();
         let forwards = self.forwards.clone();
         let event_tx = event_tx.clone();
         std::thread::spawn(move || {
-            lock_forwards(&forwards).rebuild(&profile);
+            if attempt_cancel.is_cancelled()
+                || !lock_forwards(&forwards).rebuild_if_current(&profile_id, generation)
+            {
+                return;
+            }
             let _ = event_tx.blocking_send(EndpointSupervisorEvent::Connected {
                 endpoint_id,
                 generation,
@@ -159,6 +170,7 @@ impl EndpointSupervisors {
                 writer: prepared.writer,
                 negotiation: prepared.negotiation,
             });
+            attempt_cancel.complete();
         });
     }
 
@@ -185,6 +197,7 @@ impl EndpointSupervisors {
                 profile.id == previous.id && profile.enabled && profile.same_connection(previous)
             });
             if !keep {
+                state.attempt_cancel.cancel();
                 retired.push(endpoint_id.clone());
             }
             keep
@@ -211,11 +224,13 @@ impl EndpointSupervisors {
                 ConnectTarget::Local(_) => false,
             };
             state.target = ConnectTarget::Ssh(Box::new(profile.clone()));
+            let mut forwards = lock_forwards(&self.forwards);
+            forwards.update_profile(profile);
             // Forward rules follow the live connection: only apply edits while
             // online. Everything else is picked up by the rebuild on the next
             // successful connect.
             if rules_changed && state.online_since.is_some() {
-                lock_forwards(&self.forwards).reconcile(profile);
+                forwards.reconcile(profile);
             }
         }
         // Session-log workers track the profile set independently of the
@@ -246,6 +261,7 @@ impl EndpointSupervisors {
             state.next_attempt = None;
             let generation = self.next_generation;
             state.generation = Some(generation);
+            state.attempt_cancel = crate::remote::TaskCancellation::default();
             self.next_generation = self.next_generation.saturating_add(1);
             let endpoint_id = endpoint_id.clone();
             let target = state.target.clone();
@@ -253,23 +269,51 @@ impl EndpointSupervisors {
                 ConnectTarget::Ssh(profile) => Some((**profile).clone()),
                 ConnectTarget::Local(_) => None,
             };
+            if let Some(profile) = &forward_profile {
+                lock_forwards(&self.forwards).prepare_generation(profile, generation);
+            }
+            let attempt_cancel = state.attempt_cancel.clone();
             let event_tx = event_tx.clone();
             let shutdown = self.shutdown.clone();
             let error_kinds = self.error_kinds.clone();
             let forwards = self.forwards.clone();
             tokio::spawn(async move {
                 if shutdown.load(Ordering::Acquire) {
+                    attempt_cancel.cancel();
                     return;
                 }
                 let task_endpoint_id = endpoint_id.clone();
+                let worker_cancel = attempt_cancel.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let event = connect_once(&target, options, endpoint_id, generation)?;
-                    // The link is up: (re)start this profile's port forwards
-                    // before the Online event publishes the endpoint.
-                    if let Some(profile) = &forward_profile {
-                        lock_forwards(&forwards).rebuild(profile);
-                    }
-                    Ok(event)
+                    worker_cancel.run(|| {
+                        let event = connect_once(
+                            &target,
+                            options,
+                            endpoint_id,
+                            generation,
+                            &worker_cancel,
+                        )?;
+                        if worker_cancel.is_cancelled() {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "endpoint connection generation was cancelled",
+                            ));
+                        }
+                        // The link is up: commit forwards only if this connection
+                        // generation is still authoritative. The manager also uses
+                        // the latest catalog profile, not the task's stale snapshot.
+                        if let Some(profile) = &forward_profile {
+                            let committed = lock_forwards(&forwards)
+                                .rebuild_if_current(&profile.id, generation);
+                            if !committed {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::Interrupted,
+                                    "endpoint connection generation was retired",
+                                ));
+                            }
+                        }
+                        Ok(event)
+                    })
                 })
                 .await;
                 let event = match result {
@@ -300,9 +344,10 @@ impl EndpointSupervisors {
                         message: format!("endpoint connection task stopped unexpectedly: {error}"),
                     },
                 };
-                if !shutdown.load(Ordering::Acquire) {
+                if !shutdown.load(Ordering::Acquire) && !attempt_cancel.is_cancelled() {
                     let _ = event_tx.send(event).await;
                 }
+                attempt_cancel.complete();
             });
         }
     }
@@ -417,6 +462,9 @@ impl EndpointSupervisors {
 impl Drop for EndpointSupervisors {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        for state in self.endpoints.values() {
+            state.attempt_cancel.cancel();
+        }
         lock_forwards(&self.forwards).stop_all();
         self.session_logs.stop_all();
     }
@@ -427,6 +475,7 @@ fn connect_once(
     options: EndpointConnectOptions,
     endpoint_id: ClientEndpointId,
     generation: u64,
+    cancel: &crate::remote::TaskCancellation,
 ) -> Result<EndpointSupervisorEvent, std::io::Error> {
     let (stream, lifetime): (_, Box<dyn Send>) = match target {
         ConnectTarget::Local(path) => {
@@ -456,8 +505,13 @@ fn connect_once(
             (connected.stream, Box::new(connected.bridge))
         }
     };
-    let prepared =
-        prepare_endpoint_connection(stream, lifetime, options, !endpoint_id.is_local(), None)?;
+    let prepared = prepare_endpoint_connection(
+        stream,
+        lifetime,
+        options,
+        !endpoint_id.is_local(),
+        Some(cancel),
+    )?;
     Ok(EndpointSupervisorEvent::Connected {
         endpoint_id,
         generation,
@@ -808,5 +862,45 @@ mod tests {
         );
         assert!(supervisors.record_status(&endpoint_id, 4, ClientEndpointStatus::Attention, now));
         assert!(supervisors.endpoints[&endpoint_id].next_attempt.is_none());
+    }
+
+    #[test]
+    fn retired_connection_barrier_cannot_commit_forwards() {
+        let now = Instant::now();
+        let mut profile = profile();
+        profile
+            .port_forwards
+            .push(crate::client::endpoint::PortForwardRule {
+                kind: crate::client::endpoint::PortForwardKind::Remote,
+                bind_address: None,
+                listen_port: 18090,
+                target_host: Some("127.0.0.1".into()),
+                target_port: Some(80),
+            });
+        let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+        let mut supervisors = EndpointSupervisors::new(&[profile.clone()], now);
+        lock_forwards(&supervisors.forwards).prepare_generation(&profile, 7);
+        let cancel = supervisors.endpoints[&endpoint_id].attempt_cancel.clone();
+        let forwards = supervisors.forwards.clone();
+        let profile_id = profile.id.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).expect("connection barrier ready");
+            proceed_rx.recv().expect("connection barrier released");
+            lock_forwards(&forwards).rebuild_if_current(&profile_id, 7)
+        });
+        ready_rx.recv().expect("connection worker reached barrier");
+
+        profile.enabled = false;
+        assert_eq!(
+            supervisors.reconcile_profiles(&[profile.clone()], now),
+            vec![endpoint_id]
+        );
+        assert!(cancel.is_cancelled());
+        profile.enabled = true;
+        assert!(supervisors.reconcile_profiles(&[profile], now).is_empty());
+        proceed_tx.send(()).expect("release stale connection");
+        assert!(!worker.join().expect("connection worker"));
     }
 }

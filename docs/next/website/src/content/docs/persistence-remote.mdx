@@ -27,7 +27,7 @@ herdr session delete side-project
 
 A named session has its own panes, tabs, workspaces, sockets, and runtime state. It still shares the same global config file.
 
-When deleting a session, use the exact name shown by `herdr session list`, including letter case. On case-insensitive filesystems, `herdr session delete foo` refuses to delete a session named `Foo`.
+When deleting a session, use the exact name shown by `herdr session list`, including letter case. On case-insensitive filesystems, `herdr session delete foo` refuses to delete a session named `Foo`. Herdr checks both the server socket and the client endpoint before removing the session directory. A live endpoint, an access error, or any other probe failure aborts deletion and preserves the session data instead of guessing that the session is stopped. Symbolic-link and junction session directories are rejected as well.
 
 Use `--json` for scripts:
 

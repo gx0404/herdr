@@ -36,8 +36,26 @@
   `%USERPROFILE%\.cargo`、`%LOCALAPPDATA%\zig` 与 `vendor\libghostty-vt\.zig-cache` 加入
   排除，并把 rustc/cargo/cargo-nextest/link/zig 设为受信任程序；Microsoft Defender 可改用
   Dev Drive（ReFS + 性能模式）。这些是本机安全设置，按个人风险偏好决定。
-- `just maintenance-test` 按类并行执行维护脚本测试，并据上一轮耗时把慢类拆块；日常改动
-  用 `just test-one <filter>` 缩小范围，比全量 `just test` 快得多。
+- `just maintenance-test` 按类并行执行维护脚本测试，并据上一轮耗时把慢类拆块；默认
+  worker 数为 `min(4, cpu_count)`，可用 `HERDR_MAINTENANCE_JOBS` 或执行器 `--jobs` 覆盖。
+  `just test` 由 `scripts/run_test_suite.py` 编排五个 phase，combined `test_budget` 默认
+  `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET`/`--test-budget` 覆盖；phase 默认
+  `min(2, 5, test_budget)`（`HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs`），
+  maintenance 默认 `min(4, test_budget)`（`HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs`），
+  nextest 默认 `max(1, test_budget-maintenance_jobs)`（`HERDR_NEXTEST_JOBS`/
+  `--nextest-jobs`）。命令行优先于环境变量，显式值不自动截断；编排器把解析后的
+  maintenance/nextest 值注入 phase 子进程。每次编排运行用独立 run-id 目录保存阶段日志和
+  原子 `manifest.json`：顶层含 `run_id`、`status`、`manifest`、三个 budget/jobs 字段与
+  `failures`，`phases` 含 `recipe`、`status`、`exit_code`、`seconds`、`log`。日常改动用
+  `just test-one <filter>` 缩小范围，比全量 `just test` 快得多。
+- 发布性能 smoke 只在 Linux/macOS 执行；`just bench-release-smoke` 在
+  `.local/perf-baseline/run-*/` 保留 run-id、metadata、candidate/baseline 命令、原始
+  采样、摘要、run log 和退出码。smoke 与每个 case 都把 `HOME`、`USERPROFILE`、
+  `XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、
+  `XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、
+  `KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）指向 run 内私有临时状态，
+  并清除继承的 herdr socket/session；只删除临时运行态。其余 `bench-*` recipe 是非门禁
+  画像，命令与证据口径见 `MAKE_COMMANDS.md`。
 
 ## 每个任务的闭环
 
@@ -49,12 +67,15 @@
 3. **针对性检查**：`just test-one <filter>` / `just maintenance-test` /
    `just docs-contract-test` 按影响面选；提交前 `just check`。
 4. **用户可见行为**：同步 `docs/next` 文档与翻译（发布纪律见
-   `AGENT_RULES/docs-pipeline.md`；CHANGELOG 不在日常范围）。
+   `AGENT_RULES/docs-pipeline.md`；CHANGELOG 不在日常范围）。测试编排/性能结果等开发者
+   行为同步 `AGENT_RULES/testing.md`、`release-channels.md` 和 `MAKE_COMMANDS.md`。
 5. **生成物**：命中 `docs/README.md` 生成物登记的输入时，先跑 check 确认差异、
    有意才重建并审 diff。
 6. **验证证据**：运行期行为用 `herdr-throwaway-repro` skill 建隔离会话复现
    （在既有 herdr 会话内测试新构建用
-   `env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run -- ...`）。
+   `env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run -- ...`）。Windows
+   handshake、PTY admission、Codex native-tools 边界必须记为目标平台证据；未在 Windows
+   实机或对应 CI 运行的结果保持 PENDING。
 7. **复审**：修复杂度高的改动走独立只读复审（`--task review` 规则）；输出
    严重/中/轻/结论。
 8. **提交**：conventional commit + `refs #<issue>`；提交前提出 message 对齐；

@@ -416,6 +416,10 @@ fn graphics_owner_is_active(
             .is_some_and(|shell| shell.endpoint_is_active(owner))
 }
 
+/// Coalesce at most this many consecutive surfaces for one endpoint generation;
+/// a different event is deferred so batching cannot reorder unrelated work.
+const MAX_VIEW_SURFACE_BATCH: usize = 16;
+
 /// The main client event loop.
 ///
 /// Uses a threaded architecture:
@@ -671,6 +675,7 @@ async fn run_client_loop(
 
     // Main event loop.
     let mut client_timer = timer::ClientLoopTimer::new();
+    let mut deferred_event: Option<ClientLoopEvent> = None;
     #[cfg(windows)]
     let mut stdin_open = true;
     while !should_quit.load(Ordering::Acquire) {
@@ -802,6 +807,8 @@ async fn run_client_loop(
         #[cfg(windows)]
         let event = if let Some(event) = immediate_event {
             event
+        } else if let Some(event) = deferred_event.take() {
+            event
         } else {
             tokio::select! {
                 _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
@@ -819,6 +826,8 @@ async fn run_client_loop(
         #[cfg(unix)]
         let event = if let Some(event) = immediate_event {
             event
+        } else if let Some(event) = deferred_event.take() {
+            event
         } else {
             tokio::select! {
                 biased;
@@ -826,6 +835,46 @@ async fn run_client_loop(
                 ev = supervisor_rx.recv() => ev.map(ClientLoopEvent::EndpointSupervisor).unwrap_or(ClientLoopEvent::Timer),
                 ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
             }
+        };
+        let mut view_batch = None;
+        let event = match event {
+            ClientLoopEvent::ViewSurface {
+                endpoint_id,
+                generation,
+                view,
+            } => {
+                let batch_endpoint_id = endpoint_id.clone();
+                let first = *view;
+                let mut views = Vec::new();
+                for _ in 1..MAX_VIEW_SURFACE_BATCH {
+                    match event_rx.try_recv() {
+                        Ok(ClientLoopEvent::ViewSurface {
+                            endpoint_id: next_endpoint_id,
+                            generation: next_generation,
+                            view,
+                        }) if next_endpoint_id == batch_endpoint_id
+                            && next_generation == generation =>
+                        {
+                            views.push(*view);
+                        }
+                        Ok(other) => {
+                            deferred_event = Some(other);
+                            break;
+                        }
+                        Err(
+                            tokio::sync::mpsc::error::TryRecvError::Empty
+                            | tokio::sync::mpsc::error::TryRecvError::Disconnected,
+                        ) => break,
+                    }
+                }
+                view_batch = (!views.is_empty()).then_some(views);
+                ClientLoopEvent::ViewSurface {
+                    endpoint_id,
+                    generation,
+                    view: Box::new(first),
+                }
+            }
+            event => event,
         };
         let now = std::time::Instant::now();
         if let Some(shell) = state.shell.as_mut() {
@@ -1639,12 +1688,22 @@ async fn run_client_loop(
                 {
                     continue;
                 }
-                write_stream.received(&endpoint_id, generation, now);
-                if state
-                    .shell
-                    .as_mut()
-                    .is_some_and(|shell| shell.receive_view(generation, *view))
-                {
+                let accepted = if let Some(views) = view_batch.take() {
+                    write_stream.received(&endpoint_id, generation, now);
+                    for _ in &views {
+                        write_stream.received(&endpoint_id, generation, now);
+                    }
+                    state.shell.as_mut().is_some_and(|shell| {
+                        shell.receive_view_batch(generation, std::iter::once(*view).chain(views))
+                    })
+                } else {
+                    write_stream.received(&endpoint_id, generation, now);
+                    state
+                        .shell
+                        .as_mut()
+                        .is_some_and(|shell| shell.receive_view(generation, *view))
+                };
+                if accepted {
                     state.compose_and_present();
                 }
             }

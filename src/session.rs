@@ -290,8 +290,9 @@ fn stop_socket_with_timeout(
             return Err(error.to_string());
         }
     }
-    if !wait_until_stopped_until(&stopped_socket_paths, deadline) {
-        let reachable = reachable_socket_paths(&stopped_socket_paths);
+    let reachable = wait_until_stopped_until(&stopped_socket_paths, deadline)
+        .map_err(|error| format!("{label} cannot determine whether shutdown completed: {error}"))?;
+    if !reachable.is_empty() {
         return Err(format!(
             "{label} did not stop within {}ms; sockets are still reachable at {}",
             timeout.as_millis(),
@@ -310,16 +311,27 @@ pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
         return Err("deleting the default session is not supported".to_string());
     }
     validate_name(name)?;
-    let Some(dir) = exact_session_dir_for_delete(name)? else {
-        return Ok(session_info(Some(name)));
+    let dir = exact_session_dir_for_delete(name)?.unwrap_or_else(|| data_dir_for(Some(name)));
+    ensure_session_stopped(name, &dir)?;
+
+    let info = SessionInfo {
+        name: name.to_string(),
+        default: false,
+        running: false,
+        connection_error: None,
+        socket_path: dir.join("herdr.sock").display().to_string(),
+        session_dir: dir.display().to_string(),
     };
-    let socket_path = dir.join("herdr.sock");
-    if is_running_at(&socket_path) {
+    let Some(confirmed_dir) = exact_session_dir_for_delete(name)? else {
+        return Ok(info);
+    };
+    if confirmed_dir != dir {
         return Err(format!(
-            "session {name} is running; stop it before deleting"
+            "session {name} changed while checking deletion; retry"
         ));
     }
-    let info = session_info(Some(name));
+    ensure_session_stopped(name, &dir)?;
+
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(info),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(info),
@@ -327,8 +339,43 @@ pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
     }
 }
 
+fn ensure_session_stopped(name: &str, dir: &Path) -> Result<(), String> {
+    for socket_path in [dir.join("herdr.sock"), dir.join("herdr-client.sock")] {
+        match is_running_at(&socket_path) {
+            Ok(true) => {
+                return Err(format!(
+                    "session {name} is running; stop it before deleting"
+                ));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return Err(format!(
+                    "session {name} cannot be safely deleted; cannot determine whether {} is stopped: {error}",
+                    socket_path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn session_directory_exists_for_delete(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(format!(
+            "refusing to delete session data through non-directory or symbolic link at {}",
+            path.display()
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("cannot inspect {}: {err}", path.display())),
+    }
+}
+
 fn exact_session_dir_for_delete(name: &str) -> Result<Option<PathBuf>, String> {
     let sessions_dir = crate::config::config_dir().join("sessions");
+    if !session_directory_exists_for_delete(&sessions_dir)? {
+        return Ok(None);
+    }
     let entries = match std::fs::read_dir(&sessions_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -337,7 +384,8 @@ fn exact_session_dir_for_delete(name: &str) -> Result<Option<PathBuf>, String> {
     for entry in entries {
         let entry = entry.map_err(|err| err.to_string())?;
         if entry.file_name() == std::ffi::OsStr::new(name) {
-            return Ok(Some(entry.path()));
+            let path = entry.path();
+            return Ok(session_directory_exists_for_delete(&path)?.then_some(path));
         }
     }
 
@@ -421,26 +469,37 @@ fn stop_request_error_allows_wait(err: &std::io::Error) -> bool {
     )
 }
 
-fn is_running_at(socket_path: &Path) -> bool {
-    socket_path.exists() && crate::ipc::connect_local_stream(socket_path).is_ok()
+fn is_running_at(socket_path: &Path) -> std::io::Result<bool> {
+    match crate::ipc::connect_local_stream(socket_path) {
+        Ok(_) => Ok(true),
+        Err(err) if crate::cli::server_not_running_error(&err) => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
-fn wait_until_stopped_until(socket_paths: &[PathBuf], deadline: Instant) -> bool {
-    while Instant::now() < deadline {
-        if socket_paths.iter().all(|path| !is_running_at(path)) {
-            return true;
+fn wait_until_stopped_until(
+    socket_paths: &[PathBuf],
+    deadline: Instant,
+) -> Result<Vec<PathBuf>, String> {
+    loop {
+        let reachable = reachable_socket_paths(socket_paths)?;
+        if reachable.is_empty() || Instant::now() >= deadline {
+            return Ok(reachable);
         }
         std::thread::sleep(STOP_WAIT_POLL.min(time_until(deadline)));
     }
-    socket_paths.iter().all(|path| !is_running_at(path))
 }
 
-fn reachable_socket_paths(socket_paths: &[PathBuf]) -> Vec<PathBuf> {
-    socket_paths
-        .iter()
-        .filter(|path| is_running_at(path))
-        .cloned()
-        .collect()
+fn reachable_socket_paths(socket_paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut reachable = Vec::new();
+    for path in socket_paths {
+        if is_running_at(path)
+            .map_err(|err| format!("cannot determine server state at {}: {err}", path.display()))?
+        {
+            reachable.push(path.clone());
+        }
+    }
+    Ok(reachable)
 }
 
 fn time_until(deadline: Instant) -> Duration {
@@ -1117,6 +1176,249 @@ mod tests {
     #[test]
     fn delete_default_session_is_rejected() {
         assert!(delete_session(DEFAULT_SESSION_NAME).is_err());
+    }
+
+    #[test]
+    fn delete_session_preserves_running_data_and_deletes_after_listener_stops() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("delete-running");
+        let session_name = "running";
+        let session_dir = data_dir_for(Some(session_name));
+        let socket_path = api_socket_path_for(Some(session_name));
+        let sentinel = session_dir.join("scrollback").join("pane-1.txt");
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, b"saved pane history\n").unwrap();
+        let listener = crate::ipc::bind_local_listener(&socket_path).unwrap();
+
+        let result = delete_session(session_name);
+
+        assert!(
+            session_dir.is_dir(),
+            "running session data was removed: {result:?}"
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"saved pane history\n");
+        assert_eq!(
+            result.unwrap_err(),
+            format!("session {session_name} is running; stop it before deleting")
+        );
+
+        drop(listener);
+        for path in [socket_path, client_socket_path_for(Some(session_name))] {
+            let error = crate::ipc::connect_local_stream(&path).unwrap_err();
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ),
+                "the stopped endpoint must be absent or refuse connections: {error}"
+            );
+        }
+
+        let info = delete_session(session_name).unwrap();
+
+        assert_eq!(info.name, session_name);
+        assert!(!info.running);
+        assert!(info.connection_error.is_none());
+        assert!(
+            !session_dir.exists(),
+            "stopped session data must be deleted"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_session_preserves_data_when_endpoint_access_is_denied() {
+        use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
+        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+        use widestring::U16CString;
+
+        for (endpoint, marker_present) in [
+            ("herdr.sock", true),
+            ("herdr-client.sock", true),
+            ("herdr.sock", false),
+            ("herdr-client.sock", false),
+        ] {
+            let _dirs = crate::config::test_dirs::isolate_dirs("delete-denied");
+            let session_name = "denied";
+            let session_dir = data_dir_for(Some(session_name));
+            let socket_path = session_dir.join(endpoint);
+            let sentinel = session_dir.join("scrollback").join("pane-1.txt");
+            std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+            std::fs::write(&sentinel, b"saved pane history\n").unwrap();
+            let sddl = U16CString::from_str("D:P(D;;GA;;;WD)").unwrap();
+            let _listener = ListenerOptions::new()
+                .name(
+                    socket_path
+                        .to_string_lossy()
+                        .to_ns_name::<GenericNamespaced>()
+                        .unwrap(),
+                )
+                .security_descriptor(SecurityDescriptor::deserialize(&sddl).unwrap())
+                .create_sync()
+                .unwrap();
+            if marker_present {
+                std::fs::write(&socket_path, b"test named-pipe marker").unwrap();
+            }
+            let error = crate::ipc::connect_local_stream(&socket_path).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                is_running_at(&socket_path).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            let socket_paths = [
+                api_socket_path_for(Some(session_name)),
+                client_socket_path_for(Some(session_name)),
+            ];
+            for deadline in [Instant::now(), Instant::now() + Duration::from_secs(5)] {
+                let wait_error = wait_until_stopped_until(&socket_paths, deadline)
+                    .expect_err("access denial must not report a stopped server");
+                assert!(wait_error.contains(socket_path.to_string_lossy().as_ref()));
+                assert!(wait_error.contains(&error.to_string()));
+            }
+
+            let result = delete_session(session_name);
+
+            assert!(
+                session_dir.is_dir(),
+                "access denial on {endpoint} must preserve session data: {result:?}"
+            );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"saved pane history\n");
+            let delete_error = result.expect_err("access denial must not report deletion success");
+            assert!(delete_error.contains(socket_path.to_string_lossy().as_ref()));
+            assert!(delete_error.contains(&error.to_string()));
+        }
+    }
+
+    #[test]
+    fn delete_session_preserves_data_while_only_client_endpoint_is_running() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("delete-client");
+        let session_name = "client-only";
+        let session_dir = data_dir_for(Some(session_name));
+        let sentinel = session_dir.join("scrollback").join("pane-1.txt");
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, b"saved pane history\n").unwrap();
+        let _listener =
+            crate::ipc::bind_local_listener(&client_socket_path_for(Some(session_name))).unwrap();
+        let error =
+            crate::ipc::connect_local_stream(&api_socket_path_for(Some(session_name))).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+
+        let result = delete_session(session_name);
+
+        assert!(
+            session_dir.is_dir(),
+            "a live client endpoint must preserve session data: {result:?}"
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"saved pane history\n");
+        assert_eq!(
+            result.unwrap_err(),
+            format!("session {session_name} is running; stop it before deleting")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_and_stop_wait_detect_running_pipes_without_markers() {
+        for (endpoint, check_wait) in [
+            ("herdr.sock", false),
+            ("herdr-client.sock", false),
+            ("herdr.sock", true),
+            ("herdr-client.sock", true),
+        ] {
+            let _dirs = crate::config::test_dirs::isolate_dirs("no-marker");
+            let session_name = "running";
+            let session_dir = data_dir_for(Some(session_name));
+            let socket_path = session_dir.join(endpoint);
+            let sentinel = session_dir.join("keep");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            std::fs::write(&sentinel, b"do not remove").unwrap();
+            let _listener = crate::ipc::bind_local_listener(&socket_path).unwrap();
+            std::fs::remove_file(&socket_path).unwrap();
+
+            if check_wait {
+                let socket_paths = [
+                    api_socket_path_for(Some(session_name)),
+                    client_socket_path_for(Some(session_name)),
+                ];
+                assert_eq!(
+                    wait_until_stopped_until(&socket_paths, Instant::now()).unwrap(),
+                    vec![socket_path]
+                );
+            } else {
+                assert_eq!(
+                    delete_session(session_name).unwrap_err(),
+                    format!("session {session_name} is running; stop it before deleting")
+                );
+            }
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"do not remove");
+        }
+    }
+
+    #[test]
+    fn delete_session_refuses_linked_session_directories() {
+        #[cfg(windows)]
+        let _guard = env_lock().lock().unwrap();
+
+        for link_sessions_root in [false, true] {
+            let dirs = crate::config::test_dirs::isolate_dirs("delete-link");
+            let sessions_dir = dirs.config_dir().join("sessions");
+            let outside = dirs.state_dir().join("outside");
+            let sentinel = outside.join("linked").join("keep");
+            std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+            std::fs::write(&sentinel, b"do not remove").unwrap();
+            let (target, link) = if link_sessions_root {
+                (outside, sessions_dir)
+            } else {
+                (outside.join("linked"), sessions_dir.join("linked"))
+            };
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new(
+                    std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()),
+                )
+                .args(["/D", "/Q", "/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&target)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+                assert!(output.status.success(), "create junction: {output:?}");
+            }
+
+            let result = delete_session("linked");
+
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"do not remove");
+            assert!(std::fs::symlink_metadata(&link).is_ok());
+            let error = result.unwrap_err();
+            assert!(error.contains("symbolic link"), "{error}");
+            assert!(error.contains(link.to_string_lossy().as_ref()), "{error}");
+        }
+    }
+
+    #[test]
+    fn stop_wait_distinguishes_absent_endpoints_from_invalid_probe_paths() {
+        let dirs = crate::config::test_dirs::isolate_dirs("wait-probe");
+        let absent = dirs.config_dir().join("absent.sock");
+        assert!(!is_running_at(&absent).unwrap());
+        assert!(wait_until_stopped_until(&[absent], Instant::now())
+            .unwrap()
+            .is_empty());
+
+        let invalid = dirs.config_dir().join("invalid\0endpoint");
+        let probe_error = is_running_at(&invalid).unwrap_err();
+        assert_eq!(probe_error.kind(), std::io::ErrorKind::InvalidInput);
+        for deadline in [Instant::now(), Instant::now() + Duration::from_secs(5)] {
+            let error = wait_until_stopped_until(std::slice::from_ref(&invalid), deadline)
+                .expect_err("invalid probe paths must not report a stopped server");
+            assert!(
+                error.contains(invalid.to_string_lossy().as_ref()),
+                "{error}"
+            );
+            assert!(error.contains(&probe_error.to_string()), "{error}");
+        }
     }
 
     #[test]

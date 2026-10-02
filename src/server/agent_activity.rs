@@ -6,11 +6,11 @@
 //! 数据流：钩子经 `pane.report_agent_activity` 把提示放进 `AppState` 的收件箱 →
 //! [`Service::tick`]（server 主循环每轮调用，内部按 [`SCHEDULER_PASS_INTERVAL`]
 //! 限流）取走提示并按触发条件挑出到期的 pane → 后台线程调适配器 → 结果经
-//! `AppEvent::{AgentActivityRefreshed, ExternalAgentsRefreshed}` 回主线程落库。
+//! `AppEvent::{AgentActivityRefreshedFor, ExternalAgentsRefreshed}` 回主线程落库。
 //! `agent.activity.read` / `agent.external.list` 也在同一后台线程执行，响应异步
-//! 返回（JSON API 走请求自带的应答通道，客户端端点走 `ServerEvent`）。后台结果都带
-//! 开始顺序号（`Tickets`）回主线程：同一 pane 的树、同一外部来源的列表，只落库比
-//! 已落库那份开始得更晚的结果。
+//! 返回（JSON API 走请求自带的应答通道，客户端端点走 `ServerEvent`）。pane 任务携带
+//! 入队时的终端、agent、来源、会话与身份代次；应用前先拒绝过期身份。有效身份的树
+//! 与同一外部来源的列表仍按 worker 真正开始读取时的 `Tickets` 排序落库。
 
 mod claude;
 mod codex;
@@ -323,9 +323,9 @@ const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 type JobStarted = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 /// 后台读取的开始顺序号：worker 开始读一个 pane 的活动树或一个外部来源的列表之前
-/// 取一个号，结果事件带着它回主线程（`AppEvent::AgentActivityRefreshed` 等的
-/// `ticket`）。两条 worker 线程共用同一个计数，号越大开始得越晚、读到的来源越新；
-/// 主线程只落库比已落库那份号更大的结果（[`Scheduler::accept_pane`] /
+/// 取一个号，结果事件带着它回主线程（`AppEvent::AgentActivityRefreshedFor` 等的
+/// `ticket`）。两条 worker 线程共用同一个计数；主线程先校验 pane 身份，再只落库
+/// 比已落库那份号更大的结果（[`Scheduler::accept_pane`] /
 /// [`Scheduler::accept_external`]）。调度发现与交互读取谁先开始谁算旧，与谁先回来、
 /// 发现当时是否还在排队（排队的任务开始时才取号）都无关。
 #[derive(Clone, Debug, Default)]
@@ -454,7 +454,8 @@ impl PaneSchedule {
 ///
 /// 同一 pane 同时最多一个在途任务；结果回来（或任务开始后 [`IN_FLIGHT_TIMEOUT`]
 /// 过去）才放行下一次，期间到达的提示保留到放行后。在途名额只管不重复投递，不管
-/// 新旧：结果能否落库按开始顺序号判定（[`Self::accept_pane`]、[`Self::accept_external`]）。
+/// 新旧：回主线程时先校验任务携带的 pane 身份，再按开始顺序号判定有效结果能否落库
+/// （[`Self::accept_pane`]、[`Self::accept_external`]）。
 ///
 /// 扩展成本：每轮遍历（每秒至多一轮，不在渲染路径）对每个持有 agent 的 pane 只多
 /// 一次修订号比较；修订号变了才重扫落库的节点（每个 agent 至多
@@ -871,7 +872,7 @@ impl Worker {
                 pane_id,
                 source,
                 subject,
-                ..
+                started,
             } => {
                 let config_dir = agent_config_dir(&subject.agent, &home);
                 let cx = pane_context(
@@ -883,8 +884,10 @@ impl Worker {
                 );
                 let ticket = self.tickets.take();
                 let result = discover_nodes(source, &cx).map_err(|error| error.to_string());
-                self.send_event(AppEvent::AgentActivityRefreshed {
+                self.send_event(AppEvent::AgentActivityRefreshedFor {
                     pane_id,
+                    identity: subject.identity,
+                    started,
                     ticket,
                     result,
                 })
@@ -965,8 +968,15 @@ impl Worker {
     fn run_without_home(&self, job: Job) -> bool {
         const NO_HOME: &str = "home directory is not available";
         match job {
-            Job::Discover { pane_id, .. } => self.send_event(AppEvent::AgentActivityRefreshed {
+            Job::Discover {
                 pane_id,
+                subject,
+                started,
+                ..
+            } => self.send_event(AppEvent::AgentActivityRefreshedFor {
+                pane_id,
+                identity: subject.identity,
+                started,
                 ticket: 0,
                 result: Err(NO_HOME.into()),
             }),
@@ -1030,7 +1040,8 @@ impl Worker {
                 latest_hint: None,
             },
         };
-        // 读整棵树开始读来源前取开始顺序号，落库时据此与调度发现的结果比新旧。
+        // 读整棵树开始读来源前取开始顺序号；结果还会携带入队时的 subject 身份，
+        // 由主线程先做身份校验，再用 ticket 与调度发现的结果比新旧。
         let ticket = node_id.is_none().then(|| self.tickets.take());
         let result = match node_id {
             None => discover_nodes(source, &cx).map(|nodes| (nodes, None)),
@@ -1049,13 +1060,13 @@ impl Worker {
             }
         };
         let mut alive = true;
-        if let (ReadTarget::Pane { pane_id, .. }, Some(ticket), Ok((nodes, None))) =
+        if let (ReadTarget::Pane { pane_id, subject }, Some(ticket), Ok((nodes, None))) =
             (&target, ticket, &result)
         {
-            // 读整棵树顺带刷新落库：比它开始得早的调度发现晚到时作废，比它开始得晚的
-            // 照常覆盖它（开始顺序号）。走读取专用的事件：它不放调度发现的在途名额。
-            alive = self.send_event(AppEvent::AgentActivityRead {
+            // 身份取自入队时的 subject；同身份仍按 worker 开始读取的顺序落库。
+            alive = self.send_event(AppEvent::AgentActivityReadFor {
                 pane_id: *pane_id,
+                identity: subject.identity.clone(),
                 ticket,
                 nodes: nodes.clone(),
             });
@@ -1255,7 +1266,27 @@ impl Service {
         }
     }
 
-    /// 一个 pane 的后台发现结果已回主线程；`projection_changed` 为落库后投影是否变化。
+    /// Completes only the discovery slot owned by this exact background task token;
+    /// a stale result cannot release a newer task's in-flight slot.
+    pub(crate) fn pane_refreshed_for(
+        &mut self,
+        pane_id: PaneId,
+        started: &JobStarted,
+        projection_changed: bool,
+    ) {
+        let matching = self
+            .scheduler
+            .panes
+            .get(&pane_id)
+            .and_then(|entry| entry.in_flight.as_ref())
+            .is_some_and(|in_flight| std::sync::Arc::ptr_eq(&in_flight.started, started));
+        if matching {
+            self.scheduler.finish(pane_id);
+        }
+        self.projection_dirty |= projection_changed;
+    }
+
+    #[cfg(test)]
     pub(crate) fn pane_refreshed(&mut self, pane_id: PaneId, projection_changed: bool) {
         self.scheduler.finish(pane_id);
         self.projection_dirty |= projection_changed;
@@ -1267,8 +1298,9 @@ impl Service {
         self.projection_dirty |= projection_changed;
     }
 
-    /// 一份 pane 活动树（调度发现或读整棵树的结果，开始顺序号 `ticket`）能否落库：
-    /// 主循环据此丢弃开始得更早、却晚到的结果（[`Scheduler::accept_pane`]）。
+    /// 一份已通过调用方身份校验的 pane 活动树（调度发现或读整棵树的结果）能否落库：
+    /// 这里再按开始顺序号 `ticket` 丢弃开始得更早、却晚到的结果
+    /// （[`Scheduler::accept_pane`]）。
     pub(crate) fn accept_pane_tree(&mut self, pane_id: PaneId, ticket: u64) -> bool {
         self.scheduler.accept_pane(pane_id, ticket)
     }
@@ -1454,6 +1486,70 @@ impl Service {
 enum SubmitError {
     Busy,
     Unavailable(String),
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) enum Lane {
+        Discovery,
+        Requests,
+    }
+
+    pub(crate) struct ControlledWorkers {
+        discovery: (Worker, mpsc::Receiver<Job>),
+        requests: (Worker, mpsc::Receiver<Job>),
+    }
+
+    impl ControlledWorkers {
+        pub(crate) fn service(
+            events: tokio::sync::mpsc::Sender<AppEvent>,
+            sources: Sources,
+            home: PathBuf,
+        ) -> (Service, Self) {
+            let (discovery, discovery_jobs) = mpsc::sync_channel(DISCOVERY_QUEUE_CAPACITY);
+            let (requests, request_jobs) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
+            let tickets = Tickets::default();
+            let codex_cache =
+                std::sync::Arc::new(std::sync::Mutex::new(codex::RolloutCache::default()));
+            let worker = || Worker {
+                codex_cache: codex_cache.clone(),
+                events: events.clone(),
+                home: Some(home.clone()),
+                tickets: tickets.clone(),
+            };
+            let workers = Self {
+                discovery: (worker(), discovery_jobs),
+                requests: (worker(), request_jobs),
+            };
+            let mut service = Service::with_sources(events, sources, Some(home));
+            service.runtime = Some(Runtime {
+                discovery,
+                requests,
+            });
+            (service, workers)
+        }
+
+        pub(crate) async fn run_next(self, lane: Lane) -> Self {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || {
+                    let (worker, jobs) = match lane {
+                        Lane::Discovery => &self.discovery,
+                        Lane::Requests => &self.requests,
+                    };
+                    let job = jobs.try_recv().expect("指定车道已有待执行任务");
+                    job.mark_started();
+                    assert!(worker.run(job), "活动事件通道保持打开");
+                    self
+                }),
+            )
+            .await
+            .expect("受控活动任务应在限时内结束")
+            .expect("受控活动 worker 不应 panic")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2113,13 +2209,11 @@ mod tests {
             home: Some(home),
             tickets,
         };
-        let subject = AgentActivitySubject {
-            agent: "claude".into(),
-            session: None,
-            cwd: None,
-            latest_hint: None,
-        };
-        let agent = pane(7);
+        let (app, agent, _) = app_with_agent(Some(Agent::Claude));
+        let subject = app
+            .state
+            .agent_activity_subject(agent)
+            .expect("当前 agent 身份");
         let (reply, _answers) = mpsc::channel();
         assert!(reader.run(Job::Read(Box::new(ReadJob {
             request_id: "read".into(),
@@ -2133,7 +2227,7 @@ mod tests {
             max_bytes: 1024,
             reply: Reply::Api(reply),
         }))));
-        let AppEvent::AgentActivityRead { ticket: read, .. } = recv_event(&mut received) else {
+        let AppEvent::AgentActivityReadFor { ticket: read, .. } = recv_event(&mut received) else {
             panic!("应为读树落库事件");
         };
         assert!(discoverer.run(Job::Discover {
@@ -2142,7 +2236,7 @@ mod tests {
             subject,
             started: JobStarted::default(),
         }));
-        let AppEvent::AgentActivityRefreshed {
+        let AppEvent::AgentActivityRefreshedFor {
             ticket: discovered, ..
         } = recv_event(&mut received)
         else {
@@ -2791,7 +2885,7 @@ mod tests {
         let (mut app, pane_id, _) = app_with_agent(Some(Agent::Claude));
         let t0 = Instant::now();
         service.tick(&mut app.state, t0, false);
-        let AppEvent::AgentActivityRefreshed {
+        let AppEvent::AgentActivityRefreshedFor {
             pane_id: refreshed,
             result,
             ..
@@ -2823,7 +2917,7 @@ mod tests {
         service.tick(&mut app.state, t0 + secs(2.1), false);
         assert!(matches!(
             recv_event(&mut received),
-            AppEvent::AgentActivityRefreshed { .. }
+            AppEvent::AgentActivityRefreshedFor { .. }
         ));
     }
 
@@ -2863,7 +2957,7 @@ mod tests {
         );
         assert!(matches!(
             recv_event(&mut received),
-            AppEvent::AgentActivityRefreshed { pane_id: refreshed, .. } if refreshed == pane_id
+            AppEvent::AgentActivityRefreshedFor { pane_id: refreshed, .. } if refreshed == pane_id
         ));
     }
 
@@ -2917,7 +3011,7 @@ mod tests {
         // 还没有 hint：首次发现回空树。
         service.tick(&mut app.state, t0, false);
         match recv_event(&mut received) {
-            AppEvent::AgentActivityRefreshed { result, .. } => {
+            AppEvent::AgentActivityRefreshedFor { result, .. } => {
                 assert_eq!(result.expect("没有 hint 视同会话尚未生成"), Vec::new());
             }
             other => panic!("应为活动树刷新事件：{other:?}"),
@@ -2948,7 +3042,7 @@ mod tests {
         );
         service.tick(&mut app.state, t0 + secs(1.0), false);
         match recv_event(&mut received) {
-            AppEvent::AgentActivityRefreshed { result, .. } => {
+            AppEvent::AgentActivityRefreshedFor { result, .. } => {
                 let nodes = result.expect("快照可解析");
                 assert_eq!(
                     nodes
@@ -2986,7 +3080,7 @@ mod tests {
         hint(&mut app, pane_id, Some("tool_execution_end"));
         service.tick(&mut app.state, t0 + secs(2.0), false);
         match recv_event(&mut received) {
-            AppEvent::AgentActivityRefreshed { result, .. } => {
+            AppEvent::AgentActivityRefreshedFor { result, .. } => {
                 let error = result.expect_err("非快照文本不是 pi 的树");
                 assert!(error.starts_with("malformed"), "{error}");
             }
@@ -3130,7 +3224,7 @@ mod tests {
         // 读整棵树顺带刷新落库，走读取专用的事件（不放调度发现的在途名额）。
         assert!(matches!(
             recv_event(&mut received),
-            AppEvent::AgentActivityRead { pane_id: refreshed, nodes, .. }
+            AppEvent::AgentActivityReadFor { pane_id: refreshed, nodes, .. }
                 if refreshed == pane_id && nodes.len() == 2
         ));
 
@@ -3253,7 +3347,7 @@ mod tests {
         DISCOVER_GATE.store(true, Ordering::Relaxed);
         assert!(matches!(
             recv_event(&mut received),
-            AppEvent::AgentActivityRefreshed { pane_id: refreshed, result: Ok(nodes), .. }
+            AppEvent::AgentActivityRefreshedFor { pane_id: refreshed, result: Ok(nodes), .. }
                 if refreshed == pane_id && nodes.len() == 1
         ));
     }

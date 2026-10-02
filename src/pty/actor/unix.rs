@@ -16,7 +16,7 @@ use crate::pty::fd;
 // timeout is only a fallback for missed wakes; PTY and wake readiness drive
 // normal responsiveness.
 const ACTOR_IDLE_POLL_MS: i32 = 1000;
-const ACTOR_COMMAND_BUFFER: usize = 1024;
+const ACTOR_COMMAND_BUFFER: usize = super::admission::INPUT_ITEM_LIMIT;
 const HANDOFF_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +56,26 @@ struct PtyResizeRequest {
     terminal_responses: Vec<Bytes>,
 }
 
-#[derive(Default)]
 struct SharedPtyControls {
     resize: Option<PtyResizeRequest>,
     nudge: Option<PtyResize>,
     terminal_responses: Vec<Bytes>,
+    input_admission: Arc<super::admission::Admission>,
+    response_admission: Arc<super::admission::Admission>,
+    closed: bool,
+}
+
+impl Default for SharedPtyControls {
+    fn default() -> Self {
+        Self {
+            resize: None,
+            nudge: None,
+            terminal_responses: Vec::new(),
+            input_admission: super::admission::Admission::input(),
+            response_admission: super::admission::Admission::responses(),
+            closed: false,
+        }
+    }
 }
 
 pub(crate) struct PtyIoActorConfig {
@@ -114,27 +129,28 @@ impl PtyIoActorHandle {
             .user_writes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !user_writes.accepting {
+        if !user_writes.accepting || self.data_tx.is_closed() {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
+        let permit = self
+            .controls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .input_admission
+            .try_reserve(bytes.len());
+        let Some(permit) = permit else {
+            return Err(mpsc::error::TrySendError::Full(bytes));
+        };
         match self
             .data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(bytes))
+            .try_send(PtyIoDataCommand::WriteUserInput(permit.wrap(bytes.clone())))
         {
             Ok(()) => {
                 self.wake_actor();
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(command)) => {
-                let PtyIoDataCommand::WriteUserInput(bytes) = command else {
-                    unreachable!("queued write returned another command")
-                };
-                Err(mpsc::error::TrySendError::Full(bytes))
-            }
-            Err(mpsc::error::TrySendError::Closed(command)) => {
-                let PtyIoDataCommand::WriteUserInput(bytes) = command else {
-                    unreachable!("queued write returned another command")
-                };
+            Err(mpsc::error::TrySendError::Full(_)) => Err(mpsc::error::TrySendError::Full(bytes)),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
                 Err(mpsc::error::TrySendError::Closed(bytes))
             }
         }
@@ -150,17 +166,33 @@ impl PtyIoActorHandle {
             .user_writes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !user_writes.accepting {
+        if !user_writes.accepting || self.data_tx.is_closed() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "pty actor closed",
             ));
         }
+        let permit = text
+            .len()
+            .checked_add(enter.len())
+            .and_then(|bytes| {
+                self.controls
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .input_admission
+                    .try_reserve(bytes)
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "pty input item or byte budget is full",
+                )
+            })?;
         let (reply_tx, reply_rx) = std_mpsc::channel();
         self.data_tx
             .try_send(PtyIoDataCommand::SubmitUserInput {
-                text,
-                enter,
+                text: permit.wrap(text),
+                enter: permit.wrap(enter),
                 delay,
                 reply: reply_tx,
             })
@@ -184,12 +216,16 @@ impl PtyIoActorHandle {
         let Some(bytes) = response() else {
             return;
         };
-        if !bytes.is_empty() {
-            self.controls
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .terminal_responses
-                .push(bytes);
+        let mut controls = self
+            .controls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if controls.closed {
+            return;
+        }
+        if let Some(bytes) = controls.response_admission.admit_response(bytes) {
+            controls.terminal_responses.push(bytes);
+            drop(controls);
             self.wake_actor();
         }
     }
@@ -207,6 +243,14 @@ impl PtyIoActorHandle {
                 .controls
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if controls.closed {
+                return;
+            }
+            controls.resize.take();
+            let terminal_responses = terminal_responses
+                .into_iter()
+                .filter_map(|bytes| controls.response_admission.admit_response(bytes))
+                .collect();
             controls.resize = Some(PtyResizeRequest {
                 resize: PtyResize {
                     rows,
@@ -256,19 +300,22 @@ impl PtyIoActorHandle {
                 ));
             }
             user_writes.accepting = false;
-            if self
-                .control_tx
-                .send(PtyIoControlCommand::BeginHandoff(reply_tx))
-                .is_err()
-            {
-                user_writes.accepting = true;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "pty actor closed",
-                ));
-            }
-            self.wake_actor();
         }
+        if self
+            .control_tx
+            .send(PtyIoControlCommand::BeginHandoff(reply_tx))
+            .is_err()
+        {
+            self.user_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .accepting = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "pty actor closed",
+            ));
+        }
+        self.wake_actor();
         match reply_rx.recv_timeout(timeout) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => {
@@ -814,8 +861,7 @@ impl PtyIoActorRunner {
     }
 
     fn read_once(&mut self) -> bool {
-        // PTY-07：8 KiB 太小——高吞吐输出每 MB 要 128 次 read 与返回 poll。
-        // 64 KiB 把系统调用与循环次数降一个量级（缓冲区在 actor 线程栈上）。
+        // PTY-07：64 KiB amortizes reads without allocating on the parse path.
         let mut buf = [0u8; 64 * 1024];
         match self.file.read(&mut buf) {
             Ok(0) => false,
@@ -831,15 +877,16 @@ impl PtyIoActorRunner {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let result = (self.on_read)(&buf[..n]);
-                // PTY-07：一次取锁完成追加与取出（原先同一把锁取两次）。
                 let terminal_responses = {
                     let mut controls = self
                         .controls
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    controls
-                        .terminal_responses
-                        .extend(result.terminal_responses);
+                    for bytes in result.terminal_responses {
+                        if let Some(bytes) = controls.response_admission.admit_response(bytes) {
+                            controls.terminal_responses.push(bytes);
+                        }
+                    }
                     std::mem::take(&mut controls.terminal_responses)
                 };
                 drop(_order);
@@ -872,26 +919,23 @@ impl PtyIoActorRunner {
                     return;
                 };
                 debug_assert!(matches!(submission.phase, SubmissionPhase::WritingEnter));
+                drop(submission.enter);
                 let _ = submission.reply.send(Ok(()));
             }
         }
     }
 
     fn schedule_submission_enter(&mut self) {
-        // PTY-16：不作 unwrap。取出提交、按需改相位再放回；期间没有 await，
-        // 语义与「原地改 phase / 当场取走」等价。
         let Some(mut submission) = self.active_submission.take() else {
             return;
         };
-        let due = matches!(
-            submission.phase,
-            SubmissionPhase::WaitingUntil(deadline) if Instant::now() >= deadline
-        );
+        let due = matches!(submission.phase, SubmissionPhase::WaitingUntil(deadline) if Instant::now() >= deadline);
         if !due {
             self.active_submission = Some(submission);
             return;
         }
         if submission.enter.is_empty() {
+            drop(submission.enter);
             let _ = submission.reply.send(Ok(()));
             return;
         }
@@ -918,21 +962,54 @@ impl PtyIoActorRunner {
 
     fn fail_active_submission(&mut self, err: std::io::Error) {
         if let Some(submission) = self.active_submission.take() {
+            drop(submission.enter);
             let _ = submission.reply.send(Err(err));
         }
     }
 
     fn close_input_queue(&mut self) {
         self.data_rx.close();
+        self.pending_writes.clear();
+        self.current_write_offset = 0;
+        {
+            let mut controls = self
+                .controls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            controls.closed = true;
+            controls.input_admission.close();
+            controls.response_admission.close();
+            controls.resize.take();
+            controls.nudge.take();
+            controls.terminal_responses.clear();
+        }
         self.fail_active_submission(input_submission_closed_error());
+        if let Some(reply) = self.pending_handoff.take() {
+            let _ = reply.send(Err(input_submission_closed_error()));
+        }
         while let Some(command) = self.data_rx.blocking_recv() {
-            if let PtyIoDataCommand::SubmitUserInput { reply, .. } = command {
+            if let PtyIoDataCommand::SubmitUserInput {
+                text, enter, reply, ..
+            } = command
+            {
+                drop((text, enter));
                 let _ = reply.send(Err(input_submission_closed_error()));
             }
         }
     }
 
     fn flush_pending_writes_once(&mut self) -> std::io::Result<Option<SubmissionBoundary>> {
+        let result = self.flush_pending_writes();
+        if let Err(err) = &result {
+            self.pending_writes.clear();
+            self.current_write_offset = 0;
+            self.fail_active_submission(std::io::Error::new(err.kind(), err.to_string()));
+            self.close_input_queue();
+        }
+        result
+    }
+
+    fn flush_pending_writes(&mut self) -> std::io::Result<Option<SubmissionBoundary>> {
         while let Some(write) = self.pending_writes.front() {
             let chunk = &write.bytes[self.current_write_offset..];
             match self.file.write(chunk) {
@@ -940,12 +1017,11 @@ impl PtyIoActorRunner {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WriteZero,
                         "PTY actor write returned zero bytes",
-                    ));
+                    ))
                 }
                 Ok(written) => {
                     self.current_write_offset += written;
                     if self.current_write_offset >= write.bytes.len() {
-                        // PTY-16：`front()` 已保证有元素，pop 不会是 None。
                         let completed = self.pending_writes.pop_front();
                         self.current_write_offset = 0;
                         if let Some(boundary) = completed.and_then(|completed| completed.boundary) {
@@ -958,8 +1034,6 @@ impl PtyIoActorRunner {
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => return Ok(None),
                 Err(err) => {
                     warn!(pane = self.pane_id, err = %err, "PTY actor write failed");
-                    self.pending_writes.clear();
-                    self.current_write_offset = 0;
                     return Err(err);
                 }
             }
@@ -1119,6 +1193,212 @@ mod tests {
             poll_observer: None,
         };
         (runner, peer)
+    }
+
+    fn actor_runner_with_handle_for_unit_test() -> (PtyIoActorRunner, PtyIoActorHandle, UnixStream)
+    {
+        let (mut runner, peer) = actor_runner_for_unit_test();
+        let (data_tx, data_rx) = mpsc::channel(ACTOR_COMMAND_BUFFER);
+        let (control_tx, control_rx) = std_mpsc::channel();
+        let (wake, wake_read_fd) = test_wake_pair();
+        runner.data_rx = data_rx;
+        runner.control_rx = control_rx;
+        runner.wake_read_fd = wake_read_fd;
+        let handle = PtyIoActorHandle {
+            data_tx,
+            control_tx,
+            wake,
+            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            controls: Arc::clone(&runner.controls),
+            response_order: Arc::clone(&runner.response_order),
+        };
+        (runner, handle, peer)
+    }
+
+    #[test]
+    fn input_byte_limit_preserves_rejected_payload_and_submission_budget() {
+        let (mut runner, handle, _peer) = actor_runner_with_handle_for_unit_test();
+        let budget = super::super::admission::Admission::new(ACTOR_COMMAND_BUFFER, 6);
+        runner.controls.lock().unwrap().input_admission = Arc::clone(&budget);
+        handle
+            .try_write_user_input(Bytes::from_static(b"held"))
+            .unwrap();
+        assert!(!runner.drain_commands());
+        let rejected = handle.try_write_user_input(Bytes::from_static(b"new"));
+        assert!(
+            matches!(rejected, Err(mpsc::error::TrySendError::Full(ref bytes)) if bytes.as_ref() == b"new")
+        );
+        let submission = handle
+            .queue_user_input_submission(
+                Bytes::from_static(b"xy"),
+                Bytes::from_static(b"\r"),
+                Duration::ZERO,
+            )
+            .unwrap_err();
+        assert_eq!(submission.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(budget.in_use(), (1, 4));
+        handle
+            .try_write_user_input(Bytes::from_static(b"ok"))
+            .unwrap();
+        assert_eq!(budget.in_use(), (2, 6));
+        runner.close_input_queue();
+        assert_eq!(budget.in_use(), (0, 0));
+        assert!(matches!(
+            handle.try_write_user_input(Bytes::from_static(b"late")),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
+    }
+
+    #[test]
+    fn shutdown_releases_partial_write_and_queued_submission_permits() {
+        let (mut runner, handle, _peer) = actor_runner_with_handle_for_unit_test();
+        let send_buffer: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    runner.file.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&send_buffer).cast(),
+                    std::mem::size_of_val(&send_buffer) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let budget = Arc::clone(&runner.controls.lock().unwrap().input_admission);
+        let payload_len = 64 * 1024;
+        handle
+            .try_write_user_input(Bytes::from(vec![b'x'; payload_len]))
+            .unwrap();
+        assert!(!runner.drain_commands());
+        assert_eq!(runner.flush_pending_writes_once().unwrap(), None);
+        assert!(runner.current_write_offset > 0 && runner.current_write_offset < payload_len);
+        assert_eq!(budget.in_use(), (1, payload_len));
+        let completion = handle
+            .queue_user_input_submission(
+                Bytes::from_static(b"next"),
+                Bytes::from_static(b"\r"),
+                Duration::ZERO,
+            )
+            .unwrap();
+        handle
+            .try_write_user_input(Bytes::from_static(b"tail"))
+            .unwrap();
+        handle.shutdown();
+        assert!(runner.drain_commands());
+        runner.close_input_queue();
+        assert!(runner.pending_writes.is_empty());
+        assert_eq!(runner.current_write_offset, 0);
+        assert_eq!(budget.in_use(), (0, 0));
+        assert_eq!(
+            completion
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn response_budget_covers_controls_pending_and_parser_output() {
+        let (mut runner, handle, mut peer) = actor_runner_with_handle_for_unit_test();
+        let responses = super::super::admission::Admission::new(2, 8);
+        runner.controls.lock().unwrap().response_admission = Arc::clone(&responses);
+        handle.write_terminal_response(|| Some(Bytes::from_static(b"abc")));
+        handle.write_terminal_response(|| Some(Bytes::from_static(b"defg")));
+        runner.apply_pending_controls();
+        assert_eq!(runner.pending_writes.len(), 2);
+        assert_eq!(responses.in_use(), (2, 7));
+        handle.write_terminal_response(|| Some(Bytes::from_static(b"overflow")));
+        runner.on_read = Box::new(|_| PtyReadResult {
+            terminal_responses: vec![Bytes::from_static(b"xy")],
+        });
+        peer.set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        peer.write_all(b"query").unwrap();
+        assert!(runner.read_once());
+        assert_eq!(runner.pending_writes.len(), 2);
+        assert_eq!(responses.in_use(), (2, 7));
+        handle
+            .try_write_user_input(Bytes::from_static(b"u"))
+            .unwrap();
+        let inputs = Arc::clone(&runner.controls.lock().unwrap().input_admission);
+        assert_eq!(inputs.in_use(), (1, 1));
+        runner.close_input_queue();
+        assert_eq!(responses.in_use(), (0, 0));
+        assert_eq!(inputs.in_use(), (0, 0));
+        handle.write_terminal_response(|| Some(Bytes::from_static(b"closed")));
+        assert_eq!(responses.in_use(), (0, 0));
+    }
+
+    #[test]
+    fn actor_preserves_input_capacity_while_peer_is_not_reading() {
+        let (mut runner, _peer) = actor_runner_for_unit_test();
+        let fill = [0xAA; 8192];
+        let mut backpressured = false;
+        for _ in 0..512 {
+            match runner.file.write(&fill) {
+                Ok(0) => panic!("socket closed while filling the write buffer"),
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    backpressured = true;
+                    break;
+                }
+                Err(err) => panic!("failed to fill actor write buffer: {err}"),
+            }
+        }
+        assert!(backpressured, "socket reaches backpressure within 4 MiB");
+
+        let (data_tx, data_rx) = mpsc::channel(ACTOR_COMMAND_BUFFER);
+        let (control_tx, control_rx) = std_mpsc::channel();
+        let (wake, wake_read_fd) = test_wake_pair();
+        runner.data_rx = data_rx;
+        runner.control_rx = control_rx;
+        runner.wake_read_fd = wake_read_fd;
+        let handle = PtyIoActorHandle {
+            data_tx,
+            control_tx,
+            wake,
+            user_writes: Arc::new(Mutex::new(UserWriteGate { accepting: true })),
+            controls: Arc::clone(&runner.controls),
+            response_order: Arc::clone(&runner.response_order),
+        };
+
+        let mut accepted = 0;
+        for _ in 0..3 {
+            for _ in 0..ACTOR_COMMAND_BUFFER {
+                match handle.try_write_user_input(Bytes::from_static(b"input")) {
+                    Ok(()) => accepted += 1,
+                    Err(mpsc::error::TrySendError::Full(bytes)) => {
+                        assert_eq!(bytes, Bytes::from_static(b"input"));
+                        break;
+                    }
+                    Err(err) => panic!("actor unexpectedly closed admission: {err}"),
+                }
+            }
+            assert!(!runner.drain_commands());
+            assert_eq!(runner.flush_pending_writes_once().unwrap(), None);
+            assert_eq!(runner.current_write_offset, 0);
+            fd::drain_wake_fd(runner.wake_read_fd.as_raw_fd()).expect("drain test wakes");
+        }
+        let final_attempt = handle.try_write_user_input(Bytes::from_static(b"extra"));
+        handle.shutdown();
+        assert!(runner.drain_commands());
+        runner.close_input_queue();
+        assert!(matches!(
+            handle.try_write_user_input(Bytes::from_static(b"late")),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
+
+        assert!(
+            accepted <= ACTOR_COMMAND_BUFFER,
+            "moving input to pending_writes must not replenish admission capacity: accepted {accepted}"
+        );
+        assert!(matches!(
+            final_attempt,
+            Err(mpsc::error::TrySendError::Full(ref bytes)) if bytes.as_ref() == b"extra"
+        ));
     }
 
     #[test]

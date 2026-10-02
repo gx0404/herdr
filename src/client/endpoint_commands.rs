@@ -11,6 +11,26 @@ use super::shell::ClientShellEndpointError;
 
 const ENDPOINT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RETIRED_REQUESTS_PER_ENDPOINT: usize = 128;
+/// Maximum aggregate response body per in-flight endpoint request. Chunks are
+/// appended until the final chunk; exceeding 64 MiB fails only that request and
+/// retires its correlation tuple, leaving the endpoint connection usable.
+const MAX_ENDPOINT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum number of response chunks per request, including empty chunks. This
+/// separate 4096-chunk cap prevents an empty-chunk flood from growing state.
+const MAX_ENDPOINT_RESPONSE_CHUNKS: usize = 4096;
+
+/// Checked byte and chunk accounting for one incoming response chunk. Overflow
+/// is rejected before either counter or the response buffer is changed.
+fn checked_response_budget(
+    response_bytes: usize,
+    response_chunks: usize,
+    chunk_bytes: usize,
+) -> Option<(usize, usize)> {
+    let bytes = response_bytes.checked_add(chunk_bytes)?;
+    let chunks = response_chunks.checked_add(1)?;
+    (bytes <= MAX_ENDPOINT_RESPONSE_BYTES && chunks <= MAX_ENDPOINT_RESPONSE_CHUNKS)
+        .then_some((bytes, chunks))
+}
 
 struct QueuedCommand {
     generation: u64,
@@ -29,6 +49,7 @@ struct InFlightCommand {
     boot_id: String,
     request_id: String,
     response: Vec<u8>,
+    response_chunks: usize,
     sent_at: Instant,
 }
 
@@ -185,6 +206,7 @@ impl EndpointCommands {
                 generation: queued.generation,
                 boot_id: queued.boot_id,
                 request_id,
+                response_chunks: 0,
                 response: Vec::new(),
                 sent_at: Instant::now(),
             });
@@ -353,7 +375,7 @@ impl EndpointCommands {
         if lane.consume_retired(&retired, final_chunk) {
             return Ok(None);
         }
-        let Some(in_flight) = lane.in_flight.as_mut() else {
+        let Some(in_flight) = lane.in_flight.as_ref() else {
             return Ok(None);
         };
         if response_generation != in_flight.generation
@@ -362,6 +384,36 @@ impl EndpointCommands {
         {
             return Ok(None);
         }
+        let Some((_, response_chunks)) = checked_response_budget(
+            in_flight.response.len(),
+            in_flight.response_chunks,
+            data.len(),
+        ) else {
+            let Some(in_flight) = lane.in_flight.take() else {
+                return Ok(None);
+            };
+            lane.retire((
+                in_flight.generation,
+                in_flight.boot_id.clone(),
+                in_flight.request_id.clone(),
+            ));
+            return Ok(Some(EndpointCommandResult {
+                endpoint_id: endpoint_id.clone(),
+                generation: in_flight.generation,
+                boot_id: in_flight.boot_id,
+                request_id: in_flight.request_id,
+                result: Err(ClientShellEndpointError {
+                    code: Some("endpoint_response_too_large".into()),
+                    message: format!(
+                        "this server's response exceeded the {MAX_ENDPOINT_RESPONSE_BYTES}-byte or {MAX_ENDPOINT_RESPONSE_CHUNKS}-chunk limit"
+                    ),
+                }),
+            }));
+        };
+        let Some(in_flight) = lane.in_flight.as_mut() else {
+            return Ok(None);
+        };
+        in_flight.response_chunks = response_chunks;
         in_flight.response.extend(data);
         if !final_chunk {
             return Ok(None);
@@ -471,6 +523,7 @@ mod tests {
                         generation: 1,
                         boot_id: "boot-a".into(),
                         request_id: "request-a".into(),
+                        response_chunks: 0,
                         response: Vec::new(),
                         sent_at: Instant::now(),
                     }),
@@ -562,6 +615,533 @@ mod tests {
     }
 
     #[test]
+    fn selection_larger_than_one_frame_reassembles_without_truncation() {
+        let mut commands = commands_with_in_flight();
+        let selection = "\u{0001}".repeat(crate::terminal::text_snapshot::MAX_SNAPSHOT_BYTES);
+        let response = serde_json::to_vec(&SuccessResponse {
+            id: "request-a".into(),
+            result: ResponseResult::PaneSelection {
+                pane_id: "w1:p1".into(),
+                text: selection.clone(),
+            },
+        })
+        .unwrap();
+        assert!(response.len() > 16 * 1024 * 1024);
+        assert!(response.len() <= MAX_ENDPOINT_RESPONSE_BYTES);
+        let chunks = response.chunks(128 * 1024);
+        let chunk_count = chunks.len();
+        for (index, chunk) in chunks.enumerate() {
+            let completed = commands
+                .receive_chunk(
+                    &endpoint(),
+                    1,
+                    "boot-a",
+                    "request-a",
+                    index + 1 == chunk_count,
+                    chunk.to_vec(),
+                )
+                .unwrap();
+            if index + 1 == chunk_count {
+                let completed = completed.expect("complete selection response");
+                assert_eq!(completed.endpoint_id, endpoint());
+                assert_eq!(completed.generation, 1);
+                assert_eq!(completed.boot_id, "boot-a");
+                assert_eq!(completed.request_id, "request-a");
+                assert!(matches!(
+                    completed.result,
+                    Ok(ResponseResult::PaneSelection { pane_id, text })
+                        if pane_id == "w1:p1" && text == selection
+                ));
+            } else {
+                assert!(completed.is_none());
+                assert!(commands.accepts_response(&endpoint(), 1, "boot-a", "request-a"));
+            }
+        }
+        assert!(!has_in_flight(&commands));
+    }
+
+    #[test]
+    fn non_final_response_overflow_fails_locally_and_preserves_other_requests() {
+        use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry, EndpointTransport};
+        use std::sync::{Arc, Mutex};
+
+        struct Recording(Arc<Mutex<Vec<String>>>);
+        impl EndpointTransport for Recording {
+            fn send(&mut self, message: &ClientMessage) -> io::Result<()> {
+                if let ClientMessage::ClientShellEndpointRequest { request, .. } = message {
+                    self.0.lock().unwrap().push(request.clone());
+                }
+                Ok(())
+            }
+        }
+
+        assert_eq!(checked_response_budget(0, 0, 0), Some((0, 1)));
+        assert_eq!(
+            checked_response_budget(
+                MAX_ENDPOINT_RESPONSE_BYTES - 1,
+                MAX_ENDPOINT_RESPONSE_CHUNKS - 1,
+                1,
+            ),
+            Some((MAX_ENDPOINT_RESPONSE_BYTES, MAX_ENDPOINT_RESPONSE_CHUNKS))
+        );
+        for (bytes, chunks, incoming) in [
+            (MAX_ENDPOINT_RESPONSE_BYTES, 0, 1),
+            (0, MAX_ENDPOINT_RESPONSE_CHUNKS, 0),
+            (usize::MAX, 0, 1),
+            (1, 0, usize::MAX),
+            (0, usize::MAX, 0),
+        ] {
+            assert_eq!(checked_response_budget(bytes, chunks, incoming), None);
+        }
+
+        let mut commands = commands_with_in_flight();
+        let remote = ClientEndpointId::Ssh(
+            crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        );
+        for (lanes, endpoint_id, generation, boot_id, request_id) in [
+            (
+                &mut commands.background,
+                endpoint(),
+                1,
+                "boot-a",
+                "background",
+            ),
+            (&mut commands.reading, endpoint(), 1, "boot-a", "reading"),
+            (&mut commands.lanes, remote.clone(), 2, "boot-b", "remote"),
+        ] {
+            lanes.insert(
+                endpoint_id,
+                EndpointCommandLane {
+                    in_flight: Some(InFlightCommand {
+                        generation,
+                        boot_id: boot_id.into(),
+                        request_id: request_id.into(),
+                        response_chunks: 0,
+                        response: Vec::new(),
+                        sent_at: Instant::now(),
+                    }),
+                    ..EndpointCommandLane::default()
+                },
+            );
+        }
+        assert!(commands
+            .enqueue(
+                endpoint(),
+                1,
+                "boot-a".into(),
+                tab_focus("next-action", "tab_2"),
+                false,
+            )
+            .is_empty());
+
+        let chunk_size = 128 * 1024;
+        let response_budget = MAX_ENDPOINT_RESPONSE_BYTES;
+        let mut failed = None;
+        for _ in 0..=response_budget / chunk_size {
+            failed = commands
+                .receive_chunk(
+                    &endpoint(),
+                    1,
+                    "boot-a",
+                    "request-a",
+                    false,
+                    vec![b' '; chunk_size],
+                )
+                .expect("response overflow must not become a connection error");
+            if failed.is_some() {
+                break;
+            }
+            let in_flight = commands.lanes[&endpoint()]
+                .in_flight
+                .as_ref()
+                .expect("unfinished response must remain correlated");
+            assert!(
+                in_flight.response.len() <= response_budget,
+                "non-final chunks must not accumulate beyond {response_budget} bytes"
+            );
+        }
+        let failed = failed.expect("continuous non-final chunks must produce a bounded failure");
+        assert_eq!(failed.endpoint_id, endpoint());
+        assert_eq!(failed.generation, 1);
+        assert_eq!(failed.boot_id, "boot-a");
+        assert_eq!(failed.request_id, "request-a");
+        let error = failed.result.expect_err("request-local overflow error");
+        assert_eq!(error.code.as_deref(), Some("endpoint_response_too_large"));
+        assert!(!has_in_flight(&commands));
+        assert_eq!(queued_ids(&commands, &endpoint()), vec!["next-action"]);
+        assert!(commands.lanes[&endpoint()].retired.contains(&(
+            1,
+            "boot-a".into(),
+            "request-a".into(),
+        )));
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut endpoints =
+            EndpointRegistry::new(Recording(sent.clone()), 1, EndpointNegotiation::default());
+        assert!(commands.send_next(&endpoint(), &mut endpoints).is_empty());
+        {
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            let request: Request = serde_json::from_str(&sent[0]).unwrap();
+            assert_eq!(request.id, "next-action");
+        }
+        for final_chunk in [false, true] {
+            assert!(commands
+                .receive_chunk(
+                    &endpoint(),
+                    1,
+                    "boot-a",
+                    "request-a",
+                    final_chunk,
+                    vec![b' '; chunk_size],
+                )
+                .unwrap()
+                .is_none());
+            let next = commands.lanes[&endpoint()].in_flight.as_ref().unwrap();
+            assert_eq!(next.request_id, "next-action");
+            assert!(next.response.is_empty());
+            assert_eq!(next.response.capacity(), 0);
+        }
+        for lane in [
+            &commands.background[&endpoint()],
+            &commands.reading[&endpoint()],
+            &commands.lanes[&remote],
+        ] {
+            let in_flight = lane
+                .in_flight
+                .as_ref()
+                .expect("unrelated request stays live");
+            assert!(in_flight.response.is_empty());
+            assert_eq!(in_flight.response.capacity(), 0);
+        }
+        for (endpoint_id, generation, boot_id, request_id) in [
+            (endpoint(), 1, "boot-a", "background"),
+            (endpoint(), 1, "boot-a", "reading"),
+            (remote, 2, "boot-b", "remote"),
+            (endpoint(), 1, "boot-a", "next-action"),
+        ] {
+            assert!(commands.accepts_response(&endpoint_id, generation, boot_id, request_id));
+            let response = serde_json::to_vec(&SuccessResponse {
+                id: request_id.into(),
+                result: ResponseResult::Ok {},
+            })
+            .unwrap();
+            let completed = commands
+                .receive_chunk(
+                    &endpoint_id,
+                    generation,
+                    boot_id,
+                    request_id,
+                    true,
+                    response,
+                )
+                .unwrap()
+                .expect("unrelated request completes normally");
+            assert_eq!(completed.endpoint_id, endpoint_id);
+            assert_eq!(completed.generation, generation);
+            assert_eq!(completed.boot_id, boot_id);
+            assert_eq!(completed.request_id, request_id);
+            assert!(matches!(completed.result, Ok(ResponseResult::Ok {})));
+        }
+        assert!(commands
+            .expire(Instant::now() + ENDPOINT_COMMAND_TIMEOUT)
+            .is_empty());
+    }
+
+    #[test]
+    fn stale_chunks_do_not_grow_or_replace_an_accumulating_response() {
+        let mut commands = commands_with_in_flight();
+        let unknown = ClientEndpointId::Ssh(
+            crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        );
+        let response = serde_json::to_vec(&SuccessResponse {
+            id: "request-a".into(),
+            result: ResponseResult::Ok {},
+        })
+        .unwrap();
+        let split = response.len() / 2;
+        assert!(commands
+            .receive_chunk(
+                &endpoint(),
+                1,
+                "boot-a",
+                "request-a",
+                false,
+                response[..split].to_vec(),
+            )
+            .unwrap()
+            .is_none());
+        let in_flight = commands.lanes[&endpoint()].in_flight.as_ref().unwrap();
+        let capacity = in_flight.response.capacity();
+        let sent_at = in_flight.sent_at;
+        for (endpoint_id, generation, boot_id, request_id) in [
+            (endpoint(), 2, "boot-a", "request-a"),
+            (endpoint(), 1, "boot-b", "request-a"),
+            (endpoint(), 1, "boot-a", "request-stale"),
+            (unknown, 1, "boot-a", "request-a"),
+        ] {
+            for final_chunk in [false, false, true] {
+                assert!(commands
+                    .receive_chunk(
+                        &endpoint_id,
+                        generation,
+                        boot_id,
+                        request_id,
+                        final_chunk,
+                        vec![b'x'; 128 * 1024],
+                    )
+                    .unwrap()
+                    .is_none());
+                let in_flight = commands.lanes[&endpoint()].in_flight.as_ref().unwrap();
+                assert_eq!(in_flight.response, response[..split]);
+                assert_eq!(in_flight.response.capacity(), capacity);
+                assert_eq!(in_flight.response_chunks, 1);
+                assert_eq!(in_flight.sent_at, sent_at);
+                assert!(commands.accepts_response(&endpoint(), 1, "boot-a", "request-a"));
+            }
+        }
+        assert_eq!(commands.lanes.len(), 1);
+        assert!(commands.background.is_empty());
+        assert!(commands.reading.is_empty());
+        let completed = commands
+            .receive_chunk(
+                &endpoint(),
+                1,
+                "boot-a",
+                "request-a",
+                true,
+                response[split..].to_vec(),
+            )
+            .unwrap()
+            .expect("live response remains intact after stale chunks");
+        assert_eq!(completed.request_id, "request-a");
+        assert!(matches!(completed.result, Ok(ResponseResult::Ok {})));
+        assert!(!has_in_flight(&commands));
+    }
+
+    #[test]
+    fn final_response_chunk_accepts_exact_byte_limit_and_rejects_one_more() {
+        let response = serde_json::to_vec(&SuccessResponse {
+            id: "request-a".into(),
+            result: ResponseResult::Ok {},
+        })
+        .unwrap();
+        for excess in [0, 1] {
+            let mut commands = commands_with_in_flight();
+            let command = commands
+                .lanes
+                .get_mut(&endpoint())
+                .unwrap()
+                .in_flight
+                .as_mut()
+                .unwrap();
+            command.response = vec![b' '; MAX_ENDPOINT_RESPONSE_BYTES - response.len() + excess];
+            command.response_chunks = 1;
+            let deadline = command.sent_at + ENDPOINT_COMMAND_TIMEOUT;
+            let completed = commands
+                .receive_chunk(
+                    &endpoint(),
+                    1,
+                    "boot-a",
+                    "request-a",
+                    true,
+                    response.clone(),
+                )
+                .expect("final chunk limit is a request-local outcome")
+                .expect("final chunk completes the request");
+            assert_eq!(completed.endpoint_id, endpoint());
+            assert_eq!(completed.generation, 1);
+            assert_eq!(completed.boot_id, "boot-a");
+            assert_eq!(completed.request_id, "request-a");
+            if excess == 0 {
+                assert!(matches!(completed.result, Ok(ResponseResult::Ok {})));
+                assert!(commands.lanes[&endpoint()].retired.is_empty());
+            } else {
+                assert_eq!(
+                    completed
+                        .result
+                        .expect_err("over-limit final chunk")
+                        .code
+                        .as_deref(),
+                    Some("endpoint_response_too_large")
+                );
+                assert!(commands.lanes[&endpoint()].retired.contains(&(
+                    1,
+                    "boot-a".into(),
+                    "request-a".into(),
+                )));
+            }
+            assert!(!has_in_flight(&commands));
+            assert!(commands.expire(deadline).is_empty());
+        }
+    }
+
+    #[test]
+    fn empty_chunk_flood_fails_locally_in_every_response_lane() {
+        for lane_name in ["actions", "background", "reading"] {
+            for final_chunk in [false, true] {
+                let mut commands = commands_with_in_flight();
+                let lane = commands.lanes.remove(&endpoint()).unwrap();
+                let lanes = match lane_name {
+                    "background" => &mut commands.background,
+                    "reading" => &mut commands.reading,
+                    _ => &mut commands.lanes,
+                };
+                lanes.insert(endpoint(), lane);
+                for _ in 0..MAX_ENDPOINT_RESPONSE_CHUNKS {
+                    assert!(commands
+                        .receive_chunk(&endpoint(), 1, "boot-a", "request-a", false, Vec::new())
+                        .unwrap()
+                        .is_none());
+                }
+                assert!(commands
+                    .receive_chunk(&endpoint(), 2, "boot-a", "request-a", true, vec![b'x'])
+                    .unwrap()
+                    .is_none());
+                let lanes = match lane_name {
+                    "background" => &commands.background,
+                    "reading" => &commands.reading,
+                    _ => &commands.lanes,
+                };
+                let command = lanes[&endpoint()].in_flight.as_ref().unwrap();
+                assert_eq!(command.response_chunks, MAX_ENDPOINT_RESPONSE_CHUNKS);
+                assert!(command.response.is_empty());
+                assert_eq!(command.response.capacity(), 0);
+                let failed = commands
+                    .receive_chunk(
+                        &endpoint(),
+                        1,
+                        "boot-a",
+                        "request-a",
+                        final_chunk,
+                        Vec::new(),
+                    )
+                    .expect("empty chunk flood must not disconnect the endpoint")
+                    .expect("empty chunks consume the finite chunk budget");
+                assert_eq!(failed.endpoint_id, endpoint());
+                assert_eq!(failed.generation, 1);
+                assert_eq!(failed.boot_id, "boot-a");
+                assert_eq!(failed.request_id, "request-a");
+                assert_eq!(
+                    failed
+                        .result
+                        .expect_err("chunk budget error")
+                        .code
+                        .as_deref(),
+                    Some("endpoint_response_too_large")
+                );
+                assert!(!commands.accepts_response(&endpoint(), 1, "boot-a", "request-a"));
+                for late_final in [false, true] {
+                    assert!(commands
+                        .receive_chunk(
+                            &endpoint(),
+                            1,
+                            "boot-a",
+                            "request-a",
+                            late_final,
+                            vec![b'x']
+                        )
+                        .unwrap()
+                        .is_none());
+                }
+                assert!(commands.disconnect(&endpoint()).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cancelling_partial_responses_releases_bytes_and_resets_chunk_budget() {
+        use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry, EndpointTransport};
+
+        struct Accepting;
+        impl EndpointTransport for Accepting {
+            fn send(&mut self, _message: &ClientMessage) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for cancellation in ["timeout", "retire", "disconnect"] {
+            let mut commands = commands_with_in_flight();
+            assert!(commands
+                .receive_chunk(
+                    &endpoint(),
+                    1,
+                    "boot-a",
+                    "request-a",
+                    false,
+                    vec![b' '; 128 * 1024]
+                )
+                .unwrap()
+                .is_none());
+            assert!(commands
+                .receive_chunk(&endpoint(), 1, "boot-a", "request-a", false, Vec::new())
+                .unwrap()
+                .is_none());
+            let command = commands.lanes[&endpoint()].in_flight.as_ref().unwrap();
+            assert_eq!(command.response.len(), 128 * 1024);
+            assert_eq!(command.response_chunks, 2);
+            let deadline = command.sent_at + ENDPOINT_COMMAND_TIMEOUT;
+            match cancellation {
+                "timeout" => {
+                    let mut expired = commands.expire(deadline);
+                    assert_eq!(expired.len(), 1);
+                    let failed = expired.pop().unwrap();
+                    assert_eq!(failed.request_id, "request-a");
+                    assert_eq!(
+                        failed.result.expect_err("timeout result").code.as_deref(),
+                        Some("endpoint_timeout")
+                    );
+                }
+                "retire" => assert_eq!(commands.retire_lane(&endpoint()), vec!["request-a"]),
+                _ => assert_eq!(commands.disconnect(&endpoint()), vec!["request-a"]),
+            }
+            assert!(!has_in_flight(&commands));
+            assert!(commands.expire(deadline).is_empty());
+            assert!(commands
+                .enqueue(
+                    endpoint(),
+                    1,
+                    "boot-a".into(),
+                    tab_focus("next-action", "tab_2"),
+                    false
+                )
+                .is_empty());
+            let mut endpoints = EndpointRegistry::new(Accepting, 1, EndpointNegotiation::default());
+            assert!(commands.send_next(&endpoint(), &mut endpoints).is_empty());
+            for final_chunk in [false, true] {
+                assert!(commands
+                    .receive_chunk(
+                        &endpoint(),
+                        1,
+                        "boot-a",
+                        "request-a",
+                        final_chunk,
+                        vec![b'x']
+                    )
+                    .unwrap()
+                    .is_none());
+                let command = commands.lanes[&endpoint()].in_flight.as_ref().unwrap();
+                assert_eq!(command.request_id, "next-action");
+                assert!(command.response.is_empty());
+                assert_eq!(command.response.capacity(), 0);
+                assert_eq!(command.response_chunks, 0);
+            }
+            let response = serde_json::to_vec(&SuccessResponse {
+                id: "next-action".into(),
+                result: ResponseResult::Ok {},
+            })
+            .unwrap();
+            let completed = commands
+                .receive_chunk(&endpoint(), 1, "boot-a", "next-action", true, response)
+                .unwrap()
+                .expect("successor completes with a fresh response budget");
+            assert_eq!(completed.request_id, "next-action");
+            assert!(matches!(completed.result, Ok(ResponseResult::Ok {})));
+            assert!(!has_in_flight(&commands));
+        }
+    }
+
+    #[test]
     fn in_flight_endpoint_command_expires_and_releases_the_lane() {
         let mut commands = commands_with_in_flight();
         let expired = commands
@@ -608,6 +1188,7 @@ mod tests {
                     generation: 2,
                     boot_id: "boot-b".into(),
                     request_id: "request-b".into(),
+                    response_chunks: 0,
                     response: Vec::new(),
                     sent_at: Instant::now(),
                 }),

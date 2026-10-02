@@ -2,6 +2,7 @@
 set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
 
 python := if os() == "windows" { "python" } else { "python3" }
+nextest_jobs := env_var_or_default("HERDR_NEXTEST_JOBS", "4")
 
 # Run tests (all phases in parallel via the orchestrator; logs under target/test-suite-logs/)
 test:
@@ -9,12 +10,12 @@ test:
 
 # Full nextest run (command source of the test orchestrator's nextest phase)
 nextest-all:
-    cargo nextest run --locked --status-level leak --final-status-level fail --failure-output final --success-output never
+    cargo nextest run --locked --test-threads {{nextest_jobs}} --status-level leak --final-status-level fail --failure-output final --success-output never
 
 # Run repository maintenance contract tests (+ the fork's upstream-sync drop-path gate)
 # The unittest manifest runs in parallel child processes (one per class/chunk, CPU-count workers).
 maintenance-test:
-    {{python}} scripts/run_parallel_unittest.py scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_gx_package scripts.test_gx_release scripts.test_gx_smoke scripts.test_local_build_config scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_resolve_agent_rules scripts.test_run_parallel_unittest scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
+    {{python}} scripts/run_parallel_unittest.py scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_gx_package scripts.test_gx_release scripts.test_gx_smoke scripts.test_local_build_config scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_release_perf scripts.test_resolve_agent_rules scripts.test_run_parallel_unittest scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
     bun test scripts/release-workflows.test.ts
     {{python}} scripts/upstream_sync_drop_check.py
 
@@ -56,7 +57,7 @@ framework-check: agent-rules-check
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
-    cargo nextest run --locked "{{filter}}" --status-level leak --final-status-level fail --failure-output final --success-output never
+    cargo nextest run --locked --test-threads {{nextest_jobs}} "{{filter}}" --status-level leak --final-status-level fail --failure-output final --success-output never
 
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
@@ -79,7 +80,7 @@ ci filter='all()': lint
 
 # Keep the test build independently configurable from clippy in CI.
 ci-tests filter='all()':
-    cargo nextest run --locked -E "{{filter}}" --status-level leak --final-status-level slow --failure-output final --success-output never
+    cargo nextest run --locked --test-threads {{nextest_jobs}} -E "{{filter}}" --status-level leak --final-status-level slow --failure-output final --success-output never
     just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test

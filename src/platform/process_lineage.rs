@@ -102,14 +102,23 @@ fn multiplexer_client(name: &str) -> Option<Multiplexer> {
 
 /// Snapshot client ancestors only when the peer has a tmux/screen server ancestor.
 /// The pane PID is resolved later on the event loop, which performs no process I/O.
-/// This intentionally only proves a same-kind client, not the exact server/session.
+/// Windows supplies one platform process snapshot to the shared matcher; Unix
+/// supplies its process table. This intentionally only proves a same-kind
+/// client, not the exact server/session.
 pub(crate) fn multiplexer_client_lineages(peer: &ProcessLineage) -> Option<Vec<ProcessLineage>> {
-    multiplexer_client_lineages_with(peer, super::process_parent_entries)
+    #[cfg(windows)]
+    {
+        super::windows::snapshot_multiplexer_client_lineages(peer)
+    }
+    #[cfg(not(windows))]
+    {
+        multiplexer_client_lineages_with(peer, super::process_parent_entries)
+    }
 }
 
-fn multiplexer_client_lineages_with(
+pub(super) fn multiplexer_client_lineages_matching(
     peer: &ProcessLineage,
-    snapshot: impl FnOnce() -> Option<Vec<ProcessParentEntry>>,
+    snapshot: impl FnOnce(&dyn Fn(u32, &str) -> bool) -> Option<Vec<ProcessLineage>>,
 ) -> Option<Vec<ProcessLineage>> {
     let servers: Vec<_> = peer
         .processes
@@ -120,24 +129,32 @@ fn multiplexer_client_lineages_with(
     if servers.is_empty() {
         return Some(Vec::new());
     }
-    let entries = snapshot()?;
-    let by_pid: std::collections::HashMap<_, _> =
-        entries.iter().map(|entry| (entry.pid, entry)).collect();
-    Some(
-        entries
-            .iter()
-            .filter(|entry| {
-                // Do not mistake the peer's own server for an attached pane client.
-                !peer.contains(entry.pid)
-                    && multiplexer_client(&entry.name).is_some_and(|kind| servers.contains(&kind))
-            })
-            .filter_map(|entry| {
-                walk_process_lineage(entry.pid, |pid| {
-                    by_pid.get(&pid).map(|entry| (*entry).clone())
+    snapshot(&|pid, name| {
+        !peer.contains(pid) && multiplexer_client(name).is_some_and(|kind| servers.contains(&kind))
+    })
+}
+
+#[cfg(any(not(windows), test))]
+fn multiplexer_client_lineages_with(
+    peer: &ProcessLineage,
+    snapshot: impl FnOnce() -> Option<Vec<ProcessParentEntry>>,
+) -> Option<Vec<ProcessLineage>> {
+    multiplexer_client_lineages_matching(peer, |matches| {
+        let entries = snapshot()?;
+        let by_pid: std::collections::HashMap<_, _> =
+            entries.iter().map(|entry| (entry.pid, entry)).collect();
+        Some(
+            entries
+                .iter()
+                .filter(|entry| matches(entry.pid, &entry.name))
+                .filter_map(|entry| {
+                    walk_process_lineage(entry.pid, |pid| {
+                        by_pid.get(&pid).map(|entry| (*entry).clone())
+                    })
                 })
-            })
-            .collect(),
-    )
+                .collect(),
+        )
+    })
 }
 
 /// `pid` 是否在 `ancestor_pid` 的进程树里（`pid == ancestor_pid` 也算）。

@@ -116,6 +116,10 @@ pub(crate) fn codex_managed_hooks(hook_path: &Path) -> Vec<(&'static str, String
     hooks
 }
 
+/// Install the Codex hook asset and managed entries without replacing the
+/// user's startup configuration. `config.toml` is validated and edited before
+/// either config file is written; the hooks helper removes only Herdr-owned
+/// commands and leaves unrelated Codex entries in place.
 pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     let dir = codex_dir()?;
     check_config_targets(&dir, &["hooks.json", "config.toml"])?;
@@ -127,16 +131,29 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     }
 
     let hook_path = dir.join(CODEX_HOOK_INSTALL_NAME);
-    fs::write(&hook_path, CODEX_HOOK_ASSET)?;
-    make_executable(&hook_path)?;
+    let config_path = dir.join("config.toml");
+    let existing_config = match fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let new_config = build_codex_config_with_hooks(&existing_config).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot update {}: {error}", config_path.display()),
+        )
+    })?;
 
     let hooks_path = dir.join("hooks.json");
-    let mut hooks_file = if hooks_path.is_file() {
-        serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?).map_err(|err| {
-            io::Error::other(format!("failed to parse {}: {err}", hooks_path.display()))
-        })?
-    } else {
-        json!({})
+    let mut hooks_file = match fs::read_to_string(&hooks_path) {
+        Ok(content) => serde_json::from_str::<Value>(&content).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to parse {}: {error}", hooks_path.display()),
+            )
+        })?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error),
     };
 
     let hooks = ensure_hooks_object(
@@ -159,17 +176,12 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     for (event, command) in codex_managed_hooks(&hook_path) {
         ensure_command_hook(hooks, event, command, 10, None)?;
     }
+    let new_hooks = serde_json::to_string_pretty(&hooks_file)?;
+
+    fs::write(&hook_path, CODEX_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
     remove_legacy_bash_hook_file(&hook_path)?;
-
-    write_config(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
-
-    let config_path = dir.join("config.toml");
-    let existing_config = if config_path.is_file() {
-        fs::read_to_string(&config_path)?
-    } else {
-        String::new()
-    };
-    let new_config = build_codex_config_with_hooks(&existing_config);
+    write_config(&hooks_path, new_hooks)?;
     if new_config != existing_config {
         write_config(&config_path, new_config)?;
     }

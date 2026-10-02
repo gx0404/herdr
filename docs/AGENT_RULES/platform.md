@@ -24,6 +24,12 @@
   （pane 终止阶梯用 `ProcessSessionId` / `ProcessSessionMember`，成员按父子关系与创建
   时间验证）。pane 关闭会终止整棵 pane 进程树（含从 pane 启动的 GUI 程序），herdr 自己的
   后台 server 守护进程以 `Local\herdr-server-daemon-<pid>-<创建时间>` 标记豁免，连同其子树。
+- Windows named-pipe 客户端握手使用轮询读取并受 4 秒绝对 deadline 约束；空握手和只发出
+  部分帧都必须在 deadline 内关闭，不能用持续到达的碎片续期。平台层只提供等待/可读性
+  适配，握手协议与 2 MiB 帧界限仍由 `protocol-api.md` 的共享传输层决定。
+- Windows 配置原子替换使用 `std::fs::rename` 的替换语义并在返回前刷新父目录；不得退回
+  会在并发写入时产生暂时 `ERROR_ACCESS_DENIED` 的裸 `MoveFileExW` 路径。临时文件仍由
+  `project-infra.md` 规定的同目录流程创建。
 
 ## Windows 交叉编译（上游 Testing 节语义）
 

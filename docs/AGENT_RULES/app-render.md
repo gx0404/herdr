@@ -31,6 +31,9 @@ pane 规模的渲染与布局循环内：
   活动 pane 基数。
 
 优先确定性操作/架构测试而非墙钟 CI 限制；性能基准是行为覆盖的补充证据。
+渲染扩展用 `just bench-render-scale`，终端目标查找、BSP 布局、retained graphics
+和 API 批处理公平性分别用 `just bench-terminal-targets`、`just bench-bsp-layout`、
+`just bench-retained-graphics`、`just bench-api-fairness`；这些画像不替代行为测试。
 发布前 `just bench-release-smoke` 必须在隐藏与可见输出两种形态下与当前 stable
 二进制对比；结果显著移动或验证性能工作时，用 `HERDR_PERF_SAMPLE_SECONDS=60`
 复测并调查受影响场景。`scripts/test_ui_hot_path_architecture.py`（`just

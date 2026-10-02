@@ -232,7 +232,7 @@ herdr session stop <name> [--json]
 herdr session delete <name> [--json]
 ```
 
-需要显式停止默认会话时,把会话名写成 `default`。
+需要显式停止默认会话时,把会话名写成 `default`。删除命名会话时必须使用 `herdr session list` 显示的准确拼写，并检查其 server 和客户端 endpoint。只要任一 endpoint 仍存活，或状态无法确定，就保持数据不变；符号链接和 junction 会话目录也会被拒绝。请先停止会话并修正路径或权限，再重试。
 
 ## 工作区
 
@@ -338,6 +338,8 @@ herdr pane run <pane_id> <command>
 标准拼写是 `esc`;也接受 `escape`。
 
 `pane run` 会遵循当前的 bracketed paste 模式,并把文本和 Enter 作为一个原子操作提交。发送命令时优先用它,而不是 `send-text` 加 `send-keys Enter`;单独的发送操作仍是底层操作,不会提交命令。
+
+输入接收有上限,可防止缓慢窗格无限积累内存。窗格 PTY 最多接受 1,024 个待处理输入项和 16 MiB 待处理输入字节；占满该预算时,`pane send-*`、`pane run` 和 `agent prompt` 可能以 `pane_send_failed` 或 `agent_prompt_failed` 失败,并带 `WouldBlock`/队列已满消息。请等较早的输入排出后再重试。待处理的终端响应另有 256 项和 1 MiB 上限；响应预算已满时,Herdr 会丢弃整个响应,而不是继续增长积压。
 
 从自定义钩子上报智能体状态:
 

@@ -811,13 +811,11 @@ fn write_file(path: &Path, content: &str) {
     fs::write(path, content).expect("write file");
 }
 
-fn tool_or_skip(tool: &str) -> bool {
-    if on_path(tool) {
-        true
-    } else {
-        eprintln!("[ssh-e2e] SKIP: required tool `{tool}` not found on PATH");
-        false
-    }
+fn require_tool(tool: &str) {
+    assert!(
+        on_path(tool),
+        "required tool `{tool}` not found on PATH; ssh_e2e cannot pass without it"
+    );
 }
 
 #[test]
@@ -825,14 +823,11 @@ fn sshd_real_machine_end_to_end() {
     if run_as_orphan_reaper() {
         return;
     }
-    let Some(sshd_binary) = sshd_path() else {
-        eprintln!("[ssh-e2e] SKIP: no OpenSSH sshd available on this machine");
-        return;
-    };
+    let sshd_binary = sshd_path().unwrap_or_else(|| {
+        panic!("required OpenSSH `sshd` not found; ssh_e2e cannot pass without it")
+    });
     for tool in ["ssh", "ssh-keygen", "ssh-keyscan"] {
-        if !tool_or_skip(tool) {
-            return;
-        }
+        require_tool(tool);
     }
 
     let phase = "setup";

@@ -45,6 +45,9 @@ update/release_notes/product_announcements/plugins/render_prof 等）、采集�
   `app-render.md`（TUI 交互模式复用既有设置界面）。
 - 运行时行为类模块（update、product_announcements、release_notes、sound）改动
   属于用户可见行为：走 `docs/next` 文档与发布纪律，不得手改 `distribution/*.json`。
+- `src/config/write.rs::update_file_at` 必须在目标同目录创建临时文件，保留旧权限，写入并
+  `sync_all` 后调用平台原子替换，再同步父目录；已有符号链接沿链解析并更新最终普通文件，
+  不替换链接。失败时清理临时文件并保留原目标。
 
 ## 构建本地性（fork 硬规则）
 

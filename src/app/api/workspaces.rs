@@ -73,6 +73,7 @@ impl App {
                         crate::logging::workspace_renamed(&workspace.id);
                     }
                 }
+                self.authorize_session_layout_change();
                 self.emit_workspace_open_events(index);
                 // APP-012：不做 expect；新建 workspace 元数据缺失按创建失败返回。
                 let Some(result) = self.workspace_created_result(index) else {
@@ -159,6 +160,7 @@ impl App {
         let moved = self.state.move_workspace(index, insert_index);
         let workspaces = self.workspace_list_info();
         if moved {
+            self.authorize_session_layout_change();
             self.emit_event(EventEnvelope {
                 event: EventKind::WorkspaceMoved,
                 data: EventData::WorkspaceMoved {
@@ -229,6 +231,7 @@ impl App {
             .move_workspace_block(&workspace_ids, before_workspace_id.as_deref());
         let workspaces = self.workspace_list_info();
         if moved {
+            self.authorize_session_layout_change();
             self.emit_event(EventEnvelope {
                 event: EventKind::WorkspaceReordered,
                 data: EventData::WorkspaceReordered {
@@ -346,6 +349,7 @@ impl App {
             .collect::<Vec<_>>();
         self.state.selected = index;
         self.state.close_workspaces(close_indices);
+        self.authorize_session_layout_change();
         self.shutdown_detached_terminal_runtimes();
         for (workspace_id, workspace) in closed_workspaces {
             self.emit_event(EventEnvelope {

@@ -1630,6 +1630,36 @@ impl AppState {
                 self.agent_activity.note_hint(pane_id);
                 Vec::new()
             }
+            AppEvent::AgentActivityRefreshedFor {
+                pane_id,
+                identity,
+                result,
+                ..
+            } => {
+                if self.agent_activity_is_current(pane_id, &identity) {
+                    match result {
+                        Ok(nodes) => {
+                            self.apply_agent_activity(pane_id, nodes, Instant::now());
+                        }
+                        Err(error) => {
+                            tracing::debug!(?pane_id, %error, "agent activity refresh failed");
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            AppEvent::AgentActivityReadFor {
+                pane_id,
+                identity,
+                nodes,
+                ..
+            } => {
+                if self.agent_activity_is_current(pane_id, &identity) {
+                    self.apply_agent_activity(pane_id, nodes, Instant::now());
+                }
+                Vec::new()
+            }
+            #[cfg(test)]
             AppEvent::AgentActivityRefreshed {
                 pane_id, result, ..
             } => {
@@ -1643,6 +1673,7 @@ impl AppState {
                 }
                 Vec::new()
             }
+            #[cfg(test)]
             AppEvent::AgentActivityRead { pane_id, nodes, .. } => {
                 self.apply_agent_activity(pane_id, nodes, Instant::now());
                 Vec::new()
@@ -1828,6 +1859,15 @@ impl AppState {
                 completion_reset,
             )
         };
+        if completion_reset
+            || mutation.agent_released
+            || mutation
+                .effective_state_change
+                .as_ref()
+                .is_some_and(|change| change.previous_known_agent != change.known_agent)
+        {
+            self.agent_activity.advance_identity(pane_id);
+        }
         if completion_reset {
             self.pending_agent_notifications.remove(&pane_id);
             self.workspaces[ws_idx].pane_state_mut(pane_id)?.seen = true;

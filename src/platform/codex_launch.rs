@@ -70,7 +70,26 @@ fn install_link(target: &Path, directory: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn install_link(target: &Path, directory: &Path) -> io::Result<()> {
     let launcher = directory.join(LAUNCHER);
-    std::fs::hard_link(target, &launcher).or_else(|_| std::fs::copy(target, launcher).map(|_| ()))
+    std::fs::hard_link(target, &launcher)
+        .or_else(|_| std::fs::copy(target, launcher).map(|_| ()))?;
+    #[cfg(windows)]
+    native_tools::install(directory)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+mod native_tools;
+
+pub(crate) fn configure_child(command: &mut Command) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        native_tools::configure(command)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+        Ok(())
+    }
 }
 
 pub(crate) fn command(executable: &Path, args: &[OsString]) -> io::Result<Command> {
@@ -311,6 +330,33 @@ mod shared {
         Ok(installed.directory)
     }
 
+    #[cfg(windows)]
+    pub(super) fn directory_for_current_process() -> io::Result<PathBuf> {
+        let executable = std::env::current_exe()?;
+        if let Some((directory, lease)) = lease_running_shim(&executable)? {
+            refresh(&directory, SystemTime::now());
+            hold(Some(lease));
+            return Ok(directory);
+        }
+        install_for_process(&executable)
+    }
+
+    #[cfg(windows)]
+    fn lease_running_shim(executable: &Path) -> io::Result<Option<(PathBuf, Lease)>> {
+        if !super::is_shim(executable) {
+            return Ok(None);
+        }
+        let directory = executable
+            .parent()
+            .ok_or_else(|| io::Error::other("Codex shim has no parent directory"))?;
+        let lease = Source::inspect(executable)?
+            .lease_valid(directory)
+            .ok_or_else(|| {
+                io::Error::other("running Codex shim is incomplete or cannot be leased")
+            })?;
+        Ok(Some((directory.to_path_buf(), lease)))
+    }
+
     /// A shim ready to hand to panes.
     struct Installed {
         directory: PathBuf,
@@ -520,6 +566,10 @@ mod shared {
 
         /// Whether `directory` is a complete shim for this executable.
         fn matches(&self, directory: &Path) -> bool {
+            #[cfg(windows)]
+            if !super::native_tools::matches(directory) {
+                return false;
+            }
             std::fs::symlink_metadata(directory).is_ok_and(|metadata| plain_dir(&metadata))
                 && marked(directory)
                 && self.launches(&directory.join(LAUNCHER))
@@ -1303,6 +1353,50 @@ mod shared {
                 identity
             );
             assert!(source.matches(&identity));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn native_tools_share_the_running_shim_lease_and_are_swept_with_it() {
+            let fixture = fixture("codex-tools-lifecycle");
+            let now = now();
+            let installed = fixture.store.install(&fixture.executable, now).unwrap();
+            let shim = installed.directory.clone();
+            let tools = shim.join("native-tools");
+            assert_eq!(names(&tools), ["tar.cmd"]);
+            assert!(super::super::native_tools::matches(&shim));
+            let (running_directory, lease) =
+                lease_running_shim(&shim.join(LAUNCHER)).unwrap().unwrap();
+            assert_eq!(running_directory, shim);
+            assert_eq!(
+                names(&fixture.store.base),
+                std::slice::from_ref(&installed.identity)
+            );
+            drop(installed);
+            set_modified(&shim.join(MARKER), now - 2 * HOUR);
+            assert_eq!(fixture.store.sweep(KEEP, now), 0);
+            assert!(tools.join("tar.cmd").is_file());
+            drop(lease);
+            assert_eq!(fixture.store.sweep(KEEP, now), 1);
+            assert!(!tools.exists());
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn damaged_native_tools_are_rebuilt_or_bypassed_under_an_existing_lease() {
+            let fixture = fixture("codex-tools-repair");
+            let now = now();
+            let installed = fixture.store.install(&fixture.executable, now).unwrap();
+            let shim = installed.directory.clone();
+            fs::write(shim.join("native-tools/tar.cmd"), b"damaged").unwrap();
+            let bypass = fixture.store.install(&fixture.executable, now).unwrap();
+            assert_ne!(bypass.directory, shim);
+            assert!(super::super::native_tools::matches(&bypass.directory));
+            assert!(lease_running_shim(&shim.join(LAUNCHER)).is_err());
+            drop(installed);
+            let repaired = fixture.store.install(&fixture.executable, now).unwrap();
+            assert_eq!(repaired.directory, shim);
+            assert!(super::super::native_tools::matches(&shim));
         }
 
         #[test]

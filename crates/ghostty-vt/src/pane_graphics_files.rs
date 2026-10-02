@@ -47,7 +47,12 @@ struct Generation {
     source: PathBuf,
 }
 
-/// Keep this owned snapshot alive until the terminal has consumed its path.
+/// Owns one immutable graphics snapshot for as long as the terminal may use it.
+///
+/// The native file-backing callback receives an `Arc` reference to this value;
+/// its release callback drops that reference. The open validated file, private
+/// generation directory, cleanup guard, and (for native snapshots) budget
+/// reservation therefore all outlive the path handed to libghostty.
 #[derive(Debug)]
 pub struct OwnedExport {
     lease: Lease,
@@ -62,6 +67,9 @@ struct ExportFile {
     _generation: Arc<Generation>,
 }
 
+/// Per-native-source-store limit for live snapshots: at most 64 objects and
+/// 64 MiB of reserved bytes. A reservation is released only with the final
+/// `OwnedExport` owner, not when the native callback merely finishes reading.
 #[derive(Debug, Default)]
 struct NativeBudget {
     bytes: usize,
@@ -333,6 +341,40 @@ impl Drop for Generation {
     }
 }
 
+/// Rolls back a partially created `server-<pid>-<nonce>` tree. The guard is
+/// committed only after both private directories pass validation, so a failed
+/// permission or validation step cannot leave a discoverable staging root.
+struct GenerationCreationGuard {
+    root: PathBuf,
+    committed: bool,
+}
+
+impl GenerationCreationGuard {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for GenerationCreationGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Err(err) = fs::remove_dir_all(&self.root) {
+            if err.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(target: LOG_TARGET, path = %self.root.display(), err = %err, "failed to remove incomplete pane graphics directory");
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 pub fn validate_direct_source(path: &Path, expected_len: usize) -> io::Result<()> {
     validate_source_under(path, expected_len, runtime_base())
@@ -411,12 +453,14 @@ fn create_generation(base: &Path) -> io::Result<Generation> {
             .as_nanos();
         let root = base.join(format!("server-{}-{nonce}", std::process::id()));
         fs::create_dir(&root)?;
+        let mut rollback = GenerationCreationGuard::new(root.clone());
         fs::set_permissions(&root, fs::Permissions::from_mode(DIRECTORY_MODE))?;
         let source = root.join("source");
         fs::create_dir(&source)?;
         fs::set_permissions(&source, fs::Permissions::from_mode(DIRECTORY_MODE))?;
         validate_directory(&root)?;
         validate_directory(&source)?;
+        rollback.commit();
         Ok(Generation { root, source })
     }
 }
@@ -1023,6 +1067,18 @@ mod tests {
 
         assert!(!stale.exists());
         drop(store);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn failed_generation_cleanup_guard_removes_partial_tree() {
+        let (_, base) = store();
+        let root = base.join("server-partial");
+        fs::create_dir_all(root.join("source")).unwrap();
+        {
+            let _rollback = GenerationCreationGuard::new(root.clone());
+        }
+        assert!(!root.exists());
         let _ = fs::remove_dir_all(base);
     }
 

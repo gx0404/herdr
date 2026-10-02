@@ -3661,15 +3661,25 @@ impl PaneRuntime {
     pub(crate) fn capture_text_snapshot(
         &self,
     ) -> Option<crate::terminal::text_snapshot::FrozenText> {
-        let _content_guard = self
-            .content_write_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let revision = self.content_seq();
-        if !revision.is_multiple_of(2) {
+        let (revision, captured) = {
+            let _content_guard = self
+                .content_write_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let revision = self.content_seq();
+            if !revision.is_multiple_of(2) {
+                return None;
+            }
+            let captured = self.terminal.capture_text_snapshot_data()?;
+            (revision, captured)
+        };
+        // Pair the owned terminal capture with an even content revision under the
+        // write lock, then format outside the lock. Recheck after formatting because
+        // writers may advance the revision while the owned rows are being materialized.
+        let mut snapshot = PaneTerminal::format_text_snapshot(captured)?;
+        if self.content_seq() != revision {
             return None;
         }
-        let mut snapshot = self.terminal.capture_text_snapshot()?;
         snapshot.content_revision = revision;
         Some(snapshot)
     }
@@ -4299,6 +4309,24 @@ mod tests {
             .text
             .contains("one"));
         assert!(runtime.visible_text().contains("five"));
+    }
+
+    #[tokio::test]
+    async fn text_snapshot_formats_after_capturing_a_stable_content_revision() {
+        let runtime = PaneRuntime::test_with_screen_bytes(20, 4, b"snapshot-stable\r\n");
+        let snapshot = runtime
+            .capture_text_snapshot()
+            .expect("stable text snapshot");
+
+        assert_eq!(snapshot.content_revision, runtime.content_seq());
+        assert!(snapshot.content_revision.is_multiple_of(2));
+        let text = snapshot
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter().map(|cell| cell.text.as_str()))
+            .collect::<String>();
+        assert!(text.contains("snapshot-stable"));
+        assert!(runtime.content_write_lock.try_lock().is_ok());
     }
 
     #[tokio::test]

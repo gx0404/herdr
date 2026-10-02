@@ -2,10 +2,19 @@
 
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const ROOT_PREFIX: &str = "hhs-";
+const OWNER_MARKER: &str = ".owner";
+const ROOT_ENV: &str = "HERDR_HOST_SHUTDOWN_ROOT";
+const REAPER_OWNER_ENV: &str = "HERDR_HOST_SHUTDOWN_REAPER_OWNER";
+const REAPER_ROOT_ENV: &str = "HERDR_HOST_SHUTDOWN_REAPER_ROOT";
+const REAPER_DRIVER_ROOT_ENV: &str = "HERDR_HOST_SHUTDOWN_REAPER_DRIVER_ROOT";
+const HOST_SHUTDOWN_TEST_NAME: &str = "host_shutdown_saves_layout_before_releasing_delay_lock";
 
 /// 被测二进制使用的应用目录名，规则同 `tests/support/mod.rs::app_dir_name`（本文件不引入
 /// support）：debug 构建是 `herdr-dev`，release 构建是 `herdr`。
@@ -52,7 +61,7 @@ impl LoginManager {
     }
 }
 
-fn private_bus(address: &str) -> ChildGuard {
+fn private_bus(address: &str, root: &Path) -> ChildGuard {
     let mut child = ChildGuard(
         Command::new("dbus-daemon")
             .args([
@@ -62,6 +71,7 @@ fn private_bus(address: &str) -> ChildGuard {
                 "--address",
                 address,
             ])
+            .env(ROOT_ENV, root)
             .stdout(Stdio::piped())
             .spawn()
             .unwrap(),
@@ -115,11 +125,207 @@ fn api(socket: &Path, method: &str, params: serde_json::Value) -> serde_json::Va
     response
 }
 
+fn is_host_shutdown_root(root: &Path) -> bool {
+    root.parent() == Some(Path::new("/var/tmp"))
+        && root
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(ROOT_PREFIX))
+        && root.join(OWNER_MARKER).is_file()
+}
+
+fn path_is_under(path: &[u8], root: &[u8]) -> bool {
+    path.strip_prefix(root)
+        .is_some_and(|rest| rest.first().is_none_or(|byte| *byte == b'/'))
+}
+
+fn process_belongs_to_root(proc_dir: &Path, root: &[u8]) -> bool {
+    std::fs::read(proc_dir.join("environ")).is_ok_and(|environ| {
+        environ.split(|byte| *byte == 0).any(|var| {
+            var.strip_prefix(ROOT_ENV.as_bytes()).is_some_and(|value| {
+                value.first().is_some_and(|byte| *byte == b'=') && path_is_under(&value[1..], root)
+            })
+        })
+    })
+}
+
+fn kill_sandbox_processes(root: &Path, spare: &[u32]) -> usize {
+    let needle = root.to_string_lossy();
+    let needle = needle.as_bytes();
+    let self_pid = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut killed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == self_pid || spare.contains(&pid) {
+            continue;
+        }
+        if process_belongs_to_root(&entry.path(), needle) {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            killed += 1;
+        }
+    }
+    killed
+}
+
+fn reap_root(root: &Path) {
+    if !is_host_shutdown_root(root) {
+        return;
+    }
+    for _ in 0..5 {
+        if kill_sandbox_processes(root, &[]) == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn owner_is_live(pid: u32) -> bool {
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    if !alive {
+        return false;
+    }
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return true;
+    };
+    cmdline
+        .windows(b"host_shutdown".len())
+        .any(|window| window == b"host_shutdown")
+}
+
+fn sweep_stale_roots() {
+    let Ok(entries) = std::fs::read_dir("/var/tmp") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let root = entry.path();
+        if !is_host_shutdown_root(&root) {
+            continue;
+        }
+        let Some(owner) = std::fs::read_to_string(root.join(OWNER_MARKER))
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if owner == std::process::id() || owner_is_live(owner) {
+            continue;
+        }
+        reap_root(&root);
+    }
+}
+
+fn spawn_orphan_reaper(root: &Path) -> Child {
+    let mut command = Command::new(std::env::current_exe().expect("test binary path"));
+    command
+        .args([
+            "--exact",
+            HOST_SHUTDOWN_TEST_NAME,
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(REAPER_OWNER_ENV, std::process::id().to_string())
+        .env(REAPER_ROOT_ENV, root)
+        .env_remove(ROOT_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().expect("spawn orphan reaper")
+}
+
+fn run_as_orphan_reaper() -> bool {
+    let (Some(owner), Some(root)) = (
+        std::env::var(REAPER_OWNER_ENV)
+            .ok()
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok()),
+        std::env::var_os(REAPER_ROOT_ENV).map(PathBuf::from),
+    ) else {
+        return false;
+    };
+    if !is_host_shutdown_root(&root) {
+        return false;
+    }
+    while unsafe { libc::getppid() } == owner {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    reap_root(&root);
+    true
+}
+
+#[test]
+fn orphan_reaper_reclaims_sigkilled_driver() {
+    let root = PathBuf::from(format!(
+        "/var/tmp/{ROOT_PREFIX}{}-driver-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut driver = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "orphan_reaper_sigkill_driver", "--nocapture"])
+        .env(REAPER_DRIVER_ROOT_ENV, &root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let status = driver.wait().unwrap();
+    assert!(!status.success(), "the reaper driver must be SIGKILLed");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while root.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !root.exists(),
+        "orphan reaper left sandbox {}",
+        root.display()
+    );
+}
+
+#[test]
+fn orphan_reaper_sigkill_driver() {
+    let Some(root) = std::env::var_os(REAPER_DRIVER_ROOT_ENV).map(PathBuf::from) else {
+        return;
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(OWNER_MARKER), std::process::id().to_string()).unwrap();
+    let _child = Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .env(ROOT_ENV, &root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _reaper = spawn_orphan_reaper(&root);
+    unsafe { libc::kill(std::process::id() as libc::pid_t, libc::SIGKILL) };
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires dbus-daemon; exercises a private bus and disposable named server, not host shutdown"]
 async fn host_shutdown_saves_layout_before_releasing_delay_lock() {
+    if run_as_orphan_reaper() {
+        return;
+    }
+    sweep_stale_roots();
     let base = std::path::PathBuf::from(format!(
-        "/var/tmp/hhs-{}-{}",
+        "/var/tmp/{ROOT_PREFIX}{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -127,8 +333,10 @@ async fn host_shutdown_saves_layout_before_releasing_delay_lock() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join(OWNER_MARKER), std::process::id().to_string()).unwrap();
+    let mut reaper = spawn_orphan_reaper(&base);
     let address = format!("unix:path={}", base.join("bus").display());
-    let mut bus = private_bus(&address);
+    let mut bus = private_bus(&address, &base);
     let peer = Arc::new(Mutex::new(None));
     let mut service = login_service(&address, peer.clone()).await;
     let session_dir = base.join(app_dir_name()).join("sessions/shutdown");
@@ -146,6 +354,7 @@ async fn host_shutdown_saves_layout_before_releasing_delay_lock() {
             .env("XDG_CONFIG_HOME", &base)
             .env("XDG_STATE_HOME", &base)
             .env("XDG_RUNTIME_DIR", &base)
+            .env(ROOT_ENV, &base)
             .env("HERDR_CONFIG_PATH", &config)
             .env_remove("HERDR_SOCKET_PATH")
             .env("DBUS_SYSTEM_BUS_ADDRESS", address.trim())
@@ -185,7 +394,7 @@ async fn host_shutdown_saves_layout_before_releasing_delay_lock() {
     if base.join("bus").exists() {
         std::fs::remove_file(base.join("bus")).unwrap();
     }
-    bus = private_bus(&address);
+    bus = private_bus(&address, &base);
     service = login_service(&address, peer.clone()).await;
     wait_for_inhibitor(&peer).await;
 
@@ -233,5 +442,8 @@ async fn host_shutdown_saves_layout_before_releasing_delay_lock() {
     drop(server);
     drop(service);
     drop(bus);
-    std::fs::remove_dir_all(base).unwrap();
+    reap_root(&base);
+    let _ = reaper.kill();
+    let _ = reaper.wait();
+    let _ = std::fs::remove_dir_all(base);
 }

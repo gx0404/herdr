@@ -2,6 +2,7 @@ use std::io;
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
+use toml_edit::TableLike;
 
 use super::command::{hook_command, legacy_bash_hook_command};
 #[cfg(windows)]
@@ -183,60 +184,173 @@ pub(crate) fn is_matching_command_hook(hook: &Value, command: &str) -> bool {
         && hook.get("command").and_then(Value::as_str) == Some(command)
 }
 
-pub(crate) fn build_codex_config_with_hooks(content: &str) -> String {
-    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
-    let trailing_newline = content.ends_with('\n');
-    let mut in_top_level_features = false;
-    let mut features_header_index = None;
-    let mut hooks_index = None;
-    let mut deprecated_hooks_indexes = Vec::new();
+/// Enable Codex hooks while preserving user-authored TOML text and semantics.
+///
+/// The parsed table is the semantic baseline; `toml_edit` changes only the
+/// feature spans, and the candidate is parsed again and compared against that
+/// baseline with the intended `hooks = true` migration. Unsafe or unrelated
+/// rewrites are rejected before the caller writes `config.toml`.
+pub(crate) fn build_codex_config_with_hooks(content: &str) -> io::Result<String> {
+    let mut expected: toml::Table = toml::from_str(content)
+        .map_err(|error| invalid_codex_config(format!("failed to parse config.toml: {error}")))?;
+    let expected_features = expected
+        .entry("features".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| invalid_codex_config("features must be a table or inline table"))?;
+    for key in ["hooks", "codex_hooks"] {
+        if expected_features
+            .get(key)
+            .is_some_and(|value| value.as_bool().is_none())
+        {
+            return Err(invalid_codex_config(format!(
+                "features.{key} must be a boolean"
+            )));
+        }
+    }
+    expected_features.remove("codex_hooks");
+    expected_features.insert("hooks".to_string(), toml::Value::Boolean(true));
 
-    for (index, line) in lines.iter().enumerate() {
-        if let Some(header) = toml_table_header(line) {
-            in_top_level_features = header == "[features]";
-            if in_top_level_features && features_header_index.is_none() {
-                features_header_index = Some(index);
+    let document = toml_edit::ImDocument::parse(content)
+        .map_err(|error| invalid_codex_config(format!("failed to parse config.toml: {error}")))?;
+    let feature_item = document.get("features");
+    let features: Option<&dyn TableLike> = feature_item.and_then(toml_edit::Item::as_table_like);
+    let hooks = features.and_then(|table| table.get("hooks"));
+    let deprecated = features.and_then(|table| table.get_key_value("codex_hooks"));
+    let mut edits = Vec::new();
+    if let Some(hooks) = hooks {
+        if hooks.as_value().and_then(toml_edit::Value::as_bool) != Some(true) {
+            let span = hooks
+                .span()
+                .ok_or_else(|| invalid_codex_config("cannot locate features.hooks"))?;
+            edits.push((span, "true"));
+        }
+    }
+    if let Some((key, value)) = deprecated {
+        let key_span = key
+            .span()
+            .ok_or_else(|| invalid_codex_config("cannot locate features.codex_hooks key"))?;
+        let value_span = value
+            .span()
+            .ok_or_else(|| invalid_codex_config("cannot locate features.codex_hooks value"))?;
+        if hooks.is_none() {
+            edits.push((key_span, "hooks"));
+            edits.push((value_span, "true"));
+        } else {
+            let inline_span = feature_item
+                .and_then(toml_edit::Item::as_inline_table)
+                .and_then(toml_edit::InlineTable::span);
+            let range = codex_deprecated_flag_range(content, key_span, value_span, inline_span)?;
+            edits.push((range, ""));
+        }
+    }
+
+    let candidate = if hooks.is_none() && deprecated.is_none() {
+        insert_codex_hooks(content, document.into_mut())?
+    } else {
+        let mut candidate = content.to_string();
+        edits.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        let mut previous_start = content.len();
+        for (range, replacement) in edits {
+            if range.end > previous_start || content.get(range.clone()).is_none() {
+                return Err(invalid_codex_config(
+                    "cannot safely edit overlapping feature flags",
+                ));
             }
-            continue;
+            previous_start = range.start;
+            candidate.replace_range(range, replacement);
         }
-
-        if !in_top_level_features {
-            continue;
-        }
-
-        if is_toml_key(line, "codex_hooks") {
-            deprecated_hooks_indexes.push(index);
-        } else if is_toml_key(line, "hooks") {
-            hooks_index = Some(index);
-        }
+        candidate
+    };
+    let parsed: toml::Table = toml::from_str(&candidate)
+        .map_err(|error| invalid_codex_config(format!("invalid edited config.toml: {error}")))?;
+    if parsed != expected {
+        return Err(invalid_codex_config(
+            "editing feature flags would change unrelated settings",
+        ));
     }
-
-    if let Some(index) = hooks_index {
-        lines[index] = "hooks = true".to_string();
-    }
-
-    for index in deprecated_hooks_indexes.into_iter().rev() {
-        lines.remove(index);
-    }
-
-    if hooks_index.is_none() {
-        if let Some(index) = features_header_index {
-            lines.insert(index + 1, "hooks = true".to_string());
-            return join_toml_lines(lines, trailing_newline);
-        }
-
-        let mut result = content.trim_end_matches('\n').to_string();
-        if !result.is_empty() {
-            result.push('\n');
-            result.push('\n');
-        }
-        result.push_str("[features]\nhooks = true\n");
-        return result;
-    }
-
-    join_toml_lines(lines, trailing_newline)
+    Ok(candidate)
 }
 
+fn invalid_codex_config(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn codex_deprecated_flag_range(
+    content: &str,
+    key: std::ops::Range<usize>,
+    value: std::ops::Range<usize>,
+    inline: Option<std::ops::Range<usize>>,
+) -> io::Result<std::ops::Range<usize>> {
+    if let Some(inline) = inline {
+        let before = content
+            .get(inline.start + 1..key.start)
+            .ok_or_else(|| invalid_codex_config("cannot locate inline feature separator"))?;
+        let after = content
+            .get(value.end..inline.end.saturating_sub(1))
+            .ok_or_else(|| invalid_codex_config("cannot locate inline feature separator"))?;
+        if let Some(comma) = after.find(',') {
+            if after[..comma].trim().is_empty() {
+                return Ok(key.start..value.end + comma + 1);
+            }
+        }
+        let before = before.trim_end();
+        if before.ends_with(',') {
+            return Ok(inline.start + before.len()..value.end);
+        }
+        return Err(invalid_codex_config(
+            "cannot safely remove inline features.codex_hooks",
+        ));
+    }
+
+    let line_start = content[..key.start]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let prefix = &content[line_start..key.start];
+    let indentation = prefix.len() - prefix.trim_start_matches([' ', '\t', '\u{feff}']).len();
+    Ok(line_start + indentation..value.end)
+}
+
+fn insert_codex_hooks(content: &str, mut document: toml_edit::DocumentMut) -> io::Result<String> {
+    let roundtrip = document.to_string();
+    let omit_final_newline =
+        !content.ends_with('\n') && roundtrip.strip_suffix('\n') == Some(content);
+    if roundtrip != content && !omit_final_newline {
+        return Err(invalid_codex_config(
+            "cannot preserve config.toml formatting while adding hooks",
+        ));
+    }
+    let features = document
+        .entry("features")
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or_else(|| invalid_codex_config("features must be a table or inline table"))?;
+    features.insert("hooks", toml_edit::value(true));
+    let mut candidate = document.to_string();
+    if omit_final_newline && candidate.ends_with('\n') {
+        candidate.pop();
+    }
+    let prefix = content
+        .bytes()
+        .zip(candidate.bytes())
+        .take_while(|(before, after)| before == after)
+        .count();
+    let suffix = content.as_bytes()[prefix..]
+        .iter()
+        .rev()
+        .zip(candidate.as_bytes()[prefix..].iter().rev())
+        .take_while(|(before, after)| before == after)
+        .count();
+    if prefix + suffix != content.len() {
+        return Err(invalid_codex_config(
+            "adding hooks would rewrite unrelated config.toml text",
+        ));
+    }
+    Ok(candidate)
+}
+
+/// Replace only Herdr's marked Kimi hook block. Removing the old marker first
+/// makes repeated installs idempotent and leaves unmarked user TOML untouched.
 pub(crate) fn build_kimi_config_with_hooks(content: &str, hook_path: &Path) -> String {
     let mut result = remove_kimi_config_block(content)
         .trim_end_matches('\n')
@@ -337,33 +451,4 @@ pub(crate) fn join_toml_lines(lines: Vec<String>, trailing_newline: bool) -> Str
         result.push('\n');
     }
     result
-}
-
-pub(crate) fn toml_table_header(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with('#') || !trimmed.starts_with('[') {
-        return None;
-    }
-
-    let header_end = if trimmed.starts_with("[[") {
-        trimmed.find("]]").map(|index| index + 2)?
-    } else {
-        trimmed.find(']').map(|index| index + 1)?
-    };
-    let header = &trimmed[..header_end];
-    let rest = trimmed[header_end..].trim_start();
-    if !rest.is_empty() && !rest.starts_with('#') {
-        return None;
-    }
-
-    Some(header)
-}
-
-pub(crate) fn is_toml_key(line: &str, key: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.starts_with('#') || !trimmed.starts_with(key) {
-        return false;
-    }
-
-    trimmed[key.len()..].trim_start().starts_with('=')
 }

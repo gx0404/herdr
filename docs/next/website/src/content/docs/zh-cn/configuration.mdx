@@ -35,6 +35,10 @@ herdr --default-config > ~/.config/herdr/config.toml
 
 如果配置值无效，Herdr 会回退到安全的默认值，并显示启动警告。
 
+启动和重载诊断会以简短的 `herdr config check` 提示结尾。配置无效或无法读取时，会说明 Herdr 是使用默认值还是保留当前配置；未知键会标为 unknown keys。运行 `herdr config check` 可查看完整诊断；发现问题时它会以非零状态退出。
+
+Herdr 自己编辑 `config.toml` 时，会在目标旁写入临时文件、同步它、原子替换普通文件，并同步父目录。已有符号链接会跟随并更新其普通文件目标，而不会替换链接；目录、非普通文件目标和不安全的符号链接链会被拒绝。编辑失败时，已有配置保持不变。
+
 当 `onboarding` 缺失或为 true 时，Herdr 会显示首次运行设置。继续完成引导会写入 `onboarding = false`，并打开设置中的集成标签页。完成设置后，如果想跳过此流程，请设置该值。
 
 ```toml

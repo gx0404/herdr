@@ -438,6 +438,48 @@ fn narrow_cell_holding_a_two_wide_grapheme_is_blanked_only_at_the_last_column() 
 }
 
 #[test]
+fn narrow_dirty_patches_match_full_render_across_cjk_and_vs16_edge_transitions() {
+    for glyph in ["中", "⚠\u{fe0f}"] {
+        let pane = WidePane::new(8, 2);
+        let mut retained = placeholder_rows(5, 2);
+        let updates = [
+            (
+                "\x1b[?2027l\x1b[?25l\x1b[2;1HKEEP\x1b[1;5HX".to_string(),
+                4,
+                "X",
+            ),
+            (format!("\x1b[1;1H\x1b[2K\x1b[1;4H{glyph}"), 3, glyph),
+            (format!("\x1b[1;1H\x1b[2K\x1b[1;5H{glyph}"), 4, " "),
+            ("\x1b[1;1H\x1b[2K\x1b[1;5HX".to_string(), 4, "X"),
+        ];
+        for (step, (bytes, column, expected)) in updates.iter().enumerate() {
+            for terminal in [&pane.pane, &pane.incremental] {
+                let _ =
+                    terminal.process_pty_bytes(PaneId::from_raw(1), 0, bytes.as_bytes(), &pane.tx);
+            }
+            let TerminalDirtyPatchOutcome::Patch(patch) =
+                pane.incremental.collect_dirty_patch(5, 2)
+            else {
+                panic!("expected dirty patch for {glyph:?}, step {step}");
+            };
+            let rows = patch_symbols(patch);
+            assert!(rows.iter().any(|(row, _)| *row == 0));
+            for (row, symbols) in rows {
+                assert_eq!(symbols.len(), 5);
+                retained[usize::from(row)] = symbols;
+            }
+            assert_eq!(retained[0][*column], *expected, "{glyph:?}, step {step}");
+            assert_eq!(retained[1], cells(&["K", "E", "E", "P", " "]));
+            assert_eq!(retained, pane.render_area(5), "{glyph:?}, step {step}");
+            assert_no_wide_glyph_past_right_edge(&retained);
+            if step == 2 {
+                assert_eq!(pane.render_area(8)[0][4], glyph);
+            }
+        }
+    }
+}
+
+#[test]
 fn inline_redraw_of_cjk_lines_that_fill_the_width_leaves_no_residue() {
     // Claude Code 这类 inline 程序（Ink）：自己按显示宽度折行，行与行之间写换行，
     // 重绘时逐行 EL + CUU 擦掉上一帧再整帧重写，从不依赖终端自动换行。

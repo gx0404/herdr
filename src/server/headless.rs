@@ -21,15 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
 use interprocess::local_socket::traits::Listener as _;
-#[cfg(windows)]
-use interprocess::local_socket::traits::Stream as _;
 #[cfg(unix)]
 use interprocess::local_socket::ListenerNonblockingMode;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
-#[cfg(windows)]
-use tracing::error;
 use tracing::{debug, info, warn};
 
 use base64::Engine;
@@ -39,13 +36,16 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
+#[cfg(unix)]
+use crate::ipc::LocalListener;
 use crate::ipc::{
-    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
-    SocketFileIdentity,
+    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, SocketFileIdentity,
 };
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
 };
+#[cfg(windows)]
+use crate::server::client_accept::spawn_windows_client_accept_thread;
 #[cfg(unix)]
 use crate::server::client_accept::{
     accept_pending_client_connections, reject_pending_client_connections,
@@ -54,7 +54,7 @@ use crate::server::client_shell::{
     render_pane_surface as render_client_shell_pane_surface,
     snapshot_with_completions as client_shell_snapshot,
 };
-use crate::server::client_transport::ServerEvent;
+use crate::server::client_transport::{ClientHandshakeLimiter, ServerEvent};
 use crate::server::clients::{
     latest_shell_client, render_targets, terminal_stream_client_ids, ClientConnection,
     ClientConnectionMode, ClientShellInputTarget, DeferredRender, RenderTargetMode,
@@ -202,6 +202,8 @@ pub struct HeadlessServer {
     api_server: Option<api::ServerHandle>,
     #[cfg(unix)]
     client_listener: LocalListener,
+    #[cfg(unix)]
+    client_handshake_limiter: Arc<ClientHandshakeLimiter>,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
@@ -267,51 +269,6 @@ pub struct HeadlessServer {
     _test_scratch_dir: Option<tests::ScratchDir>,
 }
 
-#[cfg(windows)]
-fn spawn_windows_client_accept_thread(
-    listener: LocalListener,
-    should_quit: Arc<AtomicBool>,
-    server_event_tx: mpsc::Sender<ServerEvent>,
-) {
-    std::thread::spawn(move || {
-        let mut next_client_id = 1_u64;
-        while !should_quit.load(Ordering::Acquire) {
-            let stream = match listener.accept() {
-                Ok(stream) => stream,
-                Err(err) => {
-                    if should_quit.load(Ordering::Acquire) {
-                        break;
-                    }
-                    error!(err = %err, "client listener accept failed");
-                    std::thread::sleep(Duration::from_millis(50));
-                    continue;
-                }
-            };
-
-            let client_id = next_client_id;
-            next_client_id = next_client_id.saturating_add(1);
-
-            if let Err(err) = stream.set_nonblocking(true) {
-                warn!(err = %err, "failed to set client stream nonblocking");
-                continue;
-            }
-
-            let should_quit = should_quit.clone();
-            let server_event_tx = server_event_tx.clone();
-            std::thread::spawn(move || {
-                if let Err(err) = crate::server::client_transport::handle_client_handshake(
-                    stream,
-                    client_id,
-                    &server_event_tx,
-                    &should_quit,
-                ) {
-                    debug!(client_id, err = %err, "client handshake failed");
-                }
-            });
-        }
-    });
-}
-
 impl HeadlessServer {
     /// Creates and starts the headless server.
     ///
@@ -340,8 +297,14 @@ impl HeadlessServer {
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        let client_handshake_limiter = ClientHandshakeLimiter::new();
         #[cfg(windows)]
-        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
+        spawn_windows_client_accept_thread(
+            listener,
+            should_quit.clone(),
+            server_event_tx.clone(),
+            client_handshake_limiter.clone(),
+        );
 
         let server_keybindings = app_keybindings(&app);
         let headless_size = app.state.headless_size;
@@ -361,6 +324,8 @@ impl HeadlessServer {
             api_server,
             #[cfg(unix)]
             client_listener: listener,
+            #[cfg(unix)]
+            client_handshake_limiter,
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
@@ -1118,6 +1083,7 @@ impl HeadlessServer {
             &mut self.next_client_id,
             &self.should_quit,
             &self.server_event_tx,
+            &self.client_handshake_limiter,
         )
     }
 

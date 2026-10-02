@@ -131,23 +131,46 @@ fn changed_rows(
         let frame_start = usize::from(y) * usize::from(frame.width) + usize::from(area.x);
         let frame_end = frame_start.checked_add(width)?;
         let existing = frame.cells.get(frame_start..frame_end)?;
+        // A wider source patch can end inside a grapheme at a narrower recipient's
+        // right edge. Correct only that edge cell; the out-of-area continuation can
+        // be an empty cell even when the visible grapheme has non-zero width.
+        let clipped_edge = cells[..width]
+            .last()
+            .filter(|cell| {
+                width < cells.len()
+                    && (unicode_width::UnicodeWidthStr::width(cell.symbol.as_str()) > 1
+                        || (!cell.symbol.is_empty() && cells[width].symbol.is_empty()))
+            })
+            .map(|cell| protocol::CellData {
+                symbol: " ".into(),
+                hyperlink: None,
+                ..*cell
+            });
+        let prefix_width = width - usize::from(clipped_edge.is_some());
         // 先按接收者基线翻译超链接索引，再做逐格 diff——两表不同源，
-        // 直接比 u32 索引是错的。未改索引的格子保持借用，不逐格克隆。
+        // 直接比 u32 索引是错的。被裁掉的字形不追加不可见链接，其余格仍零拷贝借用。
         let translation = RowHyperlinks::new(
-            &cells[..width],
+            &cells[..prefix_width],
             &patch.hyperlinks,
             frame,
             new_hyperlink_uris,
         );
+        let cell_at = |offset| {
+            if offset < prefix_width {
+                translation.cell(offset)
+            } else {
+                clipped_edge.as_ref()
+            }
+        };
         let mut offset = 0;
         while offset < width {
-            if existing[offset] == *translation.cell(offset)? {
+            if existing[offset] == *cell_at(offset)? {
                 offset += 1;
                 continue;
             }
             let start = offset;
             offset += 1;
-            while offset < width && existing[offset] != *translation.cell(offset)? {
+            while offset < width && existing[offset] != *cell_at(offset)? {
                 offset += 1;
             }
             // Include the following cell so a wide-to-narrow (or
@@ -156,7 +179,7 @@ fn changed_rows(
             let end = offset.saturating_add(1).min(width);
             let mut emitted = Vec::with_capacity(end - start);
             for index in start..end {
-                emitted.push(translation.cell(index)?.clone());
+                emitted.push(cell_at(index)?.clone());
             }
             rows.push(protocol::PaneSurfacePatchRow {
                 x: area.x.checked_add(u16::try_from(start).ok()?)?,

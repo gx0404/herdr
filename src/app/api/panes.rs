@@ -123,6 +123,7 @@ impl App {
         self.state
             .terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
+        self.authorize_session_layout_change();
         self.schedule_session_save();
         // APP-012：不做 unwrap；新建 pane 元数据缺失按创建失败返回。
         let Some(pane) = self.pane_info(ws_idx, new_pane.pane_id) else {
@@ -1312,6 +1313,7 @@ impl App {
 
         self.state.remove_alias_shadowed_by_new_pane(moved_pane_id);
         self.state.mark_session_dirty();
+        self.authorize_session_layout_change();
         self.schedule_session_save();
         let Some(pane) = self.pane_info(target_ws_idx, moved_pane_id) else {
             return encode_error(id, "pane_move_failed", "moved pane is unavailable");
@@ -2091,6 +2093,7 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
+        self.authorize_session_layout_change();
 
         Ok(())
     }

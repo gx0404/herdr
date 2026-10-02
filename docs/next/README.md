@@ -80,6 +80,47 @@ just test        # unit tests
 just check       # formatting, tests, and maintenance checks
 ```
 
+The test orchestrator runs five phases: nextest, maintenance, UI hot-path architecture,
+integration assets, and docs contract. Its combined worker budget defaults to
+`min(8, cpu_count)` and can be set with `HERDR_TEST_BUDGET` or `--test-budget`. The
+limits are resolved as command line > environment > default, and every explicit value
+must be a positive integer:
+
+- phase concurrency defaults to `min(2, 5, test_budget)`; use
+  `HERDR_TEST_PHASE_JOBS`, `--phase-jobs`, or the `--jobs` alias;
+- maintenance workers default to `min(4, test_budget)`; use
+  `HERDR_MAINTENANCE_JOBS` or `--maintenance-jobs` (the standalone
+  `run_parallel_unittest.py` also accepts `--jobs`);
+- nextest threads default to `max(1, test_budget-maintenance_jobs)`; use
+  `HERDR_NEXTEST_JOBS` or `--nextest-jobs`.
+
+The orchestrator passes the resolved maintenance and nextest values to its phase
+processes. Explicit worker overrides are not silently capped by the combined budget.
+Each run gets an isolated directory under `target/test-suite-logs/<run-id>/` with
+per-phase logs and an atomically updated `manifest.json`. The manifest records
+`run_id`, `status`, `manifest`, `test_budget`, `phase_jobs`, `maintenance_jobs`,
+`nextest_jobs`, `failures`, and, under `phases`, each phase's `recipe`, `status`,
+`exit_code`, `seconds`, and `log`. Direct `just nextest-all`, `just test-one`, and
+`just ci-tests` recipes use `HERDR_NEXTEST_JOBS` and default to 4 when it is unset.
+
+For a Linux or macOS release performance smoke comparison, run:
+
+```bash
+scripts/release_perf_smoke.sh target/release/herdr
+```
+
+The smoke runs the candidate against a stable baseline for the `hidden50` and
+`visible30` scenarios in two serial rounds. Set `HERDR_PERF_BASELINE_BIN` to use a
+local baseline instead of downloading the stable binary, and use
+`HERDR_PERF_SAMPLE_SECONDS` or `HERDR_PERF_WARMUP_SECONDS` to change the sample and
+warmup durations. Each `.local/perf-baseline/run-*` run keeps its commands, metadata,
+raw samples, summary, run log, and exit code, while removing only its temporary state.
+The smoke and each case isolate all user state by setting `HOME`, `USERPROFILE`,
+`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`,
+`XDG_CACHE_HOME`, `APPDATA`, `LOCALAPPDATA`, `HERDR_HOME`, `CODEX_HOME`,
+`KIMI_CODE_HOME`, and `TMPDIR` to private directories under that run; each case also
+sets `TMUX_TMPDIR` and clears inherited herdr socket/session variables before launch.
+
 ## license
 
 Herdr is licensed under the [Apache License 2.0](LICENSE).

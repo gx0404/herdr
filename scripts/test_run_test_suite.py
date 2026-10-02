@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import run_test_suite
 
@@ -37,6 +41,133 @@ class PhaseDefinitionTests(unittest.TestCase):
         justfile = JUSTFILE.read_text(encoding="utf-8")
         self.assertIn("scripts.test_run_test_suite", justfile)
 
+    def test_nextest_recipes_have_an_explicit_overridable_thread_limit(self) -> None:
+        justfile = JUSTFILE.read_text(encoding="utf-8")
+        self.assertIn('env_var_or_default("HERDR_NEXTEST_JOBS", "4")', justfile)
+        self.assertEqual(justfile.count("--test-threads {{nextest_jobs}}"), 3)
+
+    def test_default_log_root_is_explicit_and_each_run_uses_a_child_directory(self) -> None:
+        self.assertEqual(PROJECT_ROOT / "target" / "test-suite-logs", run_test_suite.LOG_DIR)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def runner(name: str, recipe: str, log_path: Path) -> tuple[int, float]:
+                log_path.write_text(f"{name}:{recipe}\n", encoding="utf-8")
+                return 0, 0.01
+
+            with mock.patch.object(run_test_suite, "LOG_DIR", root):
+                run_test_suite.run_all(
+                    phase_jobs=1,
+                    run_id="run-a",
+                    phase_runner=runner,
+                )
+                run_test_suite.run_all(
+                    phase_jobs=1,
+                    run_id="run-b",
+                    phase_runner=runner,
+                )
+            self.assertTrue((root / "run-a" / "manifest.json").is_file())
+            self.assertTrue((root / "run-b" / "manifest.json").is_file())
+            self.assertTrue((root / "run-a" / "nextest.log").is_file())
+            self.assertTrue((root / "run-b" / "nextest.log").is_file())
+
+
+class PhaseConfigurationTests(unittest.TestCase):
+    def test_environment_phase_limit_is_used_and_cli_value_wins(self) -> None:
+        self.assertEqual(
+            run_test_suite.resolve_phase_jobs(environ={run_test_suite.PHASE_JOBS_ENV: "3"}),
+            3,
+        )
+        self.assertEqual(
+            run_test_suite.resolve_phase_jobs(1, {run_test_suite.PHASE_JOBS_ENV: "3"}),
+            1,
+        )
+
+    def test_invalid_phase_limit_is_not_silently_accepted(self) -> None:
+        with self.assertRaises(ValueError):
+            run_test_suite.resolve_phase_jobs(environ={run_test_suite.PHASE_JOBS_ENV: "0"})
+
+    def test_budget_defaults_leave_capacity_for_nextest(self) -> None:
+        environment = {run_test_suite.TEST_BUDGET_ENV: "8"}
+        maintenance = run_test_suite.resolve_maintenance_jobs(environ=environment)
+        self.assertEqual(maintenance, 4)
+        self.assertEqual(
+            run_test_suite.resolve_nextest_jobs(environ=environment, maintenance_jobs=maintenance),
+            4,
+        )
+
+    def test_budget_cli_values_override_environment(self) -> None:
+        environment = {
+            run_test_suite.TEST_BUDGET_ENV: "12",
+            run_test_suite.MAINTENANCE_JOBS_ENV: "3",
+            run_test_suite.NEXTEST_JOBS_ENV: "5",
+        }
+        self.assertEqual(run_test_suite.resolve_test_budget(7, environment), 7)
+        self.assertEqual(run_test_suite.resolve_maintenance_jobs(2, environment, test_budget=7), 2)
+        self.assertEqual(
+            run_test_suite.resolve_nextest_jobs(1, environment, maintenance_jobs=2, test_budget=7),
+            1,
+        )
+
+    def test_combined_runner_passes_worker_limits_to_child_environment(self) -> None:
+        seen: dict[str, dict[str, str]] = {}
+
+        def runner(
+            name: str,
+            recipe: str,
+            log_path: Path,
+            *,
+            environment: dict[str, str],
+        ) -> tuple[int, float]:
+            seen[name] = environment
+            log_path.write_text("ok\n", encoding="utf-8")
+            return 0, 0.01
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(run_test_suite, "run_phase", side_effect=runner):
+                run_test_suite.run_all(
+                    phase_jobs=1,
+                    test_budget=9,
+                    maintenance_jobs=3,
+                    nextest_jobs=6,
+                    log_root=Path(temporary),
+                    run_id="environment",
+                )
+        self.assertEqual(len(seen), len(run_test_suite.PHASES))
+        self.assertTrue(
+            all(
+                environment[run_test_suite.MAINTENANCE_JOBS_ENV] == "3"
+                and environment[run_test_suite.NEXTEST_JOBS_ENV] == "6"
+                for environment in seen.values()
+            )
+        )
+
+    def test_phase_limit_bounds_active_workers(self) -> None:
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        def runner(name: str, recipe: str, log_path: Path) -> tuple[int, float]:
+            nonlocal active, maximum
+            log_path.write_text("ok\n", encoding="utf-8")
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return 0, 0.02
+
+        with tempfile.TemporaryDirectory() as temporary:
+            results = run_test_suite.run_all(
+                phase_jobs=2,
+                log_root=Path(temporary),
+                run_id="bounded",
+                phase_runner=runner,
+            )
+        self.assertEqual(len(results), len(run_test_suite.PHASES))
+        self.assertEqual(maximum, 2)
+
 
 class SummarizeTests(unittest.TestCase):
     def test_all_pass_yields_zero(self) -> None:
@@ -52,6 +183,68 @@ class SummarizeTests(unittest.TestCase):
         results = {name: (0, 1.0) for name in run_test_suite.phase_names()}
         results["nextest"] = (None, 0.1)
         self.assertEqual(run_test_suite.summarize(results), (1, ["nextest"]))
+
+    def test_missing_phase_counts_as_failure(self) -> None:
+        results = {"nextest": (0, 1.0)}
+        code, failures = run_test_suite.summarize(results)
+        self.assertEqual(code, 1)
+        self.assertEqual(failures, [name for name, _ in run_test_suite.PHASES if name != "nextest"])
+
+
+class ManifestTests(unittest.TestCase):
+    def test_manifest_is_atomic_and_records_final_phase_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def runner(name: str, recipe: str, log_path: Path) -> tuple[int, float]:
+                log_path.write_text("ok\n", encoding="utf-8")
+                return 0, 0.25
+
+            run_test_suite.run_all(
+                phase_jobs=3,
+                test_budget=9,
+                maintenance_jobs=3,
+                nextest_jobs=6,
+                log_root=root,
+                run_id="manifest-run",
+                phase_runner=runner,
+            )
+            run_dir = root / "manifest-run"
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "passed")
+            self.assertEqual(manifest["run_id"], "manifest-run")
+            self.assertEqual(
+                {key: manifest[key] for key in ("test_budget", "phase_jobs", "maintenance_jobs", "nextest_jobs")},
+                {"test_budget": 9, "phase_jobs": 3, "maintenance_jobs": 3, "nextest_jobs": 6},
+            )
+            self.assertTrue(all(item["status"] == "passed" for item in manifest["phases"].values()))
+            self.assertEqual(list(run_dir.glob(".manifest.json.*.tmp")), [])
+
+    def test_failed_phase_is_recorded_as_failed_not_green(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def runner(name: str, recipe: str, log_path: Path) -> tuple[int | None, float]:
+                log_path.write_text("failure\n", encoding="utf-8")
+                if name == "maintenance":
+                    return 3, 0.1
+                if name == "docs-contract":
+                    return None, 0.1
+                return 0, 0.1
+
+            results = run_test_suite.run_all(
+                phase_jobs=2,
+                log_root=root,
+                run_id="failed-run",
+                phase_runner=runner,
+            )
+            manifest = json.loads((root / "failed-run" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_test_suite.summarize(results)[0], 1)
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(manifest["phases"]["maintenance"]["exit_code"], 3)
+            self.assertEqual(manifest["phases"]["maintenance"]["status"], "failed")
+            self.assertIsNone(manifest["phases"]["docs-contract"]["exit_code"])
+            self.assertEqual(manifest["phases"]["docs-contract"]["status"], "failed")
 
 
 class RunPhaseTests(unittest.TestCase):

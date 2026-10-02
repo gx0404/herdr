@@ -14,6 +14,10 @@
   状态（`vendored-libghostty-vt.md`），不在绑定层复刻终端逻辑。
 - 输入编码/解析（`src/input/encode.rs`、`parse.rs`、`src/pane/kitty_keyboard.rs`
   等与 pane 域并集）保持 platform-gated：Windows VT 输入路径见 `platform.md`。
+- Windows PTY actor 的 admission 是明确预算而不是只依赖 channel 容量：输入最多 1024
+  项/16 MiB，响应最多 256 项/1 MiB。输入超限返回 `Full`/`WouldBlock`；响应超限丢弃
+  整个响应并只记录一次告警，许可随 `Bytes` 的最后一个所有者释放。预算检查不得放回
+  逐字节解析热循环。
 
 ## kitty graphics 与 pane surface
 

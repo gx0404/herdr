@@ -178,6 +178,8 @@ herdr channel set stable
 
 For direct installs, changing channels checks the selected channel and installs its latest binary. If that update fails, run `herdr update` to retry from the configured channel.
 
+Herdr's own updater requires a non-empty SHA-256 checksum in the selected release manifest. It verifies the downloaded asset before installation and aborts without replacing the current binary when the checksum is missing or does not match. Package-manager installs keep their existing update path.
+
 Preview builds are regularly published GitHub prereleases from the current development branch. They are useful when you want fixes before the next stable release, but they can regress. Homebrew, mise, and Nix installs do not use the preview channel.
 
 Stable is the recommended channel for normal Windows use. Preview receives fixes sooner but can regress, so opt in only when you want that tradeoff. Existing Windows preview installs remain on preview until you switch them explicitly. If an older preview build rejects `herdr channel set stable`, run `herdr update` once on preview, then retry the channel switch.

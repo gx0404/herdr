@@ -710,16 +710,44 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::AgentActivityRefreshedFor {
+                pane_id,
+                identity,
+                started,
+                ticket,
+                result,
+            } => {
+                let pane_id = *pane_id;
+                let started = started.clone();
+                let current = self.app.state.agent_activity_is_current(pane_id, identity);
+                let store = current
+                    && match result {
+                        Ok(_) => self.agent_activity.accept_pane_tree(pane_id, *ticket),
+                        Err(_) => true,
+                    };
+                let changed = store && self.app.handle_internal_event_with_render_impact(ev);
+                self.agent_activity
+                    .pane_refreshed_for(pane_id, &started, changed);
+                false
+            }
+            AppEvent::AgentActivityReadFor {
+                pane_id,
+                identity,
+                ticket,
+                ..
+            } => {
+                let store = self.app.state.agent_activity_is_current(*pane_id, identity)
+                    && self.agent_activity.accept_pane_tree(*pane_id, *ticket);
+                let changed = store && self.app.handle_internal_event_with_render_impact(ev);
+                self.agent_activity.pane_read(changed);
+                false
+            }
+            #[cfg(test)]
             AppEvent::AgentActivityRefreshed {
                 pane_id,
                 ticket,
                 result,
             } => {
-                // 活动树只进投影：不触发整帧重绘，改由调度器的投影脏标记安排一次
-                // chrome tick——快照未变时只走投影；修订号前进时同 tick 补改戳帧
-                // （见 `dispatch_render_tick` / `projection_restamp.rs`）。比已落库
-                // 那份开始得更早的结果（读整棵树先开始、先落了更新的树）作废；失败
-                // 结果照常交给 app 记日志，它不改落库的树。
                 let pane_id = *pane_id;
                 let store = match result {
                     Ok(_) => self.agent_activity.accept_pane_tree(pane_id, *ticket),
@@ -729,11 +757,10 @@ impl HeadlessServer {
                 self.agent_activity.pane_refreshed(pane_id, changed);
                 false
             }
+            #[cfg(test)]
             AppEvent::AgentActivityRead {
                 pane_id, ticket, ..
             } => {
-                // 读整棵树的结果同样只进投影、按开始顺序号比新旧，但不放调度发现的
-                // 在途名额。
                 let store = self.agent_activity.accept_pane_tree(*pane_id, *ticket);
                 let changed = store && self.app.handle_internal_event_with_render_impact(ev);
                 self.agent_activity.pane_read(changed);
@@ -785,14 +812,20 @@ impl HeadlessServer {
     }
 
     pub(super) fn drain_all_internal_events_with_forwarding(&mut self) -> bool {
+        // This is the API request preflight barrier. Snapshot the queue depth before
+        // handling any event so a producer that keeps refilling the channel cannot
+        // starve the request; every event visible at the request boundary still
+        // reaches the query before its state is read unless shutdown interrupts the drain.
+        let barrier = self.app.event_rx.len();
         let mut changed = false;
-        loop {
-            let (had_event, batch_changed) =
-                self.drain_internal_events_with_forwarding_up_to(crate::app::APP_EVENT_DRAIN_LIMIT);
-            changed |= batch_changed;
-            if !had_event || self.should_quit.load(Ordering::Acquire) {
+        for _ in 0..barrier {
+            if self.should_quit.load(Ordering::Acquire) {
                 break;
             }
+            let Ok(ev) = self.app.event_rx.try_recv() else {
+                break;
+            };
+            changed |= self.handle_internal_event_with_forwarding(ev);
         }
         changed
     }

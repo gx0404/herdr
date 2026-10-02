@@ -189,6 +189,10 @@ impl ClientShellState {
         rows: u16,
     ) -> Option<crate::client::frame_output::ComposedFrame> {
         let snapshot = self.snapshot.as_deref()?;
+        #[cfg(test)]
+        {
+            self.workbench.compose_count += 1;
+        }
         let now = self
             .last_composed_at
             .unwrap_or_else(std::time::Instant::now);

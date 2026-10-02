@@ -81,6 +81,26 @@ class PlanTests(TempModuleMixin, unittest.TestCase):
         self.assertTrue(all(not unit.test_ids for unit in units))
 
 
+class WorkerConfigurationTests(unittest.TestCase):
+    def test_default_workers_are_safe_bounded(self) -> None:
+        self.assertGreaterEqual(runner.DEFAULT_WORKERS, 1)
+        self.assertLessEqual(runner.DEFAULT_WORKERS, 4)
+
+    def test_environment_worker_limit_is_used_and_cli_value_wins(self) -> None:
+        self.assertEqual(
+            runner.resolve_jobs(environ={runner.MAINTENANCE_JOBS_ENV: "3"}),
+            3,
+        )
+        self.assertEqual(
+            runner.resolve_jobs(1, {runner.MAINTENANCE_JOBS_ENV: "3"}),
+            1,
+        )
+
+    def test_invalid_worker_limit_is_not_silently_accepted(self) -> None:
+        with self.assertRaises(ValueError):
+            runner.resolve_jobs(environ={runner.MAINTENANCE_JOBS_ENV: "0"})
+
+
 class OrderingAndDurationTests(unittest.TestCase):
     def units(self) -> list[runner.Unit]:
         return [
@@ -109,12 +129,19 @@ class OrderingAndDurationTests(unittest.TestCase):
             path = Path(temporary) / "nested" / "durations.json"
             runner.record_durations(results, path)
             self.assertEqual(runner.load_durations(path), {"m.Fast.test_a": 0.4, "broken": 1.5})
+            self.assertEqual(list(path.parent.glob(".durations.json.*.tmp")), [])
 
     def test_unreadable_history_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "durations.json"
             path.write_text("[not, a, mapping", encoding="utf-8")
             self.assertEqual(runner.load_durations(path), {})
+
+    def test_default_duration_path_is_under_project_test_logs(self) -> None:
+        self.assertEqual(
+            runner.DURATIONS_PATH,
+            PROJECT_ROOT / "target" / "test-suite-logs" / "unittest-durations.json",
+        )
 
 
 class SummaryTests(unittest.TestCase):

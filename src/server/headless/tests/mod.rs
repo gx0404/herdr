@@ -89,8 +89,14 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         .expect("set listener nonblocking");
     let (server_event_tx, server_event_rx) = mpsc::channel(64);
     let should_quit = Arc::new(AtomicBool::new(false));
+    let client_handshake_limiter = crate::server::client_transport::ClientHandshakeLimiter::new();
     #[cfg(windows)]
-    spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
+    spawn_windows_client_accept_thread(
+        listener,
+        should_quit.clone(),
+        server_event_tx.clone(),
+        client_handshake_limiter.clone(),
+    );
     let server_keybindings = app_keybindings(&app);
     let headless_size = app.state.headless_size;
     // 活动树运行时的 home 隔离到本测试的临时目录：适配器（zcode 等）会按 home 读
@@ -114,6 +120,8 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         api_server: None,
         #[cfg(unix)]
         client_listener: listener,
+        #[cfg(unix)]
+        client_handshake_limiter,
         client_socket_path: socket_path,
         client_socket_identity,
         clients: HashMap::new(),
@@ -1930,6 +1938,203 @@ async fn different_size_shells_receive_geometry_specific_patches_from_one_dirty_
     );
 
     shutdown_test_runtimes(&mut server);
+}
+
+fn assert_different_size_shells_retained_boundary_matches_full(glyph: &str, linked: bool) {
+    let link_start = if linked {
+        "\x1b]8;;https://example.com/wide-edge\x1b\\"
+    } else {
+        ""
+    };
+    let link_end = if linked { "\x1b]8;;\x1b\\" } else { "" };
+    let receive_surface =
+        |receiver: &std::sync::mpsc::Receiver<Vec<u8>>, context: &str| match read_server_message(
+            recv_forwarded(receiver, context),
+        ) {
+            ServerMessage::PaneSurface(surface) => surface,
+            other => panic!("{context}: expected full surface, got {other:?}"),
+        };
+    let setup = || {
+        let mut server = test_headless_server();
+        let pane_id = install_shared_view_test_runtime(&mut server);
+        let (large_control, large_render) = connect_test_shell(&mut server, 7, 80, 23);
+        let (small_control, small_render) = connect_test_shell(&mut server, 8, 68, 17);
+        let _ = client_shell_snapshot(&large_control);
+        let _ = client_shell_snapshot(&small_control);
+        server.claim_shell_tab_geometry(7, false);
+        write_shared_test_pane(
+            &mut server,
+            pane_id,
+            format!("\x1b[?2027l\x1b[?25l\x1b[2;1H{link_start}KEEP{link_end}").as_bytes(),
+        );
+        server.render_and_stream();
+        let surfaces = [
+            receive_surface(&large_render, "large initial surface"),
+            receive_surface(&small_render, "small initial surface"),
+        ];
+        (
+            server,
+            pane_id,
+            [large_render, small_render],
+            surfaces,
+            [large_control, small_control],
+        )
+    };
+    let (mut server, pane_id, renders, mut retained, _controls) = setup();
+    let (mut full_server, full_pane_id, full_renders, full_initial, _full_controls) = setup();
+    for index in 0..2 {
+        assert_eq!(retained[index].frame, full_initial[index].frame);
+        assert_eq!(
+            retained[index].frame.hyperlinks.len(),
+            if linked { 1 } else { 0 }
+        );
+    }
+    let small_width = retained[1].panes[0].inner_rect.width;
+    let large_width = retained[0].panes[0].inner_rect.width;
+    assert!(small_width > 2 && large_width > small_width + 1);
+    for (source, pane) in [(&server, pane_id), (&full_server, full_pane_id)] {
+        assert_eq!(
+            source.app.state.workspaces[0].test_runtimes[&pane]
+                .current_size()
+                .1,
+            large_width
+        );
+    }
+
+    for (phase, column, symbol) in [
+        ("ascii", small_width, "X"),
+        ("fits", small_width - 1, glyph),
+        ("clipped", small_width, glyph),
+        ("restored", small_width, "X"),
+    ] {
+        let bytes = format!(
+            "\x1b[1;1H\x1b[2K\x1b[1;{column}H\x1b[1;31;44m{link_start}{symbol}{link_end}\x1b[0m"
+        );
+        write_shared_test_pane(&mut server, pane_id, bytes.as_bytes());
+        write_shared_test_pane(&mut full_server, full_pane_id, bytes.as_bytes());
+        assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+        for client_id in [7, 8] {
+            assert_eq!(
+                server.clients[&client_id].deferred_render(),
+                DeferredRender::None
+            );
+            full_server
+                .clients
+                .get_mut(&client_id)
+                .unwrap()
+                .request_repaint();
+        }
+        full_server.render_and_stream();
+
+        for (index, client_id) in [7, 8].into_iter().enumerate() {
+            let ServerMessage::PaneSurfacePatch(patch) =
+                read_server_message(recv_forwarded(&renders[index], "retained boundary patch"))
+            else {
+                panic!("expected retained patch for {glyph:?}, {phase}, client {client_id}");
+            };
+            let surface = &mut retained[index];
+            assert_eq!(patch.base_surface_revision, surface.surface_revision);
+            assert!(patch.surface_revision > patch.base_surface_revision);
+            assert!(!patch.rows.is_empty());
+            let area = surface.panes[0].inner_rect;
+            for row in &patch.rows {
+                assert!(row.y >= area.y && row.y < area.y + area.height);
+                assert!(row.x >= area.x);
+                assert!(usize::from(row.x) + row.cells.len() <= usize::from(area.x + area.width));
+                let start =
+                    usize::from(row.y) * usize::from(surface.frame.width) + usize::from(row.x);
+                surface.frame.cells[start..start + row.cells.len()].clone_from_slice(&row.cells);
+            }
+            surface.frame.cursor = patch.cursor;
+            surface.surface_revision = patch.surface_revision;
+            assert_eq!(
+                surface.frame,
+                server.clients[&client_id]
+                    .render_state
+                    .last_pane_surface()
+                    .unwrap()
+                    .frame,
+                "wire patch must reconstruct the committed surface"
+            );
+
+            let full = receive_surface(&full_renders[index], "independent full boundary surface");
+            assert_eq!(area, full.panes[0].inner_rect);
+            let boundary = usize::from(area.y) * usize::from(full.frame.width)
+                + usize::from(area.x + column - 1);
+            let expected_symbol = if index == 1 && phase == "clipped" {
+                " "
+            } else {
+                symbol
+            };
+            assert_eq!(full.frame.cells[boundary].symbol.as_str(), expected_symbol);
+            assert_eq!(
+                surface.frame.cells[boundary].symbol.as_str(),
+                expected_symbol
+            );
+            assert_eq!(
+                (surface.frame.width, surface.frame.height),
+                (full.frame.width, full.frame.height)
+            );
+            assert_eq!(surface.frame.cells.len(), full.frame.cells.len());
+            let mut normalized = surface.frame.clone();
+            for (offset, cell) in normalized.cells.iter_mut().enumerate() {
+                if offset % usize::from(full.frame.width) == 0
+                    || !cell.symbol.is_empty()
+                    || full.frame.cells[offset].symbol != " "
+                {
+                    continue;
+                }
+                let head = &surface.frame.cells[offset - 1];
+                // 仅规范化同一完整字形覆盖的尾格；裁断首格与可见空白仍逐字段比较。
+                if !head.skip
+                    && head == &full.frame.cells[offset - 1]
+                    && unicode_width::UnicodeWidthStr::width(head.symbol.as_str()) == 2
+                {
+                    *cell = full.frame.cells[offset].clone();
+                }
+            }
+            let encode = |frame: &FrameData| {
+                crate::protocol::render_ansi::BlitEncoder::with_ime_anchor_repeat(false)
+                    .encode(frame, true)
+                    .bytes
+            };
+            assert_eq!(
+                encode(&surface.frame),
+                encode(&normalized),
+                "continuation normalization must not change the actual ANSI output"
+            );
+            for (offset, (actual, expected)) in
+                normalized.cells.iter().zip(&full.frame.cells).enumerate()
+            {
+                assert_eq!(
+                    actual,
+                    expected,
+                    "{glyph:?}, {phase}, client {client_id}, cell ({}, {})",
+                    offset % usize::from(full.frame.width),
+                    offset / usize::from(full.frame.width)
+                );
+            }
+            assert_eq!(surface.frame.cursor, full.frame.cursor);
+            assert_eq!(surface.frame.hyperlinks, full.frame.hyperlinks);
+            assert_eq!(encode(&surface.frame), encode(&full.frame));
+        }
+    }
+    shutdown_test_runtimes(&mut server);
+    shutdown_test_runtimes(&mut full_server);
+}
+
+#[tokio::test]
+async fn different_size_shells_retained_cjk_boundary_matches_independent_full_render() {
+    for linked in [false, true] {
+        assert_different_size_shells_retained_boundary_matches_full("中", linked);
+    }
+}
+
+#[tokio::test]
+async fn different_size_shells_retained_vs16_boundary_matches_independent_full_render() {
+    for linked in [false, true] {
+        assert_different_size_shells_retained_boundary_matches_full("⚠\u{fe0f}", linked);
+    }
 }
 
 #[tokio::test]

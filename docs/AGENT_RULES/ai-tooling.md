@@ -24,7 +24,9 @@
 - `.agents/skills/`（pre-release-audit、throwaway-repro、triage）与
   `.pi/prompts/` 是仓库工作流资产；内容与领域文档重复时以领域文档为准收编。
 - `.zed/settings.json` 只放编辑器/rust-analyzer 调优，不放 AI 规则。
-- 接入细节、逐工具验证账与 PENDING 项见 `docs/AI_TOOLS.md`。
+- 工具配置说明必须以仓库内实际配置、探针或真实会话证据为准；静态配置可解析不等于
+  客户端会话已生效，未实际运行的接入项保持 PENDING。接入细节与逐工具验证账见
+  `docs/AI_TOOLS.md`。
 
 ## Graphify 纪律
 

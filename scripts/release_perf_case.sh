@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 8 ]]; then
-  echo "usage: $0 <binary> <variant> <scenario> <round> <seconds> <warmup> <output-root> <platform>" >&2
+if [[ $# -ne 9 ]]; then
+  echo "usage: $0 <binary> <variant> <scenario> <round> <seconds> <warmup> <output-root> <temporary-root> <platform>" >&2
   exit 2
 fi
 
@@ -14,7 +14,8 @@ round=$4
 seconds=$5
 warmup=$6
 out_root=$(cd "$7" && pwd)
-platform=$8
+temporary_root=$(cd "$8" && pwd)
+platform=$9
 script_dir=$(cd "$(dirname "$0")" && pwd)
 producer="$script_dir/release_perf_producer.pl"
 cols=86
@@ -28,27 +29,71 @@ esac
 case "$platform" in linux) platform_tag=l ;; macos) platform_tag=m ;; *) exit 2 ;; esac
 variant_tag=${variant:0:1}
 name="rps${platform_tag}${variant_tag}${scenario_tag}r${round}x$$"
-state="/var/tmp/herdr-release-perf-$name"
+state="$temporary_root/$name"
+home="$state/home"
 xdg="$state/xdg"
+xdg_state="$state/xdg-state"
 runtime="$state/run"
+xdg_data="$state/xdg-data"
+xdg_cache="$state/xdg-cache"
+appdata="$state/appdata"
+localappdata="$state/localappdata"
+herdr_home="$state/herdr-home"
+codex_home="$state/codex-home"
+kimi_home="$state/kimi-home"
+tmp="$state/tmp"
 gate="$state/start-output"
 out="$out_root/$variant/$scenario/r$round"
-mkdir -p "$xdg" "$runtime" "$out"
+tmux_root="$temporary_root/tmux"
+mkdir -p "$home" "$xdg" "$xdg_state" "$runtime" "$xdg_data" "$xdg_cache" \
+  "$appdata" "$localappdata" "$herdr_home" "$codex_home" "$kimi_home" "$tmp" \
+  "$out" "$tmux_root"
+chmod 700 "$state" "$home" "$xdg" "$xdg_state" "$runtime" "$xdg_data" "$xdg_cache" \
+  "$appdata" "$localappdata" "$herdr_home" "$codex_home" "$kimi_home" "$tmp" "$tmux_root"
+tmux_cmd=(env -u TMUX TMUX_TMPDIR="$tmux_root" tmux)
 
-launch_env=(env -u HERDR_BIN_PATH -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_STARTUP_CWD -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID XDG_CONFIG_HOME="$xdg" XDG_RUNTIME_DIR="$runtime" HERDR_DISABLE_SOUND=1 SHELL=/bin/sh)
-control_env=(env -u HERDR_BIN_PATH -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_STARTUP_CWD -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID XDG_CONFIG_HOME="$xdg" XDG_RUNTIME_DIR="$runtime" HERDR_DISABLE_SOUND=1 SHELL=/bin/sh HERDR_SESSION="$name")
+launch_env=(env
+  -u HERDR_BIN_PATH -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH
+  -u HERDR_SESSION -u HERDR_STARTUP_CWD -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID
+  HOME="$home" USERPROFILE="$home" XDG_CONFIG_HOME="$xdg" XDG_STATE_HOME="$xdg_state"
+  XDG_RUNTIME_DIR="$runtime" XDG_DATA_HOME="$xdg_data" XDG_CACHE_HOME="$xdg_cache"
+  APPDATA="$appdata" LOCALAPPDATA="$localappdata" HERDR_HOME="$herdr_home"
+  CODEX_HOME="$codex_home" KIMI_CODE_HOME="$kimi_home" TMPDIR="$tmp"
+  HERDR_DISABLE_SOUND=1 SHELL=/bin/sh)
+control_env=(env
+  -u HERDR_BIN_PATH -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH
+  -u HERDR_STARTUP_CWD -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID
+  HOME="$home" USERPROFILE="$home" XDG_CONFIG_HOME="$xdg" XDG_STATE_HOME="$xdg_state"
+  XDG_RUNTIME_DIR="$runtime" XDG_DATA_HOME="$xdg_data" XDG_CACHE_HOME="$xdg_cache"
+  APPDATA="$appdata" LOCALAPPDATA="$localappdata" HERDR_HOME="$herdr_home"
+  CODEX_HOME="$codex_home" KIMI_CODE_HOME="$kimi_home" TMPDIR="$tmp"
+  HERDR_DISABLE_SOUND=1 SHELL=/bin/sh HERDR_SESSION="$name")
+
+{
+  printf 'variant=%s\nscenario=%s\nround=%s\nseconds=%s\nwarmup=%s\nplatform=%s\n' \
+    "$variant" "$scenario" "$round" "$seconds" "$warmup" "$platform"
+  printf 'binary=%q\n' "$bin"
+} > "$out/case-metadata.txt"
 
 cleaned=0
 cleanup() {
-  if [[ $cleaned -eq 1 ]]; then return; fi
+  local status=$?
+  if [[ $cleaned -eq 1 ]]; then
+    trap - EXIT
+    exit "$status"
+  fi
   cleaned=1
+  set +e
   "${control_env[@]}" "$bin" session stop "$name" >/dev/null 2>&1 || true
   for _ in $(seq 1 50); do
     if "${control_env[@]}" "$bin" session delete "$name" >/dev/null 2>&1; then break; fi
     sleep 0.1
   done
-  tmux kill-session -t "$name" >/dev/null 2>&1 || true
+  "${tmux_cmd[@]}" kill-session -t "$name" >/dev/null 2>&1 || true
+  printf '%s\n' "$status" > "$out/exit-code.txt"
   rm -rf "$state"
+  trap - EXIT
+  exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -57,7 +102,8 @@ trap 'exit 143' TERM
 printf -v launch 'exec '
 printf -v quoted '%q ' "${launch_env[@]}" "$bin" --session "$name"
 launch+=$quoted
-tmux new-session -d -s "$name" -x "$cols" -y "$rows" "$launch"
+printf '%s\n' "$launch" > "$out/launch-command.txt"
+"${tmux_cmd[@]}" new-session -d -s "$name" -x "$cols" -y "$rows" "$launch"
 
 panes_json=
 for _ in $(seq 1 150); do
@@ -96,7 +142,7 @@ for _ in $(seq 1 80); do
   sleep 0.1
 done
 [[ -n "$server_pid" ]] || { echo "could not find server pid" >&2; exit 1; }
-client_pid=$(tmux list-panes -s -t "$name" -F '#{pane_pid}')
+client_pid=$("${tmux_cmd[@]}" list-panes -s -t "$name" -F '#{pane_pid}')
 [[ -n "$client_pid" ]] || { echo "could not find client pid" >&2; exit 1; }
 all_pids=("$server_pid" "$client_pid")
 

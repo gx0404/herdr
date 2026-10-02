@@ -173,6 +173,9 @@ impl RawInputFramer {
 #[derive(Default)]
 pub(crate) struct RawInputByteFramer {
     buffer: Vec<u8>,
+    bracketed_paste_scan: Option<BracketedPasteScan>,
+    #[cfg(test)]
+    bracketed_paste_scanned_bytes: usize,
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
     // Keep the discarded prefix separate from continuation bytes awaiting validation.
@@ -208,6 +211,13 @@ pub(crate) struct RawInputByteFramer {
     host_escape_disambiguation_active: bool,
     #[cfg(unix)]
     awaiting_mouse_tail_after: Option<usize>,
+}
+
+#[derive(Default)]
+struct BracketedPasteScan {
+    next_byte: usize,
+    matched_end_bytes: usize,
+    end_start: Option<usize>,
 }
 
 const HOST_COLOR_QUERY_REPLIES: u16 = 258;
@@ -273,6 +283,7 @@ impl RawInputByteFramer {
 
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         self.buffer.extend_from_slice(data);
+        self.update_bracketed_paste_scan();
         #[cfg(unix)]
         if let Some(prefix_len) = self.awaiting_mouse_tail_after.take() {
             if !continues_escape_sequence(&self.buffer) {
@@ -283,6 +294,70 @@ impl RawInputByteFramer {
             }
         }
         self.drain_available_chunks()
+    }
+
+    fn update_bracketed_paste_scan(&mut self) {
+        if !self.buffer.starts_with(BRACKETED_PASTE_START) {
+            self.bracketed_paste_scan = None;
+            return;
+        }
+        if self
+            .bracketed_paste_scan
+            .as_ref()
+            .is_some_and(|scan| scan.next_byte > self.buffer.len())
+        {
+            self.bracketed_paste_scan = None;
+        }
+
+        self.bracketed_paste_scan
+            .get_or_insert_with(|| BracketedPasteScan {
+                next_byte: BRACKETED_PASTE_START.len(),
+                ..BracketedPasteScan::default()
+            });
+
+        while let Some(index) = self
+            .bracketed_paste_scan
+            .as_ref()
+            .and_then(|scan| scan.end_start.is_none().then_some(scan.next_byte))
+        {
+            let Some(&byte) = self.buffer.get(index) else {
+                break;
+            };
+            #[cfg(test)]
+            {
+                self.bracketed_paste_scanned_bytes += 1;
+            }
+            let Some(scan) = self.bracketed_paste_scan.as_mut() else {
+                break;
+            };
+            scan.next_byte += 1;
+
+            while scan.matched_end_bytes > 0 && BRACKETED_PASTE_END[scan.matched_end_bytes] != byte
+            {
+                scan.matched_end_bytes = 0;
+            }
+            if BRACKETED_PASTE_END[scan.matched_end_bytes] == byte {
+                scan.matched_end_bytes += 1;
+                if scan.matched_end_bytes == BRACKETED_PASTE_END.len() {
+                    scan.end_start = Some(index + 1 - BRACKETED_PASTE_END.len());
+                }
+            }
+        }
+    }
+
+    fn bracketed_paste_end(&self) -> Option<usize> {
+        self.bracketed_paste_scan
+            .as_ref()
+            .and_then(|scan| scan.end_start)
+    }
+
+    fn reset_bracketed_paste_scan(&mut self) {
+        self.bracketed_paste_scan = None;
+    }
+
+    #[cfg(test)]
+    fn bracketed_paste_scanned_bytes(&self) -> usize {
+        self.bracketed_paste_scanned_bytes
     }
 
     /// Hold a lone trailing ESC for one idle flush so an OSC 10/11 reply split
@@ -399,8 +474,9 @@ impl RawInputByteFramer {
 
     #[cfg(any(windows, test))]
     pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
-        self.buffer.starts_with(BRACKETED_PASTE_START)
-            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
+        self.bracketed_paste_scan
+            .as_ref()
+            .is_some_and(|scan| scan.end_start.is_none())
     }
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
@@ -510,8 +586,10 @@ impl RawInputByteFramer {
             return chunks;
         }
 
-        if self.buffer.starts_with(BRACKETED_PASTE_START)
-            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
+        if self
+            .bracketed_paste_scan
+            .as_ref()
+            .is_some_and(|scan| scan.end_start.is_none())
         {
             tracing::trace!(
                 len = self.buffer.len(),
@@ -709,6 +787,7 @@ impl RawInputByteFramer {
         self.flushed_csi_head = None;
         self.held_csi_intro_flush = false;
         self.buffer.clear();
+        self.reset_bracketed_paste_scan();
         chunks
     }
 
@@ -879,13 +958,33 @@ impl RawInputByteFramer {
                 continue;
             }
 
+            self.update_bracketed_paste_scan();
+            if self
+                .bracketed_paste_scan
+                .as_ref()
+                .is_some_and(|scan| scan.end_start.is_none())
+            {
+                break;
+            }
+
             if self.split_coalesced_escape && self.buffer.starts_with(b"\x1b\x1b") {
                 chunks.push(vec![ESC]);
                 self.buffer.drain(..1);
                 continue;
             }
 
-            let Some((event, consumed)) = extract_one_event(&self.buffer) else {
+            let bracketed_paste_end = self.bracketed_paste_end();
+            let bracketed_paste_event = bracketed_paste_end.is_some();
+            if let Some(end) = bracketed_paste_end {
+                if std::str::from_utf8(&self.buffer[BRACKETED_PASTE_START.len()..end]).is_err() {
+                    self.buffer.drain(..end + BRACKETED_PASTE_END.len());
+                    self.reset_bracketed_paste_scan();
+                    continue;
+                }
+            }
+            let Some((event, consumed)) =
+                extract_one_event_with_bracketed_paste_end(&self.buffer, bracketed_paste_end)
+            else {
                 break;
             };
             if matches!(event, RawInputEvent::Mouse(_)) {
@@ -912,6 +1011,9 @@ impl RawInputByteFramer {
             self.held_csi_intro_flush = false;
             chunks.push(self.buffer[..consumed].to_vec());
             self.buffer.drain(..consumed);
+            if bracketed_paste_event {
+                self.reset_bracketed_paste_scan();
+            }
         }
 
         chunks
@@ -1014,12 +1116,19 @@ pub(crate) fn events_require_host_terminal_theme_query(events: &[RawInputEvent])
 }
 
 fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
+    extract_one_event_with_bracketed_paste_end(buffer, None)
+}
+
+fn extract_one_event_with_bracketed_paste_end(
+    buffer: &[u8],
+    bracketed_paste_end: Option<usize>,
+) -> Option<(RawInputEvent, usize)> {
     if buffer.is_empty() {
         return None;
     }
 
     if buffer.starts_with(BRACKETED_PASTE_START) {
-        let end = find_subsequence(buffer, BRACKETED_PASTE_END)?;
+        let end = bracketed_paste_end.or_else(|| find_subsequence(buffer, BRACKETED_PASTE_END))?;
         let content = std::str::from_utf8(&buffer[BRACKETED_PASTE_START.len()..end]).ok()?;
         return Some((
             RawInputEvent::Paste(content.to_string()),
@@ -3037,6 +3146,102 @@ mod tests {
             panic!("expected paste");
         };
         assert_eq!(text, "hello\nworld");
+    }
+
+    #[test]
+    fn bracketed_paste_scan_is_linear_across_lengths_and_chunk_sizes() {
+        let payloads = [
+            String::new(),
+            "a".to_owned(),
+            "中文🙂".repeat(4),
+            "中文🙂".repeat(32),
+            "中文🙂".repeat(256),
+        ];
+
+        for payload in payloads {
+            let mut bytes = BRACKETED_PASTE_START.to_vec();
+            bytes.extend_from_slice(payload.as_bytes());
+            bytes.extend_from_slice(BRACKETED_PASTE_END);
+
+            for chunk_size in [1, 2, 3, 5, 7, 16, 64, 257] {
+                let mut framer = RawInputByteFramer::default();
+                let chunks = bytes
+                    .chunks(chunk_size)
+                    .flat_map(|chunk| framer.push(chunk))
+                    .collect::<Vec<_>>();
+
+                assert_eq!(
+                    chunks.len(),
+                    1,
+                    "payload len {}, chunk {chunk_size}",
+                    payload.len()
+                );
+                let (event, consumed) = extract_one_event(&chunks[0]).expect("paste event");
+                let RawInputEvent::Paste(text) = event else {
+                    panic!("expected paste event");
+                };
+                assert_eq!(consumed, bytes.len());
+                assert_eq!(text, payload);
+                assert_eq!(
+                    framer.bracketed_paste_scanned_bytes(),
+                    payload.len() + BRACKETED_PASTE_END.len(),
+                    "payload len {}, chunk {chunk_size}",
+                    payload.len()
+                );
+                assert!(!framer.has_pending_bracketed_paste());
+            }
+        }
+    }
+
+    #[test]
+    fn chunked_bracketed_paste_scan_preserves_utf8_and_cross_chunk_terminator() {
+        let payload = "中文🙂\n";
+        let mut bytes = BRACKETED_PASTE_START.to_vec();
+        bytes.extend_from_slice(payload.as_bytes());
+        bytes.extend_from_slice(BRACKETED_PASTE_END);
+        let terminator_start = bytes.len() - BRACKETED_PASTE_END.len();
+
+        for split in 1..BRACKETED_PASTE_END.len() {
+            let mut framer = RawInputByteFramer::default();
+            assert!(framer.push(&bytes[..terminator_start + split]).is_empty());
+            assert!(framer.has_pending_bracketed_paste());
+
+            let chunks = framer.push(&bytes[terminator_start + split..]);
+            assert_eq!(chunks.len(), 1, "terminator split {split}");
+            let (event, consumed) = extract_one_event(&chunks[0]).expect("paste event");
+            let RawInputEvent::Paste(text) = event else {
+                panic!("expected paste event");
+            };
+            assert_eq!(consumed, bytes.len());
+            assert_eq!(text, payload);
+            assert_eq!(
+                framer.bracketed_paste_scanned_bytes(),
+                payload.len() + BRACKETED_PASTE_END.len()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_bracketed_paste_does_not_poison_next_paste_scan() {
+        let mut framer = RawInputByteFramer::default();
+        let mut invalid = BRACKETED_PASTE_START.to_vec();
+        invalid.push(0xff);
+        invalid.extend_from_slice(BRACKETED_PASTE_END);
+
+        assert!(framer.push(&invalid).is_empty());
+        assert!(framer.flush_timeout().is_empty());
+
+        let mut valid = BRACKETED_PASTE_START.to_vec();
+        valid.extend_from_slice("🙂".as_bytes());
+        valid.extend_from_slice(BRACKETED_PASTE_END);
+        let chunks = framer.push(&valid);
+        assert_eq!(chunks.len(), 1);
+        let (event, consumed) = extract_one_event(&chunks[0]).expect("paste event");
+        let RawInputEvent::Paste(text) = event else {
+            panic!("expected paste event");
+        };
+        assert_eq!(consumed, valid.len());
+        assert_eq!(text, "🙂");
     }
 
     #[test]

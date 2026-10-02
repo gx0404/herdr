@@ -3,7 +3,7 @@
 共享入库的 Codex 项目面；`state/`、`sessions/`、`auth.json` 为本机状态
 （根 `.gitignore`）。
 
-- `config.toml`：审批策略（on-request）、workspace-write 沙箱、项目文档
+- `config.toml`：审批策略 `never`、`danger-full-access` 沙箱模式、项目文档
   读取上限、agents 注册，以及 PreToolUse/PostToolUse/Stop hooks。**hooks
   语法以真实 Codex CLI 为准（v0.154.0 实测）**：事件键是数组表
   `[[hooks.PreToolUse]]`、命令嵌套在 `[[hooks.PreToolUse.hooks]]`；写成

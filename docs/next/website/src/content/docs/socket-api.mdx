@@ -656,6 +656,8 @@ Transport errors, such as invalid UTF-8, can close the connection without a resp
 
 Event subscriptions keep the connection open after the initial response.
 
+Client transport input is bounded. A raw input frame is limited to 1 MiB; structured pane or popup input is limited to 4,096 expanded events and 1 MiB of text/paste bytes. A complete oversized bracketed paste is rejected with a client notice and does not disconnect the connection, while other oversized input is treated as a protocol violation and can close it.
+
 ## Socket paths
 
 The default socket lives under your Herdr config directory.
@@ -1207,6 +1209,10 @@ without this lifecycle support stays at Attention until it is explicitly updated
 only those actions and show a client-local notice; they do not disconnect the UI. Rejected
 or timed-out actions are also reported without ending the connection. Servers
 from before endpoint generation 1 need one final update.
+
+The initial endpoint handshake has a four-second absolute deadline and a 2 MiB first-frame limit; sending an incomplete hello in pieces does not extend the deadline. A server admits at most 32 handshakes concurrently. These limits protect the server from clients that connect without completing setup, so reconnect rather than waiting indefinitely.
+
+Generation-1 endpoint requests have a 1 MiB request-body limit and 128-byte limits for the boot and request identifiers. Responses are sent in chunks of up to 512 KiB. The client accepts at most 64 MiB or 4,096 chunks for one response; exceeding either budget fails that request with `endpoint_response_too_large` while leaving the endpoint connection available for later requests. Queued or in-flight endpoint actions expire after 60 seconds with `endpoint_timeout`.
 
 The numbered binary protocol remains for same-install and internal operations,
 including direct terminal attach and live handoff. Check `ping` or `herdr status`

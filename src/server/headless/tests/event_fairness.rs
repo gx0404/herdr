@@ -100,6 +100,40 @@ fn scheduled_work_runs_between_external_api_batches() {
     assert_eq!(server.app.api_rx.len(), 1);
 }
 
+#[test]
+fn api_request_preflight_preserves_query_boundary_and_leaves_late_events() {
+    let mut server = test_headless_server();
+    server
+        .app
+        .event_tx
+        .try_send(AppEvent::UpdateReady {
+            version: "4.0.before".into(),
+            install_command: "herdr install".into(),
+        })
+        .unwrap();
+    let responses = queue_requests(&mut server, 1);
+
+    server.drain_api_requests_with_shutdown_check();
+
+    let response = responses.try_iter().next().expect("API response");
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["id"], "0");
+    assert_eq!(
+        server.app.state.update_available.as_deref(),
+        Some("4.0.before")
+    );
+
+    server
+        .app
+        .event_tx
+        .try_send(AppEvent::UpdateReady {
+            version: "4.0.after".into(),
+            install_command: "herdr install".into(),
+        })
+        .unwrap();
+    assert_eq!(server.app.event_rx.len(), 1);
+}
+
 #[tokio::test]
 async fn server_loop_drains_api_backlog_and_runs_scheduled_work() {
     let mut server = test_headless_server();

@@ -2336,6 +2336,23 @@ mod tests {
     }
 
     #[test]
+    fn vti_chunked_bracketed_paste_preserves_unicode_and_terminator_boundaries() {
+        let payload = "中文🙂\n".repeat(64);
+        let mut records = "\x1b[200~".chars().map(key_char).collect::<Vec<_>>();
+        records.extend(
+            payload
+                .encode_utf16()
+                .map(|unit| key_vk_with_utf16(0, unit)),
+        );
+        records.extend("\x1b[201~".chars().map(key_char));
+
+        assert_eq!(
+            translate(records),
+            vec![crate::protocol::ClientInputEvent::Paste { text: payload }]
+        );
+    }
+
+    #[test]
     fn vti_ctrl_c_record_becomes_ctrl_c_key() {
         assert_eq!(
             translate([key_char('\u{3}')]),

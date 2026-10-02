@@ -1,9 +1,9 @@
 {
   "artifacts": {
-    ".graphify_labels.json": "7043ac76e9a82a843878bc20bed54f60f2669f7e369a9ef5107a1ad7d7b733ff",
-    ".graphify_labels.json.sig": "8ef95195aa2bd20437f9343dc5f9497ecbe52733c56767478c042da913e9d8ec",
-    "GRAPH_REPORT.md": "68f5c675f5e0b0358e70af717e7bdb4688fe12647df4abdb7fbfc55fed411ec9",
-    "graph.json": "15126b60c7ca72c04a50f4c6a77d161c0af5e48b0d425bc2c01c18099b7d0530"
+    ".graphify_labels.json": "032aa57789e53b36c853fc2df1bd6dcf430898e7bb024278924b7718a77f79d6",
+    ".graphify_labels.json.sig": "2568ee88fcceae3c03f4fbda52479a0459839da7d24c3b475cbd14aa49981fa0",
+    "GRAPH_REPORT.md": "d30cda357b9d7575bebd2ef8e86ac3887577287663c31e53f037d8b2e89b4419",
+    "graph.json": "69e5cf55ddcdd162b6d0f5c927f97d43128af1568af8759706db1e7f8176cfcb"
   },
   "index_root": "src",
   "pipeline": {
@@ -16,7 +16,7 @@
     "excluded": [
       "src/ghostty/bindings.rs"
     ],
-    "file_count": 516,
-    "sha256": "e9752823cd8756a424a35915cbb585cb4e21badb6373cca52081437e631012d2"
+    "file_count": 519,
+    "sha256": "9417b2dbe1c8558cad2a4f784f9dd2f446362e0735fa9ba05f877e53365442a2"
   }
 }

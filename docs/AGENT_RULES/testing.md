@@ -14,7 +14,26 @@ just check    # 格式检查 + nextest + maintenance + Windows 目标 lint
 ```
 
 提交前跑 `just check`，除非明确接受更窄的验证；不得绕过失败检查——修好，或
-准确说明为何更窄的检查足够。
+准确说明为何更窄的检查足够。`just test` 由 `scripts/run_test_suite.py` 编排五个阶段：
+`nextest`、`maintenance`、`ui-hot-path`、`integration-assets`、`docs-contract`。
+worker 配置按以下优先级解析：命令行 > 环境变量 > 默认值，所有显式值必须是正整数：
+
+- combined `test_budget` 默认 `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET` 或
+  `--test-budget` 覆盖；它是 maintenance 与 nextest 的默认合并预算。
+- `phase_jobs` 默认 `min(2, 5, test_budget)`，可用 `HERDR_TEST_PHASE_JOBS`、
+  `--phase-jobs` 或兼容别名 `--jobs` 覆盖，限制五个 phase 同时运行数。
+- `maintenance_jobs` 默认 `min(4, test_budget)`，可用 `HERDR_MAINTENANCE_JOBS` 或
+  `--maintenance-jobs` 覆盖；独立调用 `run_parallel_unittest.py` 时仍用 `--jobs`。
+- `nextest_jobs` 默认 `max(1, test_budget-maintenance_jobs)`，可用
+  `HERDR_NEXTEST_JOBS` 或 `--nextest-jobs` 覆盖。编排器把解析后的 maintenance/nextest
+  值导出给各阶段；显式 worker 覆盖不再自动截断到 budget。
+
+阶段日志与原子 `manifest.json` 写入 `target/test-suite-logs/<run-id>/`。manifest 顶层
+记录 `run_id`、`status`、`manifest`、`test_budget`、`phase_jobs`、`maintenance_jobs`、
+`nextest_jobs`、`failures`；`phases` 下每项记录 `recipe`、`status`、`exit_code`、
+`seconds`、`log`。直接运行 `just nextest-all`、`just test-one` 或 `just ci-tests` 时，
+justfile 通过 `HERDR_NEXTEST_JOBS` 传递 nextest 线程数，未设置时默认 4。维护脚本执行器
+默认 `min(4, cpu_count)` 个 worker，耗时表在同目录原子替换写回。
 
 - 单测贴代码放 `#[cfg(test)] mod tests`；新 `AppState`/`Workspace` 行为必须可用
   `AppState::test_new()` / `Workspace::test_new()` 无 PTY 测试（不变量武器见
@@ -33,10 +52,20 @@ just check    # 格式检查 + nextest + maintenance + Windows 目标 lint
 
 区分静态检查、单测、集成（`tests/`：api_ping、client_mode、live_handoff、
 detach_reattach、cross_area、server_headless 等）、bun 契约测试
-（`just docs-contract-test`、`just integration-assets-test`）、性能
-（`bench-render-scale` 非门禁、`bench-release-smoke` 发布前）。UI 截图对 TUI
-不适用（N/A）：等效证据是 throwaway-repro 真会话 + `scripts/capture_agent_screen.py`
-读回。
+（`just docs-contract-test`、`just integration-assets-test`）、性能画像
+（`bench-render-scale`、`bench-terminal-targets`、`bench-bsp-layout`、
+`bench-retained-graphics`、`bench-api-fairness`）与发布前 `bench-release-smoke`。
+UI 截图对 TUI 不适用（N/A）：等效证据是 throwaway-repro 真会话 +
+`scripts/capture_agent_screen.py` 读回；Windows handshake/PTY admission/Codex
+native-tools 只在 Windows 实机或 Windows CI 证据成立时标 PASS。
+
+- `bench-release-smoke` 只支持 Linux/macOS，候选与 stable baseline 在两个串行 round 中
+  跑 `hidden50`/`visible30`；每次运行把 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、
+  `XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`APPDATA`、
+  `LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、`KIMI_CODE_HOME`、`TMPDIR` 指到
+  `.local/perf-baseline/run-*/tmp` 下的私有目录，case 另外用同一临时根的 `TMUX_TMPDIR`。
+  smoke 还清除继承的 herdr socket/session 环境；只删除临时 state，保留命令、metadata、
+  原始 CPU 采样、summary、exit-code 与 run log。该隔离语义是性能证据的一部分。
 
 宽泛重构或发布风险回归先分类风险：触及两个以上核心面、持久化状态、协议/API
 ID、workspace/tab/pane 身份、restore/handoff、agent 检测权威或 UI/输入状态投影

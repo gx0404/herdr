@@ -1,7 +1,6 @@
 pub(crate) mod agent_activity;
 mod alt_screen_read;
 pub mod autodetect;
-#[cfg(unix)]
 pub(crate) mod client_accept;
 pub(crate) mod client_commands;
 mod client_endpoint_control;

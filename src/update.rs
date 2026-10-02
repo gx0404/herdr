@@ -387,6 +387,41 @@ impl ReleaseInfo {
     }
 }
 
+fn nonempty_checksum(value: Option<&String>) -> Option<String> {
+    value
+        .filter(|checksum| !checksum.trim().is_empty())
+        .cloned()
+}
+
+/// Return the non-empty digest required at every install boundary.
+///
+/// Manifest parsing populates `ReleaseInfo::sha256`; this final check is kept at
+/// download and replacement time too, so neither platform can fetch or replace
+/// a binary whose SHA-256 was absent or blank.
+fn required_release_sha256(release: &ReleaseInfo) -> Result<&str, String> {
+    if let Some(checksum) = release
+        .sha256
+        .as_deref()
+        .filter(|checksum| !checksum.trim().is_empty())
+    {
+        return Ok(checksum);
+    }
+
+    #[cfg(windows)]
+    {
+        Err(errors().windows_sha256_missing.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let (os, arch) = platform_target();
+        let key = format!("{os}-{arch}");
+        Err(crate::i18n::fill(
+            errors().manifest_asset_missing_sha256_fmt,
+            &[("key", &key)],
+        ))
+    }
+}
+
 fn fetch_update_manifest() -> Result<UpdateManifest, String> {
     fetch_json_manifest(STABLE_UPDATE_MANIFEST_URL)
 }
@@ -477,10 +512,8 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
         crate::i18n::fill(errors().manifest_no_binary_fmt, &[("key", &asset_key)])
     })?;
     let download_url = asset.url.clone();
-    let sha256 = asset
-        .sha256
-        .clone()
-        .or_else(|| manifest.sha256.get(&asset_key).cloned())
+    let sha256 = nonempty_checksum(asset.sha256.as_ref())
+        .or_else(|| nonempty_checksum(manifest.sha256.get(&asset_key)))
         .ok_or_else(|| {
             crate::i18n::fill(
                 errors().manifest_asset_missing_sha256_fmt,
@@ -576,6 +609,12 @@ fn release_info_from_preview_manifest(
                 .and_then(|build| build.assets.get(&asset_key))
         })
         .ok_or_else(|| crate::i18n::fill(errors().preview_no_binary_fmt, &[("key", &asset_key)]))?;
+    let sha256 = nonempty_checksum(asset.sha256.as_ref()).ok_or_else(|| {
+        crate::i18n::fill(
+            errors().manifest_asset_missing_sha256_fmt,
+            &[("key", &asset_key)],
+        )
+    })?;
     let download_url = asset.url.clone();
 
     Ok(Some(ReleaseInfo {
@@ -589,7 +628,7 @@ fn release_info_from_preview_manifest(
         #[cfg(not(windows))]
         target_endpoint_generation: manifest.endpoint_generation,
         download_url,
-        sha256: asset.sha256.clone(),
+        sha256: Some(sha256),
         #[cfg(windows)]
         package_format: asset.package_format()?,
         notes_body,
@@ -697,6 +736,7 @@ impl Drop for DownloadedUpdate {
 /// Download a release to a prepared executable temp file without touching the running server.
 #[cfg(not(windows))]
 fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
+    let expected_sha256 = required_release_sha256(release)?;
     let current_exe = env::current_exe().map_err(|e| {
         crate::i18n::fill(
             errors().current_binary_not_found_fmt,
@@ -740,16 +780,14 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
         return Err(errors().download_failed.into());
     }
 
-    if let Some(expected) = &release.sha256 {
-        if let Err(e) = crate::checksum::verify_sha256(&tmp_path, expected) {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(crate::i18n::fill(
-                errors().checksum_failed_fmt,
-                &[("error", &e.to_string())],
-            ));
-        }
-        tracing::info!(sha256 = %expected, "downloaded update checksum verified");
+    if let Err(e) = crate::checksum::verify_sha256(&tmp_path, expected_sha256) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(crate::i18n::fill(
+            errors().checksum_failed_fmt,
+            &[("error", &e.to_string())],
+        ));
     }
+    tracing::info!(sha256 = %expected_sha256, "downloaded update checksum verified");
 
     // Make executable
     #[cfg(unix)]
@@ -771,7 +809,11 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
 }
 
 #[cfg(not(windows))]
-fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String> {
+fn install_downloaded_update(
+    mut update: DownloadedUpdate,
+    release: &ReleaseInfo,
+) -> Result<(), String> {
+    required_release_sha256(release)?;
     let tmp_path = update
         .tmp_path
         .take()
@@ -809,10 +851,7 @@ impl Drop for DownloadedWindowsUpdate {
 
 #[cfg(windows)]
 fn download_windows_update(release: &ReleaseInfo) -> Result<DownloadedWindowsUpdate, String> {
-    let expected_sha256 = release
-        .sha256
-        .as_deref()
-        .ok_or_else(|| errors().windows_sha256_missing.to_string())?;
+    let expected_sha256 = required_release_sha256(release)?;
     let stem = format!("herdr-update-{}", std::process::id());
     let update = DownloadedWindowsUpdate {
         package_path: env::temp_dir().join(format!("{stem}.{}", release.package_format)),
@@ -845,10 +884,7 @@ fn install_windows_update_with_installer(
     release: &ReleaseInfo,
     update: &DownloadedWindowsUpdate,
 ) -> Result<(), String> {
-    let expected_sha256 = release
-        .sha256
-        .as_deref()
-        .ok_or_else(|| errors().windows_sha256_missing.to_string())?;
+    let expected_sha256 = required_release_sha256(release)?;
     let mut command = Command::new("powershell");
     command
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
@@ -2398,7 +2434,7 @@ fn self_update_unmanaged(options: SelfUpdateOptions) -> Result<Version, String> 
             eprintln!("Stop running Herdr sessions when ready, then run `herdr update` again.");
             return Ok(current);
         }
-        install_downloaded_update(downloaded_update)?;
+        install_downloaded_update(downloaded_update, &release)?;
         eprintln!("installed {}", release.label());
         let server_update_decisions = if options.live_handoff {
             server_update_decisions
@@ -2785,6 +2821,40 @@ mod package_tests {
     }
 }
 
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    #[test]
+    fn preview_manifest_requires_nonempty_asset_checksum() {
+        let (os, arch) = platform_target();
+        let asset_key = format!("{os}-{arch}");
+        for checksum in ["null", "\"\"", "\"   \""] {
+            let json = format!(
+                r####"{{
+                    "channel": "preview",
+                    "base_version": "99.99.99",
+                    "build_id": "checksum-regression",
+                    "commit": "abcdef1234567890",
+                    "built_at": "2026-06-02T03:00:00Z",
+                    "protocol": 77,
+                    "notes": "### Fixed\\n- One",
+                    "assets": {{
+                        "{asset_key}": {{
+                            "url": "https://example.com/herdr",
+                            "sha256": {checksum}
+                        }}
+                    }}
+                }}"####,
+            );
+            let manifest: PreviewManifest = serde_json::from_str(&json).unwrap();
+
+            let error = release_info_from_preview_manifest(&manifest).unwrap_err();
+            assert!(error.contains("SHA-256"), "{error}");
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -2967,6 +3037,42 @@ mod tests {
             sha256: None,
             notes_body: "### Changed\n- One".to_string(),
         }
+    }
+
+    #[test]
+    fn download_update_rejects_missing_checksum_before_network_access() {
+        let error = match download_update(&fake_release("9.8.7", Some(77))) {
+            Ok(_) => panic!("download should require a checksum"),
+            Err(error) => error,
+        };
+        assert!(error.contains("SHA-256"), "{error}");
+    }
+
+    #[test]
+    fn install_update_rejects_missing_checksum_without_replacing_binary() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-update-install-checksum-{}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let current_exe = root.join("herdr");
+        let tmp_path = root.join("update.tmp");
+        fs::write(&current_exe, b"old executable").unwrap();
+        fs::write(&tmp_path, b"new executable").unwrap();
+
+        let error = install_downloaded_update(
+            DownloadedUpdate {
+                current_exe: current_exe.clone(),
+                tmp_path: Some(tmp_path),
+            },
+            &fake_release("9.8.7", Some(77)),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("SHA-256"), "{error}");
+        assert_eq!(fs::read(&current_exe).unwrap(), b"old executable");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4055,7 +4161,7 @@ mod tests {
 
         assert!(release_info_from_manifest(&manifest)
             .unwrap_err()
-            .contains("missing a SHA-256 checksum"));
+            .contains("SHA-256"));
     }
 
     #[test]

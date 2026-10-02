@@ -1,18 +1,35 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sysinfo::{Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
 static PID_REGISTRY: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 static RUNTIME_DIR_REGISTRY: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static REAPER_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Child>>> = OnceLock::new();
 static INIT: Once = Once::new();
 static CLEANUP_GUARD: OnceLock<CleanupGuard> = OnceLock::new();
-const WATCHDOG_SCAN_INTERVAL: Duration = Duration::from_secs(1);
-const RUNTIME_OWNER_MARKER: &str = ".herdr-test-owner-pid";
+const SANDBOX_OWNER_MARKER: &str = ".herdr-test-sandbox-owner";
+const REAPER_OWNER_ENV: &str = "HERDR_TEST_REAPER_OWNER";
+const REAPER_ROOT_ENV: &str = "HERDR_TEST_REAPER_ROOT";
+const REAPER_DRIVER_ROOT_ENV: &str = "HERDR_TEST_REAPER_DRIVER_ROOT";
+const SANDBOX_ENV_KEYS: &[&str] = &[
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "XDG_CACHE_HOME",
+    "HERDR_CONFIG_PATH",
+    "HERDR_SOCKET_PATH",
+    "HERDR_CLIENT_SOCKET_PATH",
+];
 pub const CURRENT_PROTOCOL: u32 = 23;
 pub const CURRENT_ENDPOINT_PROTOCOL_GENERATION: u32 = 1;
 pub const SERVER_MESSAGE_SERVER_SHUTDOWN: u32 = 3;
@@ -77,13 +94,17 @@ pub fn register_runtime_dir(path: &Path) {
     ensure_cleanup_hooks();
 
     let _ = fs::create_dir_all(path);
-    let _ = fs::write(
-        path.join(RUNTIME_OWNER_MARKER),
-        std::process::id().to_string(),
-    );
+    let owner = std::process::id().to_string();
 
     let mut runtime_dirs = runtime_dir_registry_lock();
     runtime_dirs.insert(path.to_path_buf());
+    drop(runtime_dirs);
+
+    let Some(root) = path.parent().map(Path::to_path_buf) else {
+        return;
+    };
+    let _ = fs::write(root.join(SANDBOX_OWNER_MARKER), owner);
+    register_sandbox_reaper(&root);
 }
 
 pub fn unregister_runtime_dir(path: &Path) {
@@ -116,6 +137,7 @@ pub fn cleanup_test_base(base: &Path) {
 
     terminate_servers_for_runtime_dirs(&runtime_dirs);
     unregister_runtime_dir(&runtime_dir);
+    unregister_sandbox_reaper(base);
     let _ = fs::remove_dir_all(base);
 }
 
@@ -550,28 +572,34 @@ pub fn wait_for_disconnect(stream: &mut UnixStream, timeout: Duration) -> Result
 }
 
 pub fn cleanup_registered_herdr_pids() {
-    let pids: Vec<u32> = {
+    // PIDs are retained for API compatibility, but never used as ownership
+    // evidence: a reused PID must not make the cleanup target a user process.
+    {
         let mut registry = pid_registry_lock();
-        registry.drain().collect()
-    };
-
-    for pid in pids {
-        terminate_pid(pid);
+        registry.clear();
     }
 
     let runtime_dirs: HashSet<PathBuf> = {
         let mut runtime_dirs = runtime_dir_registry_lock();
         runtime_dirs.drain().collect()
     };
-
     terminate_servers_for_runtime_dirs(&runtime_dirs);
-    let _ = cleanup_servers_with_missing_runtime_dir();
+
+    let reapers: Vec<(PathBuf, Child)> = {
+        let mut registry = reaper_registry_lock();
+        registry.drain().collect()
+    };
+    for (root, reaper) in reapers {
+        let reaper_pid = reaper.id();
+        cleanup_sandbox_root(&root, &[reaper_pid]);
+        stop_reaper(reaper);
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 fn ensure_cleanup_hooks() {
     INIT.call_once(|| {
-        let _ = cleanup_servers_with_missing_runtime_dir();
-        start_global_watchdog();
+        sweep_stale_sandboxes();
 
         let _ = CLEANUP_GUARD.set(CleanupGuard);
 
@@ -606,83 +634,263 @@ fn runtime_dir_registry_lock() -> std::sync::MutexGuard<'static, HashSet<PathBuf
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn registered_runtime_dirs_snapshot() -> HashSet<PathBuf> {
-    if let Some(runtime_dirs) = RUNTIME_DIR_REGISTRY.get() {
-        runtime_dirs
+fn reaper_registry_lock() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Child>> {
+    REAPER_REGISTRY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn register_sandbox_reaper(root: &Path) {
+    if !is_sandbox_root(root) {
+        return;
+    }
+
+    let mut reapers = reaper_registry_lock();
+    if reapers.contains_key(root) {
+        return;
+    }
+
+    if let Some(child) = spawn_sandbox_reaper(root) {
+        reapers.insert(root.to_path_buf(), child);
+    }
+}
+
+fn stop_reaper(mut reaper: Child) {
+    if reaper.try_wait().ok().flatten().is_none() {
+        let _ = reaper.kill();
+        let _ = reaper.wait();
+    }
+}
+
+fn unregister_sandbox_reaper(root: &Path) {
+    let reaper = REAPER_REGISTRY.get().and_then(|registry| {
+        registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    } else {
-        HashSet::new()
-    }
-}
-
-fn should_terminate_runtime_dir(
-    runtime_dir: &Path,
-    registered_runtime_dirs: &HashSet<PathBuf>,
-) -> bool {
-    if !registered_runtime_dirs.contains(runtime_dir) {
-        return false;
-    }
-
-    if !runtime_dir.exists() {
-        return true;
-    }
-
-    !runtime_dir_owner_alive(runtime_dir)
-}
-
-fn start_global_watchdog() {
-    thread::spawn(|| loop {
-        thread::sleep(WATCHDOG_SCAN_INTERVAL);
-
-        if let Err(err) = cleanup_servers_with_missing_runtime_dir() {
-            eprintln!("herdr test cleanup watchdog error: {err}");
-        }
+            .remove(root)
     });
+    if let Some(reaper) = reaper {
+        stop_reaper(reaper);
+    }
 }
 
-fn cleanup_servers_with_missing_runtime_dir() -> std::io::Result<()> {
-    let registered_runtime_dirs = registered_runtime_dirs_snapshot();
-    if registered_runtime_dirs.is_empty() {
-        return Ok(());
-    }
-
-    for pid in iter_worktree_server_pids()? {
-        let Some(runtime_dir) = process_runtime_dir(pid)? else {
-            continue;
-        };
-
-        if should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs) {
-            terminate_pid(pid);
-        }
-    }
-
-    Ok(())
+fn reaper_pid_for_root(root: &Path) -> Option<u32> {
+    REAPER_REGISTRY.get().and_then(|registry| {
+        registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(root)
+            .map(Child::id)
+    })
 }
 
 fn terminate_servers_for_runtime_dirs(runtime_dirs: &HashSet<PathBuf>) {
-    if runtime_dirs.is_empty() {
-        return;
+    for runtime_dir in runtime_dirs {
+        let Some(root) = runtime_dir.parent() else {
+            continue;
+        };
+        let spare = reaper_pid_for_root(root).into_iter().collect::<Vec<_>>();
+        cleanup_sandbox_root(root, &spare);
     }
+}
 
-    let Ok(pids) = iter_worktree_server_pids() else {
-        return;
+fn sandbox_parent_is_allowed(parent: Option<&Path>) -> bool {
+    let Some(parent) = parent else {
+        return false;
     };
+    parent == std::env::temp_dir() || (cfg!(unix) && parent == Path::new("/tmp"))
+}
 
-    for pid in pids {
-        let Ok(runtime_dir) = process_runtime_dir(pid) else {
-            continue;
-        };
+fn is_sandbox_root(root: &Path) -> bool {
+    root.is_absolute()
+        && sandbox_parent_is_allowed(root.parent())
+        && fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_dir())
+        && root.join(SANDBOX_OWNER_MARKER).is_file()
+}
 
-        let Some(runtime_dir) = runtime_dir else {
-            continue;
-        };
+fn owner_pid_from_sandbox_marker(root: &Path) -> Option<u32> {
+    fs::read_to_string(root.join(SANDBOX_OWNER_MARKER))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
 
-        if runtime_dirs.contains(&runtime_dir) {
-            terminate_pid(pid);
+fn spawn_sandbox_reaper(root: &Path) -> Option<Child> {
+    let current_exe = std::env::current_exe().ok()?;
+    let mut command = Command::new(current_exe);
+    command
+        .args([
+            "--exact",
+            "support::sandbox_reaper_entrypoint",
+            "--nocapture",
+        ])
+        .env(REAPER_OWNER_ENV, std::process::id().to_string())
+        .env(REAPER_ROOT_ENV, root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
     }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
+                | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows_sys::Win32::System::Threading::DETACHED_PROCESS,
+        );
+    }
+
+    command.spawn().ok()
+}
+
+fn wait_for_sandbox_owner_exit(owner: u32) {
+    #[cfg(unix)]
+    {
+        while unsafe { libc::getppid() } == owner as libc::pid_t {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, owner) };
+        if !handle.is_null() {
+            unsafe {
+                WaitForSingleObject(handle, INFINITE);
+                CloseHandle(handle);
+            }
+        }
+    }
+}
+
+fn run_sandbox_reaper(owner: u32, root: &Path) {
+    if !is_sandbox_root(root) || owner == std::process::id() {
+        return;
+    }
+
+    wait_for_sandbox_owner_exit(owner);
+    if root.join(SANDBOX_OWNER_MARKER).exists() {
+        cleanup_sandbox_root(root, &[]);
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+fn cleanup_sandbox_root(root: &Path, spare: &[u32]) {
+    if !is_sandbox_root(root) {
+        return;
+    }
+
+    for _ in 0..5 {
+        if kill_sandbox_processes(root, spare) == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn sweep_stale_sandboxes() {
+    let mut parents = vec![std::env::temp_dir()];
+    if cfg!(unix) {
+        let unix_parent = PathBuf::from("/tmp");
+        if !parents.contains(&unix_parent) {
+            parents.push(unix_parent);
+        }
+    }
+
+    for parent in parents {
+        let Ok(entries) = fs::read_dir(parent) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let root = entry.path();
+            if !is_sandbox_root(&root) || owner_pid_from_sandbox_marker(&root).is_none() {
+                continue;
+            }
+            let owner = owner_pid_from_sandbox_marker(&root).unwrap_or_default();
+            if owner == std::process::id() || process_exists(owner as libc::pid_t) {
+                continue;
+            }
+
+            eprintln!(
+                "[herdr-test-reaper] sweeping stale sandbox {}",
+                root.display()
+            );
+            cleanup_sandbox_root(&root, &[]);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+}
+
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    path == root || path.strip_prefix(root).is_ok()
+}
+
+fn environment_entry_belongs_to_root(entry: &OsStr, root: &Path) -> bool {
+    let entry = entry.to_string_lossy();
+    let Some(equal) = entry.find('=') else {
+        return false;
+    };
+    let key = &entry[..equal];
+    if !SANDBOX_ENV_KEYS.contains(&key) {
+        return false;
+    }
+    path_is_under(Path::new(&entry[equal + 1..]), root)
+}
+
+fn executable_belongs_to_root(exe: Option<&Path>, root: &Path) -> bool {
+    exe.is_some_and(|exe| path_is_under(exe, root))
+}
+
+fn process_belongs_to_root(process: &Process, root: &Path) -> bool {
+    process
+        .environ()
+        .iter()
+        .any(|entry| environment_entry_belongs_to_root(entry, root))
+        || executable_belongs_to_root(process.exe(), root)
+}
+
+fn kill_sandbox_processes(root: &Path, spare: &[u32]) -> usize {
+    let self_pid = std::process::id();
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_environ(UpdateKind::Always)
+            .with_exe(UpdateKind::Always),
+    );
+
+    system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            let pid = pid.as_u32();
+            if pid == self_pid || spare.contains(&pid) || !process_belongs_to_root(process, root) {
+                return None;
+            }
+            process.kill().then_some(pid)
+        })
+        .count()
 }
 
 fn iter_worktree_server_pids() -> std::io::Result<Vec<u32>> {
@@ -766,19 +974,6 @@ fn process_runtime_dir(pid: u32) -> std::io::Result<Option<PathBuf>> {
     Ok(socket_path.and_then(|path| path.parent().map(Path::to_path_buf)))
 }
 
-fn runtime_dir_owner_alive(runtime_dir: &Path) -> bool {
-    let marker = runtime_dir.join(RUNTIME_OWNER_MARKER);
-    let Ok(contents) = fs::read_to_string(marker) else {
-        return false;
-    };
-
-    let Ok(owner_pid) = contents.trim().parse::<libc::pid_t>() else {
-        return false;
-    };
-
-    process_exists(owner_pid)
-}
-
 fn is_test_herdr_binary(path: &Path) -> bool {
     // /proc resolves executable symlinks. Match only this Cargo build, including
     // custom target directories; binary identity alone never grants ownership.
@@ -801,66 +996,7 @@ impl Drop for CleanupGuard {
     }
 }
 
-fn terminate_pid(pid: u32) {
-    let pid_t = pid as libc::pid_t;
-
-    if process_exists(pid_t) {
-        unsafe {
-            libc::kill(pid_t, libc::SIGTERM);
-        }
-    }
-
-    if wait_for_pid_exit(pid_t, Duration::from_millis(400)) {
-        return;
-    }
-
-    if process_exists(pid_t) {
-        unsafe {
-            libc::kill(pid_t, libc::SIGKILL);
-        }
-    }
-
-    let _ = wait_for_pid_exit(pid_t, Duration::from_secs(2));
-}
-
-fn wait_for_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-
-    while Instant::now() < deadline {
-        if !process_exists(pid) {
-            return true;
-        }
-
-        let mut status = 0;
-        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        if result == pid {
-            return true;
-        }
-
-        if result == -1 {
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::ECHILD) => {
-                    // Not our child (or already reaped elsewhere). Poll /proc existence
-                    // until the process is truly gone.
-                    if !process_exists(pid) {
-                        return true;
-                    }
-                }
-                Some(libc::ESRCH) => return true,
-                _ => {
-                    if !process_exists(pid) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        thread::sleep(Duration::from_millis(20));
-    }
-
-    !process_exists(pid)
-}
-
+#[cfg(unix)]
 fn process_exists(pid: libc::pid_t) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
     if result == 0 {
@@ -870,57 +1006,213 @@ fn process_exists(pid: libc::pid_t) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn process_exists(pid: libc::pid_t) -> bool {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid as u32)]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(sysinfo::Pid::from_u32(pid as u32)).is_some()
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn sandbox_reaper_sigkill_driver() {
+    let Ok(root) = std::env::var(REAPER_DRIVER_ROOT_ENV) else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let runtime = root.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    register_runtime_dir(&runtime);
+
+    let helper = Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("HERDR_CONFIG_PATH", root.join("config.toml"))
+        .env("HERDR_SOCKET_PATH", runtime.join("herdr.sock"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    fs::write(root.join("helper.pid"), helper.id().to_string()).unwrap();
+    fs::write(root.join("ready"), "ready").unwrap();
+
+    unsafe {
+        libc::kill(libc::getpid(), libc::SIGKILL);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn sandbox_reaper_entrypoint() {
+    let (Ok(owner), Ok(root)) = (
+        std::env::var(REAPER_OWNER_ENV),
+        std::env::var_os(REAPER_ROOT_ENV),
+    ) else {
+        return;
+    };
+    let Ok(owner) = owner.parse::<u32>() else {
+        return;
+    };
+    run_sandbox_reaper(owner, &PathBuf::from(root));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn unique_missing_runtime_dir(label: &str) -> PathBuf {
+    fn unique_root(label: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "herdr-watchdog-scoping-{label}-{}-{unique}",
+            "herdr-reaper-{label}-{}-{unique}",
             std::process::id()
         ))
     }
 
-    #[test]
-    fn watchdog_scoping_does_not_terminate_missing_unregistered_runtime_dir() {
-        let runtime_dir = unique_missing_runtime_dir("unregistered");
-        let registered_runtime_dirs = HashSet::new();
-
-        assert!(
-            !should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs),
-            "missing runtime dirs must not be killable until they are proven session-owned"
-        );
-    }
-
-    #[test]
-    fn watchdog_scoping_terminates_missing_registered_runtime_dir() {
-        let runtime_dir = unique_missing_runtime_dir("registered");
-        let mut registered_runtime_dirs = HashSet::new();
-        registered_runtime_dirs.insert(runtime_dir.clone());
-
-        assert!(
-            should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs),
-            "missing runtime dirs that are session-owned should be considered killable"
-        );
-    }
-
-    #[test]
-    fn watchdog_scoping_preserves_registered_live_owner() {
-        let runtime_dir = unique_missing_runtime_dir("live-owner");
-        fs::create_dir_all(&runtime_dir).unwrap();
+    fn marked_root(label: &str) -> PathBuf {
+        let root = unique_root(label);
+        fs::create_dir_all(&root).unwrap();
         fs::write(
-            runtime_dir.join(RUNTIME_OWNER_MARKER),
+            root.join(SANDBOX_OWNER_MARKER),
             std::process::id().to_string(),
         )
         .unwrap();
-        let registered_runtime_dirs = HashSet::from([runtime_dir.clone()]);
-        let should_terminate = should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs);
-        fs::remove_dir_all(runtime_dir).unwrap();
-        assert!(!should_terminate, "a live test owner must remain protected");
+        root
+    }
+
+    #[test]
+    fn sandbox_root_boundary_rejects_prefix_collision() {
+        let root = Path::new("/tmp/herdr-reaper-root-123");
+        assert!(path_is_under(root, Path::new("/tmp/herdr-reaper-root-123")));
+        assert!(path_is_under(
+            Path::new("/tmp/herdr-reaper-root-123/runtime"),
+            root
+        ));
+        assert!(!path_is_under(
+            Path::new("/tmp/herdr-reaper-root-1234/runtime"),
+            root
+        ));
+    }
+
+    #[test]
+    fn sandbox_ownership_requires_environment_or_executable_evidence() {
+        let root = marked_root("ownership");
+        let path = format!("PATH={}/bin", root.display());
+        assert!(!environment_entry_belongs_to_root(OsStr::new(&path), &root));
+
+        let path = format!("HOME={}/home", root.display());
+        assert!(environment_entry_belongs_to_root(OsStr::new(&path), &root));
+        assert!(executable_belongs_to_root(
+            Some(&root.join("bin/herdr")),
+            &root
+        ));
+        assert!(!executable_belongs_to_root(
+            Some(Path::new("/tmp/herdr-reaper-other/herdr")),
+            &root
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sandbox_ownership_rejects_cmdline_only_match() {
+        let root = marked_root("cmdline-only");
+        let command = format!("COMMAND=tail -f {}/log", root.display());
+        assert!(!environment_entry_belongs_to_root(
+            OsStr::new(&command),
+            &root
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unmarked_sandbox_is_never_swept() {
+        let root = unique_root("unmarked");
+        fs::create_dir_all(&root).unwrap();
+        assert!(!is_sandbox_root(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_owner_protects_sandbox_from_stale_sweep() {
+        let root = marked_root("live-owner");
+        assert_eq!(
+            owner_pid_from_sandbox_marker(&root),
+            Some(std::process::id())
+        );
+        assert!(process_exists(std::process::id() as libc::pid_t));
+        sweep_stale_sandboxes();
+        assert!(root.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_sweep_reclaims_root_after_reaper_loss() {
+        let root = unique_root("stale");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(SANDBOX_OWNER_MARKER),
+            2_000_000_000_u32.to_string(),
+        )
+        .unwrap();
+        let mut helper = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .env("HOME", root.join("home"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        sweep_stale_sandboxes();
+        let _ = helper.kill();
+        let _ = helper.wait();
+        assert!(
+            !root.exists(),
+            "stale sweep left sandbox {}",
+            root.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_reaper_reclaims_sigkilled_driver_sandbox() {
+        let root = unique_root("sigkilled-driver");
+        let mut driver = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "support::sandbox_reaper_sigkill_driver",
+                "--nocapture",
+            ])
+            .env(REAPER_DRIVER_ROOT_ENV, &root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = driver.wait().unwrap();
+        assert!(!status.success(), "the driver must be SIGKILLed");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while root.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !root.exists(),
+            "orphan reaper left sandbox {}",
+            root.display()
+        );
     }
 
     #[test]

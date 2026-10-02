@@ -60,7 +60,7 @@ Herdr 对 Linux/macOS 上的集成配置和所有平台的新文件使用原子�
 | 集成类型 | 智能体 | 效果 |
 | --- | --- | --- |
 | 生命周期权威 | Pi、Kimi Code CLI、OpenCode | 已安装且在为该窗格主动上报时,由钩子或插件事件决定 `idle`、`working` 和 `blocked`。对同一个生命周期权威,Herdr 不再使用屏幕清单兜底。 |
-| 会话身份 | Claude Code、Codex | 集成上报用于恢复的原生会话引用。状态仍来自 Herdr 的屏幕清单检测。 |
+| 会话身份 | Claude Code、Codex | 集成上报用于恢复的原生会话引用。状态仍来自 Herdr 的屏幕清单检测。在使用 `--no-daemon` 运行时，Codex 也会上报回合状态，屏幕检测仍负责处理可见的阻塞提示。 |
 
 原生会话恢复需要最新的 Herdr 集成: Pi 集成版本 `2`、OMP 版本 `3`、Claude Code 版本 `6`、Codex 版本 `5`、GitHub Copilot CLI 版本 `2`、Devin CLI 版本 `2`、Droid 版本 `2`、Kimi Code CLI 版本 `3`、Qoder CLI 版本 `2`、Qwen Code 版本 `1`、Letta Code 版本 `1`、Cursor Agent CLI 版本 `1`、Grok CLI 版本 `2`、OpenCode 版本 `5`、Kilo Code CLI 版本 `1`、Hermes Agent 版本 `5`、MastraCode 版本 `1`、Antigravity CLI 版本 `1`。用 `herdr integration status` 查看已安装版本。
 
@@ -159,7 +159,9 @@ Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配
 
 Herdr 通过窗格内的启动器执行受管 Codex 启动和会话恢复。对交互启动、`resume` 和 `fork`，启动器根据窗格当前 `PATH` 选择可执行文件，通过 `--help` 确认完整的 `--no-daemon` 参数后才添加它。Codex 0.157 默认共享 daemon；前台模式让钩子保持在当前窗格的进程树中，避免复用另一窗格的环境。保存的恢复命令仍是原始 `codex resume <id>`。Herdr 不修改 Codex 配置，也不停止已有 daemon。
 
-新窗格还会在 `PATH` 最前面加入私有的原生 `codex` shim；通过该路径找到的普通 `codex` 命令使用同一启动器。登录脚本、nvm/mise 初始化、alias、shell 函数、绝对可执行路径以及外部包装器可能绕过它；这些场景请对支持该参数的 Codex 显式使用 `--no-daemon`。Herdr 不编辑 shell 启动文件。为避免包装器递归，启动器会从实际启动进程的 `PATH` 中移除自己的 shim 目录；Codex 内的子命令使用剩余的原始路径。
+新窗格还会在 `PATH` 最前面加入私有的原生 `codex` shim；通过该路径找到的普通 `codex` 命令使用同一启动器。登录脚本、nvm/mise 初始化、alias、shell 函数、绝对可执行路径以及外部包装器可能绕过它；这些场景请对支持该参数的 Codex 显式使用 `--no-daemon`。Herdr 不编辑 shell 启动文件。为避免包装器递归，启动器会从实际启动进程的 `PATH` 中移除自己的 shim 目录；其他原始路径条目的相对顺序保持不变。
+
+在 Windows 上，启动器随后只为真实 Codex 进程前置一个私有的 tar 专用适配目录。Codex 的 PowerShell 更新器因此使用 Windows 原生 `tar.exe`，而不是可能误解析盘符和反斜杠路径的 Git/MSYS tar。通过启动器运行 Codex 时，其内置更新提示也获得此修复。它不会前置整个 System32，不修改用户或系统 `PATH`，也不改变 PowerShell 执行策略；Bash/Zsh 仍使用原有的 GNU `tar`、`find` 和 `sort`。绕过启动器直接运行 Codex 不在修复范围内，已经运行的 Codex 进程需要重新启动。如果 Windows tar 或私有适配器不可用，Herdr 会明确警告内置更新仍可能失败，并在不做该环境调整的情况下启动。批处理适配器面向安装器使用的文件路径，不是任意命令语法的透明代理；不支持文件路径中的字面量 `%NAME%` 序列。
 
 非交互子命令（包括 `exec`、`review`、`app-server`、`mcp-server`、`login`、`agents`、`queue`）、显式 `--remote` 和已有的 `--no-daemon` 都原样传递。未知选项也保守地原样传递。子命令清单以 Codex 0.157 为准，包含隐藏命令和别名。未来新增的裸命令名可能无法与单词提示词区分；Herdr 尚未适配该命令时，请通过真实 Codex 可执行文件路径调用。不支持该参数的旧版程序保持原样。能力探测最多两秒，标准输出与错误输出合计上限 64 KiB；探测失败时，Herdr 提示前台隔离能力未知，并且只启动一次原始命令。Codex 启动失败后不会自动重试。在 Herdr 窗格外不会添加参数。此启动器不会为脱离窗格或远端 Codex 的钩子赋予可信的窗格归属。
 

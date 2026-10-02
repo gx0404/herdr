@@ -55,6 +55,11 @@ fn launch(args: &[OsString]) -> io::Result<()> {
         path_without_shims(std::env::var_os("PATH").as_deref().unwrap_or_default())?,
     );
     command.env_remove(ACTIVE);
+    if let Err(error) = crate::platform::codex_launch::configure_child(&mut command) {
+        eprintln!(
+            "herdr: Codex Windows update tools unavailable ({error}); launching unchanged; built-in updates may still fail"
+        );
+    }
     crate::platform::codex_launch::run(command)
 }
 

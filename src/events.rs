@@ -136,23 +136,34 @@ pub enum AppEvent {
         node_id: Option<String>,
         seq: Option<u64>,
     },
-    /// A scheduled background refresh finished for a pane's agent. `Err`
-    /// keeps the previously stored tree (the source was unreadable this time)
-    /// and only releases the in-flight slot. `ticket` is the start-order
-    /// number the worker took before reading the source
-    /// (`server::agent_activity::Tickets`): a tree is stored only when its
-    /// ticket is newer than the one already stored for that pane.
+    /// Synthetic result for tests of tree storage and start-order arbitration.
+    #[cfg(test)]
     AgentActivityRefreshed {
         pane_id: PaneId,
         ticket: u64,
         result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
     },
-    /// An interactive whole-tree read (`agent.activity.read` without a node)
-    /// finished for a pane. The tree is stored like a refresh result, ordered
-    /// by the same start ticket, but the scheduler's in-flight slot stays with
-    /// the discovery still running for that pane.
+    /// Synthetic whole-tree result; production readers must carry an identity.
+    #[cfg(test)]
     AgentActivityRead {
         pane_id: PaneId,
+        ticket: u64,
+        nodes: Vec<crate::api::schema::AgentActivityNode>,
+    },
+    /// A scheduled background refresh finished for the identity captured at
+    /// submission. This internal variant carries the identity and exact task
+    /// token needed to reject stale results and release only its own slot.
+    AgentActivityRefreshedFor {
+        pane_id: PaneId,
+        identity: crate::app::state::AgentActivityIdentity,
+        started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ticket: u64,
+        result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
+    },
+    /// An interactive whole-tree read finished for its submitted identity.
+    AgentActivityReadFor {
+        pane_id: PaneId,
+        identity: crate::app::state::AgentActivityIdentity,
         ticket: u64,
         nodes: Vec<crate::api::schema::AgentActivityNode>,
     },

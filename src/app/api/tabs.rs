@@ -117,6 +117,7 @@ impl App {
                     self.state.switch_workspace_tab(ws_idx, tab_idx);
                     self.state.mode = Mode::Terminal;
                 }
+                self.authorize_session_layout_change();
                 self.schedule_session_save();
                 self.emit_tab_created_events(ws_idx, tab_idx);
                 // APP-012：不做 expect；新建 tab 元数据缺失按创建失败返回。
@@ -211,6 +212,7 @@ impl App {
             .is_some_and(|ws| ws.move_tab(tab_idx, insert_index));
         let tabs = self.tab_list_info(ws_idx);
         if moved {
+            self.authorize_session_layout_change();
             self.schedule_session_save();
             self.emit_event(EventEnvelope {
                 event: EventKind::TabMoved,
@@ -256,6 +258,7 @@ impl App {
             let workspace = self.workspace_info(ws_idx);
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
+            self.authorize_session_layout_change();
             self.state.remove_plugin_pane_records(pane_ids);
             self.shutdown_detached_terminal_runtimes();
             self.emit_event(EventEnvelope {
@@ -288,6 +291,7 @@ impl App {
         self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
+        self.authorize_session_layout_change();
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
             event: EventKind::TabClosed,

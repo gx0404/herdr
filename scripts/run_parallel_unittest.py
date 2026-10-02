@@ -1,15 +1,15 @@
 """并行运行 unittest 模块清单（`just maintenance-test` 的执行器）。
 
-父进程用 unittest 的 loader 枚举清单模块里的测试，默认按「模块 + 类」切成工作单元；
-每个单元在独立子进程里跑 `python -m unittest`，线程池按 CPU 数并发。清单里的模块已
-核实可跨进程并发：不写仓库工作树、git 写操作只发生在各自唯一的临时仓库、没有固定
-端口/管道/锁文件。
+父进程用 unittest 的 loader 枚举清单模块，默认按「模块 + 类」切成工作单元；每个
+单元在独立子进程里跑 `python -m unittest`，线程池按安全有界的 worker 数并发。清单
+里的模块已核实可跨进程并发：不写仓库工作树、git 写操作只发生在各自唯一的临时仓库、
+没有固定端口/管道/锁文件。
 
-上一轮各测试的耗时记在 `target/test-suite-logs/unittest-durations.json`（gitignored）。
-有记录时，慢的类按估计耗时拆成不超过 `TARGET_UNIT_SECONDS` 的块，并从长到短派发，
-缩短长尾；没有记录时每类一个单元、按清单顺序派发（子进程启动也有成本，不盲目细拆）。
-任一单元失败（含模块导入失败、子进程异常退出）即整体非零退出，失败单元的完整输出
-会回放。
+上一轮各测试的耗时记在 `target/test-suite-logs/unittest-durations.json`（gitignored），
+并以原子替换写回。有记录时，慢的类按估计耗时拆成不超过 `TARGET_UNIT_SECONDS` 的块，
+并从长到短派发；没有记录时每类一个单元、按清单顺序派发（子进程启动也有成本，不盲目
+细拆）。任一单元失败（含模块导入失败、子进程异常退出）即整体非零退出，失败单元的
+完整输出会回放。
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ from typing import Iterable, Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DURATIONS_PATH = PROJECT_ROOT / "target" / "test-suite-logs" / "unittest-durations.json"
+MAINTENANCE_JOBS_ENV = "HERDR_MAINTENANCE_JOBS"
+DEFAULT_WORKERS = min(4, max(1, os.cpu_count() or 1))
 TARGET_UNIT_SECONDS = 3.0
 UNKNOWN_TEST_SECONDS = 0.05
 SLOWEST_REPORTED = 5
@@ -54,6 +57,27 @@ class UnitResult:
     seconds: float
     ran: int
     skipped: int
+
+
+def _positive_int(value: int | str, label: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} must be a positive integer: {value!r}") from error
+    if parsed < 1:
+        raise ValueError(f"{label} must be a positive integer: {parsed}")
+    return parsed
+
+
+def resolve_jobs(value: int | None = None, environ: dict[str, str] | None = None) -> int:
+    """Resolve worker count, with the command-line value taking precedence over the environment."""
+    if value is not None:
+        return _positive_int(value, "jobs")
+    environment = os.environ if environ is None else environ
+    raw = environment.get(MAINTENANCE_JOBS_ENV)
+    if raw is not None:
+        return _positive_int(raw, MAINTENANCE_JOBS_ENV)
+    return DEFAULT_WORKERS
 
 
 def iter_test_cases(suite: unittest.TestSuite | unittest.TestCase) -> Iterator[unittest.TestCase]:
@@ -127,7 +151,14 @@ def load_durations(path: Path = DURATIONS_PATH) -> dict[str, float]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {key: float(value) for key, value in data.items() if isinstance(value, (int, float))}
+    durations: dict[str, float] = {}
+    for key, value in data.items():
+        if isinstance(value, (int, float)):
+            try:
+                durations[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return durations
 
 
 def estimated_seconds(unit: Unit, durations: dict[str, float]) -> float:
@@ -143,6 +174,32 @@ def order_units(units: list[Unit], durations: dict[str, float]) -> list[Unit]:
     return sorted(units, key=lambda unit: estimated_seconds(unit, durations), reverse=True)
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+    except OSError:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 def record_durations(results: Iterable[UnitResult], path: Path = DURATIONS_PATH) -> None:
     durations = load_durations(path)
     for result in results:
@@ -155,8 +212,7 @@ def record_durations(results: Iterable[UnitResult], path: Path = DURATIONS_PATH)
         else:
             durations[result.unit.label] = round(result.seconds, 3)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(durations, indent=0, sort_keys=True), encoding="utf-8")
+        _atomic_write_text(path, json.dumps(durations, indent=0, sort_keys=True) + "\n")
     except OSError:
         pass
 
@@ -224,16 +280,26 @@ def _force_utf8_streams() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("modules", nargs="+", help="unittest 模块名，例如 scripts.test_release")
-    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4, help="并发子进程数（默认 CPU 数）")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        help=f"并发子进程数（默认安全上限 {DEFAULT_WORKERS}；也可用 {MAINTENANCE_JOBS_ENV}）",
+    )
     args = parser.parse_args(argv)
     _force_utf8_streams()
+    try:
+        jobs = resolve_jobs(args.jobs)
+    except ValueError as error:
+        print(f"维护测试参数错误: {error}", file=sys.stderr, flush=True)
+        return 2
     # 与子进程的 `python -m unittest`（cwd=仓库根）同样从仓库根导入 `scripts.*`。
     sys.path.insert(0, str(PROJECT_ROOT))
     started = time.monotonic()
     durations = load_durations()
     units = order_units(plan_units(args.modules, durations), durations)
-    results = run_units(units, args.jobs)
-    code, lines = summarize(results, time.monotonic() - started, args.jobs)
+    results = run_units(units, jobs)
+    code, lines = summarize(results, time.monotonic() - started, jobs)
     record_durations(results)
     print("\n".join(lines), flush=True)
     return code

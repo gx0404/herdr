@@ -19,6 +19,7 @@ impl App {
 
         self.state.selected = ws_idx;
         self.state.close_selected_workspace();
+        self.authorize_session_layout_change();
 
         if !removed_workspace_was_active {
             return;

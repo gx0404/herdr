@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Changed
+- Codex sessions started or restored inside Herdr now use a pane-local launcher. It adds `--no-daemon` only when the selected executable supports it, removes Herdr's private shim paths without reordering the other `PATH` entries, and on Windows can provide a private native `tar.exe` adapter for Codex's built-in updater without changing the user or system `PATH` or PowerShell execution policy.
+- Configuration updates now use durable temporary files, preserve existing permissions and symlink targets, and synchronize the replacement. Codex integration installation validates its TOML and JSON inputs before writing and changes only Herdr's top-level hook settings.
+- Client view updates are coalesced per endpoint, terminal snapshots format outside the PTY content lock after a stable capture, and Windows process discovery reuses a shared snapshot across panes.
+
+### Fixed
+- Agent activity refresh and read results are tied to the pane's current agent and session identity, so late results from a previous occupant no longer overwrite current activity.
+- Windows process ancestry now verifies parent and child creation times and treats unknown identities as unknown, preventing reused PIDs or incomplete snapshots from being accepted as live descendants. Closing a Windows pane now also terminates its complete child process tree.
+- PTY input, resize, and response queues now have bounded admission and shutdown rejection, so a blocked Enter write or response flood cannot stall later input. Endpoint response assembly enforces 64 MiB and 4096-chunk limits and reports an `endpoint_response_too_large` error for that request without discarding unrelated requests.
+- Client handshakes use an absolute deadline and a bounded number of concurrent slots, so idle or partial handshakes cannot hold resources indefinitely.
+- Terminal edge cases no longer lose state: OSC 52 clipboard writes reset stale selection mode, invalid bracketed paste input does not poison the next paste, and narrow retained patches blank clipped wide glyphs consistently with a full render. Native key events retain their UTF-8 storage until encoding, and incomplete pane-graphics generations are cleaned up.
+- Update installation refuses a downloaded executable whose SHA-256 digest does not match before replacing the current binary. Retired endpoint connection generations can no longer rebuild stale port forwards, and forwarding cleanup no longer waits indefinitely for inherited stderr pipes.
+
+### Performance
+- High-rate terminal view traffic now batches compatible frames, avoids redundant composition, and keeps retained-surface patches narrow. Activity and process-discovery paths use bounded work and shared snapshots instead of repeating full scans.
+
+### Testing
+- Maintenance and full-suite runners now use bounded concurrency, per-run logs and manifests, atomic duration/result writes, and explicit failure handling for missing phases or unavailable logs.
+- Release performance smoke runs record metadata, commands, summaries, and exit codes under `.local/perf-baseline`; each case isolates temporary state and its tmux directory. Regression coverage was added for Codex configuration preservation, Windows launch and handshake behavior, process identity, PTY admission, response limits, retained rendering, and graphics cleanup.
+
 ## [0.9.3] - 2026-09-29
 
 This is a hotfix release for v0.9.2. See the v0.9.2 notes for the full feature release: https://github.com/herdrdev/herdr/releases/tag/v0.9.2

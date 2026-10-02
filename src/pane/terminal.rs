@@ -73,6 +73,24 @@ pub struct PanePresentationMetadata {
     pub kitty_graphics_may_have_placements: bool,
 }
 
+pub(crate) struct CapturedTextSnapshot {
+    cols: u16,
+    viewport_rows: u16,
+    viewport_start: u32,
+    row_origin: u32,
+    range_start: u32,
+    range_end: u32,
+    total_rows: u32,
+    alternate_screen: bool,
+    truncated: bool,
+    colors: crate::ghostty::RenderColors,
+    default_palette: [crate::ghostty::RgbColor; 256],
+    initial_default_foreground: Option<crate::ghostty::RgbColor>,
+    initial_default_background: Option<crate::ghostty::RgbColor>,
+    host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    rows: Vec<crate::ghostty::ScreenStyledRow>,
+}
+
 fn scroll_metrics_of(terminal: &crate::ghostty::Terminal) -> Option<ScrollMetrics> {
     let scrollbar = terminal.scrollbar().ok()?;
     Some(ScrollMetrics {
@@ -659,13 +677,32 @@ impl PaneTerminal {
         self.ghostty.wheel_routing()
     }
 
+    #[cfg(test)]
     pub(crate) fn capture_text_snapshot(
         &self,
     ) -> Option<crate::terminal::text_snapshot::FrozenText> {
-        use crate::terminal::text_snapshot::{
-            FrozenCell, FrozenRow, FrozenText, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_CELLS,
-        };
+        let captured = self.capture_text_snapshot_data()?;
+        Self::format_text_snapshot(captured)
+    }
+
+    pub(crate) fn capture_text_snapshot_data(&self) -> Option<CapturedTextSnapshot> {
         let core = self.ghostty.core.lock().ok()?;
+        Self::capture_text_snapshot_data_locked(&core)
+    }
+
+    pub(crate) fn screen_text_snapshot(
+        &self,
+    ) -> Option<(
+        crate::ghostty::ActiveScreen,
+        u16,
+        Vec<crate::ghostty::ScreenTextRow>,
+    )> {
+        self.ghostty.screen_text_snapshot()
+    }
+
+    fn capture_text_snapshot_data_locked(core: &GhosttyPaneCore) -> Option<CapturedTextSnapshot> {
+        use crate::terminal::text_snapshot::MAX_SNAPSHOT_CELLS;
+
         let terminal = &core.terminal;
         let cols = terminal.cols().ok()?;
         let viewport_rows = terminal.rows().ok()?;
@@ -680,19 +717,10 @@ impl PaneTerminal {
             .saturating_add(count.saturating_sub(scroll.len) / 4)
             .min(scroll.total);
         let start = end.saturating_sub(count);
-        let colors = terminal.screen_colors().ok()?;
-        let default_fg = ghostty_default_fg(
-            colors.foreground,
-            core.host_terminal_theme,
-            core.initial_default_foreground,
-        );
-        let default_bg = ghostty_default_bg(
-            colors.background,
-            core.host_terminal_theme,
-            core.initial_default_background,
-        );
-        let overrides = PaletteOverrides::new(&colors.palette, &terminal.default_palette().ok()?);
-        let mut snapshot = FrozenText {
+        let rows = (start..end)
+            .map(|y| terminal.screen_styled_row(u32::try_from(y).ok()?).ok())
+            .collect::<Option<Vec<_>>>()?;
+        Some(CapturedTextSnapshot {
             cols,
             viewport_rows,
             viewport_start: u32::try_from(scroll.offset).ok()?,
@@ -702,14 +730,67 @@ impl PaneTerminal {
             total_rows: u32::try_from(scroll.total).ok()?,
             alternate_screen: terminal.active_screen().ok()?
                 == crate::ghostty::ActiveScreen::Alternate,
-            content_revision: 0,
             truncated: start > 0 || end < scroll.total,
-            rows: Vec::with_capacity(end - start),
+            colors: terminal.screen_colors().ok()?,
+            default_palette: terminal.default_palette().ok()?,
+            initial_default_foreground: core.initial_default_foreground,
+            initial_default_background: core.initial_default_background,
+            host_terminal_theme: core.host_terminal_theme,
+            rows,
+        })
+    }
+
+    pub(crate) fn format_text_snapshot(
+        captured: CapturedTextSnapshot,
+    ) -> Option<crate::terminal::text_snapshot::FrozenText> {
+        use crate::terminal::text_snapshot::{
+            FrozenCell, FrozenRow, FrozenText, MAX_SNAPSHOT_BYTES,
+        };
+
+        let CapturedTextSnapshot {
+            cols,
+            viewport_rows,
+            viewport_start,
+            row_origin,
+            range_start,
+            range_end,
+            total_rows,
+            alternate_screen,
+            truncated,
+            colors,
+            default_palette,
+            initial_default_foreground,
+            initial_default_background,
+            host_terminal_theme,
+            rows,
+        } = captured;
+        let default_fg = ghostty_default_fg(
+            colors.foreground,
+            host_terminal_theme,
+            initial_default_foreground,
+        );
+        let default_bg = ghostty_default_bg(
+            colors.background,
+            host_terminal_theme,
+            initial_default_background,
+        );
+        let overrides = PaletteOverrides::new(&colors.palette, &default_palette);
+        let mut snapshot = FrozenText {
+            cols,
+            viewport_rows,
+            viewport_start,
+            row_origin,
+            range_start,
+            range_end,
+            total_rows,
+            alternate_screen,
+            content_revision: 0,
+            truncated,
+            rows: Vec::with_capacity(rows.len()),
         };
         let mut bytes = 0usize;
-        for y in start..end {
-            let row = terminal.screen_styled_row(u32::try_from(y).ok()?).ok()?;
-            let mut cells = Vec::with_capacity(usize::from(cols));
+        for row in rows {
+            let mut cells = Vec::with_capacity(row.cells.len());
             for cell in row.cells {
                 let mut style = cell.style;
                 style.bg_color = cell.content_bg.or(style.bg_color);
@@ -772,16 +853,6 @@ impl PaneTerminal {
             });
         }
         (snapshot.bytes() <= MAX_SNAPSHOT_BYTES).then_some(snapshot)
-    }
-
-    pub(crate) fn screen_text_snapshot(
-        &self,
-    ) -> Option<(
-        crate::ghostty::ActiveScreen,
-        u16,
-        Vec<crate::ghostty::ScreenTextRow>,
-    )> {
-        self.ghostty.screen_text_snapshot()
     }
 
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {

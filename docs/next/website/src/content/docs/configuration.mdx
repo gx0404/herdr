@@ -35,6 +35,10 @@ herdr --default-config > ~/.config/herdr/config.toml
 
 If a config value is invalid, Herdr falls back to a safe default and shows a startup warning.
 
+Startup and reload diagnostics end with a short `herdr config check` hint. Invalid or unreadable input says whether Herdr is using defaults or keeping the current config; unknown keys are reported as unknown keys. Run `herdr config check` for the full diagnostics. It exits non-zero when issues are found.
+
+When Herdr edits `config.toml` itself, it writes a temporary file beside the target, syncs it, atomically replaces the regular file, and syncs the parent directory. An existing symlink is followed to its regular-file target rather than replaced; directories, non-regular targets, and unsafe symlink chains are rejected. A failed edit leaves the existing config in place.
+
 Herdr shows first-run setup when `onboarding` is missing or true. Continuing from onboarding writes `onboarding = false` and opens settings on the integrations tab. Set `onboarding = false` to skip that flow after setup.
 
 ```toml

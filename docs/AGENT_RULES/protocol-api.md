@@ -42,6 +42,15 @@ herdr 正在向 server 拥有的 runtime 协议 + TUI 作为客户端之一迁�
 - 既有值摘要检测不到追加的枚举变体：逐个审查冻结 codec 可达的枚举为
   append-closed，即使测试仍绿。
 
+## 传输边界与公平性预算
+
+- 初始客户端握手必须在 4 秒绝对 deadline 内读完；Windows named-pipe 的分片轮询不能
+  续期该 deadline。握手首帧使用普通 `MAX_FRAME_SIZE`（2 MiB），同时最多保留 32 个
+  握手 worker；Welcome 与连接事件入队后释放握手许可，再进入正常读循环。
+- 每客户端 control 车道上限为 4 MiB/4096 条，完全停滞的写入 30 秒后失败；单条客户端
+  输入上限为 1 MiB。server 外部 API/event 每轮最多处理 64 条，以便 scheduled work 和
+  渲染取得机会；这些预算不是 generation 1 wire 兼容字段。
+
 ## 线协议版本
 
 `src/protocol/wire.rs::PROTOCOL_VERSION` 是 wire 协议版本号。协议变更时先与

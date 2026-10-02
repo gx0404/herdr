@@ -29,11 +29,35 @@ PENDING 补验方式：在对应工具的真实会话中尝试探针命令
 （`gh pr merge 1`、编辑 `distribution/latest.json`），确认被拒并显示理由；
 完成后把上行改为 PASS 并注明日期。
 
+## 测试与性能命令（AI agent）
+
+AI agent 默认通过 `just test` 进入五阶段编排，不要把单个 phase 的绿色当作全量通过。
+`HERDR_TEST_BUDGET`/`--test-budget` 控制 combined 默认预算（默认 `min(8, cpu_count)`）；
+`HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs` 控制 phase 并发（默认
+`min(2, 5, budget)`）；`HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs` 控制 maintenance
+（默认 `min(4, budget)`）；`HERDR_NEXTEST_JOBS`/`--nextest-jobs` 控制 nextest（默认
+`max(1, budget-maintenance)`）。命令行优先于环境变量，显式值必须为正整数，编排器会把
+解析后的 maintenance/nextest 值传给 phase 子进程。每个 run 的 `manifest.json` 原子记录
+`run_id`、`status`、`manifest`、`test_budget`、`phase_jobs`、`maintenance_jobs`、
+`nextest_jobs`、`failures`，以及每个 phase 的 `recipe`、`status`、`exit_code`、`seconds`、
+`log`；证据路径是 `target/test-suite-logs/<run-id>/`。
+
+`just nextest-all`、`just test-one`、`just ci-tests` 是直接 nextest 入口，justfile 使用
+`HERDR_NEXTEST_JOBS`，未设置时默认 4；直接 `run_parallel_unittest.py` 的 `--jobs` 与
+`HERDR_MAINTENANCE_JOBS` 只影响 maintenance 执行器。`bench-release-smoke` 仅支持
+Linux/macOS，且候选与 baseline 必须在 run 内隔离的 `HOME`、`USERPROFILE`、
+`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、
+`XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、
+`KIMI_CODE_HOME`、`TMPDIR` 中运行；case 还设置 `TMUX_TMPDIR` 并清除继承的 herdr
+socket/session。只清理 `.local/perf-baseline/run-*/tmp` 临时态，保留 metadata、命令、
+采样、summary、run log 与 exit-code，避免 AI 工具用户状态污染。
+
 ## 维护
 
-Codex 审批策略以实际会话配置为准。当前仓库设置 `approval_policy = "never"`；
-用户级配置和启动参数仍须一致，已经启动的会话可能保留旧快照。`never` 控制
-是否询问，不扩大 `sandbox_mode = "workspace-write"` 的访问范围。
+Codex 项目配置以 `.codex/config.toml` 为准：当前设置 `approval_policy = "never"`、
+`sandbox_mode = "danger-full-access"`、`project_doc_max_bytes = 32768`；用户级配置和
+启动参数仍须一致，已经启动的会话可能保留旧快照。`never` 控制是否询问；危险操作仍由
+共享 hook 策略拦截，配置值本身不替代 hook 探针或真实会话验证。
 参见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
 Codex 的 PreToolUse 响应采用 `hookSpecificOutput.permissionDecision`。

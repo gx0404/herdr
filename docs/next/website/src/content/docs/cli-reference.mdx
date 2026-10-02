@@ -249,7 +249,7 @@ herdr session stop <name> [--json]
 herdr session delete <name> [--json]
 ```
 
-Use `default` as the session name when you need to stop the default session explicitly.
+Use `default` as the session name when you need to stop the default session explicitly. Deleting a named session uses the exact spelling shown by `herdr session list`, checks both its server and client endpoints, and leaves the data untouched if either endpoint is live or its state cannot be determined. It also refuses symbolic-link or junction session directories; stop the session and correct the path or permissions before retrying.
 
 ## Workspaces
 
@@ -376,6 +376,8 @@ aliases for `ctrl+c`.
 `esc` is the canonical spelling; `escape` is also accepted.
 
 `pane run` honors live bracketed-paste mode and submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands; the separate send operations remain low-level and non-submitting.
+
+Input admission is bounded so a slow pane cannot accumulate memory without limit. A pane PTY accepts at most 1,024 pending input items and 16 MiB of pending input bytes; `pane send-*`, `pane run`, and `agent prompt` can fail with `pane_send_failed` or `agent_prompt_failed` and a `WouldBlock`/full-queue message while that budget is occupied. Retry after earlier input drains. Pending terminal responses are separately capped at 256 items and 1 MiB; when that response budget is full, Herdr drops a whole response rather than growing the backlog.
 
 Report agent state from custom hooks:
 

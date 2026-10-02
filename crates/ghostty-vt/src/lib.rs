@@ -773,6 +773,8 @@ unsafe extern "C" fn decode_png_trampoline(
     let Some(rgba) = decode_png_rgba(bytes) else {
         return false;
     };
+    // GhosttySysImage transfers this allocation to libghostty; allocate with
+    // the callback-provided allocator and never free it from Rust after success.
     let ptr = unsafe { ffi::ghostty_alloc(allocator, rgba.data.len()) };
     if ptr.is_null() {
         return false;
@@ -3196,13 +3198,17 @@ impl Drop for RenderState {
 
 pub struct KeyEvent {
     raw: ffi::GhosttyKeyEvent,
+    /// The FFI setter borrows this pointer rather than copying it. Keep the
+    /// bytes owned for the native event's lifetime, replacing them only after
+    /// the event has been pointed at the new allocation.
+    utf8: Option<Box<[u8]>>,
 }
 
 impl KeyEvent {
     pub fn new() -> Result<Self, Error> {
         let mut raw = ptr::null_mut();
         unsafe { ffi::ghostty_key_event_new(ptr::null(), &mut raw).into_result()? };
-        Ok(Self { raw })
+        Ok(Self { raw, utf8: None })
     }
 
     pub fn set_action(&mut self, action: ffi::GhosttyKeyAction) {
@@ -3218,9 +3224,13 @@ impl KeyEvent {
     }
 
     pub fn set_utf8(&mut self, text: &str) {
-        unsafe {
-            ffi::ghostty_key_event_set_utf8(self.raw, text.as_ptr().cast::<c_char>(), text.len())
-        }
+        let utf8 = (!text.is_empty()).then(|| text.as_bytes().to_vec().into_boxed_slice());
+        let (ptr, len) = utf8.as_ref().map_or((ptr::null(), 0), |utf8| {
+            (utf8.as_ptr().cast::<c_char>(), utf8.len())
+        });
+        // SAFETY: utf8 remains alive until after the native event has switched to its pointer.
+        unsafe { ffi::ghostty_key_event_set_utf8(self.raw, ptr, len) };
+        self.utf8 = utf8;
     }
 
     pub fn set_unshifted_codepoint(&mut self, codepoint: u32) {
@@ -3945,6 +3955,31 @@ mod tests {
             .unwrap();
         }
         out
+    }
+
+    #[test]
+    fn key_event_owns_utf8_storage_across_replacement_and_encoding() {
+        let mut event = KeyEvent::new().unwrap();
+        event.set_action(ffi::GhosttyKeyAction_GHOSTTY_KEY_ACTION_PRESS);
+        event.set_key(KEY_A);
+        let mut encoder = KeyEncoder::new().unwrap();
+
+        for text in ["a", "b"] {
+            event.set_utf8(text);
+            let mut len = 0;
+            let ptr = unsafe { ffi::ghostty_key_event_get_utf8(event.raw, &mut len) };
+            assert!(!ptr.is_null());
+            let bytes = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), len) };
+            assert_eq!(bytes, text.as_bytes());
+            encoder.encode(&event).unwrap();
+        }
+
+        event.set_utf8("");
+        let mut len = usize::MAX;
+        let ptr = unsafe { ffi::ghostty_key_event_get_utf8(event.raw, &mut len) };
+        assert!(ptr.is_null());
+        assert_eq!(len, 0);
+        encoder.encode(&event).unwrap();
     }
 
     #[test]

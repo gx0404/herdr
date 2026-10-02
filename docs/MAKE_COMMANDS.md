@@ -9,10 +9,10 @@
 
 | 命令 | 用途 | 前置 | 副作用 | 证据 |
 |---|---|---|---|---|
-| `just test` | 全量验证：编排器并行跑 nextest + maintenance + 热路径架构 + 资产 + docs 契约（阶段日志在 `target/test-suite-logs/`） | Rust/Python/Bun/Node 工具链 | 编译产物、临时目录 | 退出码 0；阶段汇总各子命令状态 |
-| `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源） | Rust | 编译产物 | 退出码 0 |
-| `just test-one <filter>` | 单个 nextest 过滤器 | 同上 | 同上 | 退出码 0 |
-| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败）。清单由 `scripts/run_parallel_unittest.py` 按类拆成子进程、以 CPU 数并发执行；上一轮耗时记在 `target/test-suite-logs/unittest-durations.json`，据此把慢类拆块、从长到短派发 | Python3（3.10 需 tomli）、Bun | 写 `target/test-suite-logs/unittest-durations.json` | 执行器末行 `OK` + bun test OK + 丢弃检查 `OK: … 均无命中`；失败单元回放完整输出 |
+| `just test` | 全量验证：编排器并行跑 nextest + maintenance + 热路径架构 + 资产 + docs 契约；五个 phase 默认最多同时跑 `min(2, 5, test_budget)` 个。combined budget 默认 `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET`/`--test-budget`；phase 可用 `HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs`，maintenance 可用 `HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs`，nextest 可用 `HERDR_NEXTEST_JOBS`/`--nextest-jobs` 覆盖 | Rust/Python/Bun/Node 工具链 | 编译产物、临时目录、`target/test-suite-logs/<run-id>/` 阶段日志与原子 manifest；manifest 含 budget、三个 jobs 字段、每 phase 结果与 failures | 退出码 0；阶段汇总各子命令状态；命令行值优先于环境变量，非法/非正值失败 |
+| `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源）；justfile 读取 `HERDR_NEXTEST_JOBS`，未设置时 `--test-threads 4` | Rust | 编译产物 | 退出码 0 |
+| `just test-one <filter>` | 单个 nextest 过滤器；使用同一 `HERDR_NEXTEST_JOBS`/默认 4 | 同上 | 同上 | 退出码 0 |
+| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败）。清单由 `scripts/run_parallel_unittest.py` 按类拆成子进程，默认以 `min(4, cpu_count)` worker 并发，可用 `HERDR_MAINTENANCE_JOBS`/执行器 `--jobs` 覆盖；`just test` 通过 `--maintenance-jobs` 解析后注入该环境变量。上一轮耗时记在 `target/test-suite-logs/unittest-durations.json`，以原子替换写回，据此把慢类拆块、从长到短派发 | Python3（3.10 需 tomli）、Bun | 写 `target/test-suite-logs/unittest-durations.json` | 执行器末行 `OK` + bun test OK + 丢弃检查 `OK: … 均无命中`；失败单元回放完整输出 |
 | `just test-windows-input [args..]` | 仅 Windows：本机交互式 Windows Terminal 输入资格测试（`scripts/test_windows_input.ps1`，注入输入并清空剪贴板；普通 CI 不跑） | Windows、pwsh | 注入键鼠输入、清空剪贴板 | 报告中各输入路径的覆盖结论 |
 | `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |
 | `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |
@@ -51,7 +51,11 @@
 | 命令 | 用途 | 前置 | 证据 |
 |---|---|---|---|
 | `just bench-render-scale` | 非门禁全渲染扩展画像（1/15 pane、后台 workspace） | release 构建 | 控制台画像（记录到任务说明） |
-| `just bench-release-smoke` | 发布前 CPU 对比（~3–5 分钟；未设 `HERDR_PERF_BASELINE_BIN` 下载 stable） | 网络或本地基线 | 对比结论；显著回归须调查 |
+| `just bench-terminal-targets` | 递增 pane 数下的终端 target 查找画像 | release 构建 | 控制台画像 |
+| `just bench-bsp-layout` | 平衡/偏斜树的 BSP split 收集与构造画像 | release 构建 | 控制台画像 |
+| `just bench-retained-graphics` | full/retained text、静态图与 unchanged-image 更新画像 | release 构建 | 控制台画像 |
+| `just bench-api-fairness` | 外部 API burst 的首批延迟与 drain 成本画像 | release 构建 | 控制台画像 |
+| `just bench-release-smoke` | 发布前 CPU 对比（~3–5 分钟；未设 `HERDR_PERF_BASELINE_BIN` 下载 stable；Linux/macOS；候选与 baseline 在 `hidden50`/`visible30` 两轮串行运行） | 网络或本地基线 | `.local/perf-baseline/run-*/` 保留 run-id、metadata、candidate/baseline 命令、原始采样、summary、run log 与退出码；smoke/case 将 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、`KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）全部指向 run 内私有临时 state，且清除继承的 herdr socket/session；仅清理临时运行态，显著回归须调查 |
 
 ## 发布链（上游保留入口；见 `AGENT_RULES/release-channels.md`）
 

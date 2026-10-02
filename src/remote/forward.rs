@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::io;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -28,7 +28,10 @@ use crate::client::endpoint::{PortForwardKind, PortForwardRule, ProfileId, Saved
 /// `ExitOnForwardFailure` catches anything racy or IPv6-only.
 const DEFAULT_LOCAL_BIND_ADDRESS: &str = "127.0.0.1";
 const MONITOR_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Keep diagnostics bounded even when ssh writes continuously to stderr.
 const MAX_FORWARD_STDERR_BYTES: usize = 8 * 1024;
+/// Do not let an inherited stderr pipe keep forward teardown blocked forever.
+const MAX_FORWARD_STDERR_DRAIN_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PortForwardPhase {
@@ -44,8 +47,10 @@ pub(crate) struct PortForwardStatus {
     pub(crate) detail: Option<String>,
 }
 
-/// One running forwarding child. Dropping it stops the child; the monitor
-/// thread records the exit reason into the shared state first.
+/// One running forwarding child. Dropping it signals the monitor, which kills
+/// and waits for the child before the handle joins. Stderr is capped at 8 KiB
+/// and its final drain waits at most 100 ms, so inherited pipe readers cannot
+/// make profile teardown wait forever.
 pub(crate) struct PortForward {
     rule: PortForwardRule,
     state: Arc<Mutex<PortForwardState>>,
@@ -71,7 +76,7 @@ impl PortForward {
         options: Option<&ManagedSshOptions>,
     ) -> io::Result<Self> {
         ensure_listen_address_available(rule)?;
-        let mut child = forward_command(rule, target, options)
+        let child = forward_command(rule, target, options)
             .spawn()
             .map_err(|error| {
                 io::Error::new(
@@ -79,6 +84,10 @@ impl PortForward {
                     format!("failed to start SSH port forward: {error}"),
                 )
             })?;
+        Ok(Self::from_child(rule, child))
+    }
+
+    fn from_child(rule: &PortForwardRule, mut child: Child) -> Self {
         let state = Arc::new(Mutex::new(PortForwardState {
             phase: PortForwardPhase::Active,
             detail: None,
@@ -89,12 +98,12 @@ impl PortForward {
             let stop = Arc::clone(&stop);
             thread::spawn(move || monitor_forward(&mut child, &state, &stop))
         };
-        Ok(Self {
+        Self {
             rule: rule.clone(),
             state,
             stop,
             monitor: Some(monitor),
-        })
+        }
     }
 
     fn is_active(&self) -> bool {
@@ -132,7 +141,14 @@ fn monitor_forward(
     stop: &Arc<AtomicBool>,
 ) {
     let drain = child.stderr.take().map(|stderr| {
-        thread::spawn(move || super::process::read_to_end_bounded(stderr, MAX_FORWARD_STDERR_BYTES))
+        let (done, result) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = done.send(super::process::read_to_end_bounded(
+                stderr,
+                MAX_FORWARD_STDERR_BYTES,
+            ));
+        });
+        result
     });
     let mut exited = None;
     loop {
@@ -158,7 +174,7 @@ fn monitor_forward(
         thread::sleep(MONITOR_POLL_INTERVAL);
     }
     let stderr_tail = drain
-        .and_then(|drain| drain.join().ok())
+        .and_then(|drain| drain.recv_timeout(MAX_FORWARD_STDERR_DRAIN_WAIT).ok())
         .and_then(|result| result.ok())
         .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
         .filter(|tail| !tail.is_empty());
@@ -256,9 +272,13 @@ fn forward_command(
 /// Tracks the desired and running forwards of every connected SSH endpoint.
 /// `rebuild` restarts a profile's whole set after a successful (re)connect;
 /// `reconcile` applies catalog rule edits in place while the connection
-/// stays up; `stop` tears a set down when the endpoint retires.
+/// stays up; `stop` tears a set down when the endpoint retires. A prepared
+/// generation is a commit fence: a late connection attempt may not rebuild
+/// forwards after that generation has been revoked.
 pub(crate) struct PortForwardManager {
     sets: HashMap<ProfileId, ForwardSet>,
+    desired: HashMap<ProfileId, SavedSshEndpoint>,
+    generations: HashMap<ProfileId, u64>,
     starter: ForwardStarter,
 }
 
@@ -289,15 +309,37 @@ impl PortForwardManager {
     pub(crate) fn new() -> Self {
         Self {
             sets: HashMap::new(),
+            desired: HashMap::new(),
+            generations: HashMap::new(),
             starter: PortForward::start,
         }
+    }
+
+    pub(crate) fn prepare_generation(&mut self, profile: &SavedSshEndpoint, generation: u64) {
+        self.desired.insert(profile.id.clone(), profile.clone());
+        self.generations.insert(profile.id.clone(), generation);
+    }
+
+    pub(crate) fn update_profile(&mut self, profile: &SavedSshEndpoint) {
+        self.desired.insert(profile.id.clone(), profile.clone());
+    }
+
+    pub(crate) fn rebuild_if_current(&mut self, profile_id: &ProfileId, generation: u64) -> bool {
+        if self.generations.get(profile_id) != Some(&generation) {
+            return false;
+        }
+        let Some(profile) = self.desired.get(profile_id).cloned() else {
+            return false;
+        };
+        self.rebuild(&profile);
+        true
     }
 
     /// Restarts every forward of a profile. Called by the endpoint supervisor
     /// after a connection (re)establishes; also stops forwards of profiles
     /// whose rules were all removed.
     pub(crate) fn rebuild(&mut self, profile: &SavedSshEndpoint) {
-        self.stop(&profile.id);
+        self.stop_set(&profile.id);
         if profile.port_forwards.is_empty() {
             return;
         }
@@ -341,6 +383,7 @@ impl PortForwardManager {
     /// when the rules were emptied — gets a full rebuild, exactly like a
     /// fresh connect, so the 0 -> N transition never waits for a reconnect.
     pub(crate) fn reconcile(&mut self, profile: &SavedSshEndpoint) {
+        self.update_profile(profile);
         if profile.port_forwards.is_empty() {
             self.stop(&profile.id);
             return;
@@ -370,12 +413,20 @@ impl PortForwardManager {
         }
     }
 
-    pub(crate) fn stop(&mut self, profile_id: &ProfileId) {
+    fn stop_set(&mut self, profile_id: &ProfileId) {
         self.sets.remove(profile_id);
+    }
+
+    pub(crate) fn stop(&mut self, profile_id: &ProfileId) {
+        self.stop_set(profile_id);
+        self.desired.remove(profile_id);
+        self.generations.remove(profile_id);
     }
 
     pub(crate) fn stop_all(&mut self) {
         self.sets.clear();
+        self.desired.clear();
+        self.generations.clear();
     }
 
     pub(crate) fn status(&self, profile_id: &ProfileId) -> Vec<PortForwardStatus> {
@@ -493,6 +544,8 @@ mod tests {
     fn manager_with(starter: ForwardStarter) -> PortForwardManager {
         PortForwardManager {
             sets: HashMap::new(),
+            desired: HashMap::new(),
+            generations: HashMap::new(),
             starter,
         }
     }
@@ -655,5 +708,127 @@ mod tests {
                 config_path.display()
             );
         }
+    }
+
+    #[test]
+    fn revoked_generation_cannot_rebuild_forwards() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("forward-revoked-generation");
+        let profile = profile_with_forwards(vec![rule(PortForwardKind::Local, 18084)]);
+        let mut manager = manager_with(starter_succeeds);
+        manager.prepare_generation(&profile, 7);
+        manager.stop(&profile.id);
+
+        assert!(!manager.rebuild_if_current(&profile.id, 7));
+        assert!(manager.status(&profile.id).is_empty());
+    }
+
+    #[test]
+    fn current_generation_rebuilds_the_latest_catalog_profile() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("forward-latest-generation");
+        let original = profile_with_forwards(vec![rule(PortForwardKind::Local, 18085)]);
+        let mut latest = original.clone();
+        latest.port_forwards = vec![rule(PortForwardKind::Local, 18086)];
+        let mut manager = manager_with(starter_succeeds);
+        manager.prepare_generation(&original, 8);
+        manager.update_profile(&latest);
+
+        assert!(manager.rebuild_if_current(&original.id, 8));
+        let statuses = manager.status(&original.id);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].rule.listen_port, 18086);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_forward_with_inherited_stderr_is_bounded() {
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        let rule = rule(PortForwardKind::Remote, 18087);
+        let child = Command::new("sh")
+            .args(["-c", "sleep 2 >&2 & exit 0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fake forwarding child");
+        let forward = PortForward::from_child(&rule, child);
+        let started = Instant::now();
+        drop(forward);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "forward cleanup waited for an inherited stderr pipe"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_one_forward_does_not_hold_manager_forever() {
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        let first = profile_with_forwards(vec![rule(PortForwardKind::Remote, 18088)]);
+        let second = profile_with_forwards(vec![rule(PortForwardKind::Remote, 18089)]);
+        let first_rule = first.port_forwards[0].clone();
+        let child = Command::new("sh")
+            .args(["-c", "sleep 2 >&2 & exit 0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fake forwarding child");
+        let forward = PortForward::from_child(&first_rule, child);
+        let stop_started = Arc::clone(&forward.stop);
+        let mut manager = manager_with(starter_succeeds);
+        manager.sets.insert(
+            first.id.clone(),
+            ForwardSet {
+                entries: vec![ForwardEntry {
+                    rule: first_rule,
+                    state: ForwardEntryState::Running(forward),
+                }],
+                config: None,
+            },
+        );
+        manager.sets.insert(
+            second.id.clone(),
+            ForwardSet {
+                entries: vec![ForwardEntry {
+                    rule: second.port_forwards[0].clone(),
+                    state: ForwardEntryState::Running(
+                        starter_succeeds(&second.port_forwards[0], "unused", None)
+                            .expect("second fake forward"),
+                    ),
+                }],
+                config: None,
+            },
+        );
+        let shared = Arc::new(Mutex::new(manager));
+        let stop_id = first.id.clone();
+        let stopping = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .stop(&stop_id);
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !stop_started.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(stop_started.load(Ordering::Acquire));
+
+        let started = Instant::now();
+        let statuses = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .status(&second.id);
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "second endpoint waited indefinitely for first forward cleanup"
+        );
+        stopping.join().expect("forward stop thread");
     }
 }

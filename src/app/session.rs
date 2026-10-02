@@ -1,6 +1,83 @@
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use super::{App, SESSION_SAVE_DEBOUNCE};
+
+#[derive(Default)]
+pub(super) struct SessionLayout {
+    workspaces: HashSet<String>,
+    tabs: HashSet<(String, usize)>,
+    panes: HashSet<(String, usize, usize)>,
+    unidentified: bool,
+}
+
+impl SessionLayout {
+    pub(super) fn from_snapshot(snapshot: &crate::persist::SessionSnapshot) -> Self {
+        let mut layout = Self::default();
+        for workspace in &snapshot.workspaces {
+            let Some(id) = &workspace.id else {
+                layout.unidentified = true;
+                continue;
+            };
+            layout.workspaces.insert(id.clone());
+            for (index, tab) in workspace.tabs.iter().enumerate() {
+                let Some(&number) = workspace.public_tab_numbers.get(index) else {
+                    layout.unidentified = true;
+                    continue;
+                };
+                layout.tabs.insert((id.clone(), number));
+                for pane in tab.panes.keys() {
+                    if let Some(&pane_number) = workspace.public_pane_numbers.get(pane) {
+                        layout.panes.insert((id.clone(), number, pane_number));
+                    } else {
+                        layout.unidentified = true;
+                    }
+                }
+            }
+        }
+        layout
+    }
+
+    fn from_workspaces(workspaces: &[crate::workspace::Workspace]) -> Self {
+        let mut layout = Self::default();
+        for workspace in workspaces {
+            layout.workspaces.insert(workspace.id.clone());
+            for tab in &workspace.tabs {
+                layout.tabs.insert((workspace.id.clone(), tab.number));
+                for pane in tab.panes.keys() {
+                    if let Some(&number) = workspace.public_pane_numbers.get(pane) {
+                        layout
+                            .panes
+                            .insert((workspace.id.clone(), tab.number, number));
+                    } else {
+                        layout.unidentified = true;
+                    }
+                }
+            }
+        }
+        layout
+    }
+
+    #[cfg(test)]
+    pub(super) fn pane_count(&self) -> usize {
+        self.panes.len()
+    }
+
+    fn is_retained_by(&self, current: &Self) -> bool {
+        !self.unidentified
+            && !current.unidentified
+            && self.workspaces.is_subset(&current.workspaces)
+            && self.tabs.is_subset(&current.tabs)
+            && self.panes.is_subset(&current.panes)
+    }
+
+    fn is_single_pane(&self) -> bool {
+        !self.unidentified
+            && self.workspaces.len() == 1
+            && self.tabs.len() == 1
+            && self.panes.len() == 1
+    }
+}
 
 enum SessionSaveJob {
     Clear,
@@ -51,39 +128,51 @@ impl App {
         }
     }
 
-    /// 打包一次会话保存；返回 `None` 表示「这次不写」。
-    ///
-    /// 两条「不写」规则都是为了让主机重启后盘上还留着完整会话
-    /// （HSR-04 / 上游 #4320）：
-    ///
-    /// 1. 空工作区集合只有在用户/API 显式关闭最后一个工作区时才写 `Clear`。
-    ///    主机重启会让 pane 逐个退出、集合同样归零，那时必须保留盘上的快照；
-    ///    shutdown 路径同理。
-    /// 2. 疑似主机打断的护栏窗口里，不许把盘上的快照写小。级联退出会让工作区
-    ///    集合一路缩水，期间的检查点、去抖自动保存与 `ensure_default_workspace`
-    ///    的自动补位都会捕到中间态；直接写下去等于把「全丢」换成「丢一部分」。
+    /// 仅在用户/API 已完成显式布局变更后调用；普通置脏不授予收缩许可。
+    pub(crate) fn authorize_session_layout_change(&mut self) {
+        self.authorized_session_layout =
+            Some(SessionLayout::from_workspaces(&self.state.workspaces));
+    }
+
+    pub(super) fn authorize_default_workspace_replacement(&mut self) {
+        let current = SessionLayout::from_workspaces(&self.state.workspaces);
+        if self.persisted_session_layout.is_single_pane() && current.is_single_pane() {
+            self.authorize_session_layout_change();
+        }
+    }
+
+    /// 隐式归零不清盘；护栏内保留基线的 workspace/tab/pane 身份。
+    /// 新建同等数量的替代项不能掩盖丢失；旧快照缺身份时保守等到护栏到期。
     fn capture_session_save_job(&self, now: Instant) -> Option<SessionSaveJob> {
         if self.state.workspaces.is_empty() {
             if self.state.explicit_session_teardown {
                 return Some(SessionSaveJob::Clear);
             }
-            // 这是一条会改变持久化结果的决策，debug 级在真机排障时看不到。
             tracing::info!(
                 should_quit = self.state.should_quit,
-                persisted_workspaces = self.persisted_workspace_count,
+                persisted_workspaces = self.persisted_session_layout.workspaces.len(),
                 "skipping session save: workspace set emptied without an explicit teardown"
             );
             return None;
         }
-        if self.pane_exit_cascade_guard_until(now).is_some()
-            && self.state.workspaces.len() < self.persisted_workspace_count
-        {
-            tracing::info!(
-                workspaces = self.state.workspaces.len(),
-                persisted_workspaces = self.persisted_workspace_count,
-                "skipping session save: a pane exit cascade would shrink the persisted snapshot"
-            );
-            return None;
+        if self.pane_exit_cascade_guard_until(now).is_some() {
+            let current = SessionLayout::from_workspaces(&self.state.workspaces);
+            let protected = self
+                .authorized_session_layout
+                .as_ref()
+                .unwrap_or(&self.persisted_session_layout);
+            if !protected.is_retained_by(&current) {
+                tracing::info!(
+                    workspaces = current.workspaces.len(),
+                    tabs = current.tabs.len(),
+                    panes = current.panes.len(),
+                    persisted_workspaces = protected.workspaces.len(),
+                    persisted_tabs = protected.tabs.len(),
+                    persisted_panes = protected.panes.len(),
+                    "skipping session save: a pane exit cascade would discard persisted layout identities"
+                );
+                return None;
+            }
         }
         let snapshot = crate::persist::capture(
             &self.state.workspaces,
@@ -146,15 +235,15 @@ impl App {
         suspicious
     }
 
-    /// 记录一次真正派发出去的写盘，维护「盘上有多少 workspace」的账本。
-    ///
-    /// 乐观记账（后台线程写失败只打日志）：记多了只会让护栏更保守地保留旧快照，
-    /// 方向是安全的。
+    /// 按派发的实际快照记账，不按可继续变化的 live state，也不声称写盘已成功。
+    /// 未显式授权的护栏内保存只能增加身份：写失败仍保留较大的账本，最多多拦；
+    /// 只有显式布局授权或护栏到期才接受身份丢失，写失败仍由 SessionWriter 报告。
     fn note_session_save_dispatched(&mut self, job: &SessionSaveJob) {
-        self.persisted_workspace_count = match job {
-            SessionSaveJob::Clear => 0,
-            SessionSaveJob::Save { snapshot, .. } => snapshot.workspaces.len(),
+        self.persisted_session_layout = match job {
+            SessionSaveJob::Clear => SessionLayout::default(),
+            SessionSaveJob::Save { snapshot, .. } => SessionLayout::from_snapshot(snapshot),
         };
+        self.authorized_session_layout = None;
         #[cfg(test)]
         {
             self.session_save_writes += 1;
@@ -264,5 +353,167 @@ fn run_session_save_job(
     match job {
         SessionSaveJob::Clear => writer.clear(),
         SessionSaveJob::Save { snapshot, history } => writer.save(&snapshot, history.as_ref()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{AppPolicy, AppState};
+    use crate::events::AppEvent;
+    use crate::platform::ChildExitReason;
+    use crate::workspace::Workspace;
+    use ratatui::layout::Direction;
+
+    fn test_workspace() -> Workspace {
+        let mut workspace = Workspace::test_new("identity-guard");
+        workspace.test_split(Direction::Horizontal);
+        workspace.test_add_tab(Some("logs"));
+        workspace.switch_tab(0);
+        workspace
+    }
+
+    fn test_app(workspace: Workspace) -> App {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            AppPolicy::TEST,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state = AppState::test_new();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app
+    }
+
+    #[test]
+    fn session_shrink_guard_rejects_equal_count_replacements_after_growth() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("layout-identity-replacements");
+        for replaced in ["workspace", "tab", "pane"] {
+            let mut app = test_app(test_workspace());
+            let now = Instant::now();
+            let baseline = app.capture_session_save_job(now).expect("baseline job");
+            app.note_session_save_dispatched(&baseline);
+            assert!(app.note_pane_exit_requires_checkpoint(ChildExitReason::Interrupted, now));
+            app.state.workspaces[0].test_split(Direction::Vertical);
+            app.state.ensure_test_terminals();
+            let grown = app
+                .capture_session_save_job(now + Duration::from_secs(1))
+                .expect("adding a pane retains every protected identity");
+            let before = SessionLayout::from_workspaces(&app.state.workspaces);
+
+            match replaced {
+                "workspace" => {
+                    let mut replacement = test_workspace();
+                    replacement.test_split(Direction::Vertical);
+                    app.state.workspaces = vec![replacement];
+                }
+                "tab" => {
+                    assert!(app.state.workspaces[0].close_tab(1));
+                    app.state.workspaces[0].test_add_tab(Some("replacement"));
+                }
+                "pane" => {
+                    let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+                    app.state.handle_app_event(AppEvent::PaneDied {
+                        pane_id,
+                        exit_reason: ChildExitReason::Exited,
+                    });
+                    app.state.workspaces[0].test_split(Direction::Horizontal);
+                }
+                _ => unreachable!(),
+            }
+            app.state.mark_session_dirty();
+            app.state.ensure_test_terminals();
+            app.note_session_save_dispatched(&grown);
+            let after = SessionLayout::from_workspaces(&app.state.workspaces);
+            assert_eq!(
+                (
+                    before.workspaces.len(),
+                    before.tabs.len(),
+                    before.panes.len()
+                ),
+                (after.workspaces.len(), after.tabs.len(), after.panes.len()),
+                "{replaced} replacement must preserve all three counts"
+            );
+            assert!(
+                app.capture_session_save_job(now + Duration::from_secs(2)).is_none(),
+                "the dispatched job, not the later live {replaced}, defines the protected identities"
+            );
+        }
+    }
+
+    #[test]
+    fn session_shrink_guard_restored_snapshot_uses_public_ids_and_keeps_missing_tabs() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("layout-identity-restore");
+        let mut app = test_app(test_workspace());
+        let now = Instant::now();
+        let Some(SessionSaveJob::Save { mut snapshot, .. }) = app.capture_session_save_job(now)
+        else {
+            panic!("expected baseline snapshot");
+        };
+        let old_root = app.state.workspaces[0].tabs[0].root_pane;
+        let mut restored = test_workspace();
+        restored.id = snapshot.workspaces[0].id.clone().unwrap();
+        assert_ne!(restored.tabs[0].root_pane, old_root);
+        assert!(restored.move_tab(0, 2));
+        app.state.workspaces = vec![restored];
+        app.state.ensure_test_terminals();
+        app.persisted_session_layout = SessionLayout::from_snapshot(&snapshot);
+        assert!(app.note_pane_exit_requires_checkpoint(ChildExitReason::Interrupted, now));
+        assert!(app.capture_session_save_job(now).is_some());
+
+        snapshot.workspaces[0].public_pane_numbers.clear();
+        assert!(!SessionLayout::from_snapshot(&snapshot)
+            .is_retained_by(&SessionLayout::from_workspaces(&app.state.workspaces)));
+        assert!(app.state.workspaces[0].close_tab(0));
+        assert!(app.capture_session_save_job(now).is_none());
+    }
+
+    #[test]
+    fn session_shrink_guard_limits_replacement_authorization_and_expires() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("layout-identity-authorization");
+        for panes in [1, 3] {
+            let mut workspace = Workspace::test_new("original");
+            for _ in 1..panes {
+                workspace.test_split(Direction::Horizontal);
+            }
+            let mut app = test_app(workspace);
+            let now = Instant::now();
+            let baseline = app.capture_session_save_job(now).expect("baseline job");
+            app.note_session_save_dispatched(&baseline);
+            assert!(app.note_pane_exit_requires_checkpoint(ChildExitReason::Interrupted, now));
+            app.state.workspaces = vec![Workspace::test_new("default")];
+            app.state.ensure_test_terminals();
+            app.state.mark_session_dirty();
+            assert!(app.capture_session_save_job(now).is_none());
+            app.authorize_default_workspace_replacement();
+            assert_eq!(app.capture_session_save_job(now).is_some(), panes == 1);
+            if panes > 1 {
+                let until = now + PANE_EXIT_CASCADE_GUARD;
+                assert!(app
+                    .capture_session_save_job(until - Duration::from_nanos(1))
+                    .is_none());
+                assert!(app.capture_session_save_job(until).is_some());
+            }
+
+            app.authorize_session_layout_change();
+            let authorized = app
+                .capture_session_save_job(now)
+                .expect("explicit replacement");
+            app.note_session_save_dispatched(&authorized);
+            app.state.workspaces = vec![Workspace::test_new("unapproved replacement")];
+            app.state.ensure_test_terminals();
+            assert!(app.capture_session_save_job(now).is_none());
+            app.state.close_selected_workspace();
+            let clear = app
+                .capture_session_save_job(now)
+                .expect("explicit final close");
+            assert!(matches!(clear, SessionSaveJob::Clear));
+            app.note_session_save_dispatched(&clear);
+            assert!(app.persisted_session_layout.workspaces.is_empty());
+            assert!(app.authorized_session_layout.is_none());
+        }
     }
 }

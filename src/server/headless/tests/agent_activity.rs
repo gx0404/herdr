@@ -187,7 +187,7 @@ async fn scheduled_tasks_submit_discovery_and_release_the_slot_on_the_result() {
         .await
         .expect("后台发现结果")
         .expect("通道未关闭");
-    let AppEvent::AgentActivityRefreshed {
+    let AppEvent::AgentActivityRefreshedFor {
         pane_id: refreshed,
         result,
         ..
@@ -410,6 +410,471 @@ async fn a_whole_tree_read_keeps_the_discovery_slot_and_outlives_an_older_discov
         "D1 的结果回来后名额放行"
     );
     shutdown_test_runtimes(&mut server);
+}
+
+struct SessionTree(&'static str);
+
+static CLAUDE_SESSION_TREE: SessionTree = SessionTree("claude");
+static CODEX_SESSION_TREE: SessionTree = SessionTree("codex");
+
+impl crate::server::agent_activity::ActivitySource for SessionTree {
+    fn id(&self) -> &'static str {
+        self.0
+    }
+
+    fn discover(
+        &self,
+        cx: &crate::server::agent_activity::SourceContext<'_>,
+    ) -> Result<Vec<AgentActivityNode>, crate::server::agent_activity::SourceError> {
+        let session = cx.session.expect("测试任务捕获了会话身份");
+        let mut found = node(&session.value, AgentActivityStatus::Running);
+        if let Some(hint) = cx.latest_hint {
+            found.label = hint.to_owned();
+        }
+        Ok(vec![found])
+    }
+
+    fn read(
+        &self,
+        _cx: &crate::server::agent_activity::SourceContext<'_>,
+        _node_id: &str,
+        _cursor: Option<&str>,
+        _max_bytes: usize,
+    ) -> Result<
+        crate::server::agent_activity::ContentChunk,
+        crate::server::agent_activity::SourceError,
+    > {
+        Err(crate::server::agent_activity::SourceError::Unsupported)
+    }
+}
+
+fn session_tree_source_for(
+    agent: &str,
+) -> Option<&'static dyn crate::server::agent_activity::ActivitySource> {
+    match agent {
+        "claude" => Some(&CLAUDE_SESSION_TREE),
+        "codex" => Some(&CODEX_SESSION_TREE),
+        _ => None,
+    }
+}
+
+fn report_activity_session(server: &mut HeadlessServer, public: &str, session: &str, seq: u64) {
+    let response = server.app.handle_api_request(api::schema::Request {
+        id: format!("activity-session-{seq}"),
+        method: api::schema::Method::PaneReportAgentSession(
+            api::schema::PaneReportAgentSessionParams {
+                pane_id: public.to_owned(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(seq),
+                agent_session_id: Some(session.into()),
+                agent_session_path: None,
+                session_start_source: Some("clear".into()),
+                resume_argv: None,
+            },
+        ),
+    });
+    assert!(response.contains("\"ok\""), "{response}");
+}
+
+fn session_activity_ticket(event: &AppEvent, pane_id: crate::layout::PaneId, session: &str) -> u64 {
+    let (actual_pane, ticket, nodes) = match event {
+        AppEvent::AgentActivityRefreshedFor {
+            pane_id,
+            ticket,
+            result: Ok(nodes),
+            ..
+        }
+        | AppEvent::AgentActivityReadFor {
+            pane_id,
+            ticket,
+            nodes,
+            ..
+        } => (pane_id, ticket, nodes),
+        other => panic!("应为会话活动树结果：{other:?}"),
+    };
+    assert_eq!(*actual_pane, pane_id);
+    assert_eq!(
+        nodes.as_slice(),
+        &[node(session, AgentActivityStatus::Running)],
+        "worker 应读取任务入队时捕获的会话"
+    );
+    *ticket
+}
+
+async fn queued_previous_session_result_keeps_current_tree(stale_read: bool) {
+    use crate::server::agent_activity::test_support::{ControlledWorkers, Lane};
+
+    let (mut server, pane_id) = server_with_agent_pane();
+    let (service, workers) = ControlledWorkers::service(
+        server.app.event_tx.clone(),
+        crate::server::agent_activity::Sources {
+            source_for: session_tree_source_for,
+            external: no_external_sources,
+        },
+        std::env::temp_dir(),
+    );
+    server.agent_activity = service;
+    let public = server.app.public_pane_id(0, pane_id).expect("公开 id");
+    let now = Instant::now();
+    let read = || {
+        api::schema::Method::AgentActivityRead(AgentActivityReadParams {
+            pane_id: Some(public.clone()),
+            ..AgentActivityReadParams::default()
+        })
+    };
+
+    report_activity_session(&mut server, &public, "session-a", 1);
+    let stale_response = if stale_read {
+        Some(api_request(&mut server, read()))
+    } else {
+        server
+            .agent_activity
+            .tick(&mut server.app.state, now, false);
+        None
+    };
+
+    report_activity_session(&mut server, &public, "session-b", 2);
+    assert_eq!(
+        server
+            .app
+            .state
+            .agent_activity_subject(pane_id)
+            .and_then(|subject| subject.session)
+            .expect("当前 pane 仍持有会话")
+            .value,
+        "session-b"
+    );
+    let current_response = if stale_read {
+        server
+            .agent_activity
+            .tick(&mut server.app.state, now, false);
+        None
+    } else {
+        Some(api_request(&mut server, read()))
+    };
+    let (current_lane, stale_lane) = if stale_read {
+        (Lane::Discovery, Lane::Requests)
+    } else {
+        (Lane::Requests, Lane::Discovery)
+    };
+    let workers = workers.run_next(current_lane).await;
+    let current_event = tokio::time::timeout(LOADED_WAIT, server.app.event_rx.recv())
+        .await
+        .expect("会话 B 的活动结果")
+        .expect("活动事件通道保持打开");
+    let current_ticket = session_activity_ticket(&current_event, pane_id, "session-b");
+    server.handle_internal_event_with_forwarding(current_event);
+    let expected = vec![node("session-b", AgentActivityStatus::Running)];
+    let current_tree = server
+        .app
+        .state
+        .agent_activity
+        .activity(pane_id)
+        .expect("会话 B 的树已落库");
+    assert_eq!(current_tree.nodes, expected);
+    let revision = current_tree.revision;
+    server.agent_activity.projection_synced();
+
+    let _workers = workers.run_next(stale_lane).await;
+    let stale_event = tokio::time::timeout(LOADED_WAIT, server.app.event_rx.recv())
+        .await
+        .expect("排队的会话 A 活动结果")
+        .expect("活动事件通道保持打开");
+    let stale_ticket = session_activity_ticket(&stale_event, pane_id, "session-a");
+    assert!(
+        stale_ticket > current_ticket,
+        "旧身份任务后开始，单凭 ticket 无法判定身份是否过期"
+    );
+    for response in stale_response.into_iter().chain(current_response) {
+        response.recv_timeout(LOADED_WAIT).expect("读树请求已应答");
+    }
+    server.handle_internal_event_with_forwarding(stale_event);
+    let final_tree = server
+        .app
+        .state
+        .agent_activity
+        .activity(pane_id)
+        .expect("会话 B 的树不能因旧身份结果而消失");
+    assert_eq!(
+        final_tree.nodes, expected,
+        "会话 A 在排队期间已过期，即使 ticket 更大也不能覆盖 B"
+    );
+    assert_eq!(
+        final_tree.revision, revision,
+        "丢弃旧身份结果不推进树修订号"
+    );
+    assert!(
+        !server.agent_activity.projection_dirty(),
+        "丢弃旧身份结果不污染客户端活动投影"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn queued_discovery_from_a_previous_session_cannot_overwrite_the_current_tree() {
+    queued_previous_session_result_keeps_current_tree(false).await;
+}
+
+#[tokio::test]
+async fn queued_tree_read_from_a_previous_session_cannot_overwrite_the_current_tree() {
+    queued_previous_session_result_keeps_current_tree(true).await;
+}
+
+fn controlled_session_server() -> (
+    HeadlessServer,
+    crate::layout::PaneId,
+    String,
+    crate::server::agent_activity::test_support::ControlledWorkers,
+) {
+    let (mut server, pane_id) = server_with_agent_pane();
+    let (service, workers) =
+        crate::server::agent_activity::test_support::ControlledWorkers::service(
+            server.app.event_tx.clone(),
+            crate::server::agent_activity::Sources {
+                source_for: session_tree_source_for,
+                external: no_external_sources,
+            },
+            std::env::temp_dir(),
+        );
+    server.agent_activity = service;
+    let public = server.app.public_pane_id(0, pane_id).expect("公开 id");
+    report_activity_session(&mut server, &public, "session-a", 1);
+    (server, pane_id, public, workers)
+}
+
+async fn next_activity_result(server: &mut HeadlessServer) -> AppEvent {
+    tokio::time::timeout(LOADED_WAIT, server.app.event_rx.recv())
+        .await
+        .expect("活动任务在限时内返回")
+        .expect("活动事件通道保持打开")
+}
+
+#[tokio::test]
+async fn queued_identity_change_rejects_aba_terminal_agent_and_source_results() {
+    use crate::server::agent_activity::test_support::Lane;
+
+    for change in ["a-b-a", "terminal", "agent", "source"] {
+        for stale_read in [false, true] {
+            let (mut server, pane_id, public, workers) = controlled_session_server();
+            let now = Instant::now();
+            let original = server
+                .app
+                .state
+                .agent_activity_subject(pane_id)
+                .expect("初始身份");
+            let read = || {
+                api::schema::Method::AgentActivityRead(AgentActivityReadParams {
+                    pane_id: Some(public.clone()),
+                    ..AgentActivityReadParams::default()
+                })
+            };
+            let stale_response = if stale_read {
+                Some(api_request(&mut server, read()))
+            } else {
+                server
+                    .agent_activity
+                    .tick(&mut server.app.state, now, false);
+                None
+            };
+
+            match change {
+                "a-b-a" => {
+                    report_activity_session(&mut server, &public, "session-b", 2);
+                    report_activity_session(&mut server, &public, "session-a", 3);
+                }
+                "terminal" => {
+                    let replacement = crate::workspace::Workspace::test_new("replacement");
+                    let terminal_id = replacement
+                        .pane_state(replacement.tabs[0].root_pane)
+                        .expect("替代 pane")
+                        .attached_terminal_id
+                        .clone();
+                    let mut terminal = crate::terminal::TerminalState::new(
+                        terminal_id.clone(),
+                        std::env::temp_dir(),
+                    );
+                    terminal.detected_agent = Some(Agent::Claude);
+                    terminal.state = AgentState::Working;
+                    terminal.persisted_agent_session = server
+                        .app
+                        .state
+                        .terminals
+                        .get(&original.identity.terminal_id)
+                        .expect("原终端")
+                        .persisted_agent_session
+                        .clone();
+                    server
+                        .app
+                        .state
+                        .terminals
+                        .insert(terminal_id.clone(), terminal);
+                    server.app.state.workspaces[0]
+                        .pane_state_mut(pane_id)
+                        .expect("原 pane")
+                        .attached_terminal_id = terminal_id;
+                }
+                "agent" | "source" => {
+                    let terminal = server
+                        .app
+                        .state
+                        .terminals
+                        .get_mut(&original.identity.terminal_id)
+                        .expect("当前终端");
+                    if change == "agent" {
+                        terminal.detected_agent = Some(Agent::Codex);
+                        terminal
+                            .persisted_agent_session
+                            .as_mut()
+                            .expect("当前会话")
+                            .agent = "codex".into();
+                    } else {
+                        terminal
+                            .persisted_agent_session
+                            .as_mut()
+                            .expect("当前会话")
+                            .source = "custom:claude".into();
+                    }
+                }
+                _ => unreachable!("固定身份切换矩阵"),
+            }
+            let current = server
+                .app
+                .state
+                .agent_activity_subject(pane_id)
+                .expect("替代身份");
+            assert_eq!(current.identity.session, original.identity.session);
+            assert_ne!(current.identity, original.identity, "{change}");
+            if change == "a-b-a" {
+                assert!(current.identity.generation > original.identity.generation);
+            }
+            let label = format!("current-{change}");
+            assert!(server.app.state.agent_activity.store_hint(pane_id, &label));
+            let current_response = if stale_read {
+                server
+                    .agent_activity
+                    .tick(&mut server.app.state, now, false);
+                None
+            } else {
+                Some(api_request(&mut server, read()))
+            };
+            let (current_lane, stale_lane) = if stale_read {
+                (Lane::Discovery, Lane::Requests)
+            } else {
+                (Lane::Requests, Lane::Discovery)
+            };
+            let workers = workers.run_next(current_lane).await;
+            let current_event = next_activity_result(&mut server).await;
+            let current_ticket = match &current_event {
+                AppEvent::AgentActivityRefreshedFor { ticket, .. }
+                | AppEvent::AgentActivityReadFor { ticket, .. } => *ticket,
+                other => panic!("应为当前身份结果：{other:?}"),
+            };
+            server.handle_internal_event_with_forwarding(current_event);
+            let expected = vec![AgentActivityNode {
+                label,
+                ..node("session-a", AgentActivityStatus::Running)
+            }];
+            let stored = server
+                .app
+                .state
+                .agent_activity
+                .activity(pane_id)
+                .expect("当前树");
+            assert_eq!(stored.nodes, expected);
+            let revision = stored.revision;
+            let epoch = server.app.state.projection_epoch;
+            server.agent_activity.projection_synced();
+
+            let _workers = workers.run_next(stale_lane).await;
+            let stale_event = next_activity_result(&mut server).await;
+            let stale_ticket = session_activity_ticket(&stale_event, pane_id, "session-a");
+            assert!(stale_ticket > current_ticket);
+            for response in stale_response.into_iter().chain(current_response) {
+                response.recv_timeout(LOADED_WAIT).expect("读树请求已应答");
+            }
+            server.handle_internal_event_with_forwarding(stale_event);
+            let stored = server
+                .app
+                .state
+                .agent_activity
+                .activity(pane_id)
+                .expect("当前树保留");
+            assert_eq!(stored.nodes, expected, "{change}, stale_read={stale_read}");
+            assert_eq!(stored.revision, revision);
+            assert_eq!(server.app.state.projection_epoch, epoch);
+            assert!(!server.agent_activity.projection_dirty());
+            assert!(
+                server
+                    .agent_activity
+                    .accept_pane_tree(pane_id, stale_ticket),
+                "拒绝旧身份不能推进开始顺序水位"
+            );
+            shutdown_test_runtimes(&mut server);
+        }
+    }
+}
+
+#[tokio::test]
+async fn late_discovery_completion_does_not_release_a_newer_slot() {
+    use crate::server::agent_activity::{test_support::Lane, IN_FLIGHT_TIMEOUT};
+
+    for (next_session, failed) in [
+        ("session-a", false),
+        ("session-a", true),
+        ("session-b", false),
+        ("session-b", true),
+    ] {
+        let (mut server, pane_id, public, workers) = controlled_session_server();
+        let now = Instant::now();
+        server
+            .agent_activity
+            .tick(&mut server.app.state, now, false);
+        let workers = workers.run_next(Lane::Discovery).await;
+        let mut old_event = next_activity_result(&mut server).await;
+        if let AppEvent::AgentActivityRefreshedFor { result, .. } = &mut old_event {
+            if failed {
+                *result = Err("source unavailable".into());
+            }
+        } else {
+            panic!("应为发现结果");
+        }
+        let observed = now + Duration::from_secs(1);
+        server
+            .agent_activity
+            .tick(&mut server.app.state, observed, false);
+        report_activity_session(&mut server, &public, next_session, 2);
+        server.app.state.agent_activity.note_hint(pane_id);
+        server
+            .agent_activity
+            .tick(&mut server.app.state, observed + IN_FLIGHT_TIMEOUT, false);
+        assert!(server.agent_activity.discovery_in_flight(pane_id));
+
+        server.handle_internal_event_with_forwarding(old_event);
+        assert!(
+            server.agent_activity.discovery_in_flight(pane_id),
+            "旧任务完成不得释放替代任务名额，{next_session}, failed={failed}"
+        );
+        // 同一会话的成功结果仍可合法落库；同步夹具投影后只断言旧 token 未释放名额。
+        server.agent_activity.projection_synced();
+        assert!(!server.agent_activity.projection_dirty());
+        let _workers = workers.run_next(Lane::Discovery).await;
+        let current_event = next_activity_result(&mut server).await;
+        session_activity_ticket(&current_event, pane_id, next_session);
+        server.handle_internal_event_with_forwarding(current_event);
+        assert!(!server.agent_activity.discovery_in_flight(pane_id));
+        assert_eq!(
+            server
+                .app
+                .state
+                .agent_activity
+                .activity(pane_id)
+                .expect("当前会话的树")
+                .nodes,
+            vec![node(next_session, AgentActivityStatus::Running)]
+        );
+        shutdown_test_runtimes(&mut server);
+    }
 }
 
 /// 审查轻 2：主循环按开始顺序号落库。事件按指定次序直接喂给主循环，不靠线程时序：

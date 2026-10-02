@@ -5,11 +5,11 @@
 //! `HeadlessServer`.
 
 use std::collections::VecDeque;
-use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SendError, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::TryClone as _;
@@ -40,6 +40,74 @@ const MIN_CLIENT_ROWS: u16 = 1;
 /// within the 5-second deadline, even with OS timer slack, thread scheduling,
 /// and cleanup overhead.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Maximum number of connections allowed to remain in the initial handshake.
+///
+/// A client that connects and never sends a hello must not be able to consume an
+/// unbounded number of blocking handshake threads. The permit is released as soon
+/// as the welcome has been queued, before the normal client read loop begins.
+pub(crate) const MAX_CONCURRENT_CLIENT_HANDSHAKES: usize = 32;
+
+#[derive(Debug)]
+pub(crate) struct ClientHandshakeLimiter {
+    active: AtomicUsize,
+    limit: usize,
+}
+
+impl ClientHandshakeLimiter {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicUsize::new(0),
+            limit: MAX_CONCURRENT_CLIENT_HANDSHAKES,
+        })
+    }
+
+    #[cfg(all(test, windows))]
+    fn with_limit(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicUsize::new(0),
+            limit,
+        })
+    }
+
+    pub(crate) fn try_acquire(self: &Arc<Self>) -> Option<ClientHandshakePermit> {
+        let mut active = self.active.load(Ordering::Acquire);
+        loop {
+            if active >= self.limit {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(ClientHandshakePermit {
+                        limiter: self.clone(),
+                    });
+                }
+                Err(current) => active = current,
+            }
+        }
+    }
+
+    #[cfg(all(test, windows))]
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClientHandshakePermit {
+    limiter: Arc<ClientHandshakeLimiter>,
+}
+
+impl Drop for ClientHandshakePermit {
+    fn drop(&mut self) {
+        self.limiter.active.fetch_sub(1, Ordering::Release);
+    }
+}
 
 #[cfg(unix)]
 const OBSERVER_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -694,6 +762,62 @@ fn classify_input_event_size(
     }
 }
 
+/// Reads one framed hello against one absolute deadline.
+///
+/// On Unix each partial read receives only the remaining timeout; on Windows
+/// named-pipe polling checks the same deadline between peeks. Thus a client
+/// cannot keep the handshake alive by sending an incomplete frame in pieces.
+/// `read_message` separately rejects a declared first frame over `MAX_FRAME_SIZE`
+/// (2 MiB), before deserializing it.
+struct HandshakeReader<'a> {
+    stream: &'a mut LocalStream,
+    deadline: Instant,
+}
+
+impl<'a> HandshakeReader<'a> {
+    fn new(stream: &'a mut LocalStream, deadline: Instant) -> Self {
+        Self { stream, deadline }
+    }
+
+    fn remaining(&self) -> io::Result<Duration> {
+        let now = Instant::now();
+        if now >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "client handshake deadline exceeded",
+            ));
+        }
+        Ok(self.deadline.duration_since(now))
+    }
+}
+
+impl Read for HandshakeReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let remaining = self.remaining()?;
+            self.stream.set_recv_timeout(Some(remaining))?;
+            return self.stream.read(buffer);
+        }
+
+        #[cfg(windows)]
+        loop {
+            let _ = self.remaining()?;
+            match crate::ipc::poll_local_stream_read_count(self.stream, buffer)? {
+                crate::ipc::LocalStreamReadCount::Data(read) => return Ok(read),
+                crate::ipc::LocalStreamReadCount::Closed => return Ok(0),
+                crate::ipc::LocalStreamReadCount::Pending => {
+                    crate::platform::wait_client_stream_readable(self.stream)?;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 fn set_client_recv_timeout(
     stream: &LocalStream,
@@ -746,18 +870,31 @@ fn set_client_write_timeout(
 ///
 /// Reads the `TerminalHello` or `ClientShellHello` message, validates the version,
 /// sends `Welcome`, and then enters a read loop forwarding messages to the server event channel.
+#[cfg(test)]
 pub(crate) fn handle_client_handshake(
-    mut stream: LocalStream,
+    stream: LocalStream,
     client_id: u64,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
 ) -> io::Result<()> {
+    handle_client_handshake_with_permit(stream, client_id, server_event_tx, should_quit, None)
+}
+
+pub(crate) fn handle_client_handshake_with_permit(
+    mut stream: LocalStream,
+    client_id: u64,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+    should_quit: &Arc<AtomicBool>,
+    handshake_permit: Option<ClientHandshakePermit>,
+) -> io::Result<()> {
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     if should_quit.load(Ordering::Acquire) {
         return Ok(());
     }
 
-    // Reset to blocking mode — the accept loop sets nonblocking but
-    // the handshake thread needs blocking I/O for read_message/write_message.
+    // The accept loop uses nonblocking mode. Restore the stream mode needed by
+    // the handshake write path; HandshakeReader applies the absolute deadline
+    // itself (receive timeouts on Unix, readiness polling on Windows).
     stream.set_nonblocking(false)?;
 
     set_client_recv_timeout(
@@ -767,8 +904,12 @@ pub(crate) fn handle_client_handshake(
         client_id,
     )?;
 
-    // Read the handshake message.
-    let hello: ClientMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
+    // Read the handshake message. The reader updates the OS timeout on Unix and
+    // polls named pipes on Windows, so partial frames cannot extend the deadline.
+    let hello: ClientMessage = match protocol::read_message(
+        &mut HandshakeReader::new(&mut stream, handshake_deadline),
+        MAX_FRAME_SIZE,
+    ) {
         Ok(msg) => msg,
         Err(protocol::FramingError::UnexpectedEof) => {
             debug!(client_id, "client disconnected before handshake");
@@ -997,6 +1138,7 @@ pub(crate) fn handle_client_handshake(
             _ => {}
         }
     }
+    drop(handshake_permit);
 
     // Enter read loop — read client messages and forward to main loop.
     client_read_loop_with_endpoint_controls(
@@ -1631,6 +1773,157 @@ mod tests {
         let mut bytes = Vec::new();
         protocol::write_message(&mut bytes, message).expect("frame server message");
         bytes
+    }
+
+    #[cfg(windows)]
+    fn assert_handshake_deadline_closes_client(name: &str, partial_hello: bool) {
+        let (mut client_stream, server_stream, _path) = local_stream_pair(name);
+        let (server_event_tx, _server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let result =
+                handle_client_handshake(server_stream, 90, &server_event_tx, &handshake_quit);
+            let _ = done_tx.send(result);
+        });
+
+        if partial_hello {
+            client_stream
+                .write_all(&[0x01])
+                .expect("write partial hello prefix");
+        }
+
+        let started = Instant::now();
+        let result = done_rx
+            .recv_timeout(HANDSHAKE_TIMEOUT + Duration::from_secs(1))
+            .expect("handshake thread must stop at its absolute deadline");
+        assert!(
+            result.is_ok(),
+            "deadline should close the handshake cleanly"
+        );
+        assert!(
+            started.elapsed() < HANDSHAKE_TIMEOUT + Duration::from_secs(1),
+            "handshake exceeded its deadline: {:?}",
+            started.elapsed()
+        );
+
+        let close_deadline = Instant::now() + Duration::from_secs(1);
+        while !crate::ipc::local_stream_peer_closed(&mut client_stream)
+            .expect("probe named-pipe closure")
+        {
+            assert!(
+                Instant::now() < close_deadline,
+                "server must release the pipe after the handshake deadline"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        handle.join().expect("handshake thread join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn empty_windows_handshake_closes_at_absolute_deadline() {
+        assert_handshake_deadline_closes_client("empty-handshake-deadline", false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn partial_windows_handshake_closes_at_absolute_deadline() {
+        assert_handshake_deadline_closes_client("partial-handshake-deadline", true);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn client_handshake_limiter_bounds_idle_connections_and_allows_second_client() {
+        let limiter = ClientHandshakeLimiter::with_limit(2);
+        let (idle_client_one, idle_server_one, _path_one) =
+            local_stream_pair("handshake-limit-idle-one");
+        let (idle_client_two, idle_server_two, _path_two) =
+            local_stream_pair("handshake-limit-idle-two");
+        let (server_event_tx, _server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let mut idle_handles = Vec::new();
+        for (client_id, server_stream) in [(91, idle_server_one), (92, idle_server_two)] {
+            let permit = limiter.try_acquire().expect("idle handshake slot");
+            let event_tx = server_event_tx.clone();
+            let handshake_quit = should_quit.clone();
+            idle_handles.push(std::thread::spawn(move || {
+                handle_client_handshake_with_permit(
+                    server_stream,
+                    client_id,
+                    &event_tx,
+                    &handshake_quit,
+                    Some(permit),
+                )
+            }));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while limiter.active() != 2 {
+            assert!(
+                Instant::now() < deadline,
+                "idle handshakes did not occupy both slots"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            limiter.try_acquire().is_none(),
+            "a third idle connection must not create another handshake worker"
+        );
+
+        drop(idle_client_one);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while limiter.active() != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "closed idle pipe did not release its slot"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let (mut normal_client, normal_server, _normal_path) =
+            local_stream_pair("handshake-limit-normal");
+        let permit = limiter.try_acquire().expect("second normal client slot");
+        let event_tx = server_event_tx.clone();
+        let handshake_quit = should_quit.clone();
+        let normal_handle = std::thread::spawn(move || {
+            handle_client_handshake_with_permit(
+                normal_server,
+                93,
+                &event_tx,
+                &handshake_quit,
+                Some(permit),
+            )
+        });
+        protocol::write_message(
+            &mut normal_client,
+            &ClientMessage::TerminalHello {
+                version: PROTOCOL_VERSION,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                pixel_mouse: false,
+            },
+        )
+        .expect("write normal hello");
+        assert!(matches!(
+            protocol::read_message::<_, ServerMessage>(&mut normal_client, MAX_FRAME_SIZE)
+                .expect("read normal welcome"),
+            ServerMessage::Welcome { error: None, .. }
+        ));
+
+        drop(normal_client);
+        drop(idle_client_two);
+        for handle in idle_handles {
+            handle.join().expect("idle handshake thread join").unwrap();
+        }
+        normal_handle
+            .join()
+            .expect("normal handshake thread join")
+            .unwrap();
+        assert_eq!(limiter.active(), 0, "all handshake slots must be released");
     }
 
     /// HSR-06/RS-16：control 车道字节或条数越界说明客户端已经不读——丢队列、

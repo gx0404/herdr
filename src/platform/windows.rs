@@ -2019,9 +2019,15 @@ fn available_pane_shell_from_snapshot(
     if !super::is_pane_shell_process_name(&shell.name) {
         return None;
     }
-    descendant_entries(child_pid, snapshot)
-        .is_empty()
-        .then(|| shell.name.clone())
+    let shell_created = shell.creation_time()?;
+    let busy_or_unknown = snapshot.child_pids(child_pid).any(|pid| {
+        snapshot.entry(pid).is_none_or(|child| {
+            child
+                .creation_time()
+                .is_none_or(|created| created >= shell_created)
+        })
+    });
+    (!busy_or_unknown).then(|| shell.name.clone())
 }
 
 pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
@@ -2195,20 +2201,31 @@ fn select_topmost_agent_chain_candidate<'a>(
     })
 }
 
+fn verified_parent_child(parent: &WindowsProcessEntry, child: &WindowsProcessEntry) -> bool {
+    parent.pid == child.parent_pid
+        && matches!(
+            (parent.creation_time(), child.creation_time()),
+            (Some(parent_created), Some(child_created)) if parent_created <= child_created
+        )
+}
+
 fn process_is_ancestor(ancestor_pid: u32, descendant_pid: u32, snapshot: &ProcessSnapshot) -> bool {
     let mut current = descendant_pid;
     let mut visited = HashSet::new();
     while visited.insert(current) {
-        let Some(parent) = snapshot.entry(current).map(|entry| entry.parent_pid) else {
+        let Some(child) = snapshot.entry(current) else {
             return false;
         };
-        if parent == ancestor_pid {
-            return true;
-        }
-        if parent == 0 {
+        let Some(parent) = snapshot.entry(child.parent_pid) else {
+            return false;
+        };
+        if !verified_parent_child(parent, child) {
             return false;
         }
-        current = parent;
+        if parent.pid == ancestor_pid {
+            return true;
+        }
+        current = parent.pid;
     }
 
     false
@@ -2216,23 +2233,17 @@ fn process_is_ancestor(ancestor_pid: u32, descendant_pid: u32, snapshot: &Proces
 
 fn descendant_entries(root_pid: u32, snapshot: &ProcessSnapshot) -> Vec<&WindowsProcessEntry> {
     let mut output = Vec::new();
-    let mut queue = VecDeque::new();
-    let mut visited = HashSet::new();
-    visited.insert(root_pid);
-    if let Some(root_children) = snapshot.children_by_parent.get(&root_pid) {
-        for &index in root_children {
-            let entry = &snapshot.entries[index];
-            if visited.insert(entry.pid) {
-                queue.push_back(entry);
-            }
-        }
-    }
-    while let Some(entry) = queue.pop_front() {
-        output.push(entry);
-        if let Some(next) = snapshot.children_by_parent.get(&entry.pid) {
+    let Some(root) = snapshot.entry(root_pid) else {
+        return output;
+    };
+    let mut queue = VecDeque::from([root]);
+    let mut visited = HashSet::from([root_pid]);
+    while let Some(parent) = queue.pop_front() {
+        if let Some(next) = snapshot.children_by_parent.get(&parent.pid) {
             for &index in next {
                 let child = &snapshot.entries[index];
-                if visited.insert(child.pid) {
+                if visited.insert(child.pid) && verified_parent_child(parent, child) {
+                    output.push(child);
                     queue.push_back(child);
                 }
             }
@@ -2252,37 +2263,50 @@ fn foreground_process_from_entry(entry: &WindowsProcessEntry) -> super::Foregrou
     }
 }
 
-/// Enumerate process identities for the tmux/screen compatibility heuristic.
-pub(crate) fn process_parent_entries() -> Option<Vec<ProcessParentEntry>> {
-    let entries: Vec<_> = snapshot_processes()
-        .into_iter()
-        .map(|entry| ProcessParentEntry {
-            pid: entry.pid,
-            parent_pid: entry.parent_pid,
-            name: entry.name,
-        })
-        .collect();
-    (!entries.is_empty()).then_some(entries)
+pub(super) fn snapshot_multiplexer_client_lineages(
+    peer: &ProcessLineage,
+) -> Option<Vec<ProcessLineage>> {
+    snapshot_multiplexer_client_lineages_with(peer, cached_foreground_processes)
 }
 
-/// 在同一份 Toolhelp 快照里沿 `th32ParentProcessID` 上溯。Windows 不会把孤儿进程重新
-/// 挂到别的父进程下：父进程退出后链在那里断开，结果标为不完整（查不清），不当成「不是
-/// 后代」。
+fn snapshot_multiplexer_client_lineages_with(
+    peer: &ProcessLineage,
+    snapshot: impl FnOnce() -> Arc<ProcessSnapshot>,
+) -> Option<Vec<ProcessLineage>> {
+    super::process_lineage::multiplexer_client_lineages_matching(peer, |matches| {
+        let snapshot = snapshot();
+        if snapshot.entries.is_empty() {
+            return None;
+        }
+        snapshot
+            .entries
+            .iter()
+            .filter(|entry| matches(entry.pid, &entry.name))
+            .map(|entry| process_lineage_from_snapshot(entry.pid, &snapshot))
+            .collect()
+    })
+}
+
+/// 复用 Toolhelp 快照并核验父子创建时间；身份未知或父 PID 已复用时截断为不完整的链。
 pub(crate) fn process_lineage(pid: u32) -> Option<ProcessLineage> {
-    let by_pid: HashMap<u32, ProcessParentEntry> = snapshot_processes()
-        .into_iter()
-        .map(|entry| {
-            (
-                entry.pid,
-                ProcessParentEntry {
-                    pid: entry.pid,
-                    parent_pid: entry.parent_pid,
-                    name: entry.name,
-                },
-            )
+    process_lineage_from_snapshot(pid, &cached_foreground_processes())
+}
+
+fn process_lineage_from_snapshot(pid: u32, snapshot: &ProcessSnapshot) -> Option<ProcessLineage> {
+    let mut child_created = None;
+    super::walk_process_lineage(pid, |pid| {
+        let entry = snapshot.entry(pid)?;
+        let created = entry.creation_time()?;
+        if child_created.is_some_and(|child| created > child) {
+            return None;
+        }
+        child_created = Some(created);
+        Some(ProcessParentEntry {
+            pid: entry.pid,
+            parent_pid: entry.parent_pid,
+            name: entry.name.clone(),
         })
-        .collect();
-    super::walk_process_lineage(pid, |pid| by_pid.get(&pid).cloned())
+    })
 }
 
 /// 命名管道对端（客户端）进程的 pid（`GetNamedPipeClientProcessId`，经 interprocess 的
@@ -2461,13 +2485,16 @@ impl ForegroundSelectionCache {
         snapshot: &ProcessSnapshot,
         job: &ForegroundJob,
     ) {
+        let identity = |pid| ProcessIdentity::Stub {
+            running: true,
+            creation_time: snapshot
+                .entry(pid)
+                .and_then(WindowsProcessEntry::creation_time),
+        };
         let descendants = snapshot.descendant_signatures(shell_pid);
         let descendant_identities = descendants
             .iter()
-            .map(|_| ProcessIdentity::Stub {
-                running: true,
-                creation_time: None,
-            })
+            .map(|entry| identity(entry.pid))
             .collect();
         let cached = CachedForegroundSelection::from_snapshot_with_identities(
             shell_pid,
@@ -2475,14 +2502,8 @@ impl ForegroundSelectionCache {
             job,
             descendants,
             descendant_identities,
-            ProcessIdentity::Stub {
-                running: true,
-                creation_time: None,
-            },
-            ProcessIdentity::Stub {
-                running: true,
-                creation_time: None,
-            },
+            identity(shell_pid),
+            identity(job.process_group_id),
         );
         self.remember(shell_pid, cached);
     }
@@ -5837,7 +5858,8 @@ mod tests {
         assert_eq!(super::cached_agent_classification(30, 8), Some(true));
         assert_eq!(super::cached_agent_classification(30, 7), None);
 
-        let unidentified = test_entry(31, 10, "node.exe", &["node.exe", "worker.js"]);
+        let unidentified =
+            test_entry_with_creation_time(31, 10, "node.exe", &["node.exe", "worker.js"], None);
         assert!(!super::process_entry_identifies_agent(&unidentified));
         assert!(
             !super::with_agent_classification_cache(|cache| cache.contains_key(&31)),
@@ -6766,6 +6788,231 @@ mod tests {
     }
 
     #[test]
+    fn windows_process_tree_rejects_children_older_than_their_recorded_parent() {
+        let entries = vec![
+            test_entry_with_creation_time(10, 1, "shell.exe", &["shell.exe"], Some(100)),
+            test_entry_with_creation_time(20, 10, "old.exe", &["old.exe"], Some(90)),
+            test_entry_with_creation_time(21, 20, "worker.exe", &["worker.exe"], Some(130)),
+            test_entry_with_creation_time(30, 10, "child.exe", &["child.exe"], Some(120)),
+            test_entry_with_creation_time(40, 30, "old.exe", &["old.exe"], Some(110)),
+            test_entry_with_creation_time(41, 40, "worker.exe", &["worker.exe"], Some(160)),
+            test_entry_with_creation_time(50, 30, "child.exe", &["child.exe"], Some(140)),
+        ];
+        let snapshot = super::ProcessSnapshot::new(entries);
+
+        assert_eq!(
+            super::descendant_entries(10, &snapshot)
+                .iter()
+                .map(|entry| entry.pid)
+                .collect::<Vec<_>>(),
+            vec![30, 50],
+            "reused parent PIDs must not admit older children or their subtrees"
+        );
+    }
+
+    #[test]
+    fn windows_process_tree_excludes_branches_with_unknown_identity() {
+        for (root_created, child_created, expected) in [
+            (None, Some(200), vec![]),
+            (Some(100), None, vec![40]),
+            (None, None, vec![]),
+        ] {
+            let snapshot = super::ProcessSnapshot::new(vec![
+                test_entry_with_creation_time(10, 1, "shell.exe", &["shell.exe"], root_created),
+                test_entry_with_creation_time(20, 10, "child.exe", &["child.exe"], child_created),
+                test_entry_with_creation_time(30, 20, "worker.exe", &["worker.exe"], Some(300)),
+                test_entry_with_creation_time(40, 10, "child.exe", &["child.exe"], Some(400)),
+            ]);
+
+            assert_eq!(
+                super::descendant_entries(10, &snapshot)
+                    .iter()
+                    .map(|entry| entry.pid)
+                    .collect::<Vec<_>>(),
+                expected,
+                "unknown creation times cannot establish ancestry: root={root_created:?}, child={child_created:?}"
+            );
+        }
+
+        let snapshot = super::ProcessSnapshot::new(vec![
+            test_entry_with_creation_time(20, 10, "child.exe", &["child.exe"], Some(200)),
+            test_entry_with_creation_time(30, 20, "worker.exe", &["worker.exe"], Some(300)),
+        ]);
+        assert!(
+            super::descendant_entries(10, &snapshot).is_empty(),
+            "a missing root cannot establish ancestry from its PID alone"
+        );
+    }
+
+    #[test]
+    fn windows_multiplexer_lineages_preserve_unknown_identity_from_one_snapshot() {
+        for (parent_created, client_created, descends) in [
+            (Some(100), Some(200), Some(true)),
+            (Some(250), Some(200), None),
+            (None, Some(200), None),
+            (Some(100), None, None),
+        ] {
+            let snapshot = Arc::new(super::ProcessSnapshot::new(vec![
+                test_entry(1, 0, "init", &["init"]),
+                test_entry_with_creation_time(10, 1, "pwsh.exe", &["pwsh.exe"], parent_created),
+                test_entry_with_creation_time(20, 10, "tmux: client", &["tmux"], client_created),
+                test_entry(30, 1, "tmux: server", &["tmux"]),
+                test_entry(40, 30, "hook.exe", &["hook.exe"]),
+            ]));
+            let peer = super::process_lineage_from_snapshot(40, &snapshot).unwrap();
+            let mut reads = 0;
+            let clients = super::snapshot_multiplexer_client_lineages_with(&peer, || {
+                reads += 1;
+                Arc::clone(&snapshot)
+            });
+            assert_eq!(reads, 1);
+            if client_created.is_none() {
+                assert_eq!(
+                    clients, None,
+                    "an unreadable client is not an absent client"
+                );
+            } else {
+                let clients = clients.unwrap();
+                assert_eq!(clients.len(), 1);
+                assert_eq!(clients[0].descends_from(10), descends);
+            }
+        }
+        let ordinary = super::ProcessLineage {
+            processes: vec![super::ProcessParentEntry {
+                pid: 10,
+                parent_pid: 0,
+                name: "pwsh.exe".into(),
+            }],
+            complete: true,
+        };
+        assert_eq!(
+            super::snapshot_multiplexer_client_lineages_with(&ordinary, || panic!("no scan")),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn windows_identity_walks_share_one_snapshot_for_one_and_sixteen_panes() {
+        for panes in [1, 16] {
+            let mut builds = 0;
+            let mut cache = super::ProcessSnapshotCache { cached: None };
+            let snapshot = cache.snapshot(Duration::ZERO, || {
+                builds += 1;
+                (0..panes)
+                    .flat_map(|index| {
+                        let shell = 10 + index * 10;
+                        [
+                            test_entry(shell, 0, "pwsh.exe", &["pwsh.exe"]),
+                            test_entry(shell + 1, shell, "codex.exe", &["codex.exe"]),
+                        ]
+                    })
+                    .collect()
+            });
+            for index in 0..panes {
+                let shared = cache.snapshot(Duration::MAX, || {
+                    panic!("identity walks must reuse the retained snapshot")
+                });
+                assert!(Arc::ptr_eq(&snapshot, &shared));
+                let shell = 10 + index * 10;
+                assert_eq!(
+                    super::descendant_entries(shell, &shared)
+                        .iter()
+                        .map(|entry| entry.pid)
+                        .collect::<Vec<_>>(),
+                    vec![shell + 1]
+                );
+                let lineage = super::process_lineage_from_snapshot(shell + 1, &shared).unwrap();
+                assert!(lineage.complete);
+                assert_eq!(lineage.descends_from(shell), Some(true));
+                assert!(super::process_is_ancestor(shell, shell + 1, &shared));
+                assert_eq!(
+                    super::available_pane_shell_from_snapshot(shell, &shared),
+                    None
+                );
+            }
+            assert_eq!(builds, 1, "{panes} panes share one process-table build");
+        }
+    }
+
+    #[test]
+    fn windows_process_lineage_stops_at_reused_or_unknown_parent() {
+        for (parent_created, complete) in [
+            (Some(100), true),
+            (Some(200), true),
+            (Some(250), false),
+            (None, false),
+        ] {
+            let snapshot = super::ProcessSnapshot::new(vec![
+                test_entry_with_creation_time(1, 0, "init.exe", &["init.exe"], Some(1)),
+                test_entry_with_creation_time(10, 1, "shell.exe", &["shell.exe"], parent_created),
+                test_entry_with_creation_time(20, 10, "child.exe", &["child.exe"], Some(200)),
+                test_entry_with_creation_time(30, 20, "hook.exe", &["hook.exe"], Some(300)),
+            ]);
+            let lineage = super::process_lineage_from_snapshot(30, &snapshot).unwrap();
+            assert_eq!(lineage.complete, complete, "{parent_created:?}");
+            assert_eq!(
+                lineage
+                    .processes
+                    .iter()
+                    .map(|entry| entry.pid)
+                    .collect::<Vec<_>>(),
+                if complete {
+                    vec![30, 20, 10, 1]
+                } else {
+                    vec![30, 20]
+                }
+            );
+            assert_eq!(lineage.descends_from(20), Some(true));
+            assert_eq!(lineage.descends_from(10), complete.then_some(true));
+            assert_eq!(lineage.descends_from(99), complete.then_some(false));
+            assert_eq!(super::process_is_ancestor(10, 30, &snapshot), complete);
+        }
+        let snapshot = super::ProcessSnapshot::new(vec![test_entry_with_creation_time(
+            10,
+            0,
+            "shell.exe",
+            &["shell.exe"],
+            None,
+        )]);
+        assert_eq!(super::process_lineage_from_snapshot(10, &snapshot), None);
+        assert_eq!(super::process_lineage_from_snapshot(99, &snapshot), None);
+        assert_eq!(super::process_lineage_from_snapshot(0, &snapshot), None);
+    }
+
+    #[test]
+    fn windows_shell_idle_check_rejects_unknown_identities() {
+        for (shell_created, child_created, available) in [
+            (None, Some(200), false),
+            (Some(100), None, false),
+            (None, None, false),
+            (Some(100), Some(100), false),
+            (Some(100), Some(200), false),
+            (Some(100), Some(50), true),
+        ] {
+            let snapshot = super::ProcessSnapshot::new(vec![
+                test_entry_with_creation_time(10, 1, "pwsh.exe", &["pwsh.exe"], shell_created),
+                test_entry_with_creation_time(20, 10, "child.exe", &["child.exe"], child_created),
+            ]);
+            assert_eq!(
+                super::available_pane_shell_from_snapshot(10, &snapshot).as_deref(),
+                available.then_some("pwsh.exe"),
+                "shell={shell_created:?}, child={child_created:?}"
+            );
+        }
+        let snapshot = super::ProcessSnapshot::new(vec![test_entry_with_creation_time(
+            10,
+            1,
+            "pwsh.exe",
+            &["pwsh.exe"],
+            None,
+        )]);
+        assert_eq!(
+            super::available_pane_shell_from_snapshot(10, &snapshot),
+            None
+        );
+    }
+
+    #[test]
     fn windows_process_tree_returns_shell_when_candidate_parent_chain_cycles() {
         let entries = vec![
             test_entry(10, 40, "powershell.exe", &["powershell.exe"]),
@@ -6811,7 +7058,9 @@ mod tests {
         name: &str,
         argv: &[&str],
     ) -> super::WindowsProcessEntry {
-        test_entry_with_creation_time(pid, parent_pid, name, argv, None)
+        // Ordinary tree fixtures use stable synthetic identities; tests for unreadable identities
+        // call `test_entry_with_creation_time(..., None)` explicitly.
+        test_entry_with_creation_time(pid, parent_pid, name, argv, Some(u64::from(pid)))
     }
 
     fn test_entry_without_cmdline(

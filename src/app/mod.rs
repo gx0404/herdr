@@ -151,9 +151,10 @@ pub struct App {
     /// 疑似主机打断的护栏窗口截止时刻：窗口内不许把盘上的会话快照写小
     /// （HSR-04 / 上游 #4320）。
     pane_exit_cascade_until: Option<Instant>,
-    /// 最近一次派发出去的写盘里有多少 workspace，即「盘上现在有多少」。
-    /// 护栏用它判断一次保存是不是在缩小快照。
-    persisted_workspace_count: usize,
+    /// 最近恢复或派发的快照所含 workspace/tab/pane 身份；派发不代表后台写盘成功。
+    persisted_session_layout: session::SessionLayout,
+    /// 护栏窗口内经显式布局变更或受限自动补位授权的身份基线；派发后清空。
+    authorized_session_layout: Option<session::SessionLayout>,
     /// 测试用：真正派发出去的会话写盘次数，守住「一次级联只写一次」。
     #[cfg(test)]
     session_save_writes: usize,
@@ -436,14 +437,14 @@ impl App {
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             policy.restore_session && snapshot.is_none(),
         )));
-        let (workspaces, active, selected) = if let Some(snap) = snapshot {
+        let (workspaces, active, selected) = if let Some(snap) = snapshot.as_ref() {
             let history = config
                 .experimental
                 .pane_history
                 .then(crate::persist::load_history)
                 .flatten();
             let (ws, terminals, terminal_runtimes) = crate::persist::restore(
-                &snap,
+                snap,
                 history.as_ref(),
                 24,
                 80,
@@ -627,7 +628,10 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
-        let restored_workspace_count = state.workspaces.len();
+        let persisted_session_layout = snapshot
+            .as_ref()
+            .map(session::SessionLayout::from_snapshot)
+            .unwrap_or_default();
         let client_shell_keybindings_profile = config.local_keybindings_profile_toml().ok();
         let endpoint_commands =
             custom_commands::EndpointCommandRegistry::new(&state.keybinds.custom_commands);
@@ -676,8 +680,8 @@ impl App {
             pane_exit_checkpoint_pending: false,
             recent_pane_exits: Vec::new(),
             pane_exit_cascade_until: None,
-            // 构造时 state 刚从 session.json 恢复完，所以这就是盘上的工作区数。
-            persisted_workspace_count: restored_workspace_count,
+            persisted_session_layout,
+            authorized_session_layout: None,
             #[cfg(test)]
             session_save_writes: 0,
             detached_process_children: Vec::new(),
@@ -738,6 +742,7 @@ impl App {
         )?;
         let pane_id_aliases = crate::persist::handoff_pane_aliases(snapshot, &workspaces);
 
+        app.persisted_session_layout = session::SessionLayout::from_snapshot(snapshot);
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
@@ -782,6 +787,7 @@ impl App {
 
         match self.create_workspace_with_options(cwd, true) {
             Ok(_) => {
+                self.authorize_default_workspace_replacement();
                 if preserve_checkpoint {
                     // Automatic replacement is part of pane removal, not a new user mutation.
                     self.pane_exit_checkpoint_pending = true;
@@ -3581,6 +3587,214 @@ selection_mix_ratio = 0.5
         });
     }
 
+    fn app_with_persisted_layout(workspace: Workspace) -> App {
+        let mut app = test_app();
+        app.policy.persist_session = true;
+        app.state = AppState::test_new();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.save_session_now();
+        app
+    }
+
+    fn persisted_session_value() -> serde_json::Value {
+        serde_json::to_value(crate::persist::load().expect("persisted session")).unwrap()
+    }
+
+    fn finish_background_session_save(app: &mut App) {
+        if let Some(thread) = app.session_save_thread.take() {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(thread.join());
+            });
+            done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("background session writer should finish")
+                .expect("background session writer should not panic");
+        }
+    }
+
+    #[test]
+    fn session_shrink_guard_preserves_single_workspace_panes_after_mixed_exit_batch() {
+        let (_env, _dirs) = isolated_session_dirs("single-workspace-pane-exit-batch");
+        let mut workspace = Workspace::test_new("preserved-panes");
+        let first = workspace.tabs[0].root_pane;
+        let second = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let survivor = workspace.test_split(ratatui::layout::Direction::Vertical);
+        let mut app = app_with_persisted_layout(workspace);
+        let baseline = persisted_session_value();
+        assert_eq!(
+            baseline["workspaces"][0]["tabs"][0]["panes"]
+                .as_object()
+                .unwrap()
+                .len(),
+            3
+        );
+        let baseline_writes = app.session_save_writes;
+
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: first,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        assert_eq!(app.session_save_writes, baseline_writes);
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: second,
+            exit_reason: crate::platform::ChildExitReason::Interrupted,
+        });
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].panes.len(), 1);
+        assert!(app.state.workspaces[0].tabs[0]
+            .panes
+            .contains_key(&survivor));
+        app.save_session_on_shutdown();
+        assert_eq!(
+            persisted_session_value(),
+            baseline,
+            "a checkpoint after a clean exit must not replace the original split layout"
+        );
+    }
+
+    #[test]
+    fn session_shrink_guard_preserves_single_workspace_tabs_across_debounce() {
+        let (_env, _dirs) = isolated_session_dirs("single-workspace-tab-exit-debounce");
+        let mut workspace = Workspace::test_new("preserved-tabs");
+        workspace.tabs[0].set_custom_name("main".into());
+        workspace.test_add_tab(Some("logs"));
+        workspace.test_add_tab(Some("worker"));
+        let panes: Vec<_> = workspace.tabs.iter().map(|tab| tab.root_pane).collect();
+        let mut app = app_with_persisted_layout(workspace);
+        let baseline = persisted_session_value();
+        assert_eq!(
+            baseline["workspaces"][0]["tabs"].as_array().unwrap().len(),
+            3
+        );
+
+        for &pane_id in &panes[..2] {
+            app.handle_internal_event(AppEvent::PaneDied {
+                pane_id,
+                exit_reason: crate::platform::ChildExitReason::Interrupted,
+            });
+        }
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, panes[2]);
+        assert_eq!(persisted_session_value(), baseline);
+        let writes_before_debounce = app.session_save_writes;
+        let due = app.session_save_deadline.expect("pane exit debounce") + Duration::from_secs(1);
+        let guard_until = app.pane_exit_cascade_until.expect("pane exit guard");
+        assert!(due < guard_until);
+
+        app.start_background_session_save(due);
+        finish_background_session_save(&mut app);
+
+        assert_eq!(
+            persisted_session_value(),
+            baseline,
+            "autosave must retain every original tab even when the workspace count is unchanged"
+        );
+        assert_eq!(app.session_save_writes, writes_before_debounce);
+        assert_eq!(app.session_save_deadline, Some(guard_until));
+        app.save_session_on_shutdown();
+        assert_eq!(persisted_session_value(), baseline);
+    }
+
+    #[test]
+    fn session_shrink_guard_allows_explicit_pane_and_tab_closes() {
+        let (_env, _dirs) = isolated_session_dirs("explicit-pane-tab-close-persistence");
+        let mut workspace = Workspace::test_new("explicit-close");
+        let survivor = workspace.tabs[0].root_pane;
+        let split = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let logs = workspace.test_add_tab(Some("logs"));
+        let logs_pane = workspace.tabs[logs].root_pane;
+        let mut app = app_with_persisted_layout(workspace);
+
+        for (pane_id, remaining_tabs) in [(split, 2), (logs_pane, 1)] {
+            app.state.focus_pane_in_workspace(0, pane_id);
+            app.state.close_pane();
+            app.handle_internal_event(AppEvent::PaneDied {
+                pane_id,
+                exit_reason: crate::platform::ChildExitReason::Interrupted,
+            });
+            assert_eq!(app.state.workspaces.len(), 1);
+            assert_eq!(app.state.workspaces[0].tabs.len(), remaining_tabs);
+            assert_eq!(app.state.workspaces[0].tabs[0].panes.len(), 1);
+            assert_eq!(app.state.workspaces[0].tabs[0].root_pane, survivor);
+            assert!(app.recent_pane_exits.is_empty());
+            assert!(app.pane_exit_cascade_until.is_none());
+            app.sync_session_save_schedule();
+            assert!(app.session_save_deadline.is_some());
+
+            let expected = serde_json::to_value(crate::persist::capture(
+                &app.state.workspaces,
+                &app.state.terminals,
+                &app.terminal_runtimes,
+                app.state.active,
+                app.state.selected,
+            ))
+            .unwrap();
+            app.save_session_now();
+            assert_eq!(
+                persisted_session_value(),
+                expected,
+                "an explicit close must persist the surviving layout, not retain the closed pane or tab"
+            );
+        }
+
+        app.state.close_selected_workspace();
+        assert!(app.state.workspaces.is_empty());
+        app.save_session_now();
+        assert!(crate::persist::load().is_none());
+    }
+
+    #[test]
+    fn session_shrink_guard_allows_explicit_api_close_without_reviving_closed_panes() {
+        let (_env, _dirs) = isolated_session_dirs("explicit-api-close-under-guard");
+        let mut workspace = Workspace::test_new("explicit-api-close");
+        let automatically_exited = workspace.tabs[0].root_pane;
+        let explicitly_closed = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let survivor = workspace.test_split(ratatui::layout::Direction::Vertical);
+        let mut app = app_with_persisted_layout(workspace);
+        let baseline = persisted_session_value();
+
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: automatically_exited,
+            exit_reason: crate::platform::ChildExitReason::Interrupted,
+        });
+        app.save_session_now();
+        assert_eq!(
+            persisted_session_value(),
+            baseline,
+            "an automatic PaneDied must remain protected during the cascade"
+        );
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "explicit-pane-close".into(),
+            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+                pane_id: app.public_pane_id(0, explicitly_closed).unwrap(),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "ok");
+
+        app.save_session_now();
+        let snapshot = crate::persist::load().expect("explicit close should be persisted");
+        let tab = &snapshot.workspaces[0].tabs[0];
+        assert_eq!(tab.panes.len(), 1);
+        assert!(tab.panes.contains_key(&survivor.raw()));
+        assert!(!tab.panes.contains_key(&automatically_exited.raw()));
+        assert!(!tab.panes.contains_key(&explicitly_closed.raw()));
+
+        let restored_layout = session::SessionLayout::from_snapshot(&snapshot);
+        assert_eq!(
+            restored_layout.pane_count(),
+            1,
+            "a restart must restore only the explicitly surviving pane"
+        );
+    }
+
     /// 主机重启时部分 shell 会以 `0` 收尾（计划里 burst 判据要覆盖的那一半）：
     /// 级联退出不得把盘上的完整快照换成被削减的中间态。
     #[test]
@@ -3770,7 +3984,7 @@ selection_mix_ratio = 0.5
 
     /// 明确表态（审查发现 #4）：用户在最后一个 shell 里以 `exit 1` 收尾时
     /// `session.json` 不被删除——进程内分不出这和主机重启。恢复不会「诈尸」，
-    /// 因为客户端还连着时自动补位的默认 workspace 会正常覆盖它（集合没有变小）。
+    /// 因为客户端还连着时自动补位的默认 workspace 会正常覆盖它（原快照只有一个 workspace/tab/pane）。
     #[tokio::test]
     async fn exiting_the_last_shell_keeps_the_snapshot_and_the_default_workspace_replaces_it() {
         let (_env, _dirs) = isolated_session_dirs("last-shell-exit-one");
@@ -3788,7 +4002,7 @@ selection_mix_ratio = 0.5
             crate::persist::load().expect("implicit teardown must not clear the session");
         assert_eq!(snapshot.workspaces.len(), 1);
 
-        // 客户端仍连着 → 自动补位；集合没有变小，所以护栏放行，盘上换成新会话。
+        // 客户端仍连着 → 自动补位；原快照只有一个 workspace/tab/pane，所以护栏放行，盘上换成新会话。
         assert!(app.ensure_default_workspace());
         let due = Instant::now() + SESSION_SAVE_DEBOUNCE + Duration::from_secs(1);
         app.start_background_session_save(due);
@@ -3892,6 +4106,7 @@ selection_mix_ratio = 0.5
             app.state.workspaces = vec![Workspace::test_new("newer")];
             app.state.active = Some(0);
             app.state.ensure_test_terminals();
+            app.authorize_session_layout_change();
             app.state.mark_session_dirty();
             if another_interrupted_exit {
                 app.handle_internal_event(AppEvent::PaneDied {

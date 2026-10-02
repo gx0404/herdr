@@ -139,5 +139,7 @@ grok 行上方。
 ## 性能 smoke
 
 `just bench-release-smoke`（约 3–5 分钟，未设 `HERDR_PERF_BASELINE_BIN` 时下载
-stable 作基线）在 hidden 与 visible 输出两种形态对比候选与当前 stable；语义见
-`app-render.md` 乘法路径。
+stable 作基线）只支持 Linux/macOS，在 hidden 与 visible 输出两种形态对比候选与当前
+stable；语义见 `app-render.md` 乘法路径。每次运行把 run-id、命令、原始采样、摘要和
+退出码保留在项目内 `.local/perf-baseline/run-*/`，只清理该 run 的临时运行态；不要把
+性能结果写入 `/var/tmp` 或项目外路径。

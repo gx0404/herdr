@@ -1863,6 +1863,63 @@ fn view_frame(
     }
 }
 
+#[test]
+fn batched_view_surfaces_apply_patches_in_order_and_compose_once_for_the_final_frame() {
+    let mut state = ready();
+    state.workbench.compose_count = 0;
+    advance_snapshot(&mut state, 1);
+
+    let initial = view_frame(&state, 1);
+    let mut cells = surface().frame.cells[..4].to_vec();
+    for (cell, symbol) in cells.iter_mut().zip(["D", "O", "N", "E"].iter()) {
+        cell.symbol = (*symbol).into();
+    }
+    let patch = crate::protocol::PaneSurfacePatch {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        base_surface_revision: 1,
+        surface_revision: 2,
+        rows: vec![crate::protocol::PaneSurfacePatchRow { x: 0, y: 0, cells }],
+        panes: Vec::new(),
+        cursor: None,
+        hyperlink_uris: Vec::new(),
+    };
+    let next = crate::protocol::views::DecodedView {
+        boot_id: "boot-1".into(),
+        views_revision: state.workbench.revision,
+        view_id: "1".into(),
+        tab_id: "tab_1".into(),
+        message: ServerMessage::PaneSurfacePatch(patch),
+    };
+
+    assert!(state.receive_view_batch(1, vec![initial, next]));
+    let frame = state.compose(120, 40).expect("最终工作台帧");
+    let text = frame_rows(&frame).join("\n");
+    assert!(
+        text.contains("DONE"),
+        "最后一个补丁必须出现在最终帧：{text}"
+    );
+    assert!(
+        !text.contains("LIVE"),
+        "最终帧不应保留旧的 surface 内容：{text}"
+    );
+    assert_eq!(
+        state.workbench.compose_count, 1,
+        "同一批 view 应在所有增量应用后只组合一次"
+    );
+}
+
+#[test]
+fn batched_view_surfaces_reject_a_different_connection_generation() {
+    let mut state = ready();
+    state.workbench.compose_count = 0;
+    advance_snapshot(&mut state, 1);
+
+    assert!(!state.receive_view_batch(2, vec![view_frame(&state, 1)]));
+    assert!(state.workbench.views.is_empty());
+    assert_eq!(state.workbench.compose_count, 0);
+}
+
 /// 快照（经控制连接），换成给定的投影修订号；连接代次 1，与视图帧配套。
 fn advance_snapshot(state: &mut ClientShellState, revision: u64) {
     let mut next = snapshot();
