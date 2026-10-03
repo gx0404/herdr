@@ -13,9 +13,9 @@ nextest-all:
     cargo nextest run --locked --test-threads {{nextest_jobs}} --status-level leak --final-status-level fail --failure-output final --success-output never
 
 # Run repository maintenance contract tests (+ the fork's upstream-sync drop-path gate)
-# The unittest manifest runs in parallel child processes (one per class/chunk, CPU-count workers).
+# The unittest manifest runs in parallel child processes within the configured worker limit.
 maintenance-test:
-    {{python}} scripts/run_parallel_unittest.py scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_gx_package scripts.test_gx_release scripts.test_gx_smoke scripts.test_local_build_config scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_release_perf scripts.test_resolve_agent_rules scripts.test_run_parallel_unittest scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
+    {{python}} scripts/run_parallel_unittest.py scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_graphify_fingerprint scripts.test_gx_package scripts.test_gx_release scripts.test_gx_smoke scripts.test_local_build_config scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_release_perf scripts.test_resolve_agent_rules scripts.test_run_parallel_unittest scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
     bun test scripts/release-workflows.test.ts
     {{python}} scripts/upstream_sync_drop_check.py
 
@@ -150,6 +150,11 @@ bench-render-scale:
 # Profile terminal target name resolution at increasing pane counts.
 bench-terminal-targets:
     cargo test --release --locked --bin herdr terminal_target_lookup_profile -- --ignored --nocapture --test-threads=1
+
+# Profile Windows foreground inspection of isolated idle shells, without a server.
+[windows]
+bench-process-inspection:
+    cargo test --release --locked --bin herdr windows_process_inspection_profile -- --ignored --nocapture --test-threads=1
 
 # Profile BSP split collection and construction with balanced and skewed trees.
 bench-bsp-layout:

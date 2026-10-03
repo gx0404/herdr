@@ -14,8 +14,8 @@
 //! - **进程退出前等阶梯收尾**（[`drain_pending`]），否则 pane 进程会被留成孤儿。
 //!
 //! reaper 用**一个**轮询循环驱动所有在办 pane，每个 pane 有自己的阶梯进度：新投递的
-//! 请求立刻并入当前循环（不必等上一批走完），所以任何一个请求的最坏耗时都是一轮阶梯
-//! （[`LADDER_WORST_CASE`]：unix ≤750 ms，Windows ≤2.5 s），与同时关掉多少个 pane 无关。
+//! 请求立刻登记并捕获成员，Windows 在后台 PTY 关闭后才开始首级宽限；关闭门限与阶梯预算
+//! （[`LADDER_WORST_CASE`]：unix 750 ms，Windows 3 s）不随同时关闭的 pane 数增长。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,9 +40,14 @@ const SIGNAL_LADDER: [(Signal, Duration); 3] = [
 /// 立即摘除它，正常情况下等不满。
 const KILL_GRACE_MS: u64 = if cfg!(windows) { 2000 } else { 250 };
 
-/// 一个请求从被 reaper 取走到走完阶梯的上限：整条阶梯的宽限之和。调用方据此设置
-/// [`drain_pending`] 的超时。
-pub(crate) const LADDER_WORST_CASE: Duration = Duration::from_millis(500 + KILL_GRACE_MS);
+/// PTY 关闭门限与整条阶梯的宽限之和，供调用方推导 [`drain_pending`] 的超时。
+pub(crate) const LADDER_WORST_CASE: Duration = {
+    #[cfg(windows)]
+    let close = crate::pty::actor::PTY_CLOSE_TIMEOUT;
+    #[cfg(unix)]
+    let close = Duration::ZERO;
+    close.saturating_add(Duration::from_millis(500 + KILL_GRACE_MS))
+};
 
 /// 首级几乎总是在几毫秒内命中（shell 收到 SIGHUP 立刻退出），所以首级用 [`FAST_POLL`]
 /// 轮询做到「命中即摘除」；升级到 SIGTERM/SIGKILL 的进程本来就不会很快退出，后续级别
@@ -63,6 +68,8 @@ pub(crate) struct PaneShutdownRequest {
     child_pid: u32,
     child_wait_completed: Option<Arc<AtomicBool>>,
     session: Option<ProcessSessionId>,
+    #[cfg(windows)]
+    pty_close: Option<crate::pty::actor::PtyCloseCompletion>,
 }
 
 impl PaneShutdownRequest {
@@ -90,7 +97,18 @@ impl PaneShutdownRequest {
             child_pid,
             child_wait_completed,
             session,
+            #[cfg(windows)]
+            pty_close: None,
         }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn after_pty_close(
+        mut self,
+        completion: Option<crate::pty::actor::PtyCloseCompletion>,
+    ) -> Self {
+        self.pty_close = completion;
+        self
     }
 
     #[cfg(test)]
@@ -105,13 +123,28 @@ impl PaneShutdownRequest {
             child_pid,
             child_wait_completed,
             session,
+            #[cfg(windows)]
+            pty_close: None,
         }
     }
+}
+
+#[cfg(all(test, windows))]
+type TestSubmit = Arc<dyn Fn(PaneShutdownRequest)>;
+
+#[cfg(all(test, windows))]
+thread_local! {
+    static TEST_SUBMIT: std::cell::RefCell<Option<TestSubmit>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 把一个 pane 的终止阶梯交给 reaper 线程；调用方（事件循环）立即返回。
 pub(crate) fn submit(request: PaneShutdownRequest) {
     if request.child_pid == 0 {
+        return;
+    }
+    #[cfg(all(test, windows))]
+    if let Some(submit) = TEST_SUBMIT.with(|hook| hook.borrow().clone()) {
+        submit(request);
         return;
     }
     reaper().submit(request);
@@ -172,9 +205,34 @@ struct ReapTarget {
     last_signal: Option<Signal>,
     stage_started: Instant,
     next_signal_at: Instant,
+    #[cfg(windows)]
+    pty_close: Option<crate::pty::actor::PtyCloseCompletion>,
 }
 
 impl ReapTarget {
+    fn new(request: PaneShutdownRequest, members: Vec<ProcessSessionMember>, now: Instant) -> Self {
+        Self {
+            pane_id: request.pane_id,
+            child_pid: request.child_pid,
+            child_wait_completed: request.child_wait_completed,
+            members,
+            stage: 0,
+            last_signal: None,
+            stage_started: now,
+            next_signal_at: now,
+            #[cfg(windows)]
+            pty_close: request.pty_close,
+        }
+    }
+
+    fn next_wakeup(&self) -> Instant {
+        #[cfg(windows)]
+        if let Some(completion) = &self.pty_close {
+            return completion.deadline();
+        }
+        self.next_signal_at
+    }
+
     /// 摘掉已经退出的成员；全部退出时返回 true。
     ///
     /// 每级发信号前都先摘一遍：已被 `wait` 回收（pid 可能已被复用）或已经退出的进程
@@ -225,7 +283,7 @@ fn sleep_budget(targets: &[ReapTarget], now: Instant) -> Duration {
     let poll = poll_interval(targets, now);
     let until_next_signal = targets
         .iter()
-        .map(|target| target.next_signal_at.saturating_duration_since(now))
+        .map(|target| target.next_wakeup().saturating_duration_since(now))
         .min()
         .unwrap_or(poll);
     poll.min(until_next_signal).max(MIN_POLL)
@@ -239,6 +297,7 @@ fn prepare_targets(
     requests: Vec<PaneShutdownRequest>,
     control: &impl ProcessControl,
 ) -> Vec<ReapTarget> {
+    let mut targets = Vec::with_capacity(requests.len());
     let mut anchored: Vec<(PaneShutdownRequest, ProcessSessionId)> =
         Vec::with_capacity(requests.len());
     for request in requests {
@@ -250,19 +309,22 @@ fn prepare_targets(
                 pid = request.child_pid,
                 "pane session anchor was already gone when shutdown was queued"
             );
+            #[cfg(windows)]
+            if request.pty_close.is_some() {
+                targets.push(ReapTarget::new(request, Vec::new(), Instant::now()));
+            }
             continue;
         };
         anchored.push((request, session));
     }
     if anchored.is_empty() {
-        return Vec::new();
+        return targets;
     }
 
     let sessions: Vec<ProcessSessionId> = anchored.iter().map(|(_, session)| *session).collect();
     let buckets = control.session_processes(&sessions);
     let now = Instant::now();
 
-    let mut targets = Vec::with_capacity(anchored.len());
     // 平台实现返回的桶数与 sessions 等长；万一更短也不能 panic，缺的按「扫不到成员」处理。
     let buckets = buckets.into_iter().chain(std::iter::repeat_with(Vec::new));
     for ((request, session), mut members) in anchored.into_iter().zip(buckets) {
@@ -280,22 +342,17 @@ fn prepare_targets(
                         pid = request.child_pid,
                         "pane session had no live processes left"
                     );
+                    #[cfg(windows)]
+                    if request.pty_close.is_some() {
+                        targets.push(ReapTarget::new(request, Vec::new(), now));
+                    }
                     continue;
                 }
             }
         }
         members.sort_unstable();
         members.dedup();
-        targets.push(ReapTarget {
-            pane_id: request.pane_id,
-            child_pid: request.child_pid,
-            child_wait_completed: request.child_wait_completed,
-            members,
-            stage: 0,
-            last_signal: None,
-            stage_started: now,
-            next_signal_at: now,
-        });
+        targets.push(ReapTarget::new(request, members, now));
     }
     targets
 }
@@ -308,6 +365,15 @@ fn advance_targets(
     now: Instant,
 ) {
     targets.retain_mut(|target| {
+        #[cfg(windows)]
+        if let Some(completion) = &target.pty_close {
+            let Some(ready_at) = completion.ready_at(now) else {
+                return true;
+            };
+            target.pty_close = None;
+            target.stage_started = ready_at;
+            target.next_signal_at = ready_at;
+        }
         if target.prune_exited(control) {
             info!(
                 pane = target.pane_id.raw(),
@@ -753,6 +819,8 @@ mod tests {
             last_signal: None,
             stage_started,
             next_signal_at: stage_started,
+            #[cfg(windows)]
+            pty_close: None,
         }
     }
 
@@ -1257,6 +1325,459 @@ mod tests {
             assert!(reaper.drain(Duration::from_secs(5)));
             reaper.stop();
         });
+    }
+
+    #[cfg(windows)]
+    mod pty_close_tests {
+        use super::*;
+        use crate::pane::{PaneRuntime, PaneRuntimeIo};
+        use crate::pty::actor::shutdown_test_support::ShutdownActor;
+        use bytes::Bytes;
+
+        struct SubmitGuard;
+
+        impl SubmitGuard {
+            fn install(reaper: Arc<Reaper>) -> Self {
+                TEST_SUBMIT.with(|hook| {
+                    *hook.borrow_mut() = Some(Arc::new(move |mut request| {
+                        assert!(
+                            request.session.is_some(),
+                            "runtime captured the process anchor before closing I/O"
+                        );
+                        request.child_pid = request.pane_id.raw();
+                        request.session = Some(anchor(i64::from(request.child_pid)));
+                        reaper.submit(request);
+                    }));
+                });
+                Self
+            }
+        }
+
+        impl Drop for SubmitGuard {
+            fn drop(&mut self) {
+                TEST_SUBMIT.with(|hook| hook.borrow_mut().take());
+            }
+        }
+
+        struct SavingProcesses {
+            closed: Vec<Arc<Mutex<Option<Instant>>>>,
+            now: Mutex<Option<Instant>>,
+            killed: Mutex<Vec<u32>>,
+            scanned: AtomicUsize,
+        }
+
+        impl ProcessControl for SavingProcesses {
+            fn session_id(&self, pid: u32) -> Option<ProcessSessionId> {
+                Some(anchor(i64::from(pid)))
+            }
+
+            fn session_processes(
+                &self,
+                sessions: &[ProcessSessionId],
+            ) -> Vec<Vec<ProcessSessionMember>> {
+                self.scanned.fetch_add(sessions.len(), Ordering::Relaxed);
+                sessions
+                    .iter()
+                    .map(|session| {
+                        vec![ProcessSessionMember {
+                            pid: session.id as u32,
+                            instance: 0,
+                        }]
+                    })
+                    .collect()
+            }
+
+            fn signal_processes(&self, members: &[ProcessSessionMember], signal: Signal) {
+                if signal == Signal::Kill {
+                    self.killed
+                        .lock()
+                        .unwrap()
+                        .extend(members.iter().map(|member| member.pid));
+                }
+            }
+
+            fn process_alive(&self, member: ProcessSessionMember) -> bool {
+                if self.killed.lock().unwrap().contains(&member.pid) {
+                    return false;
+                }
+                let now = self.now.lock().unwrap().unwrap_or_else(Instant::now);
+                self.closed[member.pid as usize - 1]
+                    .lock()
+                    .unwrap()
+                    .is_none_or(|closed| now < closed + Duration::from_millis(350))
+            }
+        }
+
+        fn take_targets(reaper: &Reaper, control: &impl ProcessControl) -> Vec<ReapTarget> {
+            let pending = {
+                let mut state = lock_state(reaper);
+                let pending: Vec<_> = state.queue.drain(..).collect();
+                state.in_flight = pending.len();
+                pending
+            };
+            prepare_targets(pending, control)
+        }
+
+        fn advance(
+            reaper: &Reaper,
+            targets: &mut Vec<ReapTarget>,
+            control: &SavingProcesses,
+            now: Instant,
+        ) {
+            *control.now.lock().unwrap() = Some(now);
+            advance_targets(targets, &SIGNAL_LADDER, control, now);
+            lock_state(reaper).in_flight = targets.len();
+        }
+
+        fn test_runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
+        }
+
+        fn runtime_with_actor(
+            runtime: &tokio::runtime::Runtime,
+            actor: &ShutdownActor,
+            id: u32,
+        ) -> PaneRuntime {
+            let _entered = runtime.enter();
+            let (mut pane, _) = PaneRuntime::test_with_channel(80, 24);
+            pane.pane_id = PaneId::from_raw(id);
+            pane.io = PaneRuntimeIo::Actor(actor.handle.as_ref().unwrap().clone());
+            pane.child_pid.store(std::process::id(), Ordering::Release);
+            pane.preserve_processes_on_drop = false;
+            pane
+        }
+
+        #[test]
+        fn pty_close_idle_and_cancelled_input_release_without_fixed_grace() {
+            for mode in ["idle", "queued", "cancelled"] {
+                let runtime = test_runtime();
+                let reaper = Arc::new(Reaper::new());
+                reaper.worker_started.store(true, Ordering::Release);
+                let _hook = SubmitGuard::install(Arc::clone(&reaper));
+                let mut actor = ShutdownActor::new_paused(runtime.handle());
+                let pane = runtime_with_actor(&runtime, &actor, 1);
+                let result = (mode != "idle").then(|| {
+                    pane.queue_user_input_submission(
+                        Bytes::from_static(b"save"),
+                        Bytes::from_static(b"\r"),
+                        Duration::ZERO,
+                        None,
+                    )
+                    .unwrap()
+                });
+                if mode == "cancelled" {
+                    actor.cancel_input();
+                }
+                let control = SavingProcesses {
+                    closed: vec![Arc::clone(&actor.closed_at)],
+                    now: Mutex::new(Some(Instant::now())),
+                    killed: Mutex::new(Vec::new()),
+                    scanned: AtomicUsize::new(0),
+                };
+                let started = Instant::now();
+                pane.shutdown();
+                assert!(!reaper.drain(Duration::ZERO));
+                let mut targets = take_targets(&reaper, &control);
+                let deadline = targets[0].pty_close.as_ref().unwrap().deadline();
+                let closed = actor.wait_for_close();
+                assert!(
+                    closed.duration_since(started) < Duration::from_millis(250),
+                    "idle close must not spend the bounded Enter grace"
+                );
+                assert_eq!(
+                    actor.handle.as_ref().unwrap().shutdown().deadline(),
+                    deadline
+                );
+                actor.start_input();
+                if let Some(result) = result {
+                    let result = result.recv_timeout(Duration::from_secs(2));
+                    if mode == "cancelled" {
+                        assert!(matches!(
+                            result,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                        ));
+                    } else {
+                        assert_eq!(
+                            result.unwrap().unwrap_err().kind(),
+                            std::io::ErrorKind::BrokenPipe
+                        );
+                    }
+                }
+                advance(
+                    &reaper,
+                    &mut targets,
+                    &control,
+                    closed + Duration::from_millis(1),
+                );
+                assert_eq!(targets[0].stage, 1);
+                advance(
+                    &reaper,
+                    &mut targets,
+                    &control,
+                    closed + Duration::from_millis(350),
+                );
+                assert!(reaper.drain(Duration::ZERO));
+                assert!(control.killed.lock().unwrap().is_empty());
+                actor.finish();
+            }
+        }
+
+        #[test]
+        fn pty_close_stalled_control_has_an_absolute_bounded_reaper_deadline() {
+            let runtime = test_runtime();
+            let reaper = Arc::new(Reaper::new());
+            reaper.worker_started.store(true, Ordering::Release);
+            let _hook = SubmitGuard::install(Arc::clone(&reaper));
+            let actor = ShutdownActor::new(runtime.handle());
+            actor.block_control();
+            let pane = runtime_with_actor(&runtime, &actor, 1);
+            let started = Instant::now();
+            pane.shutdown();
+            let control = FakeProcesses::session(1, &[1], None);
+            assert!(!reaper.drain(Duration::ZERO));
+            let mut targets = take_targets(&reaper, &control);
+            let deadline = targets[0].pty_close.as_ref().unwrap().deadline();
+            assert_eq!(
+                actor.handle.as_ref().unwrap().shutdown().deadline(),
+                deadline
+            );
+            assert!(sleep_budget(&targets, Instant::now()) >= FAST_POLL);
+            advance_targets(
+                &mut targets,
+                &SIGNAL_LADDER,
+                &control,
+                deadline - Duration::from_millis(1),
+            );
+            assert_eq!(targets[0].stage, 0);
+            assert!(!reaper.drain(Duration::ZERO));
+            for offset in [0, 250, 500] {
+                advance_targets(
+                    &mut targets,
+                    &SIGNAL_LADDER,
+                    &control,
+                    deadline + Duration::from_millis(offset),
+                );
+            }
+            assert_eq!(
+                control.signal_log(),
+                vec![Signal::Hangup, Signal::Terminate, Signal::Kill]
+            );
+            advance_targets(
+                &mut targets,
+                &SIGNAL_LADDER,
+                &control,
+                deadline + Duration::from_millis(500 + KILL_GRACE_MS),
+            );
+            assert!(targets.is_empty());
+            lock_state(&reaper).in_flight = 0;
+            assert!(reaper.drain(Duration::ZERO));
+            assert!(
+                deadline + Duration::from_millis(500 + KILL_GRACE_MS)
+                    <= started + LADDER_WORST_CASE + Duration::from_millis(50)
+            );
+            actor.finish();
+        }
+
+        #[test]
+        fn pty_close_without_a_process_anchor_still_stays_registered() {
+            let runtime = test_runtime();
+            let reaper = Arc::new(Reaper::new());
+            reaper.worker_started.store(true, Ordering::Release);
+            let _hook = SubmitGuard::install(Arc::clone(&reaper));
+            let actor = ShutdownActor::new(runtime.handle());
+            actor.block_control();
+            runtime_with_actor(&runtime, &actor, 1).shutdown();
+            lock_state(&reaper).queue.front_mut().unwrap().session = None;
+            let control = FakeProcesses::new();
+            let mut targets = take_targets(&reaper, &control);
+            assert_eq!(targets.len(), 1);
+            let deadline = targets[0].pty_close.as_ref().unwrap().deadline();
+            advance_targets(
+                &mut targets,
+                &SIGNAL_LADDER,
+                &control,
+                deadline - Duration::from_millis(1),
+            );
+            assert!(!reaper.drain(Duration::ZERO));
+            advance_targets(&mut targets, &SIGNAL_LADDER, &control, deadline);
+            assert!(targets.is_empty());
+            assert!(control.signal_log().is_empty());
+            lock_state(&reaper).in_flight = 0;
+            assert!(reaper.drain(Duration::ZERO));
+            actor.finish();
+        }
+
+        #[test]
+        fn pty_close_reaper_drains_fifteen_saving_panes_without_early_kill() {
+            let runtime = test_runtime();
+            let reaper = Arc::new(Reaper::new());
+            reaper.worker_started.store(true, Ordering::Release);
+            let _hook = SubmitGuard::install(Arc::clone(&reaper));
+            let mut actors = Vec::new();
+            let mut panes = Vec::new();
+            for id in 1..=15 {
+                let mut actor = ShutdownActor::new(runtime.handle());
+                let pane = runtime_with_actor(&runtime, &actor, id);
+                let result = pane
+                    .queue_user_input_submission(
+                        Bytes::from_static(b"save"),
+                        Bytes::from_static(b"\r"),
+                        Duration::ZERO,
+                        None,
+                    )
+                    .unwrap();
+                actor.wait_for_enter();
+                if id % 2 == 0 {
+                    actor.cancel_input();
+                }
+                drop(result);
+                actors.push(actor);
+                panes.push(pane);
+            }
+            let control = SavingProcesses {
+                closed: actors
+                    .iter()
+                    .map(|actor| Arc::clone(&actor.closed_at))
+                    .collect(),
+                now: Mutex::new(None),
+                killed: Mutex::new(Vec::new()),
+                scanned: AtomicUsize::new(0),
+            };
+            let started = Instant::now();
+            let drained = std::thread::scope(|scope| {
+                scope.spawn(|| reaper.run_with(&control, &SIGNAL_LADDER));
+                for pane in panes {
+                    pane.shutdown();
+                }
+                let already_drained = reaper.drain(Duration::ZERO);
+                let drained = reaper.drain(LADDER_WORST_CASE + Duration::from_secs(1));
+                reaper.stop();
+                assert!(
+                    !already_drained,
+                    "pending close gates must be visible to drain"
+                );
+                drained
+            });
+            assert!(drained);
+            assert_eq!(control.scanned.load(Ordering::Relaxed), 15);
+            assert!(control.killed.lock().unwrap().is_empty());
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "15 pane shutdowns must advance independently"
+            );
+            for actor in actors {
+                actor.finish();
+            }
+        }
+
+        #[test]
+        fn pty_close_preserves_save_window_for_runtime_shutdown_and_drop() {
+            for panes in [1, 15] {
+                for implicit_drop in [false, true] {
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let reaper = Arc::new(Reaper::new());
+                    reaper.worker_started.store(true, Ordering::Release);
+                    let _hook = SubmitGuard::install(Arc::clone(&reaper));
+                    let mut actors = Vec::new();
+                    let mut runtimes = Vec::new();
+                    let mut results = Vec::new();
+                    for pane_id in 1..=panes {
+                        let actor = ShutdownActor::new(runtime.handle());
+                        let (mut pane, _) = {
+                            let _entered = runtime.enter();
+                            PaneRuntime::test_with_channel(80, 24)
+                        };
+                        pane.pane_id = PaneId::from_raw(pane_id);
+                        pane.io = PaneRuntimeIo::Actor(actor.handle.as_ref().unwrap().clone());
+                        pane.child_pid.store(std::process::id(), Ordering::Release);
+                        pane.preserve_processes_on_drop = false;
+                        results.push(
+                            pane.queue_user_input_submission(
+                                Bytes::from_static(b"save"),
+                                Bytes::from_static(b"\r"),
+                                Duration::ZERO,
+                                None,
+                            )
+                            .unwrap(),
+                        );
+                        actor.wait_for_enter();
+                        actors.push(actor);
+                        runtimes.push(pane);
+                    }
+                    let control = SavingProcesses {
+                        closed: actors
+                            .iter()
+                            .map(|actor| Arc::clone(&actor.closed_at))
+                            .collect(),
+                        now: Mutex::new(Some(Instant::now())),
+                        killed: Mutex::new(Vec::new()),
+                        scanned: AtomicUsize::new(0),
+                    };
+                    let started = Instant::now();
+                    for pane in runtimes {
+                        if implicit_drop {
+                            drop(pane);
+                        } else {
+                            pane.shutdown();
+                        }
+                    }
+                    assert!(
+                        !reaper.drain(Duration::ZERO),
+                        "drain must see registered requests before PTY close"
+                    );
+                    let mut targets = take_targets(&reaper, &control);
+                    assert_eq!(control.scanned.load(Ordering::Relaxed), panes as usize);
+                    let first = Instant::now();
+                    advance(&reaper, &mut targets, &control, first);
+                    assert!(targets.iter().all(|target| target.stage == 0), "PTY close must precede the first ladder timer; blocked Enter cannot consume the process save window");
+                    assert!(!reaper.drain(Duration::ZERO));
+                    let closed = actors
+                        .iter()
+                        .map(ShutdownActor::wait_for_close)
+                        .max()
+                        .unwrap();
+                    assert!(
+                        started.elapsed() < Duration::from_secs(2),
+                        "pane close grace must run concurrently"
+                    );
+                    let after_close = (closed + Duration::from_millis(10))
+                        .max(first + Duration::from_millis(250));
+                    advance(&reaper, &mut targets, &control, after_close);
+                    advance(
+                        &reaper,
+                        &mut targets,
+                        &control,
+                        after_close + Duration::from_millis(250),
+                    );
+                    advance(
+                        &reaper,
+                        &mut targets,
+                        &control,
+                        after_close + Duration::from_millis(350),
+                    );
+                    assert!(
+                        control.killed.lock().unwrap().is_empty(),
+                        "saving processes must get 350ms after CLOSE without Kill"
+                    );
+                    assert!(reaper.drain(Duration::ZERO));
+                    for (actor, result) in actors.into_iter().zip(results) {
+                        assert!(result
+                            .recv_timeout(Duration::from_secs(2))
+                            .unwrap()
+                            .is_err());
+                        actor.finish();
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(windows)]

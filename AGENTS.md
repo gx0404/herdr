@@ -81,6 +81,7 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 | `just graph` / `just graph-check` / `just kb` / `just kb-check` | 图谱与知识库 |
 | `just bench-render-scale` / `just bench-terminal-targets` / `just bench-bsp-layout` | 渲染、终端目标查找、BSP 布局画像 |
 | `just bench-retained-graphics` / `just bench-api-fairness` / `just bench-release-smoke` | retained graphics、API 公平性、发布性能 smoke |
+| `just bench-process-inspection` | Windows 进程检查画像（原生 Windows） |
 | `just release-docs-check` / `just pre-release-check` / `just release` | 发布链（维护者） |
 
 全表与前置/副作用见 `docs/MAKE_COMMANDS.md`。

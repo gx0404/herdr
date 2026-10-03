@@ -1,4 +1,4 @@
-use crate::api::schema::{ResponseResult, SessionSnapshot};
+use crate::api::schema::{PaneInfo, ResponseResult, SessionSnapshot};
 use crate::app::App;
 
 use super::responses::encode_success;
@@ -17,15 +17,19 @@ impl App {
         self.session_snapshot_impl(true)
     }
 
-    /// Client shell 投影专用：`ClientShellSnapshot` 没有 layouts 字段，
-    /// 逐 tab 的 pane_layout_snapshot 在投影路径是纯浪费（HSR-05）；`agents` 的
-    /// 活动树也不复制，快照按自己的下发形态直接读存储。
+    /// Client shell 投影专用：不读取 scroll，不构造 layouts，不复制 agent 活动树；
+    /// 快照按自己的下发形态直接读活动存储。
     pub(crate) fn session_snapshot_for_projection(&self) -> SessionSnapshot {
         self.session_snapshot_impl(false)
     }
 
     fn session_snapshot_impl(&self, full: bool) -> SessionSnapshot {
         let include_layouts = full;
+        let pane_info: fn(&Self, usize, crate::layout::PaneId) -> Option<PaneInfo> = if full {
+            Self::pane_info
+        } else {
+            Self::pane_metadata
+        };
         let focused_workspace_id = self
             .state
             .active
@@ -42,6 +46,7 @@ impl App {
         let mut workspaces = Vec::new();
         let mut tabs = Vec::new();
         let mut layouts = Vec::new();
+        let mut panes = Vec::new();
         for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
             workspaces.push(self.workspace_info(ws_idx));
             for tab_idx in 0..ws.tabs.len() {
@@ -53,6 +58,13 @@ impl App {
                         layouts.push(layout);
                     }
                 }
+                panes.extend(
+                    ws.tabs[tab_idx]
+                        .layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(|pane_id| pane_info(self, ws_idx, pane_id)),
+                );
             }
         }
 
@@ -64,7 +76,7 @@ impl App {
             focused_pane_id,
             workspaces,
             tabs,
-            panes: self.collect_panes_for_workspace(None).unwrap_or_default(),
+            panes,
             layouts,
             agents: if full {
                 self.collect_agent_infos()

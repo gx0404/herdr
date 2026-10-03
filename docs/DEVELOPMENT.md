@@ -88,6 +88,23 @@
 AGENTS.md 变化到领域文档。对上游的 issue/PR 行为遵守 `AGENT_RULES/governance.md`
 守门。较大特性建议独立 worktree（见 governance 维护者工作流小节的布局约定）。
 
+`master` 保留上游基线，GX 取舍与兼容修复留在 `feature/gx_herdr`。同步前确认工作区干净、
+保存两条分支的旧 SHA 与本地回退引用，再抓取并审查上游增量。固定本轮上游 SHA 后按以下顺序操作：
+
+```bash
+git fetch upstream master
+git switch master
+git merge --ff-only <已审查的上游完整SHA>
+git switch feature/gx_herdr
+git merge --no-ff --no-commit master
+```
+
+master 不能快进时先核查分叉原因，不强制重置。feature 上逐块解决冲突，保留六家集成边界、
+GX 功能、端点冻结契约及工作流归档；不以整文件 ours/theirs、squash 或 cherry-pick 替代合并。
+运行 `python3 scripts/upstream_sync_drop_check.py`、相关回归与 `just check` 后，按提交规范完成
+真正的双亲 merge；用 `git merge-base --is-ancestor master feature/gx_herdr` 核对祖先关系。
+本地同步不自动推送或发布，远端更新另行授权。下次仍从上次 master 基线增量合并。
+
 ## GX Shell 外部源码消费
 
 GX Shell 是编排仓，不保存 herdr 源码。Oh My Zsh 外部 builder 消费本仓的独立

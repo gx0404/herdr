@@ -137,13 +137,11 @@ impl App {
         let pane_id = PaneId::alloc();
         let terminal_id = TerminalId::alloc();
         let launch_env = PaneLaunchEnv::from_extra(extra_env).without_pane_identity();
-        let terminal_area = if self.state.view.terminal_area.width >= 4
-            && self.state.view.terminal_area.height >= 4
-        {
-            self.state.view.terminal_area
+        let terminal_area = if self.state.view.terminal_area == ratatui::layout::Rect::default() {
+            let (cols, rows) = self.state.headless_size;
+            ratatui::layout::Rect::new(0, 0, cols, rows)
         } else {
-            let (estimated_rows, estimated_cols) = self.state.estimate_pane_size();
-            ratatui::layout::Rect::new(0, 0, estimated_cols, estimated_rows)
+            self.state.view.terminal_area
         };
         let Some(resolved_geometry) =
             resolve_popup_geometry(geometry.width, geometry.height, terminal_area)
@@ -221,6 +219,57 @@ mod tests {
             height: None,
         });
         app
+    }
+
+    #[test]
+    fn popup_rejects_known_small_terminal_area_before_spawning() {
+        for (cols, rows) in [(80, 3), (3, 24), (0, 24), (80, 0)] {
+            let mut app = app_with_popup();
+            app.close_popup_pane();
+            app.state.headless_size = (120, 40);
+            app.state.view.terminal_area = ratatui::layout::Rect::new(0, 0, cols, rows);
+            let mut spawned = false;
+            let result = app.spawn_popup_command(
+                Some(PathBuf::from("/popup")),
+                Vec::new(),
+                PopupGeometry::default(),
+                |_, _, _, _, _, _| {
+                    spawned = true;
+                    Err(std::io::Error::other("spawn must not be called"))
+                },
+            );
+
+            assert!(!spawned, "spawned in a {cols}x{rows} terminal area");
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "terminal area too small for popup"
+            );
+            assert!(app.state.popup_pane.is_none());
+        }
+    }
+
+    #[test]
+    fn popup_uses_headless_size_before_view_initialization() {
+        let mut app = app_with_popup();
+        app.close_popup_pane();
+        app.state.headless_size = (132, 41);
+        let expected =
+            resolve_popup_geometry(None, None, ratatui::layout::Rect::new(0, 0, 132, 41)).unwrap();
+        let mut spawned = false;
+        let result = app.spawn_popup_command(
+            Some(PathBuf::from("/popup")),
+            Vec::new(),
+            PopupGeometry::default(),
+            |_, rows, cols, _, _, _| {
+                spawned = true;
+                assert_eq!((rows, cols), (expected.inner.height, expected.inner.width));
+                Err(std::io::Error::other("spawn probe"))
+            },
+        );
+
+        assert!(spawned);
+        assert_eq!(result.unwrap_err().to_string(), "spawn probe");
+        assert!(app.state.popup_pane.is_none());
     }
 
     #[test]

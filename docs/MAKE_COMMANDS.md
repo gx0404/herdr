@@ -55,6 +55,7 @@
 | `just bench-bsp-layout` | 平衡/偏斜树的 BSP split 收集与构造画像 | release 构建 | 控制台画像 |
 | `just bench-retained-graphics` | full/retained text、静态图与 unchanged-image 更新画像 | release 构建 | 控制台画像 |
 | `just bench-api-fairness` | 外部 API burst 的首批延迟与 drain 成本画像 | release 构建 | 控制台画像 |
+| `just bench-process-inspection` | Windows 进程检查扩展画像：空闲 shell、进程快照/句柄打开/命令读取次数 | 原生 Windows、release 构建 | 控制台画像；非 Windows 不适用 |
 | `just bench-release-smoke` | 发布前 CPU 对比（~3–5 分钟；未设 `HERDR_PERF_BASELINE_BIN` 下载 stable；Linux/macOS；候选与 baseline 在 `hidden50`/`visible30` 两轮串行运行） | 网络或本地基线 | `.local/perf-baseline/run-*/` 保留 run-id、metadata、candidate/baseline 命令、原始采样、summary、run log 与退出码；smoke/case 将 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、`KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）全部指向 run 内私有临时 state，且清除继承的 herdr socket/session；仅清理临时运行态，显著回归须调查 |
 
 ## 发布链（上游保留入口；见 `AGENT_RULES/release-channels.md`）

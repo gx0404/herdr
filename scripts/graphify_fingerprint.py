@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """图谱产物指纹：登记源码与管线哈希，校验报告/镜像/标签一致性。
 
-write  : 重建后写入 graphify-out/source-fingerprint.json（tracked）。
+write  : 重建后将报告及镜像规范为 LF，再写入 graphify-out/source-fingerprint.json。
 check  : 只读校验——源码指纹未过期、管线脚本未变、tracked 产物与镜像一致；
          graph.json 为本机产物，存在则校验，缺失时降级为提示（查询不可用）。
 """
@@ -89,10 +89,17 @@ def _build_payload() -> dict:
 
 def write_fingerprint() -> None:
     GRAPH_DIR.mkdir(parents=True, exist_ok=True)
+    for report in (GRAPH_DIR / "GRAPH_REPORT.md", MIRROR_REPORT):
+        if report.is_file():
+            content = report.read_bytes()
+            normalized = content.replace(b"\r\n", b"\n")
+            if normalized != content:
+                report.write_bytes(normalized)
     payload = _build_payload()
     FINGERPRINT_PATH.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     print(f"fingerprint written: {FINGERPRINT_PATH.relative_to(REPO_ROOT)}")
 
