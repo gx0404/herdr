@@ -140,7 +140,8 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
 
     def _run_contract(self, script: Path, status: int, remove_config_guard: bool = False,
                       fault: str = "", full_case: bool = False, platform: str = "linux",
-                      readiness_stderr: str = "last failure", rewrite_tmp: bool = False):
+                      readiness_stderr: str = "last failure", rewrite_tmp: bool = False,
+                      startup_stderr: str = ""):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash, "bash is required for performance environment contracts")
         source = script.read_text(encoding="utf-8")
@@ -214,6 +215,7 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
                 CONTRACT_ROOT=shell_root, PROBE_DIR=f"{shell_root}/probes",
                 CONTRACT_STATUS=str(status), CONTRACT_FAULT=fault,
                 CONTRACT_READINESS_STDERR=readiness_stderr,
+                CONTRACT_STARTUP_STDERR=startup_stderr,
                 CONTRACT_PROCESS_TMP=f"{shell_root}/process tmp",
                 BASH_ENV=f"{shell_root}/private-bash-env.sh",
             )
@@ -337,8 +339,9 @@ case "$2" in
   *) exit 98 ;;
 esac
 '''
-            if rewrite_tmp:
+            if rewrite_tmp or startup_stderr:
                 stubs["bash"] = '''#!/bin/sh
+printf '%s' "$CONTRACT_STARTUP_STDERR" >&2
 export TMP=/tmp TEMP=/tmp
 exec "$CONTRACT_BASH" "$@"
 '''
@@ -418,6 +421,14 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                 [bash, "--noprofile", "--norc", f"{shell_root}/contract.sh"],
                 cwd=root, env=environment, capture_output=True, text=True, timeout=60, check=False,
             )
+            if result.stderr:
+                diagnostics = ROOT / "target/ci-release-evidence/perf-fixtures" / f"{script.stem}-{fault or 'normal'}-{root.name}"
+                diagnostics.mkdir(parents=True)
+                stderr_path = diagnostics / "harness-stderr.txt"
+                stderr_path.write_bytes(result.stderr.encode("utf-8"))
+                self.assertEqual(stderr_path.read_bytes(), result.stderr.encode("utf-8"))
+            if startup_stderr:
+                self.assertIn(startup_stderr, result.stderr)
             expected = status
             if script == CASE and fault in ("owner", "public-root", "long-runtime", "unicode-runtime"):
                 expected = 2
@@ -510,7 +521,12 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                 for key in ("TMP", "TEMP"):
                     self.assertIn(observed[key], (process_tmp.as_posix(), f"{shell_root}/process tmp"))
             self.assertEqual((process_tmp / "capture-before").read_text(), "private temp write\n")
-            self.assertNotIn("could not find /tmp", result.stderr)
+            if script == SMOKE and fault == "remove":
+                self.assertEqual((evidence / "cleanup.txt").read_text(), "runtime=remove-failed\n")
+                for phase in ("smoke-launch", "smoke-cleanup"):
+                    tmpdir = observations[phase]["TMPDIR"]
+                    self.assertTrue(tmpdir.startswith(shell_root + "/"))
+                    self.assertTrue((root / tmpdir[len(shell_root) + 1:]).is_dir())
             if not fault:
                 for phase in phases:
                     self.assertIn(phase, observations)
@@ -628,6 +644,10 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
         self._run_contract(CASE, 0, fault="tmux-alive-no-socket", full_case=True)
         self._run_contract(CASE, 0, fault="tmux-unknown", full_case=True)
         self._run_contract(CASE, 23, fault="tmux-alive")
+
+    def test_smoke_remove_failure_preserves_status_with_startup_stderr(self):
+        warning = "bash.exe: warning: could not find /tmp, please create!\n"
+        self._run_contract(SMOKE, 23, fault="remove", startup_stderr=warning)
 
 
 if __name__ == "__main__":
