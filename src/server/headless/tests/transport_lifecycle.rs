@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(windows)]
 use interprocess::local_socket::traits::Listener as _;
 use std::io;
 

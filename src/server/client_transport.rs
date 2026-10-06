@@ -528,7 +528,7 @@ impl ClientWriter {
         ClientTransportHandle(self.control.queue.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn seal_until(&self, deadline: Instant) {
         self.control.queue.seal(Some(deadline));
     }
@@ -547,7 +547,7 @@ impl ClientWriter {
         !state.reader_running && !state.writer_running
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) async fn wait_complete(&self) {
         self.transport().wait_complete().await;
     }

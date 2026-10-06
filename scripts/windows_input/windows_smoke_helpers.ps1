@@ -229,7 +229,9 @@ function Restore-SmokeEnvironment($Context) {
 
 function New-WindowsSmokeContext {
     param([string]$Name, [string]$Root = '')
-    $session = ($Name -replace '[^a-zA-Z0-9_-]', '-') + '-' + [guid]::NewGuid().ToString('N')
+    $prefix = $Name -creplace '[^a-zA-Z0-9_-]', '-'
+    $prefix = $prefix.Substring(0, [Math]::Min(31, $prefix.Length))
+    $session = $prefix + '-' + [guid]::NewGuid().ToString('N')
     $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     if (-not $Root) { $Root = Join-Path $repo "target/tmp/windows-smoke/$session" }
     $Root = [IO.Path]::GetFullPath($Root)

@@ -513,6 +513,49 @@ exit $code;
             ["--session", session, "session", "delete", session, "--json"],
         ])
 
+    def test_session_prefix_is_ascii_and_bounded_with_full_guid(self):
+        from pathlib import Path
+        cases = [
+            ("ci-conpty-invalid-windows-2022-37462565646-1", "ci-conpty-invalid-windows-2022-"),
+            ("A" * 30, "A" * 30),
+            ("A" * 31, "A" * 31),
+            ("A" * 32, "A" * 31),
+            ("Smoke_界éİK" * 4, ("Smoke_----" * 4)[:31]),
+        ]
+        for name, prefix in cases:
+            with self.subTest(name=name):
+                result, report = self.run_ps("""
+$ctx=New-WindowsSmokeContext -Name 'NAME';
+$ctx.Exe=$python; $ctx.ServerStarted=$true;
+$script:commands=New-Object 'Collections.Generic.List[object]';
+function Invoke-SmokeCommand {
+    param($Context, $Command, [string[]]$Arguments, $TimeoutMilliseconds, [switch]$Interactive)
+    $script:commands.Add($Arguments);
+    return [pscustomobject]@{ExitCode=0; Output='{}'; Error=''};
+}
+$result=[ordered]@{runtime='PASS'; commands=$script:commands; environment_session=$env:HERDR_SESSION};
+Invoke-SmokeHerdr -Context $ctx -Arguments @('--version') | Out-Null;
+$code=Complete-WindowsSmoke -Context $ctx -Result $result;
+Copy-Item -LiteralPath (Join-Path $ctx.Root 'result.json') -Destination (Join-Path $testRoot 'result.json');
+if ($code -eq 0) { Remove-Item -LiteralPath $ctx.Root -Recurse -Force };
+exit $code;
+""".replace("'NAME'", "'" + name + "'"))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                session = report["session"]
+                self.assertEqual(session[:-33], prefix)
+                self.assertRegex(session[-33:], r"^-[0-9a-f]{32}$")
+                self.assertTrue(session.isascii())
+                self.assertLessEqual(len(session.encode("utf-8")), 64)
+                self.assertEqual(Path(report["root"]).name, session)
+                self.assertEqual(report["environment_session"], session)
+                self.assertEqual(report["commands"], [
+                    ["--session", session, "--version"],
+                    ["--session", session, "session", "stop", session, "--json"],
+                    ["--session", session, "session", "delete", session, "--json"],
+                ])
+                self.assertEqual(report["cleanup"], "PASS")
+                self.assertEqual(report["active_processes"], 0)
+
     def test_cleanup_failure_makes_script_nonzero(self):
         result, report = self.run_ps(self.completion(stop="throw 'cleanup sentinel'"))
         self.assertNotEqual(result.returncode, 0)

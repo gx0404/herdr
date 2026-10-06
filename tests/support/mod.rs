@@ -1053,7 +1053,7 @@ fn sandbox_reaper_sigkill_driver() {
 #[cfg(test)]
 #[test]
 fn sandbox_reaper_entrypoint() {
-    let (Ok(owner), Ok(root)) = (
+    let (Ok(owner), Some(root)) = (
         std::env::var(REAPER_OWNER_ENV),
         std::env::var_os(REAPER_ROOT_ENV),
     ) else {

@@ -20,9 +20,9 @@ pub(crate) use super::unix_common::{
     local_datetime, prepare_server_client_stream, read_client_handshake,
     remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
     remote_reattach_program, remote_ssh_config_paths, reusable_remote_ssh_config_dir,
-    set_default_plugin_pane_pwd, shutdown_client_stream, status_commands_supported,
-    wait_client_stream_readable, write_client_stream, write_remote_ssh_config_file,
-    ClientStreamControl, ClientStreamReader, ServerClientStream, StatusCommandGuard,
+    set_default_plugin_pane_pwd, status_commands_supported, wait_client_stream_readable,
+    write_client_stream, write_remote_ssh_config_file, ClientStreamControl, ClientStreamReader,
+    ServerClientStream, StatusCommandGuard,
 };
 
 mod bootstrap;
