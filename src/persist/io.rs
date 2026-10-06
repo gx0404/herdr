@@ -236,6 +236,10 @@ pub(super) mod test_io {
     use std::io;
     use std::path::Path;
 
+    pub(in crate::persist) fn save_bytes(path: &Path, bytes: &[u8]) {
+        super::save_bytes_to_path(path, bytes).unwrap();
+    }
+
     type Hook = Box<dyn FnMut(&str, &Path) -> io::Result<()>>;
 
     thread_local! {

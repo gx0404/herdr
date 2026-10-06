@@ -6830,8 +6830,8 @@
       "anchor": "structure",
       "doc": "src/persist/io.rs",
       "id": "src-persist-io-rs-structure",
-      "source_sha256": "14719440736f04d3c03c110e49d33827e2a193e043f6531bf78a076605ee1610",
-      "text": "公开项：\npub(super) fn session_path() -> PathBuf {\npub(super) struct SaveError {\nimpl std::fmt::Display for SaveError {\nimpl std::error::Error for SaveError {\npub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> Result<(), SaveError> {\npub(super) fn save_history_to_path(\npub(crate) fn assert_legacy_save_rejected(path: &Path) {\npub(super) mod test_io {\npub(in crate::persist) fn check(phase: &str, path: &Path) -> io::Result<()> {\npub(in crate::persist) fn with<R>(hook: Hook, run: impl FnOnce() -> R) -> R {\nimpl Drop for Restore {\npub(super) fn clear_path(path: &Path) -> std::io::Result<()> {\npub fn clear_history() {\npub fn load() -> Option<SessionSnapshot> {\npub fn load_history() -> Option<SessionHistorySnapshot> {\nimpl std::ops::Deref for TempSessionPath {\nimpl AsRef<Path> for TempSessionPath {\nimpl Drop for TempSessionPath {"
+      "source_sha256": "bda59db92639cd7461c2cc9a697f15cbcc86bfe1373fceb708205af55e914d31",
+      "text": "公开项：\npub(super) fn session_path() -> PathBuf {\npub(super) struct SaveError {\nimpl std::fmt::Display for SaveError {\nimpl std::error::Error for SaveError {\npub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> Result<(), SaveError> {\npub(super) fn save_history_to_path(\npub(crate) fn assert_legacy_save_rejected(path: &Path) {\npub(super) mod test_io {\npub(in crate::persist) fn save_bytes(path: &Path, bytes: &[u8]) {\npub(in crate::persist) fn check(phase: &str, path: &Path) -> io::Result<()> {\npub(in crate::persist) fn with<R>(hook: Hook, run: impl FnOnce() -> R) -> R {\nimpl Drop for Restore {\npub(super) fn clear_path(path: &Path) -> std::io::Result<()> {\npub fn clear_history() {\npub fn load() -> Option<SessionSnapshot> {\npub fn load_history() -> Option<SessionHistorySnapshot> {\nimpl std::ops::Deref for TempSessionPath {\nimpl AsRef<Path> for TempSessionPath {\nimpl Drop for TempSessionPath {"
     },
     {
       "anchor": "structure",
