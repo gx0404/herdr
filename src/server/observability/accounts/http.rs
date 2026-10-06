@@ -7,6 +7,24 @@ use reqwest::blocking::Client;
 use serde_json::Value;
 use std::time::Duration;
 
+fn usage_client(provider: &str, timeout: Duration) -> Result<Client, QueryError> {
+    let builder = Client::builder()
+        .timeout(timeout)
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = if provider == "kimi" {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    builder.build().map_err(|_| {
+        (
+            ObservationStatus::Error,
+            probe_texts().api_client_failed.into(),
+        )
+    })
+}
+
 pub(super) fn query(
     account: &UsageAccountConfig,
     timeout: Duration,
@@ -31,17 +49,7 @@ pub(super) fn query(
                 probe_texts().api_credential_missing.into(),
             )
         })?;
-    let client = Client::builder()
-        .timeout(timeout)
-        .connect_timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| {
-            (
-                ObservationStatus::Error,
-                probe_texts().api_client_failed.into(),
-            )
-        })?;
+    let client = usage_client(provider, timeout)?;
     let today = time::OffsetDateTime::now_utc().date().to_string();
     let start_time = time::OffsetDateTime::now_utc()
         .replace_time(time::Time::MIDNIGHT)
@@ -321,6 +329,185 @@ use std::io::Read;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct HttpProbe {
+        base: String,
+        requests: Arc<AtomicUsize>,
+        bearer_requests: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl HttpProbe {
+        fn new(body: &'static str) -> Self {
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("bind HTTP probe");
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            listener.set_nonblocking(true).unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let bearer_requests = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker = {
+                let requests = Arc::clone(&requests);
+                let bearer_requests = Arc::clone(&bearer_requests);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let mut stream = match listener.accept() {
+                            Ok((stream, _)) => stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(2));
+                                continue;
+                            }
+                            Err(error) => panic!("HTTP probe accept failed: {error}"),
+                        };
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(30)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(30)))
+                            .unwrap();
+                        let mut header = Vec::new();
+                        let mut bytes = [0; 1024];
+                        while !header.windows(4).any(|window| window == b"\r\n\r\n") {
+                            let count = stream.read(&mut bytes).expect("read probe request");
+                            assert!(count > 0, "probe request ended before its headers");
+                            header.extend_from_slice(&bytes[..count]);
+                            assert!(header.len() <= 16 * 1024, "probe headers are bounded");
+                        }
+                        requests.fetch_add(1, Ordering::Relaxed);
+                        if String::from_utf8_lossy(&header).lines().any(|line| {
+                            line.split_once(':').is_some_and(|(name, value)| {
+                                name.eq_ignore_ascii_case("authorization")
+                                    && value.trim() == "Bearer audit-p0-fake-token"
+                            })
+                        }) {
+                            bearer_requests.fetch_add(1, Ordering::Relaxed);
+                        }
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len(),
+                        )
+                        .expect("write probe response");
+                    }
+                })
+            };
+            Self {
+                base,
+                requests,
+                bearer_requests,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn finish(mut self) -> (usize, usize) {
+            self.stop.store(true, Ordering::Release);
+            self.worker
+                .take()
+                .unwrap()
+                .join()
+                .expect("HTTP probe joins");
+            (
+                self.requests.load(Ordering::Relaxed),
+                self.bearer_requests.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    impl Drop for HttpProbe {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn isolated_proxy_environment(proxy: &str, variable: &str) {
+        for name in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "REQUEST_METHOD",
+        ] {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("NO_PROXY", "");
+        std::env::set_var("no_proxy", "");
+        std::env::set_var(variable, proxy);
+    }
+
+    #[test]
+    fn audit_p0_loopback_usage_keeps_credentials_off_environment_proxies() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        std::env::set_var("HERDR_TEST_HTTP_TOKEN", "audit-p0-fake-token");
+        for variable in ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+            let local = HttpProbe::new(r#"{"summary":{"usedPercent":25}}"#);
+            let proxy = HttpProbe::new(r#"{"summary":{"usedPercent":99}}"#);
+            isolated_proxy_environment(&proxy.base, variable);
+            let account = UsageAccountConfig {
+                id: "kimi:audit".into(),
+                agent: "kimi".into(),
+                provider: "kimi".into(),
+                auth_mode: "api".into(),
+                credential_env: Some("HERDR_TEST_HTTP_TOKEN".into()),
+                base_url: Some(local.base.clone()),
+                ..Default::default()
+            };
+
+            let result = query(&account, Duration::from_secs(30));
+            let local_requests = local.finish();
+            let proxy_requests = proxy.finish();
+
+            assert_eq!(
+                proxy_requests,
+                (0, 0),
+                "{variable} must not receive the local request or its credential"
+            );
+            assert_eq!(local_requests, (1, 1));
+            let metrics = result.expect("local usage response");
+            assert_eq!(metrics.len(), 1);
+            assert_eq!(metrics[0].used_percent, Some(25.0));
+        }
+    }
+
+    #[test]
+    fn audit_p0_cloud_usage_clients_preserve_environment_proxies() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let local = HttpProbe::new(r#"{"summary":{"usedPercent":25}}"#);
+        let proxy = HttpProbe::new(r#"{"summary":{"usedPercent":99}}"#);
+        isolated_proxy_environment(&proxy.base, "HTTP_PROXY");
+        let providers = [
+            "openai",
+            "codex",
+            "anthropic",
+            "claude",
+            "moonshot",
+            "kimi-api",
+            "openrouter",
+        ];
+        for provider in providers {
+            let value: Value = usage_client(provider, Duration::from_secs(30))
+                .expect("cloud usage client")
+                .get(&local.base)
+                .send()
+                .expect("request through local proxy")
+                .json()
+                .expect("proxy response");
+            assert_eq!(value["summary"]["usedPercent"], 99, "{provider}");
+        }
+        assert_eq!(local.finish(), (0, 0));
+        assert_eq!(proxy.finish(), (providers.len(), 0));
+    }
 
     #[test]
     fn credentials_only_go_to_registered_official_hosts() {

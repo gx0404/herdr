@@ -8,15 +8,15 @@ nextest_jobs := env_var_or_default("HERDR_NEXTEST_JOBS", "4")
 test:
     {{python}} scripts/run_test_suite.py
 
-# Full nextest run (command source of the test orchestrator's nextest phase)
+# Full nextest run (optional HERDR_NEXTEST_SHARDS shares the total nextest_jobs budget)
 nextest-all:
-    cargo nextest run --locked --test-threads {{nextest_jobs}} --status-level leak --final-status-level fail --failure-output final --success-output never
+    {{python}} scripts/run_nextest.py --test-threads {{nextest_jobs}}
 
 # Run repository maintenance contract tests (+ the fork's upstream-sync drop-path gate)
 # The unittest manifest runs in parallel child processes within the configured worker limit.
 maintenance-test:
-    {{python}} scripts/run_parallel_unittest.py scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_graphify_fingerprint scripts.test_gx_package scripts.test_gx_release scripts.test_gx_smoke scripts.test_local_build_config scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_release_perf scripts.test_resolve_agent_rules scripts.test_run_parallel_unittest scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
-    bun test scripts/release-workflows.test.ts
+    {{python}} scripts/run_parallel_unittest.py scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_graphify_fingerprint scripts.test_gx_package scripts.test_gx_release scripts.test_gx_smoke scripts.test_local_build_config scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_release_perf scripts.test_resolve_agent_rules scripts.test_run_nextest scripts.test_run_parallel_unittest scripts.test_run_test_suite scripts.test_setup_zig scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
+    bun test ./scripts/release-workflows.test.ts
     {{python}} scripts/upstream_sync_drop_check.py
 
 # Local interactive Windows Terminal input qualification (never runs in normal CI).
@@ -179,10 +179,10 @@ docs-contract-test:
 
 # Test bundled agent integration assets
 integration-assets-test:
-    bun test src/integration/assets/herdr-agent-state.test.ts
-    bun test src/integration/assets/opencode/herdr-agent-state.test.ts
-    bun test src/integration/assets/opencode/herdr-tui-session.test.ts
-    bun test src/integration/assets/kimi/herdr-agent-state.test.ts
+    bun test ./src/integration/assets/herdr-agent-state.test.ts
+    bun test ./src/integration/assets/opencode/herdr-agent-state.test.ts
+    bun test ./src/integration/assets/opencode/herdr-tui-session.test.ts
+    bun test ./src/integration/assets/kimi/herdr-agent-state.test.ts
 
 # Regenerate the C API bindings with bindgen-cli 0.72.1
 libghostty-bindings *clang_args:

@@ -1,5 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use super::client_commands::{
+    EndpointControlResponse, EndpointResponseIdentity, EndpointResponseKind, EndpointResponseReady,
+    EndpointResponseTarget, EndpointResponseTicket, MAX_CLIENT_RESPONSES,
+};
+use tokio::sync::Semaphore;
 
 use crate::protocol::{
     ClientKeyCode, ClientKeyKind, ClientMouseButton, ClientMouseKind, ClientPaneInputEvent,
@@ -174,6 +181,157 @@ pub(crate) struct MultiViewState {
     pub(crate) views: Vec<ClientView>,
 }
 
+pub(crate) struct EndpointResponseSlot {
+    pub(crate) identity: Arc<EndpointResponseIdentity>,
+    pub(crate) kind: EndpointResponseKind,
+    pub(crate) ready: Option<EndpointResponseReady>,
+    pub(crate) offset: usize,
+    pub(crate) navigation_tab: Option<String>,
+    pub(crate) deferred_request_id: Option<String>,
+}
+
+impl Drop for EndpointResponseSlot {
+    fn drop(&mut self) {
+        self.identity.cancel();
+    }
+}
+
+pub(crate) struct EndpointResponses {
+    pub(crate) slots: VecDeque<EndpointResponseSlot>,
+    pub(crate) command: Option<Arc<EndpointResponseIdentity>>,
+    control: Option<Arc<EndpointResponseIdentity>>,
+    permits: Arc<Semaphore>,
+}
+
+impl Default for EndpointResponses {
+    fn default() -> Self {
+        Self {
+            slots: VecDeque::new(),
+            command: None,
+            control: None,
+            permits: Arc::new(Semaphore::new(MAX_CLIENT_RESPONSES)),
+        }
+    }
+}
+
+impl EndpointResponses {
+    pub(crate) fn contains(&self, boot_id: &str, request_id: &str) -> bool {
+        self.slots
+            .iter()
+            .map(|slot| &slot.identity)
+            .chain(self.control.iter())
+            .any(|identity| {
+                identity.active()
+                    && identity.boot_id == boot_id
+                    && identity.request_id == request_id
+            })
+    }
+
+    pub(crate) fn admit(
+        &mut self,
+        global: &Arc<Semaphore>,
+        client_id: u64,
+        boot_id: String,
+        request_id: String,
+        kind: EndpointResponseKind,
+    ) -> Option<EndpointResponseTicket> {
+        self.slots.retain(|slot| slot.identity.live());
+        if self.slots.len() >= MAX_CLIENT_RESPONSES {
+            return None;
+        }
+        let identity = EndpointResponseIdentity::new(client_id, boot_id, request_id);
+        let ticket = EndpointResponseTicket::acquire(global, &self.permits, identity.clone())?;
+        if matches!(kind, EndpointResponseKind::Command { .. }) {
+            self.command = Some(identity.clone());
+        }
+        self.slots.push_back(EndpointResponseSlot {
+            identity,
+            kind,
+            ready: None,
+            offset: 0,
+            navigation_tab: None,
+            deferred_request_id: None,
+        });
+        Some(ticket)
+    }
+
+    pub(crate) fn admit_control(
+        &mut self,
+        client_id: u64,
+        boot_id: String,
+        request_id: String,
+        writer: super::client_transport::ClientControlWriter,
+    ) -> Option<EndpointResponseTarget> {
+        if self
+            .control
+            .as_ref()
+            .is_some_and(|identity| identity.active())
+        {
+            return None;
+        }
+        let identity = EndpointResponseIdentity::new(client_id, boot_id, request_id);
+        self.control = Some(identity.clone());
+        Some(EndpointResponseTarget::Control(EndpointControlResponse {
+            identity,
+            writer,
+        }))
+    }
+
+    pub(crate) fn remove(
+        &mut self,
+        identity: &Arc<EndpointResponseIdentity>,
+    ) -> Option<EndpointResponseSlot> {
+        let index = self
+            .slots
+            .iter()
+            .position(|slot| Arc::ptr_eq(&slot.identity, identity))?;
+        self.slots.remove(index)
+    }
+
+    pub(crate) fn ready_order(&self) -> Option<u64> {
+        self.slots
+            .iter()
+            .filter(|slot| slot.ready.is_some() && slot.identity.active())
+            .map(|slot| slot.identity.order)
+            .min()
+    }
+
+    pub(crate) fn has_ready(&self) -> bool {
+        self.ready_order().is_some()
+    }
+
+    pub(crate) fn owns_deferred_request(&self, request_id: &str) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| slot.deferred_request_id.as_deref() == Some(request_id))
+    }
+
+    fn cancel_commands(&mut self) {
+        for slot in &mut self.slots {
+            if matches!(slot.kind, EndpointResponseKind::Command { .. }) {
+                slot.identity.cancel();
+                slot.ready = None;
+            }
+        }
+        self.slots.retain(|slot| slot.identity.live());
+        self.command = None;
+    }
+
+    fn cancel_all(&mut self) {
+        self.slots.clear();
+        self.command = None;
+        if let Some(identity) = self.control.take() {
+            identity.cancel();
+        }
+    }
+}
+
+impl Drop for EndpointResponses {
+    fn drop(&mut self) {
+        self.cancel_all();
+    }
+}
+
 pub(crate) struct ClientConnection {
     pub(crate) views: Option<MultiViewState>,
     /// Whether this connection owns the Herdr shell or one direct terminal stream.
@@ -237,9 +395,9 @@ pub(crate) struct ClientConnection {
     /// Surface projection epoch that owned the in-flight command. Deferred navigation may run
     /// only if this exact presentation lease is still active when its response arrives.
     pub(crate) shell_endpoint_command_surface_revision: Option<u64>,
-    /// Request id and buffered response for a deferred worktree-created navigation.
+    /// Internal worktree request id used to suppress duplicate completion navigation.
     pub(crate) shell_deferred_navigation_request_id: Option<String>,
-    pub(crate) shell_deferred_navigation_response: Option<Vec<u8>>,
+    pub(crate) endpoint_responses: EndpointResponses,
     /// Whether this shell uses the endpoint-owned keymap rather than a client-owned keymap.
     pub(crate) shell_uses_endpoint_keybindings: bool,
     /// Channels for sending framed ServerMessage data to the client writer thread.
@@ -306,9 +464,55 @@ impl ClientConnection {
             shell_endpoint_command_in_flight: false,
             shell_endpoint_command_surface_revision: None,
             shell_deferred_navigation_request_id: None,
-            shell_deferred_navigation_response: None,
+            endpoint_responses: EndpointResponses::default(),
             shell_uses_endpoint_keybindings: false,
             writer,
+        }
+    }
+
+    pub(crate) fn cancel_endpoint_command(&mut self) {
+        self.endpoint_responses.cancel_commands();
+        self.shell_endpoint_command_in_flight = false;
+        self.shell_endpoint_command_surface_revision = None;
+        self.shell_deferred_navigation_request_id = None;
+    }
+
+    pub(crate) fn cancel_endpoint_responses(&mut self) {
+        self.endpoint_responses.cancel_all();
+        self.cancel_endpoint_command();
+    }
+
+    pub(crate) fn prune_endpoint_responses(&mut self) {
+        if self
+            .endpoint_responses
+            .command
+            .as_ref()
+            .is_some_and(|identity| !identity.active())
+        {
+            self.cancel_endpoint_command();
+        }
+        self.endpoint_responses
+            .slots
+            .retain(|slot| slot.identity.live());
+    }
+
+    pub(crate) fn finish_endpoint_command(
+        &mut self,
+        identity: &Arc<EndpointResponseIdentity>,
+    ) -> bool {
+        if self
+            .endpoint_responses
+            .command
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, identity))
+        {
+            self.endpoint_responses.command = None;
+            self.shell_endpoint_command_in_flight = false;
+            self.shell_endpoint_command_surface_revision = None;
+            self.shell_deferred_navigation_request_id = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -618,6 +822,68 @@ mod tests {
             crate::protocol::RenderEncoding::SemanticFrame,
             None,
         )
+    }
+
+    #[test]
+    fn response_matrix_cancelled_preparing_tickets_still_charge_client_and_server() {
+        let global = Arc::new(Semaphore::new(6));
+        let mut client = shell_client();
+        let mut tickets = (0..3)
+            .map(|index| {
+                client
+                    .endpoint_responses
+                    .admit(
+                        &global,
+                        1,
+                        "boot".into(),
+                        format!("preparing-{index}"),
+                        EndpointResponseKind::Reading,
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(global.available_permits(), 3);
+        assert_eq!(client.endpoint_responses.permits.available_permits(), 0);
+        client.cancel_endpoint_responses();
+        assert!(client.endpoint_responses.slots.is_empty());
+        assert!(tickets.iter().all(|ticket| !ticket.identity.active()));
+        assert_eq!(global.available_permits(), 3);
+        assert_eq!(client.endpoint_responses.permits.available_permits(), 0);
+        assert!(client
+            .endpoint_responses
+            .admit(
+                &global,
+                1,
+                "boot".into(),
+                "too-early".into(),
+                EndpointResponseKind::Reading
+            )
+            .is_none());
+        assert_eq!(
+            global.available_permits(),
+            3,
+            "failed local admission must return its temporary global permit"
+        );
+        drop(tickets.pop());
+        assert_eq!(global.available_permits(), 4);
+        assert_eq!(client.endpoint_responses.permits.available_permits(), 1);
+        let replacement = client
+            .endpoint_responses
+            .admit(
+                &global,
+                1,
+                "boot".into(),
+                "replacement".into(),
+                EndpointResponseKind::Reading,
+            )
+            .unwrap();
+        assert_eq!(global.available_permits(), 3);
+        assert_eq!(client.endpoint_responses.permits.available_permits(), 0);
+        drop(tickets);
+        drop(replacement);
+        assert_eq!(global.available_permits(), 6);
+        assert_eq!(client.endpoint_responses.permits.available_permits(), 3);
+        println!("preparing cancellation: held_global=3 held_client=0 after_drop_global=6 after_drop_client=3");
     }
 
     #[test]

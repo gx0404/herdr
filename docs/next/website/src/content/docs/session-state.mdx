@@ -36,6 +36,8 @@ If the Herdr server stops and starts again, the original pane processes are gone
 
 Snapshot restore does not preserve running shells, servers, tests, or arbitrary processes. Panes that cannot use a stronger restore path come back as new shells in their saved directories.
 
+Before a client supplies terminal dimensions, restored ordinary shells start at their individual layout sizes within the configured headless area, including pane borders, gaps, and scrollbar space, rather than all starting at 80×24. A zoomed focused pane uses the full area while hidden panes keep their layout sizes. A later client attachment can resize them normally. Native agent resume still waits for its client context; live handoff keeps the imported runtime's dimensions.
+
 If a saved directory is unavailable or the shell cannot start, the pane stays in the layout with an error instead of disappearing or moving to your home directory. Its saved directory and agent session reference remain intact. Fix the directory or shell configuration and restart the server to retry, or explicitly close the pane to remove it.
 
 When saving, Herdr prefers the live shell's directory where the operating system exposes it, and retains the last confirmed directory after the shell exits. Shell-reported directories remain the fallback on other platforms.
@@ -44,11 +46,19 @@ If `session.json` cannot be read or parsed, or requires a newer Herdr version, H
 
 Herdr retains the three most recent recovery copies, pruning older copies only after a new copy is safely written. If preservation fails, autosave and shutdown leave the original untouched and log the failure; preservation is retried on the next save request. Copies are never restored automatically. To recover one, stop the affected server, copy the recovery file over its `session.json`, then restart. Recovery copies do not include pane screen history.
 
+Layout and optional history files are written through exclusive temporary files beside their targets. Herdr prepares access controls, writes and synchronizes the contents, atomically replaces the target, and synchronizes the directory. A failure before replacement leaves the old target intact. If directory synchronization fails after replacement, the new complete file may already be visible; Herdr reports the failure without deleting it or claiming a successful durable save. Layout and history are separate writes, not a multi-file transaction.
+
+Recovery copies must finish file and directory synchronization before older copies are pruned. The normal retention targets are three failed-load backups and 48 periodic snapshots; synchronization or pruning failures can temporarily retain extra copies. Once a failed-load original has been safely backed up, a later main-file write failure does not repeatedly rotate that original backup. Filesystem synchronization requests are not a guarantee against every hardware failure or power loss.
+
+New state and recovery files use private access controls. Existing access controls must be preserved before replacement; unsupported permissions or attached data cause an error rather than silent loss. On Windows, readonly targets cannot be updated, though they can be backed up. Encrypted files, named alternate streams, multiple hard links, unsupported authorization metadata, and unsupported filesystem attributes are rejected. This is not a general-purpose file-metadata copier. A published recovery file whose synchronization failed is retained; before retrying, Herdr checks that the same file still contains the expected original bytes. A replaced or changed recovery file requires inspection instead of allowing the original session to be overwritten.
+
 ### When the saved session is cleared
 
 Herdr clears `session.json` only when you explicitly close the last workspace. If the workspace set empties for any other reason, such as a host restart that hangs up every shell or the last pane process exiting on its own, Herdr keeps the saved snapshot instead of deleting it, so the next start can still restore the session. What comes back is the most recent snapshot on disk, which can be a few seconds older than the moment the panes died.
 
 Herdr also guards that snapshot while panes are exiting in a cascade. When several panes exit within a couple of seconds, or a shell reports an exit status that a host shutdown typically produces, Herdr writes a checkpoint before removing the pane and stops replacing the saved snapshot with a smaller workspace set. The guard lifts about 90 seconds after the last such exit, so an ordinary round of closing shells is still saved, just a little later.
+
+The guard tracks workspace, tab and public pane identities, not just their counts. Creating or reordering another tab does not acknowledge an earlier missing pane. Explicit layout changes authorize only the identities changed by that operation; if other identities are still protected, saving or clearing the snapshot is deferred until the guard permits it. Restarting before that save completes can therefore restore the older layout, including a pane you just closed. Normal explicit closures without an earlier protected loss are saved as usual; explicitly deleting a stopped named session remains a separate action.
 
 ## Shutdown and snapshot recovery
 

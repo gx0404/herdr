@@ -689,7 +689,6 @@ impl HeadlessServer {
         // 尺寸、popup）记忆化渲染结果；kitty graphics 场景不入缓存。
         let mut surface_memo = crate::server::client_shell::SurfaceMemo::default();
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
-            #[cfg(unix)]
             if matches!(mode, RenderTargetMode::TerminalObserve)
                 && self
                     .clients

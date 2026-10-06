@@ -109,6 +109,7 @@ impl App {
             Err(message) => return encode_error(id, "invalid_layout", message),
         };
 
+        let before = self.capture_session_layout();
         let created = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return encode_error(id, "workspace_not_found", "workspace not found");
@@ -223,6 +224,7 @@ impl App {
         let Some(layout) = self.layout_description(ws_idx, new_tab_idx) else {
             return encode_error(id, "layout_apply_failed", "new layout unavailable");
         };
+        self.authorize_session_layout_change(before);
         encode_success(id, ResponseResult::LayoutApply { layout })
     }
 

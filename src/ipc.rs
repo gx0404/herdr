@@ -43,11 +43,8 @@ pub(crate) fn connect_local_stream(path: &Path) -> io::Result<LocalStream> {
 
     #[cfg(windows)]
     {
-        use interprocess::local_socket::{prelude::*, GenericNamespaced};
-
-        let name = path.to_string_lossy().to_string();
-        let name = name.to_ns_name::<GenericNamespaced>()?;
-        LocalStream::connect(name).map_err(crate::platform::local_server_connection_error)
+        crate::platform::connect_local_pipe(path, None)
+            .map_err(crate::platform::local_server_connection_error)
     }
 }
 
@@ -84,13 +81,6 @@ pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
 #[cfg(windows)]
 pub(crate) const WINDOWS_PIPE_BUFFER_BYTES: u32 = 1024 * 1024;
 
-#[cfg(windows)]
-fn windows_pipe_path(path: &Path) -> io::Result<widestring::U16CString> {
-    // Same `\\.\pipe\` + name mapping as interprocess's `GenericNamespaced`.
-    widestring::U16CString::from_str(format!(r"\\.\pipe\{}", path.to_string_lossy()))
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
-}
-
 /// Creates the local listener for `path` with [`WINDOWS_PIPE_BUFFER_BYTES`] buffers.
 ///
 /// interprocess exposes pipe buffer sizes only on its raw named-pipe listener, so the
@@ -110,7 +100,7 @@ fn bind_windows_pipe_listener(
     static NEXT_PLACEHOLDER: AtomicU64 = AtomicU64::new(0);
 
     let mut options = PipeListenerOptions::new();
-    options.path = std::borrow::Cow::Owned(windows_pipe_path(path)?);
+    options.path = std::borrow::Cow::Owned(crate::platform::windows_pipe_names(path)?.open);
     options.input_buffer_size_hint = WINDOWS_PIPE_BUFFER_BYTES;
     options.output_buffer_size_hint = WINDOWS_PIPE_BUFFER_BYTES;
     options.security_descriptor = security_descriptor;
@@ -134,40 +124,6 @@ fn bind_windows_pipe_listener(
     Ok(listener)
 }
 
-/// The pipe name for `path` as `CreateNamedPipeW` and `CreateFileW` register and look it
-/// up: they canonicalise `.`/`..` segments, repeated separators and trailing dots, while
-/// `WaitNamedPipeW` compares the name as given.
-#[cfg(windows)]
-fn windows_canonical_pipe_path(path: &Path) -> io::Result<widestring::U16CString> {
-    use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
-
-    let name = windows_pipe_path(path)?;
-    let mut capacity = name.len() + 1;
-    loop {
-        let mut buffer = vec![0_u16; capacity];
-        let size = u32::try_from(buffer.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pipe name is too long"))?;
-        let written = unsafe {
-            GetFullPathNameW(
-                name.as_ptr(),
-                size,
-                buffer.as_mut_ptr(),
-                std::ptr::null_mut(),
-            )
-        } as usize;
-        if written == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if written < buffer.len() {
-            buffer.truncate(written);
-            return widestring::U16CString::from_vec(buffer)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err));
-        }
-        // Too small: `written` is the required size including the terminator.
-        capacity = written;
-    }
-}
-
 /// Reports whether a Windows local listener at `path` has a pipe instance waiting for a
 /// client, without connecting to it: a probe connection would reach the server as a
 /// client that hangs up right after connecting. Unix sockets offer no equivalent;
@@ -178,7 +134,7 @@ pub(crate) fn local_listener_accepting(path: &Path) -> io::Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    let name = windows_canonical_pipe_path(path)?;
+    let name = crate::platform::windows_pipe_names(path)?.wait;
     // WaitNamedPipeW reports a listening instance without opening it. It times out while
     // every instance is busy; callers poll again rather than queue behind a dead server.
     if unsafe { windows_sys::Win32::System::Pipes::WaitNamedPipeW(name.as_ptr(), 1) } != 0 {
@@ -520,6 +476,351 @@ mod tests {
             stale_socket_connect_error(io::ErrorKind::WouldBlock),
             cfg!(windows)
         );
+    }
+
+    #[cfg(windows)]
+    fn pipe_path_at_utf16_length(root: &Path, leaf: &str, units: usize, fill: &str) -> PathBuf {
+        let raw_len = |path: &Path| {
+            format!(r"\\.\pipe\{}", path.to_string_lossy())
+                .encode_utf16()
+                .count()
+        };
+        let mut directory = root.to_path_buf();
+        let mut remaining = units.checked_sub(raw_len(&directory.join(leaf))).unwrap();
+        let fill_units = fill.encode_utf16().count();
+        while remaining != 0 {
+            assert!(remaining >= 2);
+            let mut take = remaining.min(64);
+            if remaining - take == 1 {
+                take -= 1;
+            }
+            let component_units = take - 1;
+            directory.push(format!(
+                "{}{}",
+                fill.repeat(component_units / fill_units),
+                "x".repeat(component_units % fill_units)
+            ));
+            remaining = units - raw_len(&directory.join(leaf));
+        }
+        let path = directory.join(leaf);
+        assert_eq!(raw_len(&path), units);
+        path
+    }
+
+    #[cfg(windows)]
+    fn exchange_pipe_bytes(client: &mut LocalStream, server: &mut LocalStream) {
+        use interprocess::local_socket::traits::Stream as _;
+        use std::io::Write as _;
+        use std::time::{Duration, Instant};
+
+        client.set_nonblocking(true).unwrap();
+        server.set_nonblocking(true).unwrap();
+        let transfer = |sender: &mut LocalStream, receiver: &mut LocalStream, payload: &[u8]| {
+            assert_eq!(sender.write(payload).unwrap(), payload.len());
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut received = vec![0; payload.len()];
+            let mut offset = 0;
+            while offset != received.len() {
+                assert!(Instant::now() < deadline, "bounded pipe echo read");
+                match poll_local_stream_read_count(receiver, &mut received[offset..]).unwrap() {
+                    LocalStreamReadCount::Data(count) => offset += count,
+                    LocalStreamReadCount::Pending => std::thread::sleep(Duration::from_millis(1)),
+                    LocalStreamReadCount::Closed => panic!("pipe closed during echo"),
+                }
+            }
+            assert_eq!(received, payload);
+            // Receipt is confirmed above; avoid asynchronous linger delaying the next bind.
+            let LocalStream::NamedPipe(pipe) = sender;
+            pipe.inner().assume_flushed();
+        };
+        transfer(client, server, b"client-to-server");
+        transfer(server, client, b"server-to-client");
+    }
+
+    #[cfg(windows)]
+    fn long_pipe_round_trip(private: bool) {
+        let root = crate::config::test_dirs::TempDir::new("long-pipe");
+        let bind = if private {
+            bind_private_local_listener
+        } else {
+            bind_local_listener
+        };
+        for units in [259, 260, 273, 420] {
+            for (kind, fill) in [("ascii", "p"), ("bmp", "管"), ("supplementary", "🦀")] {
+                let base = root.join(format!("{units}-{kind}"));
+                let leaf = if private {
+                    "herdr-client.sock"
+                } else {
+                    "herdr.sock"
+                };
+                let path = pipe_path_at_utf16_length(&base, leaf, units, fill);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"filesystem marker succeeds").unwrap();
+                assert_eq!(fs::read(&path).unwrap(), b"filesystem marker succeeds");
+                fs::remove_file(&path).unwrap();
+                let listener = bind(&path).unwrap_or_else(|error| panic!("long pipe bind private={private} raw_units={units} raw_error={:?}: {error}", error.raw_os_error()));
+                let original = socket_file_identity(&path).unwrap();
+                assert!(
+                    bind(&path).is_err(),
+                    "first-instance ownership must reject a second listener"
+                );
+                assert_eq!(socket_file_identity(&path).unwrap(), original);
+                assert!(local_listener_accepting(&path).unwrap());
+                for _ in 0..2 {
+                    let mut client = connect_local_stream(&path).unwrap();
+                    let mut server = listener.accept().unwrap();
+                    for stream in [&client, &server] {
+                        let (out_size, in_size) = named_pipe_buffer_sizes(stream);
+                        assert!(
+                            out_size >= WINDOWS_PIPE_BUFFER_BYTES
+                                && in_size >= WINDOWS_PIPE_BUFFER_BYTES
+                        );
+                    }
+                    exchange_pipe_bytes(&mut client, &mut server);
+                }
+                drop(listener);
+                let rebound = bind(&path).expect("all pipe instances released before rebind");
+                let current = socket_file_identity(&path).unwrap();
+                assert_ne!(original, current);
+                remove_socket_file_if_owned(&path, &original).unwrap();
+                assert_eq!(socket_file_identity(&path).unwrap(), current);
+                drop(rebound);
+                remove_socket_file_if_owned(&path, &current).unwrap();
+                assert!(!path.exists());
+                println!("long-pipe private={private} raw_utf16={units} kind={kind} instances=2 bidirectional_echo=PASS rebind=PASS marker_identity=PASS");
+            }
+        }
+        let path = root.path().to_path_buf();
+        drop(root);
+        assert!(!path.exists(), "owned long-path fixture must be removed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_public_pipe_round_trip() {
+        long_pipe_round_trip(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_private_pipe_round_trip() {
+        long_pipe_round_trip(true);
+    }
+
+    #[cfg(windows)]
+    fn accept_pipe_ready(listener: &LocalListener) -> LocalStream {
+        use interprocess::local_socket::ListenerNonblockingMode;
+        use std::time::{Duration, Instant};
+        listener
+            .set_nonblocking(ListenerNonblockingMode::Accept)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match listener.accept() {
+                Ok(stream) => return stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "bounded listener accept");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_short_legacy_interoperability_is_bidirectional() {
+        use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+        let root = crate::config::test_dirs::TempDir::new("legacy-pipe");
+        for legacy_listener in [false, true] {
+            let path = root.join(format!("legacy-{legacy_listener}.sock"));
+            let name = path.to_string_lossy().to_string();
+            let listener = if legacy_listener {
+                ListenerOptions::new()
+                    .name(name.as_str().to_ns_name::<GenericNamespaced>().unwrap())
+                    .reclaim_name(false)
+                    .create_sync()
+                    .unwrap()
+            } else {
+                bind_local_listener(&path).unwrap()
+            };
+            let mut client = if legacy_listener {
+                connect_local_stream(&path).unwrap()
+            } else {
+                LocalStream::connect(name.as_str().to_ns_name::<GenericNamespaced>().unwrap())
+                    .unwrap()
+            };
+            let mut server = accept_pipe_ready(&listener);
+            exchange_pipe_bytes(&mut client, &mut server);
+            println!("legacy-interop legacy_listener={legacy_listener} bidirectional_echo=PASS");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_aliases_share_bind_connect_probe_and_readiness() {
+        use interprocess::local_socket::ListenerNonblockingMode;
+        let root = crate::config::test_dirs::TempDir::new("pipe-alias");
+        fs::create_dir_all(root.join("case")).unwrap();
+        fs::create_dir_all(root.join("unused")).unwrap();
+        fs::create_dir_all(root.join("a".repeat(190))).unwrap();
+        fs::create_dir_all(root.join("b".repeat(190))).unwrap();
+        let canonical = root.join("case/endpoint.sock");
+        let aliases = [
+            root.join(".").join("case/endpoint.sock"),
+            root.join("unused/../case/endpoint.sock"),
+            PathBuf::from(format!("{}\\\\case\\endpoint.sock", root.display())),
+            PathBuf::from(canonical.to_string_lossy().replace('\\', "/")),
+            PathBuf::from(canonical.to_string_lossy().to_ascii_uppercase()),
+            root.join("a".repeat(190))
+                .join("..")
+                .join("b".repeat(190))
+                .join("..")
+                .join("case/endpoint.sock"),
+        ];
+        for alias in aliases {
+            let listener = bind_local_listener(&alias).unwrap();
+            listener
+                .set_nonblocking(ListenerNonblockingMode::Accept)
+                .unwrap();
+            for name in [&alias, &canonical] {
+                assert!(local_listener_accepting(name).unwrap());
+                assert!(
+                    matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+                );
+                let mut client = connect_local_stream(name).unwrap();
+                let mut server = accept_pipe_ready(&listener);
+                exchange_pipe_bytes(&mut client, &mut server);
+            }
+            crate::platform::probe_local_server(&alias).unwrap();
+            drop(listener);
+            fs::remove_file(&canonical).unwrap();
+            println!("pipe-alias raw_utf16={} canonical={} echo=PASS readiness_nonconnecting=PASS probe=PASS", format!(r"\\.\pipe\{}", alias.to_string_lossy()).encode_utf16().count(), canonical.display());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_busy_probe_has_one_deadline_and_recovers_on_release() {
+        use std::time::{Duration, Instant};
+        let root = crate::config::test_dirs::TempDir::new("busy-long-pipe");
+        let path = pipe_path_at_utf16_length(root.path(), "herdr.sock", 420, "管");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = bind_local_listener(&path).unwrap();
+        let occupied = connect_local_stream(&path).unwrap();
+        let started = Instant::now();
+        let error = crate::platform::probe_local_server(&path).unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::TimedOut,
+            "busy must not become absence"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(400) && elapsed < Duration::from_secs(2),
+            "absolute 500ms probe budget: {elapsed:?}"
+        );
+        assert!(!local_listener_accepting(&path).unwrap());
+        let (ready_tx, ready) = std::sync::mpsc::channel();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let probe_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let result = crate::platform::probe_local_server(&probe_path);
+            done_tx.send(result).unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(30)).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(matches!(
+            done.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        let server = accept_pipe_ready(&listener);
+        let result = done.recv_timeout(Duration::from_secs(30)).unwrap();
+        worker.join().unwrap();
+        result.expect("availability releases the canonical legacy wait");
+        drop(server);
+        drop(occupied);
+        drop(listener);
+        println!("pipe-busy raw_utf16=420 timeout_kind={:?} elapsed_ms={} release_probe=PASS worker_joined=true", error.kind(), elapsed.as_millis());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_invalid_names_and_marker_failure_preserve_errors_and_release() {
+        let root = crate::config::test_dirs::TempDir::new("pipe-error");
+        let absent = root.join("absent.sock");
+        for error in [
+            connect_local_stream(&absent).unwrap_err(),
+            crate::platform::probe_local_server(&absent).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        }
+        let invalid = root.join("invalid\0pipe.sock");
+        assert_eq!(
+            connect_local_stream(&invalid).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            crate::platform::probe_local_server(&invalid)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(
+            matches!(crate::platform::windows_pipe_names(Path::new("")), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
+        );
+        for private in [false, true] {
+            let base = root.join(format!("private-{private}"));
+            let path = pipe_path_at_utf16_length(&base, "marker.sock", 420, "p");
+            fs::create_dir_all(&path).unwrap();
+            let bind = if private {
+                bind_private_local_listener
+            } else {
+                bind_local_listener
+            };
+            assert!(bind(&path).is_err(), "marker path is a directory");
+            fs::remove_dir(&path).unwrap();
+            let listener =
+                bind(&path).expect("failed marker publication must close the pipe instance");
+            let mut client = connect_local_stream(&path).unwrap();
+            let mut server = accept_pipe_ready(&listener);
+            exchange_pipe_bytes(&mut client, &mut server);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_long_sessions_and_endpoint_suffixes_do_not_collide() {
+        let root = crate::config::test_dirs::TempDir::new("pipe-isolation");
+        let parent = pipe_path_at_utf16_length(root.path(), "seed.sock", 390, "🦀")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let paths = [
+            parent.join("session-a/herdr.sock"),
+            parent.join("session-a/herdr-client.sock"),
+            parent.join("session-b/herdr.sock"),
+        ];
+        let listeners = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                if index == 1 {
+                    bind_private_local_listener(path)
+                } else {
+                    bind_local_listener(path)
+                }
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for (path, listener) in paths.iter().zip(&listeners) {
+            let mut client = connect_local_stream(path).unwrap();
+            let mut server = accept_pipe_ready(listener);
+            exchange_pipe_bytes(&mut client, &mut server);
+        }
+        println!("long-pipe distinct_sessions=2 distinct_suffixes=2 listeners=3 echo=PASS");
     }
 
     #[cfg(windows)]

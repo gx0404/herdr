@@ -184,6 +184,183 @@ async fn server_loop_drains_api_backlog_and_runs_scheduled_work() {
     assert_eq!(server.app.terminal_runtimes.len(), 0);
 }
 
+fn transport_test_writer(server: &mut HeadlessServer, client_id: u64) -> ClientWriter {
+    let writer = ClientWriter::test_paused();
+    server.clients.insert(
+        client_id,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::TerminalPending,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::TerminalAnsi,
+            Some(writer.clone()),
+        ),
+    );
+    writer
+}
+
+fn fill_server_event_channel(server: &HeadlessServer) {
+    while server
+        .server_event_tx
+        .try_send(ServerEvent::QuitSignal)
+        .is_ok()
+    {}
+}
+
+fn handled_server_events() -> usize {
+    TEST_HANDLED_SERVER_EVENTS.with(std::cell::Cell::get)
+}
+
+#[test]
+fn transport_notifications_share_one_budget_with_queued_events() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("notification-budget");
+    let mut server = test_headless_server();
+    fill_server_event_channel(&server);
+    let queued = server.server_event_rx.len();
+    let fallback = EXTERNAL_EVENT_DRAIN_LIMIT * 2 + 1;
+    for client_id in 1..=fallback as u64 {
+        transport_test_writer(&mut server, client_id)
+            .test_notify_disconnect(client_id, &server.server_event_tx);
+    }
+    let initial = handled_server_events();
+    for _ in 0..8 {
+        let before = handled_server_events();
+        server.drain_server_events();
+        assert!(
+            handled_server_events() - before <= EXTERNAL_EVENT_DRAIN_LIMIT,
+            "channel and fallback must share one event budget"
+        );
+        if server.clients.is_empty() && server.server_event_rx.is_empty() {
+            break;
+        }
+        assert!(
+            server.transport_notifications.more_pending,
+            "leftover fallback work must request another turn without waiting for I/O"
+        );
+    }
+    assert!(
+        server.clients.is_empty(),
+        "unprocessed disconnects must survive for later turns"
+    );
+    assert!(server.server_event_rx.is_empty());
+    assert_eq!(handled_server_events() - initial, queued + fallback);
+}
+
+#[test]
+fn transport_shutdown_does_not_take_pending_notifications() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("notification-shutdown");
+    let mut server = test_headless_server();
+    let writer = transport_test_writer(&mut server, 1);
+    fill_server_event_channel(&server);
+    writer.test_notify_drained(1, &server.server_event_tx);
+    let queued = server.server_event_rx.len();
+    let before = handled_server_events();
+    server.should_quit.store(true, Ordering::Release);
+    assert!(!server.drain_server_events());
+    assert_eq!(handled_server_events(), before);
+    assert_eq!(server.server_event_rx.len(), queued);
+    assert_eq!(writer.take_transport_notifications(), (None, true));
+}
+
+#[test]
+fn transport_queued_drain_is_not_replayed_as_fallback() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("notification-dedup");
+    let mut server = test_headless_server();
+    let writer = transport_test_writer(&mut server, 1);
+    writer.test_notify_drained(1, &server.server_event_tx);
+    let before = handled_server_events();
+    server.drain_server_events();
+    assert_eq!(handled_server_events() - before, 1);
+    server.drain_server_events();
+    assert_eq!(handled_server_events() - before, 1);
+    writer.test_notify_drained(1, &server.server_event_tx);
+    writer.test_notify_drained(1, &server.server_event_tx);
+    assert_eq!(
+        server.server_event_rx.len(),
+        1,
+        "coalesce drains until their handler acknowledges"
+    );
+    server.drain_server_events();
+    assert_eq!(handled_server_events() - before, 2);
+}
+
+#[test]
+fn transport_fallback_remains_fair_under_continuous_channel_and_client_pressure() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("notification-round-robin");
+    let mut server = test_headless_server();
+    let writers = (1..=96)
+        .map(|id| (id, transport_test_writer(&mut server, id)))
+        .collect::<Vec<_>>();
+    let last = transport_test_writer(&mut server, 200);
+    fill_server_event_channel(&server);
+    last.test_notify_disconnect(200, &server.server_event_tx);
+    for _ in 0..6 {
+        fill_server_event_channel(&server);
+        for (id, writer) in &writers {
+            writer.test_notify_drained(*id, &server.server_event_tx);
+        }
+        let before = handled_server_events();
+        server.drain_server_events();
+        assert!(handled_server_events() - before <= EXTERNAL_EVENT_DRAIN_LIMIT);
+        if !server.clients.contains_key(&200) {
+            return;
+        }
+    }
+    panic!("continuously refreshed low-id clients must not starve the last disconnect");
+}
+
+#[test]
+fn transport_new_clients_cannot_starve_a_previous_round_disconnect() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("notification-new-clients");
+    let mut server = test_headless_server();
+    fill_server_event_channel(&server);
+    for id in 1..=64 {
+        transport_test_writer(&mut server, id).test_notify_drained(id, &server.server_event_tx);
+    }
+    server.drain_server_events();
+    fill_server_event_channel(&server);
+    let writer = server.clients[&1].writer.as_ref().unwrap().clone();
+    writer.test_notify_disconnect(1, &server.server_event_tx);
+    for round in 0..6 {
+        fill_server_event_channel(&server);
+        for id in (1000 + round * 64)..(1064 + round * 64) {
+            transport_test_writer(&mut server, id)
+                .test_notify_disconnect(id, &server.server_event_tx);
+        }
+        let before = handled_server_events();
+        server.drain_server_events();
+        assert!(handled_server_events() - before <= EXTERNAL_EVENT_DRAIN_LIMIT);
+        if !server.clients.contains_key(&1) {
+            return;
+        }
+    }
+    panic!("new clients must not extend the current round indefinitely");
+}
+
+#[test]
+fn transport_idle_clients_do_not_lock_notification_queues() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("notification-idle-scan");
+    let mut server = test_headless_server();
+    for id in 1..=512 {
+        transport_test_writer(&mut server, id);
+    }
+    let before = ClientWriter::test_notification_take_count();
+    let scanned = TEST_SCANNED_NOTIFICATION_CLIENTS.with(std::cell::Cell::get);
+    server.drain_server_events();
+    assert_eq!(
+        TEST_SCANNED_NOTIFICATION_CLIENTS.with(std::cell::Cell::get) - scanned,
+        512,
+        "each client may be examined only once per batch"
+    );
+    assert_eq!(
+        ClientWriter::test_notification_take_count(),
+        before,
+        "idle scans must not lock every client's writer queue"
+    );
+    assert!(!server.transport_notifications.more_pending);
+}
+
 #[test]
 #[ignore = "manual external API burst scheduling profile"]
 fn external_api_burst_profile() {

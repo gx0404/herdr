@@ -54,8 +54,20 @@ fn terminal_inner_rect_for(pane_inner: Rect, scrollbar_gutter: bool) -> Rect {
     )
 }
 
-fn zoomed_pane_borders(app: &AppState, multi_pane: bool) -> Borders {
-    if app.pane_borders.shows_borders(multi_pane) && app.pane_outer_borders {
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PaneChrome {
+    pub(crate) borders: crate::config::PaneBordersConfig,
+    pub(crate) gaps: bool,
+    pub(crate) outer_borders: bool,
+    pub(crate) scrollbars: bool,
+}
+
+fn zoomed_pane_borders(
+    borders: crate::config::PaneBordersConfig,
+    outer_borders: bool,
+    multi_pane: bool,
+) -> Borders {
+    if borders.shows_borders(multi_pane) && outer_borders {
         Borders::ALL
     } else {
         Borders::NONE
@@ -97,7 +109,12 @@ pub(crate) fn new_pane_terminal_size(
         pane_inner_rect(infos[index].rect, infos[index].borders)
     };
     // A lone pane has no neighbors, so its chrome matches a zoomed single pane.
-    let alone = || pane_inner_rect(area, zoomed_pane_borders(app, false));
+    let alone = || {
+        pane_inner_rect(
+            area,
+            zoomed_pane_borders(app.pane_borders, app.pane_outer_borders, false),
+        )
+    };
     let tab_for = |ws_idx: usize, pane: PaneId| {
         let ws = app.workspaces.get(ws_idx)?;
         ws.tabs.get(ws.find_tab_index_for_pane(pane)?)
@@ -108,14 +125,20 @@ pub(crate) fn new_pane_terminal_size(
             .and_then(|tab| {
                 if tab.zoomed && tab.layout.focused() == pane {
                     let multi_pane = tab.layout.pane_count() > 1;
-                    return Some(pane_inner_rect(area, zoomed_pane_borders(app, multi_pane)));
+                    return Some(pane_inner_rect(
+                        area,
+                        zoomed_pane_borders(app.pane_borders, app.pane_outer_borders, multi_pane),
+                    ));
                 }
                 let panes = tab.layout.panes(area);
                 let index = panes.iter().position(|info| info.id == pane)?;
                 Some(laid_out(panes, index))
             })
             .unwrap_or_else(alone),
-        NewPanePlacement::ZoomedOverlay => pane_inner_rect(area, zoomed_pane_borders(app, true)),
+        NewPanePlacement::ZoomedOverlay => pane_inner_rect(
+            area,
+            zoomed_pane_borders(app.pane_borders, app.pane_outer_borders, true),
+        ),
         NewPanePlacement::Split {
             ws_idx,
             target,
@@ -126,7 +149,7 @@ pub(crate) fn new_pane_terminal_size(
             .map(|(panes, new_index)| laid_out(panes, new_index))
             .unwrap_or_else(alone),
     };
-    new_terminal_size(app, pane_inner)
+    new_terminal_size(pane_inner, app.pane_scrollbars)
 }
 
 /// Terminal rows and columns for every pane of `layout` laid out in `area`, in
@@ -136,20 +159,46 @@ pub(crate) fn new_layout_terminal_sizes(
     area: Rect,
     layout: &crate::layout::TileLayout,
 ) -> Vec<(u16, u16)> {
-    apply_pane_chrome(
-        layout.panes(area),
-        app.pane_borders,
-        app.pane_gaps,
-        app.pane_outer_borders,
+    layout_terminal_sizes(
+        area,
+        layout,
+        false,
+        PaneChrome {
+            borders: app.pane_borders,
+            gaps: app.pane_gaps,
+            outer_borders: app.pane_outer_borders,
+            scrollbars: app.pane_scrollbars,
+        },
     )
     .into_iter()
-    .map(|info| new_terminal_size(app, pane_inner_rect(info.rect, info.borders)))
+    .map(|(_, size)| size)
     .collect()
 }
 
-fn new_terminal_size(app: &AppState, pane_inner: Rect) -> (u16, u16) {
+pub(crate) fn layout_terminal_sizes(
+    area: Rect,
+    layout: &crate::layout::TileLayout,
+    zoomed: bool,
+    chrome: PaneChrome,
+) -> Vec<(PaneId, (u16, u16))> {
+    let panes = layout.panes(area);
+    let zoom_borders = zoomed_pane_borders(chrome.borders, chrome.outer_borders, panes.len() > 1);
+    apply_pane_chrome(panes, chrome.borders, chrome.gaps, chrome.outer_borders)
+        .into_iter()
+        .map(|info| {
+            let inner = if zoomed && info.id == layout.focused() {
+                pane_inner_rect(area, zoom_borders)
+            } else {
+                pane_inner_rect(info.rect, info.borders)
+            };
+            (info.id, new_terminal_size(inner, chrome.scrollbars))
+        })
+        .collect()
+}
+
+fn new_terminal_size(pane_inner: Rect, pane_scrollbars: bool) -> (u16, u16) {
     // A new program starts on the primary screen, which reserves the gutter.
-    let inner = terminal_inner_rect_for(pane_inner, app.pane_scrollbars);
+    let inner = terminal_inner_rect_for(pane_inner, pane_scrollbars);
     (
         inner.height.max(crate::pane::MIN_PANE_ROWS),
         inner.width.max(crate::pane::MIN_PANE_COLS),
@@ -330,7 +379,10 @@ pub(super) fn resize_tab_panes(
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, focused_id)
         {
-            let pane_inner = pane_inner_rect(area, zoomed_pane_borders(app, multi_pane));
+            let pane_inner = pane_inner_rect(
+                area,
+                zoomed_pane_borders(app.pane_borders, app.pane_outer_borders, multi_pane),
+            );
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -390,7 +442,7 @@ pub(super) fn compute_pane_infos_for_tab(
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
-        let borders = zoomed_pane_borders(app, multi_pane);
+        let borders = zoomed_pane_borders(app.pane_borders, app.pane_outer_borders, multi_pane);
         let pane_inner = pane_inner_rect(area, borders);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;

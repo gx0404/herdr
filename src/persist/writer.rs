@@ -3,12 +3,168 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 use super::{SessionHistorySnapshot, SessionSnapshot};
+
+#[derive(PartialEq, Eq)]
+struct RecoveryContents {
+    length: u64,
+    sha256: [u8; 32],
+}
+
+fn transfer_recovery(
+    source: &mut impl io::Read,
+    output: &mut impl io::Write,
+) -> io::Result<RecoveryContents> {
+    let mut digest = Sha256::new();
+    let mut length = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = match source.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        output.write_all(&buffer[..read])?;
+        digest.update(&buffer[..read]);
+        length = length
+            .checked_add(read as u64)
+            .ok_or_else(|| io::Error::other("recovery length overflow"))?;
+    }
+    Ok(RecoveryContents {
+        length,
+        sha256: digest.finalize().into(),
+    })
+}
+
+struct PendingRecovery {
+    path: PathBuf,
+    owned: File,
+    contents: RecoveryContents,
+}
+
+impl PendingRecovery {
+    fn verify_file(&self, file: &mut File) -> io::Result<()> {
+        use std::io::Seek;
+
+        crate::platform::check_persist_source(file)?;
+        let before = file.metadata()?;
+        file.rewind()?;
+        let read = transfer_recovery(file, &mut io::sink());
+        let rewind = file.rewind();
+        let contents = read?;
+        rewind?;
+        let after = file.metadata()?;
+        if contents != self.contents
+            || before.len() != after.len()
+            || before.modified()? != after.modified()?
+        {
+            return Err(io::Error::other(
+                "pending recovery content mismatch; safe re-backup or manual inspection required",
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_verified(&self) -> io::Result<File> {
+        let owned = self.owned.metadata()?;
+        if !owned.is_file()
+            || owned.len() != self.contents.length
+            || !std::fs::symlink_metadata(&self.path)?.is_file()
+        {
+            return Err(io::Error::other(
+                "pending recovery is no longer a complete regular file",
+            ));
+        }
+        let mut file = File::open(&self.path)?;
+        if !crate::platform::same_persist_file(&self.owned, &file)? {
+            return Err(io::Error::other(
+                "pending recovery identity mismatch; safe re-backup or manual inspection required",
+            ));
+        }
+        self.verify_file(&mut file)?;
+        Ok(file)
+    }
+
+    fn verify_source(&self, path: &Path, source: &mut File) -> io::Result<()> {
+        self.verify_file(source)?;
+        self.verify_file(&mut File::open(path)?)
+    }
+}
+
+#[derive(Default)]
+struct RecoveryDirectory {
+    confirmed: bool,
+    pending: Option<PendingRecovery>,
+}
+
+impl RecoveryDirectory {
+    fn confirm_existing(
+        &mut self,
+        directory: &Path,
+        existing: &[(u128, PathBuf)],
+        mut source: Option<(&Path, &mut File)>,
+    ) -> io::Result<Option<PathBuf>> {
+        let mut phase = "recovery.retry_validate";
+        let result = (|| -> io::Result<Option<PathBuf>> {
+            let mut verified = self
+                .pending
+                .as_ref()
+                .map(PendingRecovery::open_verified)
+                .transpose()?;
+            if let (Some(pending), Some((path, source))) = (&self.pending, source.as_mut()) {
+                pending.verify_source(path, source)?;
+            }
+            if !self.confirmed && (!existing.is_empty() || self.pending.is_some()) {
+                #[cfg(test)]
+                let probe = self
+                    .pending
+                    .as_ref()
+                    .map_or(directory, |pending| pending.path.as_path());
+                phase = "recovery.retry_directory_sync";
+                #[cfg(test)]
+                super::io::test_io::check(phase, probe)?;
+                crate::platform::sync_directory(directory)?;
+                phase = "recovery.retry_parent_sync";
+                #[cfg(test)]
+                super::io::test_io::check(phase, probe)?;
+                crate::platform::sync_directory(
+                    directory
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new(".")),
+                )?;
+            }
+            phase = "recovery.retry_validate";
+            if let Some(pending) = &self.pending {
+                if let Some(file) = &mut verified {
+                    pending.verify_file(file)?;
+                }
+                pending.open_verified()?;
+                if let Some((path, source)) = source.as_mut() {
+                    pending.verify_source(path, source)?;
+                }
+            }
+            self.confirmed = true;
+            Ok(self.pending.as_ref().map(|pending| pending.path.clone()))
+        })();
+        if result.is_err() {
+            self.confirmed = false;
+        }
+        result.map_err(|err| {
+            io::Error::new(err.kind(), format!("{phase} failed (durable=false): {err}"))
+        })
+    }
+}
 
 /// Shared by autosave, pane-exit checkpoints, and shutdown.
 pub(crate) struct SessionWriter {
     path: PathBuf,
     protect_unloaded: bool,
+    backup_sync: RecoveryDirectory,
+    snapshot_sync: RecoveryDirectory,
 }
 
 impl SessionWriter {
@@ -16,18 +172,20 @@ impl SessionWriter {
         Self {
             path: super::io::session_path(),
             protect_unloaded,
+            backup_sync: RecoveryDirectory::default(),
+            snapshot_sync: RecoveryDirectory::default(),
         }
     }
 
     fn preserve_unloaded(&mut self) -> io::Result<()> {
-        if self.protect_unloaded && preserve_existing(&self.path)? {
+        if self.protect_unloaded && preserve_existing(&self.path, &mut self.backup_sync)? {
             self.protect_unloaded = false;
         }
         Ok(())
     }
 
-    fn preserve_snapshot_history(&self) {
-        if let Err(err) = preserve_snapshot_history(&self.path) {
+    fn preserve_snapshot_history(&mut self) {
+        if let Err(err) = preserve_snapshot_history(&self.path, &mut self.snapshot_sync) {
             tracing::warn!(
                 event = "persist.snapshot", outcome = "error", path = %self.path.display(),
                 err = %err, "failed to preserve session snapshot"
@@ -40,11 +198,15 @@ impl SessionWriter {
         snapshot: &SessionSnapshot,
         history: Option<&SessionHistorySnapshot>,
     ) {
-        let result = self.preserve_unloaded().and_then(|()| {
-            self.preserve_snapshot_history();
-            super::io::save_to_path(&self.path, snapshot)
-        });
-        if let Err(err) = result {
+        if let Err(err) = self.preserve_unloaded() {
+            crate::logging::session_save_failed(&self.path, &err.to_string());
+            return;
+        }
+        self.preserve_snapshot_history();
+        if let Err(err) = super::io::save_to_path(&self.path, snapshot) {
+            if err.replaced {
+                self.protect_unloaded = false;
+            }
             crate::logging::session_save_failed(&self.path, &err.to_string());
             return;
         }
@@ -78,13 +240,25 @@ impl SessionWriter {
 const SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const SNAPSHOT_LIMIT: usize = 48;
 
-fn preserve_snapshot_history(path: &Path) -> io::Result<()> {
+fn preserve_snapshot_history(path: &Path, sync: &mut RecoveryDirectory) -> io::Result<()> {
     let directory = path.with_file_name("session-snapshots");
     let existing = match recovery_files(&directory) {
         Ok(files) => files,
         Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(err) => return Err(err),
     };
+    if let Some(backup) = sync.confirm_existing(&directory, &existing, None)? {
+        finish_recovery(
+            path,
+            "session-snapshots",
+            &backup,
+            &existing,
+            SNAPSHOT_LIMIT,
+            sync,
+        )?;
+    } else if existing.len() > SNAPSHOT_LIMIT {
+        prune_backups(&existing, SNAPSHOT_LIMIT + 1)?;
+    }
     if let Some((_, latest)) = existing.last() {
         let modified = std::fs::metadata(latest)?.modified()?;
         if SystemTime::now()
@@ -94,11 +268,14 @@ fn preserve_snapshot_history(path: &Path) -> io::Result<()> {
             return Ok(());
         }
     }
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    let mut source = match File::open(path) {
+        Ok(source) => source,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err),
     };
+    crate::platform::check_persist_source(&source)?;
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut source, &mut bytes)?;
     let Ok(snapshot) = serde_json::from_slice::<SessionSnapshot>(&bytes) else {
         return Ok(());
     };
@@ -115,27 +292,35 @@ fn preserve_snapshot_history(path: &Path) -> io::Result<()> {
             }
         }
     }
-    preserve_existing_in(path, "session-snapshots", SNAPSHOT_LIMIT)?;
+    preserve_existing_in(path, "session-snapshots", SNAPSHOT_LIMIT, sync)?;
     Ok(())
 }
 
-fn preserve_existing(path: &Path) -> io::Result<bool> {
-    preserve_existing_in(path, "session-backups", 3)
+fn preserve_existing(path: &Path, sync: &mut RecoveryDirectory) -> io::Result<bool> {
+    preserve_existing_in(path, "session-backups", 3, sync)
 }
 
-fn preserve_existing_in(path: &Path, directory_name: &str, keep: usize) -> io::Result<bool> {
+fn preserve_existing_in(
+    path: &Path,
+    directory_name: &str,
+    keep: usize,
+    sync: &mut RecoveryDirectory,
+) -> io::Result<bool> {
+    use std::io::Seek;
+
     let mut source = match File::open(path) {
         Ok(file) => file,
         // Recheck on the next mutation until a fresh session is actually saved.
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(err) => return Err(err),
     };
-    if !source.metadata()?.is_file() {
-        return Err(io::Error::other("session path is not a regular file"));
-    }
+    crate::platform::check_persist_source(&source)?;
     let directory = path.with_file_name(directory_name);
     std::fs::create_dir_all(&directory)?;
     let older = recovery_files(&directory)?;
+    if let Some(backup) = sync.confirm_existing(&directory, &older, Some((path, &mut source)))? {
+        return finish_recovery(path, directory_name, &backup, &older, keep, sync);
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -154,30 +339,14 @@ fn preserve_existing_in(path: &Path, directory_name: &str, keep: usize) -> io::R
             "session-{timestamp:039}-{}-{sequence}.json",
             std::process::id()
         ));
-        match copy_recovery(&mut source, &backup) {
+        source.rewind()?;
+        match copy_recovery(&mut source, &backup, sync) {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
         }
-        tracing::info!(
-            event = "persist.backup",
-            subsystem = "persist",
-            outcome = "ok",
-            path = %path.display(),
-            backup_path = %backup.display(),
-            "preserved session recovery copy"
-        );
-        if let Err(err) = prune_backups(&older, keep) {
-            if directory_name == "session-snapshots" {
-                std::fs::remove_file(&backup)?;
-                return Err(err);
-            }
-            tracing::warn!(
-                event = "persist.backup", subsystem = "persist", outcome = "prune_error",
-                path = %directory.display(), err = %err, "failed to prune session recovery copies"
-            );
-        }
-        return Ok(true);
+        sync.confirm_existing(&directory, &older, Some((path, &mut source)))?;
+        return finish_recovery(path, directory_name, &backup, &older, keep, sync);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
@@ -185,12 +354,52 @@ fn preserve_existing_in(path: &Path, directory_name: &str, keep: usize) -> io::R
     ))
 }
 
-fn copy_recovery(source: &mut impl io::Read, backup: &Path) -> io::Result<()> {
-    let directory = backup.parent().unwrap_or_else(|| Path::new("."));
+fn finish_recovery(
+    path: &Path,
+    directory_name: &str,
+    backup: &Path,
+    existing: &[(u128, PathBuf)],
+    keep: usize,
+    sync: &mut RecoveryDirectory,
+) -> io::Result<bool> {
+    let older: Vec<_> = existing
+        .iter()
+        .filter(|(_, candidate)| candidate != backup)
+        .cloned()
+        .collect();
+    if let Err(err) = prune_backups(&older, keep) {
+        if directory_name == "session-snapshots" {
+            return Err(err);
+        }
+        let directory = path.with_file_name(directory_name);
+        tracing::warn!(
+            event = "persist.backup", subsystem = "persist", outcome = "prune_error",
+            path = %directory.display(), err = %err, "failed to prune session recovery copies"
+        );
+    }
+    sync.pending = None;
+    tracing::info!(
+        event = "persist.backup", subsystem = "persist", outcome = "ok",
+        path = %path.display(), backup_path = %backup.display(),
+        "preserved session recovery copy"
+    );
+    Ok(true)
+}
+
+fn copy_recovery(
+    source: &mut impl io::Read,
+    backup: &Path,
+    sync: &mut RecoveryDirectory,
+) -> io::Result<()> {
+    let directory = backup
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let pending = backup.with_extension("pending");
-    let mut output = crate::platform::create_config_temporary(&pending, true)?;
+    let mut output = crate::platform::create_persist_temporary(&pending)?;
     let mut published = false;
-    let result = (|| {
+    let mut phase = "recovery.check_destination";
+    let result = (|| -> io::Result<()> {
         match std::fs::symlink_metadata(backup) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
@@ -201,21 +410,68 @@ fn copy_recovery(source: &mut impl io::Read, backup: &Path) -> io::Result<()> {
                 ))
             }
         }
-        io::copy(source, &mut output)?;
+        phase = "recovery.copy";
+        #[cfg(test)]
+        super::io::test_io::check(phase, backup)?;
+        let contents = transfer_recovery(source, &mut output)?;
+        phase = "recovery.file_sync";
+        #[cfg(test)]
+        super::io::test_io::check(phase, backup)?;
         output.sync_all()?;
-        drop(output);
-        std::fs::rename(&pending, backup)?;
+        let owned = output.try_clone()?;
+        phase = "recovery.publish";
+        #[cfg(test)]
+        super::io::test_io::check(phase, backup)?;
+        // This primitive must never return Err after installing the destination.
+        crate::platform::publish_persist_recovery(&pending, backup)?;
         published = true;
-        crate::platform::sync_parent_directory(directory)?;
-        crate::platform::sync_parent_directory(directory.parent().unwrap_or_else(|| Path::new(".")))
+        sync.confirmed = false;
+        sync.pending = Some(PendingRecovery {
+            path: backup.to_path_buf(),
+            owned,
+            contents,
+        });
+        phase = "recovery.directory_sync";
+        #[cfg(test)]
+        super::io::test_io::check(phase, backup)?;
+        crate::platform::sync_directory(directory)?;
+        phase = "recovery.parent_sync";
+        #[cfg(test)]
+        super::io::test_io::check(phase, backup)?;
+        crate::platform::sync_directory(
+            directory
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new(".")),
+        )?;
+        sync.confirmed = true;
+        Ok(())
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(pending);
-        if published {
-            let _ = std::fs::remove_file(backup);
+    if let Err(error) = result {
+        let mut cleanup = Vec::new();
+        if !published {
+            if let Err(err) = crate::platform::discard_persist_temporary(&output, &pending) {
+                cleanup.push(format!("{}: {err}", pending.display()));
+            }
         }
+        let kind = if published || !cleanup.is_empty() {
+            io::ErrorKind::Other
+        } else {
+            error.kind()
+        };
+        let mut message = format!("{phase} failed (published={published}, durable=false): {error}");
+        if published {
+            message.push_str("; published recovery retained for directory-sync retry");
+        }
+        if !cleanup.is_empty() {
+            message.push_str(&format!(
+                "; recovery cleanup failed: {}",
+                cleanup.join("; ")
+            ));
+        }
+        return Err(io::Error::new(kind, message));
     }
-    result
+    Ok(())
 }
 
 fn recovery_files(directory: &Path) -> io::Result<Vec<(u128, PathBuf)>> {
@@ -287,6 +543,8 @@ mod tests {
         SessionWriter {
             path: directory.join("session.json"),
             protect_unloaded,
+            backup_sync: RecoveryDirectory::default(),
+            snapshot_sync: RecoveryDirectory::default(),
         }
     }
 
@@ -295,6 +553,69 @@ mod tests {
             "../../tests/fixtures/session/current-herdr-session.json"
         ))
         .unwrap()
+    }
+
+    fn isolated_writer(
+        protect_unloaded: bool,
+    ) -> (SessionWriter, crate::config::test_dirs::TempDir) {
+        let directory = crate::config::test_dirs::TempDir::new("persist-writer");
+        let writer = SessionWriter {
+            path: directory.join("session.json"),
+            protect_unloaded,
+            backup_sync: RecoveryDirectory::default(),
+            snapshot_sync: RecoveryDirectory::default(),
+        };
+        (writer, directory)
+    }
+
+    fn with_failure<R>(phase: &'static str, run: impl FnOnce() -> R) -> R {
+        super::super::io::test_io::with(
+            Box::new(move |current, _| {
+                let retry = current.strip_prefix("recovery.retry_");
+                if current == phase
+                    || retry.is_some_and(|suffix| phase.strip_prefix("recovery.") == Some(suffix))
+                {
+                    Err(io::Error::other("injected persistence failure"))
+                } else {
+                    Ok(())
+                }
+            }),
+            run,
+        )
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
+            type Writer = Buffer;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
     }
 
     /// Windows 上杀毒软件会在新文件落盘后短暂打开它扫描：这期间读它报共享冲突（os error
@@ -370,6 +691,8 @@ mod tests {
             writer = SessionWriter {
                 path: writer.path.clone(),
                 protect_unloaded: false,
+                backup_sync: RecoveryDirectory::default(),
+                snapshot_sync: RecoveryDirectory::default(),
             };
         }
         writer.clear();
@@ -453,6 +776,8 @@ mod tests {
         writer = SessionWriter {
             path: writer.path.clone(),
             protect_unloaded: false,
+            backup_sync: RecoveryDirectory::default(),
+            snapshot_sync: RecoveryDirectory::default(),
         };
         changed.workspaces[0].custom_name = Some("after restart".into());
         writer.save(&changed, None);
@@ -590,17 +915,656 @@ mod tests {
 
     #[test]
     fn repeated_failed_saves_do_not_replace_a_completed_recovery_copy() {
-        let mut writer = writer(true);
+        for phase in ["save.write", "save.file_sync", "save.rename"] {
+            let (mut writer, _directory) = isolated_writer(true);
+            std::fs::write(&writer.path, b"original").unwrap();
+            let history = writer.path.with_file_name("session-history.json");
+            std::fs::write(&history, b"history").unwrap();
+            let logs = capture_logs(|| {
+                with_failure(phase, || {
+                    writer.save(&snapshot(), None);
+                    assert!(!writer.protect_unloaded);
+                    writer.save(&snapshot(), None);
+                });
+            });
+            assert!(logs.contains(phase));
+            assert!(logs.contains("replaced=false"));
+            assert!(!logs.contains("session saved"));
+            assert_eq!(std::fs::read(&writer.path).unwrap(), b"original");
+            assert_eq!(std::fs::read(&history).unwrap(), b"history");
+            writer.save(&snapshot(), None);
+            assert_eq!(backups(&writer), vec![b"original".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn missing_original_precommit_failure_still_protects_a_late_file() {
+        for phase in ["save.write", "save.file_sync", "save.rename"] {
+            let (mut writer, _directory) = isolated_writer(true);
+            let history = writer.path.with_file_name("session-history.json");
+            std::fs::write(&history, b"history").unwrap();
+            with_failure(phase, || writer.save(&snapshot(), None));
+            assert!(writer.protect_unloaded);
+            assert!(!writer.path.exists());
+            assert_eq!(std::fs::read(&history).unwrap(), b"history");
+            assert!(backups(&writer).is_empty());
+            std::fs::write(&writer.path, b"late original").unwrap();
+            writer.save(&snapshot(), None);
+            assert!(!writer.protect_unloaded);
+            assert_eq!(backups(&writer), vec![b"late original".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn committed_directory_sync_failure_keeps_layout_and_skips_history() {
+        for existed in [false, true] {
+            let (mut writer, _directory) = isolated_writer(true);
+            if existed {
+                std::fs::write(&writer.path, b"unloaded original").unwrap();
+            }
+            let history = writer.path.with_file_name("session-history.json");
+            std::fs::write(&history, b"history must not be cleared").unwrap();
+            let logs = capture_logs(|| {
+                with_failure("save.directory_sync", || writer.save(&snapshot(), None));
+            });
+            assert!(!writer.protect_unloaded);
+            assert_eq!(
+                std::fs::read(&writer.path).unwrap(),
+                serde_json::to_vec_pretty(&snapshot()).unwrap()
+            );
+            assert_eq!(
+                std::fs::read(&history).unwrap(),
+                b"history must not be cleared"
+            );
+            assert!(!writer.path.with_file_name("session-snapshots").exists());
+            assert!(logs.contains("save.directory_sync"));
+            assert!(logs.contains("replaced=true"));
+            assert!(logs.contains("failed to save session"));
+            assert!(!logs.contains("session saved"));
+            writer.save(&snapshot(), None);
+            assert_eq!(backups(&writer).len(), usize::from(existed));
+        }
+    }
+
+    #[test]
+    fn optional_history_write_failure_never_reprotects_the_layout() {
+        let (mut writer, _directory) = isolated_writer(true);
+        let history_path = writer.path.with_file_name("session-history.json");
+        std::fs::write(&history_path, b"old history").unwrap();
+        let failed_path = history_path.clone();
+        let history = SessionHistorySnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            layout_fingerprint: None,
+            workspaces: vec![],
+        };
+        let logs = capture_logs(|| {
+            super::super::io::test_io::with(
+                Box::new(move |phase, path| {
+                    if phase == "save.write" && path == failed_path {
+                        Err(io::Error::other("history unavailable"))
+                    } else {
+                        Ok(())
+                    }
+                }),
+                || writer.save(&snapshot(), Some(&history)),
+            );
+        });
+        assert!(!writer.protect_unloaded);
+        assert_eq!(std::fs::read(&history_path).unwrap(), b"old history");
+        assert!(logs.contains("history unavailable"));
+        assert!(logs.contains("session saved"));
+        let mut changed = snapshot();
+        changed.workspaces[0].custom_name = Some("next layout".into());
+        writer.save(&changed, Some(&history));
+        assert_eq!(
+            std::fs::read(&writer.path).unwrap(),
+            serde_json::to_vec_pretty(&changed).unwrap()
+        );
+        assert!(backups(&writer).is_empty());
+    }
+
+    #[test]
+    fn recovery_failures_preserve_old_copies_and_block_save_and_clear() {
+        for phase in [
+            "recovery.copy",
+            "recovery.file_sync",
+            "recovery.publish",
+            "recovery.directory_sync",
+            "recovery.parent_sync",
+        ] {
+            let (mut writer, _root) = isolated_writer(true);
+            let directory = writer.path.with_file_name("session-backups");
+            std::fs::create_dir(&directory).unwrap();
+            for index in 0..3u8 {
+                std::fs::write(
+                    directory.join(format!("session-{:039}-1-0.json", index)),
+                    [index],
+                )
+                .unwrap();
+            }
+            let older = recovery_files(&directory).unwrap();
+            writer
+                .backup_sync
+                .confirm_existing(&directory, &older, None)
+                .unwrap();
+            std::fs::write(&writer.path, b"unloaded \xff").unwrap();
+            let history = writer.path.with_file_name("session-history.json");
+            std::fs::write(&history, b"history").unwrap();
+            let logs = capture_logs(|| {
+                with_failure(phase, || {
+                    writer.save(&snapshot(), None);
+                    writer.clear();
+                });
+            });
+            assert!(writer.protect_unloaded);
+            assert_eq!(std::fs::read(&writer.path).unwrap(), b"unloaded \xff");
+            assert_eq!(std::fs::read(&history).unwrap(), b"history");
+            for (index, (_, path)) in older.iter().enumerate() {
+                assert_eq!(std::fs::read(path).unwrap(), vec![index as u8]);
+            }
+            let published = matches!(phase, "recovery.directory_sync" | "recovery.parent_sync");
+            let expected = 3 + usize::from(published);
+            assert_eq!(settled_entry_count(&directory, expected), expected);
+            assert_eq!(writer.backup_sync.pending.is_some(), published);
+            assert!(logs.contains(phase));
+            assert!(logs.contains("durable=false"));
+            assert!(logs.contains(&format!("published={published}")));
+            assert!(!logs.contains("preserved session recovery copy"));
+            assert!(!logs.contains("session saved"));
+        }
+    }
+
+    #[test]
+    fn periodic_recovery_sync_failure_never_prunes_old_snapshots() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        for phase in ["recovery.directory_sync", "recovery.parent_sync"] {
+            let (mut writer, _root) = isolated_writer(false);
+            let directory = writer.path.with_file_name("session-snapshots");
+            std::fs::create_dir(&directory).unwrap();
+            for index in 0..SNAPSHOT_LIMIT {
+                let path = directory.join(format!("session-{index:039}-1-0.json"));
+                std::fs::write(&path, b"old snapshot").unwrap();
+                File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH))
+                    .unwrap();
+            }
+            std::fs::write(
+                &writer.path,
+                serde_json::to_vec_pretty(&snapshot()).unwrap(),
+            )
+            .unwrap();
+            let older = recovery_files(&directory).unwrap();
+            writer
+                .snapshot_sync
+                .confirm_existing(&directory, &older, None)
+                .unwrap();
+            let err = with_failure(phase, || {
+                preserve_snapshot_history(&writer.path, &mut writer.snapshot_sync)
+            })
+            .unwrap_err();
+            assert!(err.to_string().contains("durable=false"));
+            assert!(err.to_string().contains("retained"));
+            assert!(!writer.snapshot_sync.confirmed);
+            let published = writer.snapshot_sync.pending.as_ref().unwrap().path.clone();
+            assert_eq!(
+                std::fs::read(&published).unwrap(),
+                std::fs::read(&writer.path).unwrap()
+            );
+            let failed_files = recovery_files(&directory).unwrap();
+            assert_eq!(failed_files.len(), SNAPSHOT_LIMIT + 1);
+            for _ in 0..3 {
+                with_failure(phase, || writer.save(&snapshot(), None));
+                assert_eq!(recovery_files(&directory).unwrap(), failed_files);
+                assert!(!writer.snapshot_sync.confirmed);
+                for (_, path) in &older {
+                    assert_eq!(std::fs::read(path).unwrap(), b"old snapshot");
+                }
+            }
+            let attempts = Rc::new(RefCell::new(Vec::new()));
+            let observed = attempts.clone();
+            super::super::io::test_io::with(
+                Box::new(move |phase, _| {
+                    if phase.starts_with("recovery.") {
+                        observed.borrow_mut().push(phase.to_string());
+                    }
+                    Ok(())
+                }),
+                || {
+                    writer.save(&snapshot(), None);
+                    writer.save(&snapshot(), None);
+                },
+            );
+            assert_eq!(
+                *attempts.borrow(),
+                [
+                    "recovery.retry_directory_sync",
+                    "recovery.retry_parent_sync"
+                ]
+            );
+            assert!(writer.snapshot_sync.confirmed);
+            assert!(writer.snapshot_sync.pending.is_none());
+            assert_eq!(snapshots(&writer).len(), SNAPSHOT_LIMIT);
+            assert!(published.exists());
+            assert!(!older[0].1.exists());
+        }
+    }
+
+    #[test]
+    fn published_recovery_sync_failure_never_deletes_a_replaced_name() {
+        let (writer, _root) = isolated_writer(true);
+        let backup = writer
+            .path
+            .with_file_name("session-000000000000000000000000000000000000001-1-0.json");
+        let moved = backup.with_extension("retained");
+        let mut sync = RecoveryDirectory::default();
+        let err = super::super::io::test_io::with(
+            Box::new(|phase, backup| {
+                if phase == "recovery.directory_sync" {
+                    std::fs::rename(backup, backup.with_extension("retained"))?;
+                    std::fs::write(backup, b"foreign replacement")?;
+                    return Err(io::Error::other("directory sync failed after name swap"));
+                }
+                Ok(())
+            }),
+            || {
+                copy_recovery(
+                    &mut io::Cursor::new(b"own complete bytes"),
+                    &backup,
+                    &mut sync,
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("published=true, durable=false"));
+        assert!(err.to_string().contains("retained"));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"foreign replacement");
+        assert_eq!(std::fs::read(&moved).unwrap(), b"own complete bytes");
+        assert!(!sync.confirmed);
+        assert_eq!(
+            sync.pending.as_ref().map(|pending| pending.path.as_path()),
+            Some(backup.as_path())
+        );
+    }
+
+    #[test]
+    fn pending_recovery_replacement_never_releases_unloaded_protection() {
+        for deleted in [false, true] {
+            for during_sync in [false, true] {
+                let (mut writer, _root) = isolated_writer(true);
+                std::fs::write(&writer.path, b"snapshot A").unwrap();
+                let history = writer.path.with_file_name("session-history.json");
+                std::fs::write(&history, b"history").unwrap();
+                with_failure("recovery.directory_sync", || writer.save(&snapshot(), None));
+                let backup = writer.backup_sync.pending.as_ref().unwrap().path.clone();
+                let replace = move |path: &Path| -> io::Result<()> {
+                    if deleted {
+                        std::fs::remove_file(path)
+                    } else {
+                        std::fs::rename(path, path.with_extension("retained"))?;
+                        std::fs::write(path, b"snapshot X")
+                    }
+                };
+                if !during_sync {
+                    replace(&backup).unwrap();
+                }
+                let logs = capture_logs(|| {
+                    if during_sync {
+                        super::super::io::test_io::with(
+                            Box::new(move |phase, path| {
+                                if phase == "recovery.retry_directory_sync" {
+                                    replace(path)?;
+                                }
+                                Ok(())
+                            }),
+                            || writer.save(&snapshot(), None),
+                        );
+                    } else {
+                        writer.save(&snapshot(), None);
+                    }
+                    writer.clear();
+                });
+                assert!(writer.protect_unloaded);
+                assert!(!writer.backup_sync.confirmed);
+                assert!(writer.backup_sync.pending.is_some());
+                assert_eq!(std::fs::read(&writer.path).unwrap(), b"snapshot A");
+                assert_eq!(std::fs::read(&history).unwrap(), b"history");
+                if !deleted {
+                    assert_eq!(std::fs::read(&backup).unwrap(), b"snapshot X");
+                    assert_eq!(
+                        std::fs::read(backup.with_extension("retained")).unwrap(),
+                        b"snapshot A"
+                    );
+                }
+                assert!(logs.contains("recovery.retry_validate"));
+                assert!(!logs.contains("preserved session recovery copy"));
+                assert!(!logs.contains("session saved"));
+                assert!(!logs.contains("session cleared"));
+                drop(writer);
+            }
+        }
+    }
+
+    #[test]
+    fn pending_recovery_equal_bytes_replacement_keeps_unloaded_protection() {
+        for during_sync in [false, true] {
+            let (mut writer, _root) = isolated_writer(true);
+            std::fs::write(&writer.path, b"snapshot A").unwrap();
+            let history = writer.path.with_file_name("session-history.json");
+            std::fs::write(&history, b"history").unwrap();
+            with_failure("recovery.directory_sync", || writer.save(&snapshot(), None));
+            let backup = writer.backup_sync.pending.as_ref().unwrap().path.clone();
+            let replace = |path: &Path| -> io::Result<()> {
+                let replacement = path.with_extension("replacement");
+                std::fs::write(&replacement, b"snapshot A")?;
+                std::fs::rename(replacement, path)
+            };
+            if !during_sync {
+                replace(&backup).unwrap();
+            }
+            let logs = capture_logs(|| {
+                if during_sync {
+                    super::super::io::test_io::with(
+                        Box::new(move |phase, path| {
+                            if phase == "recovery.retry_directory_sync" {
+                                replace(path)?;
+                            }
+                            Ok(())
+                        }),
+                        || writer.save(&snapshot(), None),
+                    );
+                } else {
+                    writer.save(&snapshot(), None);
+                }
+                writer.clear();
+            });
+            assert!(writer.protect_unloaded);
+            assert!(!writer.backup_sync.confirmed);
+            assert!(writer.backup_sync.pending.is_some());
+            assert_eq!(std::fs::read(&writer.path).unwrap(), b"snapshot A");
+            assert_eq!(std::fs::read(&history).unwrap(), b"history");
+            assert_eq!(std::fs::read(&backup).unwrap(), b"snapshot A");
+            assert!(logs.contains("pending recovery identity mismatch"));
+            assert!(!logs.contains("preserved session recovery copy"));
+            assert!(!logs.contains("session saved"));
+            assert!(!logs.contains("session cleared"));
+            drop(writer);
+        }
+    }
+
+    #[test]
+    fn pending_recovery_does_not_acknowledge_a_changed_source() {
+        for during_sync in [false, true] {
+            let (mut writer, _root) = isolated_writer(true);
+            std::fs::write(&writer.path, b"snapshot A").unwrap();
+            let history = writer.path.with_file_name("session-history.json");
+            std::fs::write(&history, b"history").unwrap();
+            with_failure("recovery.directory_sync", || writer.save(&snapshot(), None));
+            let backup = writer.backup_sync.pending.as_ref().unwrap().path.clone();
+            let source = writer.path.clone();
+            let replace = move || -> io::Result<()> {
+                let replacement = source.with_extension("replacement");
+                std::fs::write(&replacement, b"snapshot B")?;
+                std::fs::rename(replacement, &source)
+            };
+            if !during_sync {
+                replace().unwrap();
+            }
+            let logs = capture_logs(|| {
+                if during_sync {
+                    super::super::io::test_io::with(
+                        Box::new(move |phase, _| {
+                            if phase == "recovery.retry_directory_sync" {
+                                replace()?;
+                            }
+                            Ok(())
+                        }),
+                        || writer.save(&snapshot(), None),
+                    );
+                } else {
+                    writer.save(&snapshot(), None);
+                }
+                writer.clear();
+            });
+            assert!(writer.protect_unloaded);
+            assert!(!writer.backup_sync.confirmed);
+            assert!(writer.backup_sync.pending.is_some());
+            assert_eq!(std::fs::read(&writer.path).unwrap(), b"snapshot B");
+            assert_eq!(std::fs::read(&history).unwrap(), b"history");
+            assert_eq!(std::fs::read(&backup).unwrap(), b"snapshot A");
+            assert_eq!(backups(&writer), vec![b"snapshot A".to_vec()]);
+            assert!(logs.contains("safe re-backup or manual inspection required"));
+            assert!(!logs.contains("preserved session recovery copy"));
+            assert!(!logs.contains("session saved"));
+            assert!(!logs.contains("session cleared"));
+            drop(writer);
+        }
+    }
+
+    #[test]
+    fn unloaded_retry_confirms_the_same_copy_before_releasing_protection() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        for phase in ["recovery.directory_sync", "recovery.parent_sync"] {
+            let (mut writer, _root) = isolated_writer(true);
+            std::fs::write(&writer.path, b"original unloaded bytes").unwrap();
+            let history = writer.path.with_file_name("session-history.json");
+            std::fs::write(&history, b"history").unwrap();
+            with_failure(phase, || writer.save(&snapshot(), None));
+            let pending = writer.backup_sync.pending.as_ref().unwrap().path.clone();
+            if phase == "recovery.parent_sync" {
+                let equivalent = writer.path.with_extension("equivalent");
+                std::fs::write(&equivalent, b"original unloaded bytes").unwrap();
+                std::fs::rename(equivalent, &writer.path).unwrap();
+            }
+            for _ in 0..3 {
+                with_failure(phase, || writer.save(&snapshot(), None));
+                assert!(writer.protect_unloaded);
+                assert_eq!(backups(&writer), vec![b"original unloaded bytes".to_vec()]);
+                assert_eq!(
+                    std::fs::read(&writer.path).unwrap(),
+                    b"original unloaded bytes"
+                );
+                assert_eq!(std::fs::read(&history).unwrap(), b"history");
+            }
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let observed = events.clone();
+            super::super::io::test_io::with(
+                Box::new(move |phase, _| {
+                    observed.borrow_mut().push(phase.to_string());
+                    Ok(())
+                }),
+                || writer.save(&snapshot(), None),
+            );
+            let events = events.borrow();
+            assert_eq!(
+                &events[..2],
+                [
+                    "recovery.retry_directory_sync",
+                    "recovery.retry_parent_sync"
+                ]
+            );
+            assert!(!writer.protect_unloaded);
+            assert!(writer.backup_sync.pending.is_none());
+            assert!(pending.exists());
+            assert_eq!(backups(&writer), vec![b"original unloaded bytes".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn restarted_writer_confirms_existing_snapshots_once_before_cadence() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let (mut writer, _root) = isolated_writer(false);
+        with_failure("recovery.directory_sync", || writer.save(&snapshot(), None));
+        let files = snapshots(&writer);
+        assert_eq!(files.len(), 1);
+        let mut restarted = SessionWriter {
+            path: writer.path.clone(),
+            protect_unloaded: false,
+            backup_sync: RecoveryDirectory::default(),
+            snapshot_sync: RecoveryDirectory::default(),
+        };
+        let mut changed = snapshot();
+        changed.workspaces[0].custom_name = Some("after restart".into());
+        let attempts = Rc::new(RefCell::new(Vec::new()));
+        let failed = attempts.clone();
+        super::super::io::test_io::with(
+            Box::new(move |phase, _| {
+                if phase.starts_with("recovery.") {
+                    failed.borrow_mut().push(phase.to_string());
+                    return Err(io::Error::other("restart sync unavailable"));
+                }
+                Ok(())
+            }),
+            || restarted.save(&changed, None),
+        );
+        assert!(!attempts.borrow().is_empty());
+        assert!(attempts
+            .borrow()
+            .iter()
+            .all(|phase| phase == "recovery.retry_directory_sync"));
+        assert!(!restarted.snapshot_sync.confirmed);
+        assert_eq!(snapshots(&restarted), files);
+        attempts.borrow_mut().clear();
+        let succeeded = attempts.clone();
+        super::super::io::test_io::with(
+            Box::new(move |phase, _| {
+                if phase.starts_with("recovery.") {
+                    succeeded.borrow_mut().push(phase.to_string());
+                }
+                Ok(())
+            }),
+            || {
+                restarted.save(&changed, None);
+                restarted.save(&changed, None);
+            },
+        );
+        assert_eq!(
+            *attempts.borrow(),
+            [
+                "recovery.retry_directory_sync",
+                "recovery.retry_parent_sync"
+            ]
+        );
+        assert_eq!(snapshots(&restarted), files);
+        assert!(restarted.snapshot_sync.confirmed);
+    }
+
+    #[test]
+    fn missing_source_does_not_require_an_usable_backup_directory() {
+        let (mut writer, _root) = isolated_writer(true);
+        std::fs::write(writer.path.with_file_name("session-backups"), b"blocked").unwrap();
+        with_failure("recovery.retry_directory_sync", || writer.clear());
+        assert!(writer.protect_unloaded);
+        assert!(!writer.path.exists());
+        with_failure("recovery.retry_directory_sync", || {
+            writer.save(&snapshot(), None)
+        });
+        assert!(!writer.protect_unloaded);
+        assert!(writer.path.exists());
+        assert_eq!(
+            std::fs::read(writer.path.with_file_name("session-backups")).unwrap(),
+            b"blocked"
+        );
+    }
+
+    #[test]
+    fn recovery_publish_collision_rewinds_the_source_before_retry() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (writer, _root) = isolated_writer(true);
+        let original = b"complete recovery bytes \xff";
+        std::fs::write(&writer.path, original).unwrap();
+        let attempts = Rc::new(Cell::new(0));
+        let count = attempts.clone();
+        assert!(super::super::io::test_io::with(
+            Box::new(move |phase, backup| {
+                if phase == "recovery.publish" {
+                    count.set(count.get() + 1);
+                    if count.get() == 1 {
+                        std::fs::write(backup, b"foreign complete backup")?;
+                    }
+                }
+                Ok(())
+            }),
+            || preserve_existing(&writer.path, &mut RecoveryDirectory::default()),
+        )
+        .unwrap());
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(
+            backups(&writer),
+            vec![b"foreign complete backup".to_vec(), original.to_vec()]
+        );
+    }
+
+    #[test]
+    fn recovery_collisions_do_not_remove_foreign_pending_or_complete_files() {
+        for pending_collision in [false, true] {
+            let (writer, _root) = isolated_writer(true);
+            let backup = writer
+                .path
+                .with_file_name("session-000000000000000000000000000000000000001-1-0.json");
+            let foreign = if pending_collision {
+                backup.with_extension("pending")
+            } else {
+                backup.clone()
+            };
+            std::fs::write(&foreign, b"foreign").unwrap();
+            let err = copy_recovery(
+                &mut io::Cursor::new(b"new recovery"),
+                &backup,
+                &mut RecoveryDirectory::default(),
+            )
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign");
+            assert_eq!(settled_entry_count(writer.path.parent().unwrap(), 1), 1);
+        }
+    }
+
+    #[test]
+    fn recovery_publish_collisions_stop_after_128_without_removing_foreign_files() {
+        let (writer, _root) = isolated_writer(true);
         std::fs::write(&writer.path, b"original").unwrap();
-        let temporary = writer.path.with_extension("json.tmp");
-        std::fs::create_dir(&temporary).unwrap();
-        writer.save(&snapshot(), None);
-        writer.save(&snapshot(), None);
+        let err = super::super::io::test_io::with(
+            Box::new(|phase, backup| {
+                if phase == "recovery.publish" {
+                    std::fs::write(backup, b"foreign")?;
+                }
+                Ok(())
+            }),
+            || preserve_existing(&writer.path, &mut RecoveryDirectory::default()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&writer.path).unwrap(), b"original");
-        std::fs::remove_dir(&temporary).unwrap();
-        writer.save(&snapshot(), None);
-        assert_eq!(backups(&writer), vec![b"original".to_vec()]);
-        remove_test_dir(&writer);
+        let directory = writer.path.with_file_name("session-backups");
+        assert_eq!(settled_entry_count(&directory, 128), 128);
+        let copies = backups(&writer);
+        assert_eq!(copies.len(), 128);
+        assert!(copies.iter().all(|bytes| bytes == b"foreign"));
+    }
+
+    #[test]
+    fn readonly_source_can_still_be_preserved_as_private_raw_bytes() {
+        let (writer, _root) = isolated_writer(true);
+        std::fs::write(&writer.path, b"readonly \xff").unwrap();
+        let original = std::fs::metadata(&writer.path).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&writer.path, readonly).unwrap();
+        let result = preserve_existing(&writer.path, &mut RecoveryDirectory::default());
+        std::fs::set_permissions(&writer.path, original).unwrap();
+        assert!(result.unwrap());
+        assert_eq!(backups(&writer), vec![b"readonly \xff".to_vec()]);
     }
 
     #[test]
@@ -618,7 +1582,7 @@ mod tests {
             .with_file_name("session-000000000000000000000000000000000000001-1-0.json");
         let mut source = io::Cursor::new(b"partial").chain(Interrupted);
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            copy_recovery(&mut source, &backup)
+            copy_recovery(&mut source, &backup, &mut RecoveryDirectory::default())
         }))
         .is_err());
         assert!(

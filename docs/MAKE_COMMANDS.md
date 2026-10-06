@@ -9,10 +9,10 @@
 
 | 命令 | 用途 | 前置 | 副作用 | 证据 |
 |---|---|---|---|---|
-| `just test` | 全量验证：编排器并行跑 nextest + maintenance + 热路径架构 + 资产 + docs 契约；五个 phase 默认最多同时跑 `min(2, 5, test_budget)` 个。combined budget 默认 `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET`/`--test-budget`；phase 可用 `HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs`，maintenance 可用 `HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs`，nextest 可用 `HERDR_NEXTEST_JOBS`/`--nextest-jobs` 覆盖 | Rust/Python/Bun/Node 工具链 | 编译产物、临时目录、`target/test-suite-logs/<run-id>/` 阶段日志与原子 manifest；manifest 含 budget、三个 jobs 字段、每 phase 结果与 failures | 退出码 0；阶段汇总各子命令状态；命令行值优先于环境变量，非法/非正值失败 |
-| `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源）；justfile 读取 `HERDR_NEXTEST_JOBS`，未设置时 `--test-threads 4` | Rust | 编译产物 | 退出码 0 |
+| `just test` | 全量验证：编排器运行 nextest + maintenance + 热路径架构 + 资产 + docs 契约；五个 phase 默认最多同时跑 `min(2, 5, test_budget)` 个，budget=1 默认串行。combined budget 默认 `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET`/`--test-budget`；并发时 maintenance 默认 `min(4, max(1, budget-1))`、nextest 用剩余预算，串行时两者分别默认 `min(4, budget)` 与 `budget`。phase 可用 `HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs`，maintenance 可用 `HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs`，nextest 可用 `HERDR_NEXTEST_JOBS`/`--nextest-jobs` 覆盖 | Rust/Python/Bun/Node 工具链 | 编译产物、临时目录、`target/test-suite-logs/<run-id>/` 逐行刷新的阶段日志与原子 manifest；启动即打印路径，manifest 含 budget、三个 jobs 字段、每 phase 的 pending/running/完成状态与 failures | 退出码 0；阶段汇总各子命令状态；命令行值优先于环境变量，非法/非正值失败，显式值不截断；被强制终止留下的 running 不算通过 |
+| `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源）；`HERDR_NEXTEST_JOBS` 默认 4，表示合计测试线程；`HERDR_NEXTEST_SHARDS` 默认 1，可显式启用不超过 jobs 的 hash 分片。分片由 `scripts/run_nextest.py` 复用一次构建的 metadata，逐测试进程隔离不变 | Rust、Python | 编译产物；分片运行的独立 metadata、store、日志和原子 manifest 留在 `target/test-suite-logs/` | 选中测试不重不漏、所有分片正常完成且退出码 0；无效预算、不兼容调度配置、启动/输出失败或取消不能假绿 |
 | `just test-one <filter>` | 单个 nextest 过滤器；使用同一 `HERDR_NEXTEST_JOBS`/默认 4 | 同上 | 同上 | 退出码 0 |
-| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败）。清单由 `scripts/run_parallel_unittest.py` 按类拆成子进程，默认以 `min(4, cpu_count)` worker 并发，可用 `HERDR_MAINTENANCE_JOBS`/执行器 `--jobs` 覆盖；`just test` 通过 `--maintenance-jobs` 解析后注入该环境变量。上一轮耗时记在 `target/test-suite-logs/unittest-durations.json`，以原子替换写回，据此把慢类拆块、从长到短派发 | Python3（3.10 需 tomli）、Bun | 写 `target/test-suite-logs/unittest-durations.json` | 执行器末行 `OK` + bun test OK + 丢弃检查 `OK: … 均无命中`；失败单元回放完整输出 |
+| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test ./scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败）。清单由 `scripts/run_parallel_unittest.py` 按类拆成子进程，默认以 `min(4, cpu_count)` worker 并发，可用 `HERDR_MAINTENANCE_JOBS`/执行器 `--jobs` 覆盖；`just test` 通过 `--maintenance-jobs` 解析后注入该环境变量。上一轮耗时记在 `target/test-suite-logs/unittest-durations.json`，以原子替换写回，据此把慢类拆块、从长到短派发 | Python3（3.10 需 tomli）、Bun | 写 `target/test-suite-logs/unittest-durations.json` | 执行器末行 `OK` + bun test OK + 丢弃检查 `OK: … 均无命中`；失败单元回放完整输出 |
 | `just test-windows-input [args..]` | 仅 Windows：本机交互式 Windows Terminal 输入资格测试（`scripts/test_windows_input.ps1`，注入输入并清空剪贴板；普通 CI 不跑） | Windows、pwsh | 注入键鼠输入、清空剪贴板 | 报告中各输入路径的覆盖结论 |
 | `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |
 | `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |
@@ -46,6 +46,15 @@
 | `just docs-contract-test` | docs 快照/版本生命周期工具（bun；集成用例以 `node` 子进程执行 `scripts/docs/*.mjs`，需 Node 在 PATH） | bun test OK |
 | `just integration-assets-test` | 捆绑 agent 集成资产（bun） | bun test OK |
 
+Windows x64 的独立 smoke 入口与所有权约束见 `DEVELOPMENT.md`「Windows 隔离 smoke」：
+`powershell -NoProfile -File scripts/windows_tui_compat.ps1 -ExePath <exe> -Shell powershell`
+（或选择 `pwsh`），以及
+`powershell -NoProfile -File scripts/windows_smoke_conpty_path.ps1 -ExePath <exe>`。
+需要仓库钉版的已安装 MSVC rustc/LLD；小构建及报告保留在项目 `target/tmp/windows-smoke/`。
+两者的 `-ConptyMode system` 显式选择系统 ConPTY，默认清除继承覆盖；`-PassThru` 返回结构化
+报告，同宿主调用必须立即核对每次 `$LASTEXITCODE`。清理失败或需要强制回收均非零；
+`-Interactive` 不是默认步骤，需要单独人工授权与验收。
+
 ## 性能
 
 | 命令 | 用途 | 前置 | 证据 |
@@ -56,7 +65,7 @@
 | `just bench-retained-graphics` | full/retained text、静态图与 unchanged-image 更新画像 | release 构建 | 控制台画像 |
 | `just bench-api-fairness` | 外部 API burst 的首批延迟与 drain 成本画像 | release 构建 | 控制台画像 |
 | `just bench-process-inspection` | Windows 进程检查扩展画像：空闲 shell、进程快照/句柄打开/命令读取次数 | 原生 Windows、release 构建 | 控制台画像；非 Windows 不适用 |
-| `just bench-release-smoke` | 发布前 CPU 对比（~3–5 分钟；未设 `HERDR_PERF_BASELINE_BIN` 下载 stable；Linux/macOS；候选与 baseline 在 `hidden50`/`visible30` 两轮串行运行） | 网络或本地基线 | `.local/perf-baseline/run-*/` 保留 run-id、metadata、candidate/baseline 命令、原始采样、summary、run log 与退出码；smoke/case 将 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、`KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）全部指向 run 内私有临时 state，且清除继承的 herdr socket/session；仅清理临时运行态，显著回归须调查 |
+| `just bench-release-smoke` | 发布前 CPU 对比（~3–5 分钟；未设 `HERDR_PERF_BASELINE_BIN` 下载 stable；Linux/macOS；候选与 baseline 在 `hidden50`/`visible30` 两轮串行运行） | 网络或本地基线 | `.local/perf-baseline/run-*/` 保留 run-id、metadata、candidate/baseline 命令、原始采样、summary、run log 与退出码；smoke/case 将 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、`KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）全部指向 run 内私有临时 state；smoke 顶层及 case 启动/控制/清理清除继承的 `HERDR_CONFIG_PATH`，case 隔离 herdr socket/session；仅清理临时运行态，显著回归须调查 |
 
 ## 发布链（上游保留入口；见 `AGENT_RULES/release-channels.md`）
 
@@ -85,7 +94,11 @@
 本机启用了 `just local-build-config` 时预检会拒绝打包（链接器与不稳定选项不得带进安装包），先 `--disable`。
 Cargo 编译目录隔离在 `target/gx/<platform>`，最终默认输出 `target/packages`；
 `--output-dir <目录>` 可选择其他产物目录。同名产物禁止覆盖，重跑应使用新的空目录。
-Windows 与 WSL 同一检出的 vendored Zig 输出仍共享，不要并发运行双平台构建。
+Cargo 驱动的 Zig 安装输出按本次 `OUT_DIR/zig-out` 隔离；直接 `just build-libghostty-vt`
+仍写 vendored 的 `zig-out`。两入口的默认缓存为仓库内 `.local/zig-cache/global` 与
+`.local/zig-cache/local`，各自支持 `ZIG_GLOBAL_CACHE_DIR` / `ZIG_LOCAL_CACHE_DIR` 显式覆盖。
+Windows 与 WSL 使用同一检出时不要并发复用本地缓存或直接构建输出。
+Windows 检查遇到 fmt/clippy 失败即报告原始诊断，不自动删除缓存或重跑掩盖错误。
 WSL 在 `/mnt/` 共享盘遇到 Zig 缓存 rename `AccessDenied` 时，将 `ZIG_LOCAL_CACHE_DIR`
 指向自己新建的 Linux 原生临时目录（如 `mktemp -d /tmp/herdr-gx-zig.XXXXXX`），完成后仅清理
 该临时目录；不要删除或复用正在使用的 Windows 缓存。非默认目录的 Linux Zig 用 `ZIG` 指定。

@@ -644,7 +644,7 @@ async fn synchronized_view_preserves_writer_backpressure_recovery() {
         matches!(&baseline[0].message, ServerMessage::PaneSurface(surface)
         if frame_text(&surface.frame).contains("BASE"))
     );
-    let full = server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 1 });
+    let full = simulate_render_drain(&mut server, 1, &output);
     assert!(full, "writer drain must schedule deferred full rendering");
     server.dispatch_render_tick(false, full, &HashSet::new(), false);
     let recovered = decode_batch(

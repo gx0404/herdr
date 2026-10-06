@@ -15,12 +15,14 @@ use super::{
 };
 
 pub(crate) use super::unix_common::{
-    configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
-    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
-    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
-    remote_ssh_config_paths, reusable_remote_ssh_config_dir, set_default_plugin_pane_pwd,
-    shutdown_client_stream, status_commands_supported, wait_client_stream_readable,
-    write_client_stream, write_remote_ssh_config_file, ClientStreamReader, StatusCommandGuard,
+    client_stream_control, configure_status_command, create_remote_private_dir,
+    create_remote_ssh_config_dir, create_remote_ssh_config_file, finish_client_stream, hostname,
+    local_datetime, prepare_server_client_stream, read_client_handshake,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
+    remote_reattach_program, remote_ssh_config_paths, reusable_remote_ssh_config_dir,
+    set_default_plugin_pane_pwd, shutdown_client_stream, status_commands_supported,
+    wait_client_stream_readable, write_client_stream, write_remote_ssh_config_file,
+    ClientStreamControl, ClientStreamReader, ServerClientStream, StatusCommandGuard,
 };
 
 mod bootstrap;
@@ -135,38 +137,45 @@ pub(crate) fn write_config_temporary(
     temporary: &Path,
     contents: &[u8],
 ) -> std::io::Result<()> {
-    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
         .open(temporary)?;
     if let Some(source) = source {
         let input = std::fs::File::open(source)?;
-        let metadata = input.metadata()?;
-        let current = output.metadata()?;
-        if (metadata.uid(), metadata.gid()) != (current.uid(), current.gid())
-            && unsafe { libc::fchown(output.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        // Prepare access controls while the temporary is still empty. Copy ACLs
-        // before mode bits so no inherited/default grant can expose the content.
-        // Do not copy data or old timestamps.
-        if unsafe {
-            libc::fcopyfile(
-                input.as_raw_fd(),
-                output.as_raw_fd(),
-                std::ptr::null_mut(),
-                libc::COPYFILE_ACL | libc::COPYFILE_XATTR,
-            )
-        } != 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        output.set_permissions(metadata.permissions())?;
+        prepare_config_metadata(&input, &output)?;
     }
     output.write_all(contents)?;
     output.sync_all()
+}
+
+pub(crate) fn prepare_config_metadata(
+    input: &std::fs::File,
+    output: &std::fs::File,
+) -> std::io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+    let metadata = input.metadata()?;
+    let current = output.metadata()?;
+    if (metadata.uid(), metadata.gid()) != (current.uid(), current.gid())
+        && unsafe { libc::fchown(output.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Prepare access controls while the temporary is still empty. Copy ACLs
+    // before mode bits so no inherited/default grant can expose the content.
+    // Do not copy data or old timestamps.
+    if unsafe {
+        libc::fcopyfile(
+            input.as_raw_fd(),
+            output.as_raw_fd(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_ACL | libc::COPYFILE_XATTR,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    output.set_permissions(metadata.permissions())
 }
 
 const PROC_PGRP_ONLY: u32 = 2;

@@ -2007,6 +2007,899 @@ fn install_kimi_errors_when_config_dir_missing() {
     let _ = fs::remove_dir_all(base);
 }
 
+fn kimi_audit_retry<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+    deadline: std::time::Instant,
+    mut wait: impl FnMut(std::time::Duration),
+) -> std::io::Result<T> {
+    loop {
+        let error = match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if !cfg!(windows) || !matches!(error.raw_os_error(), Some(32 | 33)) || remaining.is_zero() {
+            return Err(error);
+        }
+        wait(remaining.min(std::time::Duration::from_millis(10)));
+        if std::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+    }
+}
+
+fn kimi_audit_read(
+    path: &Path,
+    deadline: std::time::Instant,
+    wait: impl FnMut(std::time::Duration),
+) -> std::io::Result<Vec<u8>> {
+    kimi_audit_retry(|| fs::read(path), deadline, wait)
+}
+
+#[cfg(windows)]
+fn kimi_audit_open_exclusive(
+    path: &Path,
+    deadline: std::time::Instant,
+    wait: impl FnMut(std::time::Duration),
+) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    kimi_audit_retry(
+        || {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(path)
+        },
+        deadline,
+        wait,
+    )
+}
+
+type KimiAuditSnapshot = std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>;
+
+#[track_caller]
+fn kimi_audit_snapshot(root: &Path) -> KimiAuditSnapshot {
+    let caller = std::panic::Location::caller();
+    kimi_audit_snapshot_for(root, 0, &format!("{}:{}", caller.file(), caller.line()))
+}
+
+fn kimi_audit_snapshot_for(root: &Path, case_index: usize, phase: &str) -> KimiAuditSnapshot {
+    kimi_audit_snapshot_after_enumeration(root, case_index, phase, |_| {})
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn kimi_audit_snapshot_after_enumeration(
+    root: &Path,
+    case_index: usize,
+    phase: &str,
+    mut after_enumeration: impl FnMut(&Path),
+) -> Result<KimiAuditSnapshot, String> {
+    let mut snapshot = KimiAuditSnapshot::new();
+    let mut pending = vec![root.to_path_buf()];
+    let mut enumerated = Vec::new();
+    let describe = |operation: &str, path: &Path, names: &[PathBuf], error: std::io::Error| {
+        format!(
+            "cannot snapshot: case_index={case_index}, phase={phase}, operation={operation}, path={}, enumerated={names:?}, os_code={:?}, error={error:?}",
+            path.display(),
+            error.raw_os_error()
+        )
+    };
+    while let Some(dir) = pending.pop() {
+        let entries =
+            fs::read_dir(&dir).map_err(|error| describe("read_dir", &dir, &enumerated, error))?;
+        let mut listed = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| describe("read_dir_entry", &dir, &enumerated, error))?;
+            let path = entry.path();
+            enumerated.push(path.strip_prefix(root).unwrap().to_path_buf());
+            let kind = entry
+                .file_type()
+                .map_err(|error| describe("file_type", &path, &enumerated, error))?;
+            listed.push((path, kind));
+        }
+        after_enumeration(&dir);
+        for (path, kind) in listed {
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if kind.is_dir() {
+                snapshot.insert(relative, None);
+                pending.push(path);
+            } else {
+                if !kind.is_file() {
+                    return Err(describe(
+                        "file_type",
+                        &path,
+                        &enumerated,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "unexpected fixture type",
+                        ),
+                    ));
+                }
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let contents = kimi_audit_read(&path, deadline, std::thread::sleep)
+                    .map_err(|error| describe("read", &path, &enumerated, error))?;
+                snapshot.insert(relative, Some(contents));
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
+#[test]
+fn audit_p0_kimi_snapshot_rejects_file_removed_after_enumeration() {
+    let dir = crate::config::test_dirs::TempDir::new("audit-kimi-disappeared");
+    let path = dir.join("CONFIG.TOML.HERDR-BACKUP.tmp");
+    fs::write(&path, b"private fixture content").unwrap();
+    let mut barriers = 0;
+    let error = kimi_audit_snapshot_after_enumeration(&dir, 7, "after-install", |listed_dir| {
+        assert_eq!(listed_dir, dir.path());
+        barriers += 1;
+        fs::remove_file(&path).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(barriers, 1);
+    for expected in [
+        "case_index=7",
+        "phase=after-install",
+        "operation=read,",
+        "enumerated=[",
+        "CONFIG.TOML.HERDR-BACKUP.tmp",
+        "NotFound",
+    ] {
+        assert!(error.contains(expected), "{error}");
+    }
+    assert!(error.contains(&format!(
+        "os_code={:?}",
+        fs::read(&path).unwrap_err().raw_os_error()
+    )));
+    assert!(!error.contains("private fixture content"));
+}
+
+#[test]
+fn audit_p0_kimi_snapshot_includes_persistent_tmp_in_comparison() {
+    let dir = crate::config::test_dirs::TempDir::new("audit-kimi-persistent-tmp");
+    let relative = PathBuf::from("CONFIG.TOML.HERDR-BACKUP.tmp");
+    let path = dir.join(&relative);
+    fs::write(&path, b"before\0\xff").unwrap();
+    let before = kimi_audit_snapshot_for(&dir, 0, "before-change");
+    assert_eq!(before.get(&relative), Some(&Some(b"before\0\xff".to_vec())));
+    assert_eq!(kimi_audit_snapshot_for(&dir, 0, "unchanged"), before);
+    fs::write(&path, b"after\r\n").unwrap();
+    let after = kimi_audit_snapshot_for(&dir, 0, "after-change");
+    assert_eq!(after.get(&relative), Some(&Some(b"after\r\n".to_vec())));
+    assert_ne!(after, before);
+}
+
+#[cfg(windows)]
+struct KimiAuditFileLock {
+    path: PathBuf,
+    file: Option<fs::File>,
+    byte_locked: bool,
+}
+
+#[cfg(windows)]
+impl KimiAuditFileLock {
+    fn unlock(&mut self) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{Storage::FileSystem::UnlockFileEx, System::IO::OVERLAPPED};
+
+        if self.byte_locked {
+            let file = self.file.as_ref().expect("byte lock must retain its file");
+            let mut overlapped = OVERLAPPED::default();
+            if unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlapped) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            self.byte_locked = false;
+        }
+        Ok(())
+    }
+
+    fn release(mut self) {
+        self.unlock()
+            .unwrap_or_else(|error| panic!("cannot unlock {}: {error:?}", self.path.display()));
+        drop(self.file.take());
+    }
+}
+
+#[cfg(windows)]
+impl Drop for KimiAuditFileLock {
+    fn drop(&mut self) {
+        let result = self.unlock();
+        drop(self.file.take());
+        if !std::thread::panicking() {
+            result
+                .unwrap_or_else(|error| panic!("cannot unlock {}: {error:?}", self.path.display()));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn kimi_audit_lock_file(path: &Path, code: i32) -> KimiAuditFileLock {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::{
+        Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY},
+        System::IO::OVERLAPPED,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    if code == 32 {
+        options.share_mode(0);
+    }
+    let mut held = KimiAuditFileLock {
+        path: path.to_path_buf(),
+        file: Some(options.open(path).unwrap()),
+        byte_locked: false,
+    };
+    if code == 33 {
+        let file = held.file.as_ref().unwrap();
+        let mut overlapped = OVERLAPPED::default();
+        assert_ne!(
+            unsafe {
+                LockFileEx(
+                    file.as_raw_handle(),
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    1,
+                    0,
+                    &mut overlapped,
+                )
+            },
+            0,
+            "{}: {:?}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+        held.byte_locked = true;
+    }
+    assert_eq!(fs::read(path).unwrap_err().raw_os_error(), Some(code));
+    held
+}
+
+#[cfg(windows)]
+#[test]
+fn audit_p0_kimi_snapshot_read_recovers_after_windows_lock_release() {
+    use std::time::{Duration, Instant};
+
+    let dir = crate::config::test_dirs::TempDir::new("audit-kimi-read");
+    let root = dir.path().to_path_buf();
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::write(root.join("user-hook"), b"untouched\r\n").unwrap();
+    for code in [32, 33] {
+        let path = root.join("nested").join(format!("locked-{code}"));
+        let contents = b"full\0bytes\r\n\xff";
+        fs::write(&path, contents).unwrap();
+        let before = kimi_audit_snapshot(&root);
+        let held = kimi_audit_lock_file(&path, code);
+        std::thread::scope(|scope| {
+            let (release, wait_release) = std::sync::mpsc::channel();
+            let (released, wait_released) = std::sync::mpsc::channel();
+            let holder = scope.spawn(move || {
+                let signal = wait_release.recv_timeout(Duration::from_secs(30));
+                held.release();
+                if signal.is_ok() {
+                    released.send(()).unwrap();
+                }
+            });
+            let mut waits = 0;
+            let result = kimi_audit_read(&path, Instant::now() + Duration::from_secs(30), |_| {
+                waits += 1;
+                if waits == 1 {
+                    release.send(()).unwrap();
+                    wait_released.recv_timeout(Duration::from_secs(30)).unwrap();
+                }
+            });
+            drop(release);
+            holder.join().unwrap();
+            assert_eq!(
+                result.unwrap_or_else(|error| panic!("{}: {error:?}", path.display())),
+                contents
+            );
+            assert!(waits > 0, "the locked read must enter the retry path");
+        });
+        assert_eq!(kimi_audit_snapshot(&root), before);
+    }
+    drop(dir);
+    assert!(
+        !root.exists(),
+        "temporary tree must be cleaned after handles close"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn audit_p0_kimi_snapshot_read_stops_at_deadline_for_persistent_windows_locks() {
+    use std::time::{Duration, Instant};
+
+    let dir = crate::config::test_dirs::TempDir::new("audit-kimi-deadline");
+    let root = dir.path().to_path_buf();
+    let path = root.join("locked-file");
+    fs::write(&path, b"unchanged").unwrap();
+    for code in [32, 33] {
+        let held = kimi_audit_lock_file(&path, code);
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let error = kimi_audit_read(&path, deadline, std::thread::sleep).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(code));
+        assert!(
+            Instant::now() >= deadline,
+            "sharing errors must wait until the deadline"
+        );
+        assert!(Instant::now() - deadline < Duration::from_secs(5));
+        let failure = std::panic::catch_unwind(|| kimi_audit_snapshot(&root)).unwrap_err();
+        let message = failure.downcast_ref::<String>().unwrap();
+        assert!(message.contains("cannot snapshot"));
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains(&format!("code: {code}")));
+        held.release();
+        assert_eq!(fs::read(&path).unwrap(), b"unchanged");
+    }
+    drop(dir);
+    assert!(!root.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn audit_p0_kimi_snapshot_lock_fixture_releases_during_unwind() {
+    let dir = crate::config::test_dirs::TempDir::new("audit-kimi-unwind");
+    let root = dir.path().to_path_buf();
+    let path = root.join("locked-file");
+    fs::write(&path, b"unchanged").unwrap();
+    for code in [32, 33] {
+        let acquired = std::sync::atomic::AtomicBool::new(false);
+        let failure = std::panic::catch_unwind(|| {
+            let _held = kimi_audit_lock_file(&path, code);
+            acquired.store(true, std::sync::atomic::Ordering::Relaxed);
+            panic!("exercise fixture cleanup during unwind");
+        });
+        assert!(acquired.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(failure.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"unchanged");
+    }
+    drop(dir);
+    assert!(!root.exists());
+}
+
+#[test]
+fn audit_p0_kimi_snapshot_read_does_not_retry_other_errors() {
+    let dir = crate::config::test_dirs::TempDir::new("audit-kimi-read-errors");
+    let root = dir.path().to_path_buf();
+    for path in [root.join("missing"), root.clone()] {
+        let expected = fs::read(&path).unwrap_err();
+        let error = kimi_audit_read(
+            &path,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+            |_| panic!("must not retry non-sharing error for {}", path.display()),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), expected.raw_os_error());
+        assert_eq!(error.kind(), expected.kind());
+    }
+    drop(dir);
+    assert!(!root.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn audit_p0_kimi_exclusive_probe_waits_for_shared_reader_release() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::time::{Duration, Instant};
+
+    let dir = crate::config::test_dirs::TempDir::new("audit-kimi-shared-reader");
+    let root = dir.path().to_path_buf();
+    let path = root.join("config.toml");
+    fs::write(&path, b"unchanged\r\n").unwrap();
+    let before = kimi_audit_snapshot(&root);
+    let reader = fs::File::open(&path).unwrap();
+    assert_eq!(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(32)
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"unchanged\r\n");
+    std::thread::scope(|scope| {
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let (released, wait_released) = std::sync::mpsc::channel();
+        let holder = scope.spawn(move || {
+            let signal = wait_release.recv_timeout(Duration::from_secs(30));
+            drop(reader);
+            if signal.is_ok() {
+                released.send(()).unwrap();
+            }
+        });
+        let mut waits = 0;
+        let result =
+            kimi_audit_open_exclusive(&path, Instant::now() + Duration::from_secs(30), |_| {
+                waits += 1;
+                if waits == 1 {
+                    release.send(()).unwrap();
+                    wait_released.recv_timeout(Duration::from_secs(30)).unwrap();
+                }
+            });
+        drop(release);
+        holder.join().unwrap();
+        drop(result.unwrap_or_else(|error| panic!("{}: {error:?}", path.display())));
+        assert!(
+            waits > 0,
+            "the shared reader must block the exclusive probe"
+        );
+    });
+    assert_eq!(kimi_audit_snapshot(&root), before);
+    drop(dir);
+    assert!(!root.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn audit_p0_kimi_exclusive_probe_rejects_persistent_occupancy_and_other_errors() {
+    use std::time::{Duration, Instant};
+
+    let dir = crate::config::test_dirs::TempDir::new("audit-kimi-probe-errors");
+    let root = dir.path().to_path_buf();
+    let path = root.join("config.toml");
+    fs::write(&path, b"unchanged\r\n").unwrap();
+    let reader = fs::File::open(&path).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(50);
+    let error = kimi_audit_open_exclusive(&path, deadline, std::thread::sleep).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(32));
+    assert!(Instant::now() >= deadline);
+    assert!(Instant::now() - deadline < Duration::from_secs(5));
+    drop(reader);
+    drop(
+        kimi_audit_open_exclusive(
+            &path,
+            Instant::now() + Duration::from_secs(2),
+            std::thread::sleep,
+        )
+        .unwrap(),
+    );
+    for path in [root.join("missing"), root.clone()] {
+        let error =
+            kimi_audit_open_exclusive(&path, Instant::now() + Duration::from_secs(30), |_| {
+                panic!("must not retry non-sharing error for {}", path.display())
+            })
+            .unwrap_err();
+        assert!(!matches!(error.raw_os_error(), Some(32 | 33)));
+    }
+    assert_eq!(fs::read(&path).unwrap(), b"unchanged\r\n");
+    drop(dir);
+    assert!(!root.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn audit_p0_kimi_install_uninstall_leave_no_persistent_file_occupancy() {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    let dirs = crate::config::test_dirs::isolate_dirs("audit-kimi-handles");
+    std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
+    let dir = dirs.home_dir().join(".kimi-code");
+    fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("config.toml");
+    fs::write(&config, "default_model = 'moonshot'\n").unwrap();
+    let root = dirs.home_dir().parent().unwrap().to_path_buf();
+    let assert_accessible = |path: &Path| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        drop(
+            kimi_audit_open_exclusive(path, deadline, std::thread::sleep).unwrap_or_else(|error| {
+                panic!(
+                    "cannot access exclusively before deadline {}: {error:?}",
+                    path.display()
+                )
+            }),
+        );
+    };
+    for _ in 0..2 {
+        let installed = install_kimi().expect("install must retain its ordinary error boundary");
+        assert_accessible(&installed.config_path);
+        assert_accessible(&installed.hook_path);
+        assert!(!dir.join("config.toml.herdr-backup").exists());
+        assert!(!dir.join("config.toml.herdr-backup.pending").exists());
+    }
+    for _ in 0..2 {
+        let result = uninstall_kimi().expect("uninstall must retain its ordinary error boundary");
+        assert_accessible(&result.config_path);
+        assert!(!result.hook_path.exists());
+    }
+    drop(dirs);
+    assert!(!root.exists());
+}
+
+fn assert_kimi_audit_marker_rejection(action: &str, run: impl Fn() -> std::io::Result<()>) {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
+    let begin = KIMI_CONFIG_BLOCK_BEGIN;
+    let end = KIMI_CONFIG_BLOCK_END;
+    let mut failures = Vec::new();
+    for (case, markers) in [
+        ("missing end", vec![begin]),
+        ("missing begin", vec![end]),
+        ("reversed markers", vec![end, begin]),
+        ("nested markers", vec![begin, begin, end, end]),
+        ("duplicate begin", vec![begin, begin, end]),
+        ("duplicate end", vec![begin, end, end]),
+        ("duplicate blocks", vec![begin, end, begin, end]),
+    ] {
+        for existing_hooks in [false, true] {
+            let dirs = crate::config::test_dirs::isolate_dirs("audit-kimi-reject");
+            let dir = dirs.home_dir().join(".kimi-code");
+            fs::create_dir_all(&dir).unwrap();
+            assert_eq!(kimi_dir().unwrap(), dir);
+            let content = format!(
+                "# user header\r\ndefault_model = 'keep'\r\n{}\r\n[models.user]\r\nprovider = 'keep'\r\n# user tail\r\n",
+                markers.join("\r\n")
+            );
+            toml::from_str::<toml::Value>(&content)
+                .expect("broken marker fixtures must still be valid TOML");
+            fs::write(dir.join("config.toml"), content).unwrap();
+            if existing_hooks {
+                let hooks = dir.join("hooks");
+                fs::create_dir_all(&hooks).unwrap();
+                for name in [
+                    "herdr-agent-state.sh",
+                    "herdr-agent-state.ps1",
+                    "user-hook.txt",
+                ] {
+                    fs::write(
+                        hooks.join(name),
+                        format!("# HERDR_INTEGRATION_ID=kimi\n# previous asset: {name}\n"),
+                    )
+                    .unwrap();
+                }
+            }
+            let root = dirs.home_dir().parent().unwrap();
+            let before = kimi_audit_snapshot(root);
+            let result = run();
+            let after = kimi_audit_snapshot(root);
+            let label = format!("{action}: {case}, existing_hooks={existing_hooks}");
+            if after != before {
+                failures.push(format!(
+                    "{label}: modified the private root before rejection"
+                ));
+            }
+            match result {
+                Ok(()) => failures.push(format!("{label}: accepted damaged markers")),
+                Err(error) => {
+                    if error.kind() != std::io::ErrorKind::InvalidData
+                        || !error.to_string().contains("config.toml")
+                    {
+                        failures.push(format!("{label}: unexpected rejection: {error:?}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn audit_p0_kimi_install_rejects_damaged_markers_before_any_write() {
+    assert_kimi_audit_marker_rejection("install", || install_kimi().map(|_| ()));
+}
+
+#[test]
+fn audit_p0_kimi_uninstall_rejects_damaged_markers_before_any_write() {
+    assert_kimi_audit_marker_rejection("uninstall", || uninstall_kimi().map(|_| ()));
+}
+
+fn kimi_audit_pseudo_marker_configs() -> Vec<String> {
+    let begin = KIMI_CONFIG_BLOCK_BEGIN;
+    let end = KIMI_CONFIG_BLOCK_END;
+    let paired = format!("before\n{begin}\nkeep this text\n{end}\nafter");
+    [
+        format!("instructions = \"\"\"\n{paired}\n\"\"\""),
+        format!("instructions = '''\n{paired}\n'''"),
+        format!("notes = [{{ text = \"\"\"\n{begin}\nkeep this text\n\"\"\" }}]"),
+        format!("notes = {{ text = '''\n{end}\nkeep this text\n''' }}"),
+    ]
+    .into_iter()
+    .map(|value| {
+        format!(
+            "# user header\ndefault_model = 'moonshot'\n{value}\n[models.user]\nprovider = 'keep'\n# user tail\n"
+        )
+    })
+    .collect()
+}
+
+#[test]
+fn audit_p0_kimi_text_helpers_preserve_markers_inside_multiline_strings() {
+    let hook_path = Path::new("hooks").join(KIMI_HOOK_INSTALL_NAME);
+    for content in kimi_audit_pseudo_marker_configs() {
+        let expected: toml::Table = toml::from_str(&content).unwrap();
+        assert_eq!(
+            super::config_edit::remove_kimi_config_block(&content).unwrap(),
+            content,
+            "marker-shaped string data is not a managed comment block"
+        );
+        let updated =
+            super::config_edit::build_kimi_config_with_hooks(&content, &hook_path).unwrap();
+        assert!(
+            updated.starts_with(&content),
+            "user text must remain byte-exact"
+        );
+        let mut parsed: toml::Table = toml::from_str(&updated).unwrap();
+        let hooks = parsed.remove("hooks").unwrap();
+        assert_eq!(hooks.as_array().unwrap().len(), KIMI_HOOK_EVENTS.len());
+        assert_eq!(parsed, expected, "only managed hooks may be added");
+        assert_eq!(
+            super::config_edit::remove_kimi_config_block(&updated).unwrap(),
+            content
+        );
+    }
+}
+
+#[test]
+fn audit_p0_kimi_install_uninstall_preserve_multiline_string_markers() {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
+    for content in kimi_audit_pseudo_marker_configs() {
+        let dirs = crate::config::test_dirs::isolate_dirs("audit-kimi-string");
+        let dir = dirs.home_dir().join(".kimi-code");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(kimi_dir().unwrap(), dir);
+        let config_path = dir.join("config.toml");
+        fs::write(&config_path, &content).unwrap();
+        let expected: toml::Table = toml::from_str(&content).unwrap();
+        let root = dirs.home_dir().parent().unwrap();
+        let before = kimi_audit_snapshot(root);
+
+        let uninstalled = uninstall_kimi().expect("string markers must not reject uninstall");
+        assert!(!uninstalled.updated_config);
+        assert!(!uninstalled.removed_hook_file);
+        assert_eq!(kimi_audit_snapshot(root), before);
+
+        let install_result = install_kimi();
+        let installed = install_result.expect("string markers must not reject install");
+        let updated = fs::read_to_string(&config_path).unwrap();
+        assert!(updated.starts_with(&content));
+        let mut parsed: toml::Table = toml::from_str(&updated).unwrap();
+        let hooks = parsed.remove("hooks").unwrap();
+        assert_eq!(hooks.as_array().unwrap().len(), KIMI_HOOK_EVENTS.len());
+        assert_eq!(parsed, expected);
+        for (event, matcher, action) in KIMI_HOOK_EVENTS {
+            assert_kimi_hook(&updated, &installed.hook_path, event, matcher, action);
+        }
+
+        let uninstalled = uninstall_kimi().unwrap();
+        assert!(uninstalled.updated_config);
+        assert!(uninstalled.removed_hook_file);
+        assert_eq!(fs::read(&config_path).unwrap(), content.as_bytes());
+        assert!(!installed.hook_path.exists());
+    }
+}
+
+fn assert_kimi_audit_roundtrip(newline: &str) {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    let dirs = crate::config::test_dirs::isolate_dirs("audit-kimi-roundtrip");
+    std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
+    let dir = dirs.home_dir().join(".kimi-code");
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    assert_eq!(kimi_dir().unwrap(), dir);
+    let user_hook = hooks_dir.join("user-hook.txt");
+    fs::write(&user_hook, b"untouched user hook\r\n").unwrap();
+    let prefix = "# user header\ndefault_model = 'moonshot' # keep model\n\n[[hooks]]\nevent = 'Notification'\nmatcher = 'user.custom'\ncommand = 'echo keep'\ntimeout = 3 # keep timeout\n"
+        .replace('\n', newline);
+    let suffix =
+        "[models.user]\nprovider = 'keep' # keep provider\n# user tail\n".replace('\n', newline);
+    let original = format!("{prefix}{suffix}");
+    let content = format!(
+        "{prefix}{KIMI_CONFIG_BLOCK_BEGIN}{newline}[[hooks]]{newline}event = 'Stop'{newline}command = 'echo previous-managed'{newline}timeout = 10{newline}{KIMI_CONFIG_BLOCK_END}{newline}{suffix}"
+    );
+    toml::from_str::<toml::Value>(&content).unwrap();
+    let expected: toml::Value = toml::from_str(&original).unwrap();
+    let config_path = dir.join("config.toml");
+    fs::write(&config_path, content).unwrap();
+
+    let install_result = install_kimi();
+    let installed = install_result.expect("one paired block must be replaceable");
+    let first = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        first.starts_with(&prefix),
+        "user prefix must remain byte-exact"
+    );
+    assert!(
+        first.contains(&suffix),
+        "user suffix must remain byte-exact"
+    );
+    assert_eq!(first.matches(KIMI_CONFIG_BLOCK_BEGIN).count(), 1);
+    assert_eq!(first.matches(KIMI_CONFIG_BLOCK_END).count(), 1);
+    let mut parsed: toml::Value = toml::from_str(&first).unwrap();
+    let hooks = parsed["hooks"].as_array_mut().unwrap();
+    assert_eq!(hooks.len(), KIMI_HOOK_EVENTS.len() + 1);
+    hooks.truncate(1);
+    assert_eq!(
+        parsed, expected,
+        "unrelated TOML semantics must survive install"
+    );
+    for (event, matcher, action) in KIMI_HOOK_EVENTS {
+        assert_kimi_hook(&first, &installed.hook_path, event, matcher, action);
+    }
+    let root = dirs.home_dir().parent().unwrap();
+    let after_install = kimi_audit_snapshot(root);
+    install_kimi().expect("repeated install must succeed");
+    assert_eq!(kimi_audit_snapshot(root), after_install);
+
+    let removed = uninstall_kimi().expect("one paired block must be removable");
+    assert!(removed.updated_config);
+    assert!(removed.removed_hook_file);
+    assert!(!installed.hook_path.exists());
+    assert_eq!(fs::read(&config_path).unwrap(), original.as_bytes());
+    assert_eq!(fs::read(&user_hook).unwrap(), b"untouched user hook\r\n");
+    let after_uninstall = kimi_audit_snapshot(root);
+    let repeated = uninstall_kimi().expect("repeated uninstall must succeed");
+    assert!(!repeated.updated_config);
+    assert!(!repeated.removed_hook_file);
+    assert_eq!(kimi_audit_snapshot(root), after_uninstall);
+}
+
+#[test]
+fn audit_p0_kimi_paired_block_roundtrip_is_idempotent_and_preserves_user_config() {
+    assert_kimi_audit_roundtrip("\n");
+}
+
+#[test]
+fn audit_p0_kimi_paired_block_roundtrip_preserves_crlf_and_comments() {
+    assert_kimi_audit_roundtrip("\r\n");
+}
+
+fn assert_kimi_audit_config_rejected(content: &str, run: impl Fn() -> std::io::Result<()>) {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
+    for existing_hooks in [false, true] {
+        let dirs = crate::config::test_dirs::isolate_dirs("audit-kimi-candidate");
+        let dir = dirs.home_dir().join(".kimi-code");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(kimi_dir().unwrap(), dir);
+        let config_path = dir.join("config.toml");
+        fs::write(&config_path, content).unwrap();
+        if existing_hooks {
+            let hooks = dir.join("hooks");
+            fs::create_dir_all(&hooks).unwrap();
+            for name in ["herdr-agent-state.sh", "herdr-agent-state.ps1"] {
+                fs::write(
+                    hooks.join(name),
+                    format!("# HERDR_INTEGRATION_ID=kimi\n# previous asset: {name}\n"),
+                )
+                .unwrap();
+            }
+        }
+        let root = dirs.home_dir().parent().unwrap();
+        let before = kimi_audit_snapshot(root);
+        let result = run();
+        assert_eq!(kimi_audit_snapshot(root), before);
+        let error = result.expect_err("unsafe config must be rejected before writes");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains(&config_path.display().to_string()));
+        assert!(!format!("{error:?}").contains("audit-kimi-private-token"));
+    }
+}
+
+#[test]
+fn audit_p0_kimi_invalid_or_unsafe_candidates_are_rejected_without_leaking_config() {
+    let begin = KIMI_CONFIG_BLOCK_BEGIN;
+    let end = KIMI_CONFIG_BLOCK_END;
+    for content in [
+        format!("values = [\n{begin}\n1\n{end}\n, 2\n]\n"),
+        format!("{begin}\n[models.user]\ntoken = 'audit-kimi-private-token'\n{end}\n"),
+        format!("[[hooks]]\nevent = 'Notification'\n{begin}\ncommand = 'audit-kimi-private-token'\n{end}\n"),
+        format!("{begin}\n[[hooks]]\nevent = 'Stop'\ncommand = 'echo old'\n{end}\n[hooks.user]\ntoken = 'audit-kimi-private-token'\n"),
+    ] {
+        toml::from_str::<toml::Table>(&content).expect("source TOML is valid before the edit");
+        assert_kimi_audit_config_rejected(&content, || install_kimi().map(|_| ()));
+        assert_kimi_audit_config_rejected(&content, || uninstall_kimi().map(|_| ()));
+    }
+    let invalid = "token = 'audit-kimi-private-token'\ninvalid = ['audit-kimi-private-token'\n";
+    assert!(toml::from_str::<toml::Table>(invalid).is_err());
+    assert_kimi_audit_config_rejected(invalid, || install_kimi().map(|_| ()));
+    assert_kimi_audit_config_rejected(invalid, || uninstall_kimi().map(|_| ()));
+}
+
+#[test]
+fn audit_p0_kimi_install_rejects_conflicting_hook_shapes_before_assets() {
+    for content in [
+        "hooks = []\n",
+        "hooks = [{ event = 'Notification', command = 'audit-kimi-private-token' }]\n",
+        "hooks = 'audit-kimi-private-token'\n",
+        "[hooks]\ncommand = 'audit-kimi-private-token'\n",
+    ] {
+        toml::from_str::<toml::Table>(content).unwrap();
+        assert_kimi_audit_config_rejected(content, || install_kimi().map(|_| ()));
+    }
+}
+
+#[test]
+fn audit_p0_kimi_unmarked_configs_preserve_whitespace_and_remain_idempotent() {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
+    for (case_index, content) in [
+        "",
+        "# user comments only\r\n\r\n",
+        "default_model = 'moonshot'\r\n# 用户注释\r\n\r\n\r\n",
+        "custom = { score = nan, nested = [+nan, -nan] }\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dirs = crate::config::test_dirs::isolate_dirs("audit-kimi-unmarked");
+        let dir = dirs.home_dir().join(".kimi-code");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(kimi_dir().unwrap(), dir);
+        let config_path = dir.join("config.toml");
+        fs::write(&config_path, content).unwrap();
+        let root = dirs.home_dir().parent().unwrap();
+        let snapshot = |phase| kimi_audit_snapshot_for(root, case_index, phase);
+        let before = snapshot("before-uninstall");
+        let absent = uninstall_kimi().unwrap();
+        assert!(!absent.updated_config);
+        assert!(!absent.removed_hook_file);
+        assert_eq!(snapshot("after-absent-uninstall"), before);
+
+        install_kimi().unwrap();
+        let first = snapshot("after-install");
+        install_kimi().unwrap();
+        assert_eq!(snapshot("after-repeated-install"), first);
+        let removed = uninstall_kimi().unwrap();
+        assert!(removed.updated_config);
+        assert!(removed.removed_hook_file);
+        assert_eq!(fs::read(&config_path).unwrap(), content.as_bytes());
+        let after = snapshot("after-uninstall");
+        let repeated = uninstall_kimi().unwrap();
+        assert!(!repeated.updated_config);
+        assert!(!repeated.removed_hook_file);
+        assert_eq!(snapshot("after-repeated-uninstall"), after);
+    }
+
+    let content = "default_model = 'moonshot' # no final newline";
+    let hook_path = Path::new("hooks").join(KIMI_HOOK_INSTALL_NAME);
+    assert_eq!(
+        super::config_edit::remove_kimi_config_block(content).unwrap(),
+        content
+    );
+    let installed = super::config_edit::build_kimi_config_with_hooks(content, &hook_path).unwrap();
+    assert!(installed.starts_with(content));
+    assert_eq!(
+        super::config_edit::build_kimi_config_with_hooks(&installed, &hook_path).unwrap(),
+        installed
+    );
+    let removed = super::config_edit::remove_kimi_config_block(&installed).unwrap();
+    assert_eq!(
+        toml::from_str::<toml::Table>(&removed).unwrap(),
+        toml::from_str::<toml::Table>(content).unwrap()
+    );
+}
+
+#[test]
+fn audit_p0_kimi_uninstall_missing_config_creates_no_files_or_directories() {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
+    for directory_exists in [false, true] {
+        let dirs = crate::config::test_dirs::isolate_dirs("audit-kimi-missing");
+        let dir = dirs.home_dir().join(".kimi-code");
+        if directory_exists {
+            fs::create_dir_all(&dir).unwrap();
+        }
+        assert_eq!(kimi_dir().unwrap(), dir);
+        let root = dirs.home_dir().parent().unwrap();
+        let before = kimi_audit_snapshot(root);
+        for _ in 0..2 {
+            let result = uninstall_kimi().unwrap();
+            assert!(!result.updated_config);
+            assert!(!result.removed_hook_file);
+            assert!(!result.config_path.exists());
+            assert_eq!(kimi_audit_snapshot(root), before);
+        }
+    }
+}
+
 #[test]
 fn install_opencode_writes_server_and_tui_plugins() {
     let _lock = integration_env_lock();

@@ -809,7 +809,7 @@ pub(super) fn handle_endpoint_disconnect(
     now: std::time::Instant,
     notice: &str,
 ) -> bool {
-    supervisors.disconnected(endpoint_id, generation, now);
+    let status_accepted = supervisors.disconnected(endpoint_id, generation, now);
     #[cfg(unix)]
     state.retire_endpoint_graphics(endpoint_id, generation);
     if pending_activation
@@ -837,6 +837,9 @@ pub(super) fn handle_endpoint_disconnect(
     let unavailable = state.shell.as_mut().and_then(|shell| {
         for request_id in cancelled {
             shell.cancel_endpoint_request(&request_id);
+        }
+        if status_accepted {
+            shell.set_endpoint_connection_error_kind(endpoint_id, None);
         }
         shell.mark_endpoint_disconnected(endpoint_id);
         shell.note_endpoint_reconnect_attempt(endpoint_id, now);
@@ -866,10 +869,11 @@ pub(super) fn handle_endpoint_attention(
     message: String,
 ) -> bool {
     endpoints.disconnect(endpoint_id);
-    supervisors.record_status(
+    let status_accepted = supervisors.record_status(
         endpoint_id,
         generation,
         endpoint::ClientEndpointStatus::Attention,
+        None,
         now,
     );
     #[cfg(unix)]
@@ -896,6 +900,9 @@ pub(super) fn handle_endpoint_attention(
     let unavailable = state.shell.as_mut().and_then(|shell| {
         for request_id in cancelled {
             shell.cancel_endpoint_request(&request_id);
+        }
+        if status_accepted {
+            shell.set_endpoint_connection_error_kind(endpoint_id, None);
         }
         shell.set_endpoint_status(endpoint_id, endpoint::ClientEndpointStatus::Attention);
         endpoint_was_active.then(|| format!("{}: {message}", shell.endpoint_label(endpoint_id)))

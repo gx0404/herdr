@@ -14,23 +14,8 @@ function Invoke-Checked {
     }
 }
 
-function Invoke-CargoWithZigCacheRecovery {
-    param([string[]]$Arguments)
-
-    & cargo @Arguments
-    if ($LASTEXITCODE -eq 0) {
-        return
-    }
-
-    Write-Warning "cargo compile failed; clearing Zig build caches and retrying once"
-    Remove-Item -Recurse -Force .zig-cache -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force vendor/libghostty-vt/.zig-cache -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force vendor/libghostty-vt/zig-out -ErrorAction SilentlyContinue
-    Invoke-Checked cargo $Arguments
-}
-
 Invoke-Checked cargo @("fmt", "--check")
-Invoke-CargoWithZigCacheRecovery @(
+Invoke-Checked cargo @(
     "clippy",
     "--all-targets",
     "--locked",

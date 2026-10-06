@@ -16,7 +16,9 @@
   计数器**：`HERDR_INTEGRATION_VERSION` 标记与对应 `*_INTEGRATION_VERSION` 常量，
   在两个 release 之间多次变更同一资产时只 bump 一次（从最新 release 中的版本起算）。
 - 对宿主配置的编辑必须幂等且可回读：重复运行不叠加注入；备份/恢复路径遵循
-  `src/platform` 的配置目录约定（见 `platform.md`）。
+  `src/platform` 的配置目录约定（见 `platform.md`）。Kimi 的 TOML 管理块标记按语法
+  上下文识别，不匹配字符串内容；损坏或多义标记在配置与钩子文件产生任何副作用前拒绝，
+  保留无关文本、注释与换行，错误不回显可能含凭据的配置正文。
 - 资产内容（`src/integration/assets/**`，含 TS 与 JSON）是受控生成/冻结输入：
   修改后必须跑 `just integration-assets-test`（bun），语义变化同步
   `docs/next` 用户文档（见 `docs-pipeline.md`）。

@@ -63,11 +63,15 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   清单 + bun 契约测试。`just test` 编排五个阶段，合并 worker budget 默认
   `min(8, cpu_count)`（`HERDR_TEST_BUDGET` / `--test-budget`）；phase 并发默认
   `min(2, 5, budget)`（`HERDR_TEST_PHASE_JOBS` / `--phase-jobs` / `--jobs`），
-  maintenance 默认 `min(4, budget)`（`HERDR_MAINTENANCE_JOBS` /
-  `--maintenance-jobs`），nextest 默认使用剩余的 `max(1, budget-maintenance)`
-  （`HERDR_NEXTEST_JOBS` / `--nextest-jobs`）。命令行值优先于环境变量，显式 worker
-  值必须为正整数；每次运行的日志与原子 manifest 按 run-id 落在项目内
-  `target/test-suite-logs/<run-id>/`。
+  并发 phase 时 maintenance 默认 `min(4, max(1, budget-1))`，为 nextest 留下
+  `max(1, budget-maintenance)`；串行 phase 时各自默认 `min(4, budget)` 与 `budget`。
+  两者分别由 `HERDR_MAINTENANCE_JOBS` / `--maintenance-jobs`、`HERDR_NEXTEST_JOBS` /
+  `--nextest-jobs` 覆盖。budget=1 默认串行；命令行值优先于环境变量，显式 worker
+  值必须为正整数且不截断。日志逐行刷新，原子 manifest 区分 pending/running/完成状态，
+  每次运行按 run-id 落在项目内 `target/test-suite-logs/<run-id>/`。
+  `nextest-all` 可用 `HERDR_NEXTEST_SHARDS` 显式分片（默认 1，不超过 nextest jobs）；
+  jobs 是所有分片合计预算，分片仍逐测试隔离进程，不减少覆盖。分片集合、退出码和
+  独立日志由 `scripts/run_nextest.py` 聚合；自定义调度约束不兼容时拒绝分片。
 
 ## 常用命令
 
@@ -124,8 +128,9 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   只在 Linux/macOS 运行；每个 `.local/perf-baseline/run-*/` 将 `HOME`、`USERPROFILE`、
   `XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、
   `XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、
-  `KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）指向 run 内临时根，
-  只清理临时运行态，保留命令、原始采样、摘要与退出码。
+  `KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）指向 run 内临时根；smoke 顶层及
+  case 启动、控制、清理均清除继承的 `HERDR_CONFIG_PATH`。只清理临时运行态，
+  保留命令、原始采样、摘要与退出码。
 
 ## 提交规范
 

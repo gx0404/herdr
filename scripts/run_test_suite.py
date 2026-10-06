@@ -41,10 +41,8 @@ PHASES: tuple[tuple[str, str], ...] = (
     ("docs-contract", "docs-contract-test"),
 )
 MAX_DEFAULT_TEST_BUDGET = 8
+MAX_DEFAULT_MAINTENANCE_JOBS = 4
 DEFAULT_TEST_BUDGET = min(MAX_DEFAULT_TEST_BUDGET, max(1, os.cpu_count() or 1))
-DEFAULT_PHASE_JOBS = min(2, len(PHASES), DEFAULT_TEST_BUDGET)
-DEFAULT_MAINTENANCE_JOBS = min(4, DEFAULT_TEST_BUDGET)
-DEFAULT_NEXTEST_JOBS = max(1, DEFAULT_TEST_BUDGET - DEFAULT_MAINTENANCE_JOBS)
 
 LAST_RUN_DIR: Path | None = None
 
@@ -63,7 +61,11 @@ def _positive_int(value: int | str, label: str) -> int:
     return parsed
 
 
-def resolve_phase_jobs(value: int | None = None, environ: Mapping[str, str] | None = None) -> int:
+def resolve_phase_jobs(
+    value: int | None = None,
+    environ: Mapping[str, str] | None = None,
+    test_budget: int | None = None,
+) -> int:
     """Resolve the phase limit, with the command-line value taking precedence over the environment."""
     if value is not None:
         return _positive_int(value, "phase jobs")
@@ -71,7 +73,7 @@ def resolve_phase_jobs(value: int | None = None, environ: Mapping[str, str] | No
     raw = environment.get(PHASE_JOBS_ENV)
     if raw is not None:
         return _positive_int(raw, PHASE_JOBS_ENV)
-    return DEFAULT_PHASE_JOBS
+    return min(2, len(PHASES), resolve_test_budget(test_budget, environment))
 
 
 def resolve_test_budget(value: int | None = None, environ: Mapping[str, str] | None = None) -> int:
@@ -89,8 +91,9 @@ def resolve_maintenance_jobs(
     value: int | None = None,
     environ: Mapping[str, str] | None = None,
     test_budget: int | None = None,
+    phase_jobs: int | None = None,
 ) -> int:
-    """Resolve maintenance workers, keeping the combined default within its budget."""
+    """Resolve maintenance workers, reserving a worker for nextest when phases overlap."""
     if value is not None:
         return _positive_int(value, "maintenance jobs")
     environment = os.environ if environ is None else environ
@@ -98,7 +101,9 @@ def resolve_maintenance_jobs(
     if raw is not None:
         return _positive_int(raw, MAINTENANCE_JOBS_ENV)
     budget = resolve_test_budget(test_budget, environment)
-    return min(DEFAULT_MAINTENANCE_JOBS, budget)
+    phases = resolve_phase_jobs(phase_jobs, environment, test_budget=budget)
+    available = budget if phases == 1 else max(1, budget - 1)
+    return min(MAX_DEFAULT_MAINTENANCE_JOBS, available)
 
 
 def resolve_nextest_jobs(
@@ -106,8 +111,9 @@ def resolve_nextest_jobs(
     environ: Mapping[str, str] | None = None,
     maintenance_jobs: int | None = None,
     test_budget: int | None = None,
+    phase_jobs: int | None = None,
 ) -> int:
-    """Resolve nextest threads, leaving the remaining default budget to nextest."""
+    """Resolve nextest workers, sharing the default budget only when phases overlap."""
     if value is not None:
         return _positive_int(value, "nextest jobs")
     environment = os.environ if environ is None else environ
@@ -115,10 +121,13 @@ def resolve_nextest_jobs(
     if raw is not None:
         return _positive_int(raw, NEXTEST_JOBS_ENV)
     budget = resolve_test_budget(test_budget, environment)
+    phases = resolve_phase_jobs(phase_jobs, environment, test_budget=budget)
+    if phases == 1:
+        return budget
     maintenance = (
-        maintenance_jobs
+        _positive_int(maintenance_jobs, "maintenance jobs")
         if maintenance_jobs is not None
-        else resolve_maintenance_jobs(environ=environment, test_budget=budget)
+        else resolve_maintenance_jobs(environ=environment, test_budget=budget, phase_jobs=phases)
     )
     return max(1, budget - maintenance)
 
@@ -171,12 +180,16 @@ def _manifest_payload(
     phase_jobs: int,
     maintenance_jobs: int,
     nextest_jobs: int,
+    phase_started: Mapping[str, float],
 ) -> dict[str, object]:
     phases: dict[str, object] = {}
     for name, recipe in PHASES:
         if name in results:
             code, seconds = results[name]
             phase_status = "passed" if code == 0 else "failed"
+        elif status == "running" and name in phase_started:
+            code, seconds = None, time.monotonic() - phase_started[name]
+            phase_status = "running"
         else:
             code, seconds = None, 0.0
             phase_status = "pending" if status == "running" else "missing"
@@ -211,6 +224,7 @@ def _write_manifest(
     phase_jobs: int,
     maintenance_jobs: int,
     nextest_jobs: int,
+    phase_started: Mapping[str, float],
 ) -> None:
     _atomic_write_json(
         manifest_path,
@@ -223,6 +237,7 @@ def _write_manifest(
             phase_jobs,
             maintenance_jobs,
             nextest_jobs,
+            phase_started,
         ),
     )
 
@@ -245,7 +260,7 @@ def run_phase(
     prefix = f"[{name}] "
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = log_path.open("w", encoding="utf-8")
+        log = log_path.open("w", encoding="utf-8", buffering=1)
     except OSError as error:
         print(f"{prefix}日志启动失败: {error}", flush=True)
         return None, time.monotonic() - started
@@ -265,17 +280,18 @@ def run_phase(
             )
         except OSError as error:
             message = f"阶段启动失败: {error}"
-            print(prefix + message, flush=True)
             log.write(message + "\n")
+            print(prefix + message, flush=True)
             return None, time.monotonic() - started
 
         stream = process.stdout
         try:
             if stream is not None:
                 for line in stream:
+                    log.write(line)
+                    log.flush()
                     sys.stdout.write(prefix + line)
                     sys.stdout.flush()
-                    log.write(line)
             code = process.wait()
         except OSError as error:
             message = f"阶段输出失败: {error}"
@@ -304,13 +320,16 @@ def run_all(
     """
     global LAST_RUN_DIR
 
-    phase_limit = resolve_phase_jobs(phase_jobs)
     budget = resolve_test_budget(test_budget)
-    maintenance_limit = resolve_maintenance_jobs(maintenance_jobs, test_budget=budget)
+    phase_limit = resolve_phase_jobs(phase_jobs, test_budget=budget)
+    maintenance_limit = resolve_maintenance_jobs(
+        maintenance_jobs, test_budget=budget, phase_jobs=phase_limit
+    )
     nextest_limit = resolve_nextest_jobs(
         nextest_jobs,
         maintenance_jobs=maintenance_limit,
         test_budget=budget,
+        phase_jobs=phase_limit,
     )
     phase_environment = os.environ.copy()
     phase_environment[MAINTENANCE_JOBS_ENV] = str(maintenance_limit)
@@ -321,6 +340,7 @@ def run_all(
     LAST_RUN_DIR = run_dir
     manifest_path = run_dir / MANIFEST_NAME
     results: dict[str, tuple[int | None, float]] = {}
+    phase_started: dict[str, float] = {}
     manifest_lock = threading.Lock()
     if phase_runner is None:
 
@@ -329,56 +349,49 @@ def run_all(
 
     else:
         runner = phase_runner
-    _write_manifest(
-        manifest_path,
-        selected_run_id,
-        run_dir,
-        results,
-        "running",
-        budget,
-        phase_limit,
-        maintenance_limit,
-        nextest_limit,
+
+    def write_manifest(status: str = "running") -> None:
+        _write_manifest(
+            manifest_path,
+            selected_run_id,
+            run_dir,
+            results,
+            status,
+            budget,
+            phase_limit,
+            maintenance_limit,
+            nextest_limit,
+            phase_started,
+        )
+
+    write_manifest()
+    print(
+        f"测试编排启动（phase={phase_limit}, maintenance={maintenance_limit}, "
+        f"nextest={nextest_limit}, budget={budget}），结果 manifest: {manifest_path}",
+        flush=True,
     )
 
-    def worker(name: str, recipe: str) -> tuple[int | None, float]:
-        return runner(name, recipe, run_dir / f"{name}.log")
+    def worker(name: str, recipe: str) -> None:
+        started = time.monotonic()
+        with manifest_lock:
+            phase_started[name] = started
+            write_manifest()
+        try:
+            result = runner(name, recipe, run_dir / f"{name}.log")
+        except Exception as error:  # noqa: BLE001 - a worker crash is a failed phase.
+            print(f"[{name}] 阶段线程异常: {error}", flush=True)
+            result = (None, time.monotonic() - started)
+        with manifest_lock:
+            results[name] = result
+            write_manifest()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=phase_limit) as pool:
-        futures = {pool.submit(worker, name, recipe): name for name, recipe in PHASES}
+        futures = [pool.submit(worker, name, recipe) for name, recipe in PHASES]
         for future in concurrent.futures.as_completed(futures):
-            name = futures[future]
-            try:
-                result = future.result()
-            except Exception as error:  # noqa: BLE001 - a worker crash is a failed phase.
-                print(f"[{name}] 阶段线程异常: {error}", flush=True)
-                result = (None, 0.0)
-            with manifest_lock:
-                results[name] = result
-                _write_manifest(
-                    manifest_path,
-                    selected_run_id,
-                    run_dir,
-                    results,
-                    "running",
-                    budget,
-                    phase_limit,
-                    maintenance_limit,
-                    nextest_limit,
-                )
+            future.result()
 
     exit_code, _ = summarize(results)
-    _write_manifest(
-        manifest_path,
-        selected_run_id,
-        run_dir,
-        results,
-        "passed" if exit_code == 0 else "failed",
-        budget,
-        phase_limit,
-        maintenance_limit,
-        nextest_limit,
-    )
+    write_manifest("passed" if exit_code == 0 else "failed")
     return results
 
 
@@ -421,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         "--jobs",
         dest="phase_jobs",
         type=int,
-        help=f"并发测试阶段数（默认 {DEFAULT_PHASE_JOBS}；也可用 {PHASE_JOBS_ENV}）",
+        help=f"并发测试阶段数（默认 min(2, {len(PHASES)}, test_budget)；也可用 {PHASE_JOBS_ENV}）",
     )
     parser.add_argument(
         "--test-budget",
@@ -441,13 +454,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _force_utf8_streams()
     try:
-        phase_jobs = resolve_phase_jobs(args.phase_jobs)
         test_budget = resolve_test_budget(args.test_budget)
-        maintenance_jobs = resolve_maintenance_jobs(args.maintenance_jobs, test_budget=test_budget)
+        phase_jobs = resolve_phase_jobs(args.phase_jobs, test_budget=test_budget)
+        maintenance_jobs = resolve_maintenance_jobs(
+            args.maintenance_jobs, test_budget=test_budget, phase_jobs=phase_jobs
+        )
         nextest_jobs = resolve_nextest_jobs(
             args.nextest_jobs,
             maintenance_jobs=maintenance_jobs,
             test_budget=test_budget,
+            phase_jobs=phase_jobs,
         )
         results = run_all(
             phase_jobs=phase_jobs,

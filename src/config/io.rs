@@ -243,8 +243,8 @@ pub(crate) mod test_dirs {
         }
     }
 
-    /// 测试用的唯一临时目录：创建时先清掉 pid 复用留下的同名旧目录，析构时（含 panic
-    /// 展开）按 `remove_dir_eventually` 删除。
+    /// 测试用的唯一临时目录：排他创建，跳过同名旧目录；析构时（含 panic 展开）
+    /// 按 `remove_dir_eventually` 只删除本次认领的目录。
     pub(crate) struct TempDir {
         path: PathBuf,
     }
@@ -252,15 +252,14 @@ pub(crate) mod test_dirs {
     impl TempDir {
         pub(crate) fn new(name: &str) -> Self {
             let label: String = name.chars().map(path_safe_char).take(32).collect();
-            let path = short_temp_base().join(format!(
-                "herdr-{label}-{}-{}",
-                std::process::id(),
-                unique_id()
-            ));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).unwrap_or_else(|err| {
-                panic!("failed to create test temp dir {}: {err}", path.display())
-            });
+            let path = claim_temp_dir(|| {
+                short_temp_base().join(format!(
+                    "herdr-{label}-{}-{}",
+                    std::process::id(),
+                    unique_id()
+                ))
+            })
+            .unwrap_or_else(|err| panic!("failed to create test temp dir: {err}"));
             Self { path }
         }
 
@@ -301,19 +300,14 @@ pub(crate) mod test_dirs {
     /// socket 路径上限只有 104 字节。
     pub(crate) fn isolate_dirs(name: &str) -> IsolatedDirs {
         let label: String = name.chars().map(path_safe_char).take(24).collect();
-        let root = short_temp_base().join(format!(
-            "herdr-test-{label}-{}-{}",
-            std::process::id(),
-            unique_id()
-        ));
-        // pid 复用时同名旧目录里的残留不能带进新测试。
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap_or_else(|err| {
-            panic!(
-                "failed to create isolated test dir {}: {err}",
-                root.display()
-            )
-        });
+        let root = claim_temp_dir(|| {
+            short_temp_base().join(format!(
+                "herdr-test-{label}-{}-{}",
+                std::process::id(),
+                unique_id()
+            ))
+        })
+        .unwrap_or_else(|err| panic!("failed to create isolated test dir: {err}"));
         let config_dir = root.join("config");
         let state_dir = root.join("state");
         let config_path = config_dir.join("config.toml");
@@ -412,8 +406,78 @@ pub(crate) mod test_dirs {
         std::env::temp_dir()
     }
 
+    fn claim_temp_dir(mut candidate: impl FnMut() -> PathBuf) -> std::io::Result<PathBuf> {
+        loop {
+            let path = candidate();
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     mod tests {
         use super::*;
+
+        #[test]
+        fn claim_temp_dir_preserves_existing_candidate_and_sentinel() {
+            let fixture = TempDir::new("claim-collision");
+            let occupied = fixture.join("occupied");
+            std::fs::create_dir(&occupied).unwrap();
+            let sentinel = occupied.join("sentinel");
+            std::fs::write(&sentinel, b"must survive").unwrap();
+            let next = fixture.join("next");
+            let mut candidates = [occupied.clone(), next.clone()].into_iter();
+            let owned = TempDir {
+                path: claim_temp_dir(|| candidates.next().expect("only one collision")).unwrap(),
+            };
+            assert!(
+                sentinel.is_file(),
+                "existing candidate sentinel was deleted"
+            );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+            assert_eq!(owned.path(), next);
+            drop(owned);
+            assert!(!next.exists());
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+        }
+
+        #[test]
+        fn claim_temp_dir_creates_first_available_candidate() {
+            let fixture = TempDir::new("claim-success");
+            let path = fixture.join("new");
+            let mut calls = 0;
+            let claimed = claim_temp_dir(|| {
+                calls += 1;
+                path.clone()
+            })
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(claimed, path);
+            assert!(claimed.is_dir());
+            assert_eq!(std::fs::read_dir(claimed).unwrap().count(), 0);
+        }
+
+        #[test]
+        fn claim_temp_dir_propagates_other_errors_without_retry() {
+            let fixture = TempDir::new("claim-error");
+            let file = fixture.join("file");
+            std::fs::write(&file, b"untouched").unwrap();
+            let path = file.join("child");
+            let expected = std::fs::create_dir(&path).unwrap_err();
+            assert_ne!(expected.kind(), std::io::ErrorKind::AlreadyExists);
+            let mut calls = 0;
+            let error = claim_temp_dir(|| {
+                calls += 1;
+                assert_eq!(calls, 1, "non-collision error must not retry");
+                path.clone()
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), expected.kind());
+            assert_eq!(error.raw_os_error(), expected.raw_os_error());
+            assert_eq!(std::fs::read(file).unwrap(), b"untouched");
+        }
 
         /// 一定不在任何临时目录根下的路径：临时目录所在文件系统的根下。
         fn outside_temp_roots() -> PathBuf {

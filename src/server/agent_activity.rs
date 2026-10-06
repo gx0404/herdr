@@ -312,8 +312,6 @@ const DISCOVERY_QUEUE_CAPACITY: usize = 64;
 /// 用户发起的读取（`agent.activity.read` / `agent.external.list`）的队列深度。它们
 /// 走自己的线程，不排在轮询发现后面。
 const REQUEST_QUEUE_CAPACITY: usize = 32;
-/// 与 `client_commands` 的端点应答分块一致。
-const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 // ---------------------------------------------------------------------------
 // 调度（纯逻辑，时钟由调用方注入）
@@ -408,6 +406,7 @@ fn has_open_nodes(nodes: &[AgentActivityNode]) -> bool {
 struct PaneSchedule {
     last_started: Option<Instant>,
     in_flight: Option<InFlight>,
+    retry_pending: bool,
     hinted: bool,
     /// 提示触发的那次刷新之后的补刷时刻（[`HINT_SETTLE_DELAY`]）；在它之前别的原因
     /// 先刷了就作废。
@@ -526,7 +525,7 @@ impl Scheduler {
             None => true,
             Some(at) => {
                 let elapsed = now.saturating_duration_since(at);
-                (entry.hinted && elapsed >= HINT_MIN_INTERVAL)
+                ((entry.hinted || entry.retry_pending) && elapsed >= HINT_MIN_INTERVAL)
                     || (following && elapsed >= FOLLOW_INTERVAL)
                     || (polling && elapsed >= WORKING_POLL_INTERVAL)
                     || entry.settle_at.is_some_and(|settle| now >= settle)
@@ -534,9 +533,10 @@ impl Scheduler {
         };
         if due {
             // 这次刷新吃掉了提示：过一会儿再补刷一次。别的原因的刷新顶替掉未到期的
-            // 补刷，自己不再安排，所以补刷不会连环。
+            // 补刷，自己不再安排，所以补刷不会连环；未入队时 submission_failed 恢复提示。
             entry.settle_at = entry.hinted.then(|| now + HINT_SETTLE_DELAY);
             entry.hinted = false;
+            entry.retry_pending = false;
             entry.last_started = Some(now);
             let (in_flight, started) = InFlight::start();
             entry.in_flight = Some(in_flight);
@@ -557,6 +557,22 @@ impl Scheduler {
     pub(crate) fn end_pass(&mut self) {
         let pass = self.pass;
         self.panes.retain(|_, entry| entry.seen_pass == pass);
+    }
+
+    fn submission_failed(&mut self, pane_id: PaneId, started: &JobStarted) {
+        let Some(entry) = self.panes.get_mut(&pane_id) else {
+            return;
+        };
+        if !entry
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| std::sync::Arc::ptr_eq(&flight.started, started))
+        {
+            return;
+        }
+        entry.in_flight = None;
+        entry.retry_pending = true;
+        entry.hinted |= entry.settle_at.take().is_some();
     }
 
     /// 该 pane 的后台任务已结束（成功或失败，结果落库与否）。期间到达过提示则让下一轮
@@ -643,16 +659,22 @@ impl Scheduler {
 pub(crate) enum Reply {
     /// JSON API：请求自带的应答通道。
     Api(mpsc::Sender<String>),
-    /// 客户端端点：经 server 事件通道转成 `ClientShellEndpointResponseChunk`。
+    /// 客户端端点：一次性交付完整响应，由连接按信用分块。
     Endpoint {
-        client_id: u64,
-        boot_id: String,
+        response: crate::server::client_commands::EndpointResponseSender,
         events: tokio::sync::mpsc::Sender<ServerEvent>,
     },
 }
 
 impl Reply {
     fn send(&self, id: &str, result: Result<ResponseResult, (&'static str, String)>) {
+        let target = match self {
+            Self::Endpoint { response, .. } => match response.take() {
+                Some(target) => Some(target),
+                None => return,
+            },
+            Self::Api(_) => None,
+        };
         let text = match result {
             Ok(result) => serde_json::to_string(&SuccessResponse {
                 id: id.into(),
@@ -677,29 +699,9 @@ impl Reply {
             Self::Api(sender) => {
                 let _ = sender.send(text);
             }
-            Self::Endpoint {
-                client_id,
-                boot_id,
-                events,
-            } => {
-                let bytes = text.into_bytes();
-                let count = bytes.len().div_ceil(ENDPOINT_RESPONSE_CHUNK_BYTES).max(1);
-                for index in 0..count {
-                    let start = index * ENDPOINT_RESPONSE_CHUNK_BYTES;
-                    let end = (start + ENDPOINT_RESPONSE_CHUNK_BYTES).min(bytes.len());
-                    let event = ServerEvent::ObservationResponse {
-                        client_id: *client_id,
-                        boot_id: boot_id.clone(),
-                        message: crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
-                            boot_id: boot_id.clone(),
-                            request_id: id.into(),
-                            final_chunk: index + 1 == count,
-                            data: bytes[start..end].to_vec(),
-                        },
-                    };
-                    if events.blocking_send(event).is_err() {
-                        return;
-                    }
+            Self::Endpoint { events, .. } => {
+                if let Some(target) = target {
+                    target.send(text, events);
                 }
             }
         }
@@ -839,15 +841,22 @@ impl Runtime {
         Ok(jobs)
     }
 
-    /// 投递一个任务：入队返回真；队列满或线程已退出时任务（连同其 `reply`）被丢弃
-    /// 并返回假，由调用方同步答错误。
-    fn submit(&self, job: Job) -> bool {
+    /// 队列满或线程已退出时任务（连同其 `reply`）被丢弃，由调用方同步答错误。
+    fn submit(&self, job: Job) -> Result<(), SubmitError> {
         let queue = if job.interactive() {
             &self.requests
         } else {
             &self.discovery
         };
-        queue.try_send(job).is_ok()
+        queue.try_send(job).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => {
+                tracing::debug!("agent activity queue is full; dropping job");
+                SubmitError::Busy
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                SubmitError::Unavailable("agent activity worker has stopped".into())
+            }
+        })
     }
 }
 
@@ -1232,19 +1241,20 @@ impl Service {
         });
         scheduler.end_pass();
         for (pane_id, source, started) in due {
-            let submitted = state
-                .agent_activity_subject(pane_id)
-                .is_some_and(|subject| {
-                    self.submit(Job::Discover {
-                        pane_id,
-                        source,
-                        subject,
-                        started,
-                    })
-                    .is_ok()
-                });
-            if !submitted {
-                self.scheduler.finish(pane_id);
+            let Some(subject) = state.agent_activity_subject(pane_id) else {
+                self.scheduler.panes.remove(&pane_id);
+                continue;
+            };
+            if self
+                .submit(Job::Discover {
+                    pane_id,
+                    source,
+                    subject,
+                    started: started.clone(),
+                })
+                .is_err()
+            {
+                self.scheduler.submission_failed(pane_id, &started);
             }
         }
         let external = (self.sources.external)();
@@ -1475,11 +1485,7 @@ impl Service {
                 "agent activity worker is not running".into(),
             ));
         };
-        if runtime.submit(job) {
-            return Ok(());
-        }
-        tracing::debug!("agent activity queue is full; dropping job");
-        Err(SubmitError::Busy)
+        runtime.submit(job)
     }
 }
 
@@ -1529,6 +1535,17 @@ pub(crate) mod test_support {
                 requests,
             });
             (service, workers)
+        }
+
+        pub(crate) fn assert_empty(&self, lane: Lane) {
+            let (_, jobs) = match lane {
+                Lane::Discovery => &self.discovery,
+                Lane::Requests => &self.requests,
+            };
+            assert!(
+                matches!(jobs.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "指定车道不应有重复提交的任务"
+            );
         }
 
         pub(crate) async fn run_next(self, lane: Lane) -> Self {
@@ -2879,6 +2896,339 @@ mod tests {
         assert!(store.transcript(agent, "claude", "g").is_some());
     }
 
+    struct AuditFinishedTree;
+
+    impl ActivitySource for AuditFinishedTree {
+        fn id(&self) -> &'static str {
+            "claude"
+        }
+
+        fn discover(&self, cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError> {
+            assert_eq!(cx.agent, "claude");
+            Ok(vec![node("finished", None, AgentActivityStatus::Done)])
+        }
+
+        fn read(
+            &self,
+            _cx: &SourceContext<'_>,
+            _node_id: &str,
+            _cursor: Option<&str>,
+            _max_bytes: usize,
+        ) -> Result<ContentChunk, SourceError> {
+            Err(SourceError::Unsupported)
+        }
+    }
+
+    fn audit_activity_state(count: usize) -> (crate::app::state::AppState, Vec<PaneId>) {
+        let mut state = crate::app::state::AppState::test_new();
+        let mut panes = Vec::new();
+        for _ in 0..count {
+            let workspace = crate::workspace::Workspace::test_new("audit-activity");
+            panes.push(workspace.tabs[0].root_pane);
+            state.workspaces.push(workspace);
+        }
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        for terminal in state.terminals.values_mut() {
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = AgentState::Idle;
+        }
+        (state, panes)
+    }
+
+    fn audit_activity_service(
+        home: &Path,
+    ) -> (
+        Service,
+        test_support::ControlledWorkers,
+        tokio::sync::mpsc::Receiver<AppEvent>,
+    ) {
+        let (events, received) = tokio::sync::mpsc::channel(1);
+        let (service, workers) = test_support::ControlledWorkers::service(
+            events,
+            Sources {
+                source_for: |agent| {
+                    (agent == "claude").then_some(&AuditFinishedTree as &dyn ActivitySource)
+                },
+                external: || &[],
+            },
+            home.to_path_buf(),
+        );
+        (service, workers, received)
+    }
+
+    fn audit_apply_discovery(
+        service: &mut Service,
+        state: &mut crate::app::state::AppState,
+        received: &mut tokio::sync::mpsc::Receiver<AppEvent>,
+        now: Instant,
+    ) -> PaneId {
+        let AppEvent::AgentActivityRefreshedFor {
+            pane_id,
+            identity,
+            started,
+            ticket,
+            result,
+        } = received.try_recv().expect("受控 worker 已返回发现结果")
+        else {
+            panic!("应为 pane 发现结果");
+        };
+        assert!(state.agent_activity_is_current(pane_id, &identity));
+        assert!(service.accept_pane_tree(pane_id, ticket));
+        let changed = state
+            .apply_agent_activity(pane_id, result.expect("合成来源可读"), now)
+            .is_some();
+        service.pane_refreshed_for(pane_id, &started, changed);
+        pane_id
+    }
+
+    #[tokio::test]
+    async fn audit_p1_activity_retries_first_discovery_after_queue_capacity_returns() {
+        use test_support::Lane;
+
+        let home = crate::config::test_dirs::TempDir::new("audit-activity-first");
+        let (mut state, panes) = audit_activity_state(DISCOVERY_QUEUE_CAPACITY + 1);
+        let (mut service, mut workers, mut received) = audit_activity_service(home.path());
+        let t0 = Instant::now();
+        service.tick(&mut state, t0, false);
+        let rejected: Vec<_> = panes
+            .iter()
+            .copied()
+            .filter(|pane_id| !service.discovery_in_flight(*pane_id))
+            .collect();
+        assert_eq!(rejected.len(), 1, "真实发现队列满时恰有一次提交失败");
+        let rejected = rejected[0];
+        assert!(!state.agent_activity.has_hints());
+        assert!(state.agent_activity.activity(rejected).is_none());
+
+        workers = workers.run_next(Lane::Discovery).await;
+        let first = audit_apply_discovery(&mut service, &mut state, &mut received, t0);
+        assert_ne!(first, rejected);
+        let retry_at = t0 + SCHEDULER_PASS_INTERVAL;
+        service.tick(&mut state, retry_at, false);
+        assert!(
+            service.discovery_in_flight(rejected),
+            "容量恢复后，空闲、无树、无 hint 的首次发现必须重试"
+        );
+
+        let mut discovered = std::collections::HashSet::from([first]);
+        for _ in 0..DISCOVERY_QUEUE_CAPACITY {
+            workers = workers.run_next(Lane::Discovery).await;
+            let pane_id = audit_apply_discovery(&mut service, &mut state, &mut received, retry_at);
+            assert!(discovered.insert(pane_id), "已入队的首次发现不得重复提交");
+        }
+        assert_eq!(discovered.len(), panes.len());
+        assert!(panes
+            .iter()
+            .all(|pane_id| state.agent_activity.activity(*pane_id).is_some()));
+        service.tick(&mut state, retry_at + secs(60.0), false);
+        workers.assert_empty(Lane::Discovery);
+        assert!(panes
+            .iter()
+            .all(|pane_id| !service.discovery_in_flight(*pane_id)));
+    }
+
+    #[tokio::test]
+    async fn audit_p1_activity_keeps_retry_after_hint_and_settle_submissions_are_rejected() {
+        use test_support::Lane;
+
+        let home = crate::config::test_dirs::TempDir::new("audit-activity-hint");
+        let (mut state, panes) = audit_activity_state(DISCOVERY_QUEUE_CAPACITY + 1);
+        let (mut service, mut workers, mut received) = audit_activity_service(home.path());
+        let t0 = Instant::now();
+        service.tick(&mut state, t0, false);
+        let rejected: Vec<_> = panes
+            .iter()
+            .copied()
+            .filter(|pane_id| !service.discovery_in_flight(*pane_id))
+            .collect();
+        assert_eq!(rejected.len(), 1);
+        let rejected = rejected[0];
+        state.agent_activity.note_hint(rejected);
+        let hinted_at = t0 + HINT_MIN_INTERVAL;
+        service.tick(&mut state, hinted_at, false);
+        assert!(!state.agent_activity.has_hints());
+        assert!(!service.discovery_in_flight(rejected));
+        let settled_at = hinted_at + HINT_SETTLE_DELAY;
+        service.tick(&mut state, settled_at, false);
+        assert!(!service.discovery_in_flight(rejected));
+        assert!(state.agent_activity.activity(rejected).is_none());
+
+        workers = workers.run_next(Lane::Discovery).await;
+        audit_apply_discovery(&mut service, &mut state, &mut received, settled_at);
+        let retry_at = settled_at + SCHEDULER_PASS_INTERVAL;
+        service.tick(&mut state, retry_at, false);
+        assert!(
+            service.discovery_in_flight(rejected),
+            "hint 和补刷都被满队列拒绝后，不能静默丢掉待发现的 pane"
+        );
+        for _ in 0..DISCOVERY_QUEUE_CAPACITY {
+            workers = workers.run_next(Lane::Discovery).await;
+            audit_apply_discovery(&mut service, &mut state, &mut received, retry_at);
+        }
+        assert!(state.agent_activity.activity(rejected).is_some());
+        workers.assert_empty(Lane::Discovery);
+    }
+
+    #[tokio::test]
+    async fn audit_p1_activity_successful_jobs_keep_hint_throttling_and_single_flight() {
+        use test_support::Lane;
+
+        let home = crate::config::test_dirs::TempDir::new("audit-activity-throttle");
+        let (mut state, panes) = audit_activity_state(1);
+        let pane_id = panes[0];
+        let (mut service, mut workers, mut received) = audit_activity_service(home.path());
+        let t0 = Instant::now();
+        service.tick(&mut state, t0, false);
+        state.agent_activity.note_hint(pane_id);
+        service.tick(&mut state, t0 + secs(0.2), false);
+        workers = workers.run_next(Lane::Discovery).await;
+        assert_eq!(
+            audit_apply_discovery(&mut service, &mut state, &mut received, t0),
+            pane_id
+        );
+        workers.assert_empty(Lane::Discovery);
+
+        for offset in [0.3, 0.99] {
+            service.tick(&mut state, t0 + secs(offset), false);
+            assert!(!service.discovery_in_flight(pane_id), "hint 仍需节流");
+            workers.assert_empty(Lane::Discovery);
+        }
+        let hinted_at = t0 + HINT_MIN_INTERVAL;
+        service.tick(&mut state, hinted_at, false);
+        assert!(service.discovery_in_flight(pane_id));
+        service.tick(&mut state, hinted_at + SCHEDULER_PASS_INTERVAL, false);
+        workers = workers.run_next(Lane::Discovery).await;
+        audit_apply_discovery(&mut service, &mut state, &mut received, hinted_at);
+        workers.assert_empty(Lane::Discovery);
+
+        let settled_at = hinted_at + HINT_SETTLE_DELAY;
+        service.tick(&mut state, settled_at, false);
+        assert!(service.discovery_in_flight(pane_id), "合法 hint 仍补刷一次");
+        workers = workers.run_next(Lane::Discovery).await;
+        audit_apply_discovery(&mut service, &mut state, &mut received, settled_at);
+        service.tick(&mut state, settled_at + secs(60.0), false);
+        assert!(!service.discovery_in_flight(pane_id));
+        workers.assert_empty(Lane::Discovery);
+    }
+
+    #[tokio::test]
+    async fn audit_p1_activity_rejected_retries_keep_cadence_and_forget_removed_panes() {
+        use test_support::Lane;
+
+        let home = crate::config::test_dirs::TempDir::new("audit-activity-removed");
+        let (mut state, panes) = audit_activity_state(DISCOVERY_QUEUE_CAPACITY + 1);
+        let (mut service, mut workers, mut received) = audit_activity_service(home.path());
+        let t0 = Instant::now();
+        service.tick(&mut state, t0, false);
+        assert!(matches!(
+            service.submit(Job::DiscoverExternal {
+                sources: &[],
+                started: JobStarted::default(),
+            }),
+            Err(SubmitError::Busy)
+        ));
+        let rejected = panes
+            .into_iter()
+            .find(|pane_id| !service.discovery_in_flight(*pane_id))
+            .expect("满队列拒绝了一个 pane");
+        workers = workers.run_next(Lane::Discovery).await;
+        audit_apply_discovery(&mut service, &mut state, &mut received, t0);
+        let pass = service.scheduler.pass;
+        for offset in [0.1, 0.3, 0.49] {
+            service.tick(&mut state, t0 + secs(offset), false);
+            assert_eq!(service.scheduler.pass, pass, "失败不会触发逐帧遍历");
+            assert!(!service.discovery_in_flight(rejected));
+        }
+        state.agent_activity.note_hint(rejected);
+        service.tick(&mut state, t0 + secs(0.5), false);
+        assert_eq!(last_decision(&service, rejected).1, Some(t0));
+        assert!(
+            !service.discovery_in_flight(rejected),
+            "新 hint 也不能绕过节流"
+        );
+        state
+            .workspaces
+            .retain(|workspace| workspace.pane_state(rejected).is_none());
+        service.tick(&mut state, t0 + HINT_MIN_INTERVAL, false);
+        assert!(state.agent_activity_subject(rejected).is_none());
+        assert!(!service.scheduler.panes.contains_key(&rejected));
+        for _ in 0..DISCOVERY_QUEUE_CAPACITY - 1 {
+            workers = workers.run_next(Lane::Discovery).await;
+            assert_ne!(
+                audit_apply_discovery(&mut service, &mut state, &mut received, t0),
+                rejected
+            );
+        }
+        workers.assert_empty(Lane::Discovery);
+    }
+
+    #[tokio::test]
+    async fn audit_p1_activity_closed_queue_reports_unavailable_and_keeps_live_retry() {
+        use test_support::Lane;
+
+        let home = crate::config::test_dirs::TempDir::new("audit-activity-closed");
+        let (mut state, panes) = audit_activity_state(1);
+        let pane_id = panes[0];
+        let (mut service, workers, _closed_received) = audit_activity_service(home.path());
+        drop(workers);
+        assert!(matches!(
+            service.submit(Job::DiscoverExternal {
+                sources: &[],
+                started: JobStarted::default(),
+            }),
+            Err(SubmitError::Unavailable(_))
+        ));
+        let t0 = Instant::now();
+        service.tick(&mut state, t0, false);
+        assert!(!service.discovery_in_flight(pane_id));
+        let (replacement, mut workers, mut received) = audit_activity_service(home.path());
+        service.runtime = replacement.runtime;
+        service.tick(&mut state, t0 + secs(0.5), false);
+        workers.assert_empty(Lane::Discovery);
+        service.tick(&mut state, t0 + HINT_MIN_INTERVAL, false);
+        assert!(service.discovery_in_flight(pane_id));
+        workers = workers.run_next(Lane::Discovery).await;
+        audit_apply_discovery(
+            &mut service,
+            &mut state,
+            &mut received,
+            t0 + HINT_MIN_INTERVAL,
+        );
+        service.tick(&mut state, t0 + secs(60.0), false);
+        workers.assert_empty(Lane::Discovery);
+        assert!(!service.discovery_in_flight(pane_id));
+    }
+
+    #[tokio::test]
+    async fn audit_p1_activity_old_result_cannot_release_a_replacement_slot() {
+        use test_support::Lane;
+
+        let home = crate::config::test_dirs::TempDir::new("audit-activity-old-result");
+        let (mut state, panes) = audit_activity_state(1);
+        let pane_id = panes[0];
+        let (mut service, mut workers, mut received) = audit_activity_service(home.path());
+        let t0 = Instant::now();
+        service.tick(&mut state, t0, false);
+        workers = workers.run_next(Lane::Discovery).await;
+        let observed = t0 + SCHEDULER_PASS_INTERVAL;
+        service.tick(&mut state, observed, false);
+        state.agent_activity.note_hint(pane_id);
+        let retry_at = observed + IN_FLIGHT_TIMEOUT;
+        service.tick(&mut state, retry_at, false);
+        assert!(service.discovery_in_flight(pane_id));
+        audit_apply_discovery(&mut service, &mut state, &mut received, retry_at);
+        assert!(
+            service.discovery_in_flight(pane_id),
+            "超时任务的旧结果不能释放替代任务的身份 token"
+        );
+        service.tick(&mut state, retry_at + SCHEDULER_PASS_INTERVAL, false);
+        workers = workers.run_next(Lane::Discovery).await;
+        audit_apply_discovery(&mut service, &mut state, &mut received, retry_at);
+        assert!(!service.discovery_in_flight(pane_id));
+        workers.assert_empty(Lane::Discovery);
+    }
+
     #[test]
     fn tick_submits_discovery_and_the_result_comes_back_as_an_app_event() {
         let (mut service, mut received) = fake_service();
@@ -3731,8 +4081,13 @@ mod tests {
                     ..AgentActivityReadParams::default()
                 }),
                 Reply::Endpoint {
-                    client_id: 7,
-                    boot_id: "boot".into(),
+                    response: crate::server::client_commands::EndpointResponseSender::new(
+                        crate::server::client_commands::EndpointResponseTarget::Bulk(
+                            crate::server::client_commands::test_response_ticket(
+                                7, "boot", "req-1",
+                            ),
+                        ),
+                    ),
                     events: server_events,
                 },
                 Instant::now(),
@@ -3748,24 +4103,18 @@ mod tests {
                 Err(error) => panic!("没有等到端点应答：{error:?}"),
             }
         };
-        let ServerEvent::ObservationResponse {
-            client_id,
-            boot_id,
-            message:
-                crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
-                    request_id,
-                    final_chunk,
-                    data,
-                    ..
-                },
-        } = event
-        else {
-            panic!("应为端点应答分块");
+        let ServerEvent::EndpointResponseReady { response } = event else {
+            panic!("应为完整端点应答");
         };
-        assert_eq!((client_id, boot_id.as_str()), (7, "boot"));
-        assert_eq!(request_id, "req-1");
-        assert!(final_chunk);
-        let response: serde_json::Value = serde_json::from_slice(&data).expect("JSON");
+        assert_eq!(
+            (
+                response.ticket.identity.client_id,
+                response.ticket.identity.boot_id.as_str()
+            ),
+            (7, "boot")
+        );
+        assert_eq!(response.ticket.identity.request_id, "req-1");
+        let response: serde_json::Value = serde_json::from_slice(&response.body).expect("JSON");
         assert_eq!(response["result"]["content"]["node_id"], "a");
     }
 }

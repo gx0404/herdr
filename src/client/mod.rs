@@ -21,6 +21,8 @@ mod config_reload;
 mod direct_graphics;
 pub(crate) mod endpoint;
 mod endpoint_commands;
+#[cfg(test)]
+pub(crate) use endpoint_commands::EndpointResponseTestAssembler;
 mod errors;
 mod events;
 mod frame_output;
@@ -1379,8 +1381,10 @@ async fn run_client_loop(
                     generation,
                     status,
                     message,
+                    error_kind,
                 } => {
-                    if !supervisors.record_status(&endpoint_id, generation, status, now) {
+                    if !supervisors.record_status(&endpoint_id, generation, status, error_kind, now)
+                    {
                         continue;
                     }
                     if status == endpoint::ClientEndpointStatus::Attention {
@@ -1434,6 +1438,7 @@ async fn run_client_loop(
                         &endpoint_id,
                         generation,
                         endpoint::ClientEndpointStatus::Online,
+                        None,
                         now,
                     ) {
                         continue;

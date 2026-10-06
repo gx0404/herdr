@@ -2,6 +2,7 @@ use super::*;
 
 #[path = "agent_activity.rs"]
 mod agent_activity_tests;
+mod endpoint_responses;
 mod event_fairness;
 mod multi_view;
 mod native_graphics;
@@ -17,6 +18,7 @@ mod surface_delta_tests;
 mod surface_interest_tests;
 #[path = "surface_scroll.rs"]
 mod surface_scroll_tests;
+mod transport_lifecycle;
 
 fn client_shell_projection(
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
@@ -120,11 +122,19 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         api_server: None,
         #[cfg(unix)]
         client_listener: listener,
-        #[cfg(unix)]
         client_handshake_limiter,
         client_socket_path: socket_path,
         client_socket_identity,
         clients: HashMap::new(),
+        closing_clients: Vec::new(),
+        shutdown_transports: Vec::new(),
+        transport_notifications: TransportNotificationSchedule::default(),
+        endpoint_response_budget: Arc::new(tokio::sync::Semaphore::new(
+            crate::server::client_commands::MAX_SERVER_RESPONSES,
+        )),
+        endpoint_pump_remaining: crate::server::client_commands::ENDPOINT_BLOCKS_PER_TURN,
+        endpoint_notification_cursor: None,
+        endpoint_response_owners: Vec::new(),
         native_graphics: Default::default(),
         #[cfg(unix)]
         next_client_id: 1,
@@ -222,6 +232,143 @@ fn read_server_shutdown_reason(bytes: Vec<u8>) -> Option<String> {
         ServerMessage::ServerShutdown { reason } => reason,
         other => panic!("expected shutdown, got {other:?}"),
     }
+}
+
+#[cfg(windows)]
+async fn register_transport_test_client(
+    server: &mut HeadlessServer,
+) -> (crate::platform::ServerClientStream, u64, ClientWriter) {
+    let client = crate::ipc::connect_local_stream(&server.client_socket_path).unwrap();
+    let mut client = crate::platform::prepare_server_client_stream(client, LOADED_WAIT).unwrap();
+    protocol::write_message(
+        &mut client,
+        &protocol::ClientMessage::TerminalHello {
+            version: protocol::PROTOCOL_VERSION,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
+            pixel_mouse: false,
+        },
+    )
+    .unwrap();
+    let _: ServerMessage = protocol::read_message(&mut client, MAX_FRAME_SIZE).unwrap();
+    let event = tokio::time::timeout(LOADED_WAIT, server.server_event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ServerEvent::ClientConnected {
+        client_id, writer, ..
+    } = &event
+    else {
+        panic!("expected connection")
+    };
+    let client_id = *client_id;
+    let writer = writer.clone();
+    server.handle_server_event_with_render_impact(event);
+    (client, client_id, writer)
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn transport_remove_seals_and_drains_last_shutdown_without_blocking_main_loop() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("transport-remove");
+    let mut server = test_headless_server();
+    let (mut client, client_id, writer) = register_transport_test_client(&mut server).await;
+    assert!(server.send_to_client(
+        client_id,
+        ServerMessage::ServerShutdown {
+            reason: Some("detached".into())
+        }
+    ));
+    let started = Instant::now();
+    server.remove_client(client_id);
+    server.remove_client(client_id);
+    assert!(started.elapsed() < Duration::from_millis(100));
+    assert!(!server.clients.contains_key(&client_id));
+    assert!(writer.control.send(vec![1]).is_err());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let message: ServerMessage = protocol::read_message(&mut client, MAX_FRAME_SIZE).unwrap();
+    assert!(
+        matches!(message, ServerMessage::ServerShutdown { reason: Some(reason) } if reason == "detached")
+    );
+    tokio::time::timeout(LOADED_WAIT, writer.wait_complete())
+        .await
+        .unwrap();
+    server.drain_server_events();
+    assert!(server.closing_clients.is_empty());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn transport_disconnect_is_reaped_even_when_event_channel_is_full() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("transport-event-overflow");
+    let mut server = test_headless_server();
+    let (_client, client_id, writer) = register_transport_test_client(&mut server).await;
+    while server
+        .server_event_tx
+        .try_send(ServerEvent::QuitSignal)
+        .is_ok()
+    {}
+    writer.abort();
+    tokio::time::timeout(LOADED_WAIT, writer.wait_complete())
+        .await
+        .unwrap();
+    while server.server_event_rx.try_recv().is_ok() {}
+    server.drain_server_events();
+    assert!(!server.clients.contains_key(&client_id));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn transport_final_shutdown_uses_one_deadline_for_all_clients() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("transport-final-shutdown");
+    let mut server = test_headless_server();
+    let mut peers = Vec::new();
+    let mut writers = Vec::new();
+    for _ in 0..4 {
+        let (peer, _, writer) = register_transport_test_client(&mut server).await;
+        writer.control.send(vec![0; 3 * 1024 * 1024]).unwrap();
+        peers.push(peer);
+        writers.push(writer);
+    }
+    let started = Instant::now();
+    server.initiate_shutdown();
+    assert!(started.elapsed() < Duration::from_millis(100));
+    tokio::time::timeout(LOADED_WAIT, server.complete_shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "deadline multiplied by client count"
+    );
+    assert!(writers.iter().all(ClientWriter::is_complete));
+    assert!(writers.iter().all(ClientWriter::was_aborted));
+    assert!(server.clients.is_empty());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn transport_final_shutdown_delivers_to_delayed_reader() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("transport-shutdown-delivery");
+    let mut server = test_headless_server();
+    let (mut peer, _, writer) = register_transport_test_client(&mut server).await;
+    let receiver = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let message: ServerMessage = protocol::read_message(&mut peer, MAX_FRAME_SIZE).unwrap();
+        assert!(matches!(message, ServerMessage::ServerShutdown { .. }));
+        let mut tail = [0];
+        let _ = std::io::Read::read(&mut peer, &mut tail);
+    });
+    server.initiate_shutdown();
+    tokio::time::timeout(LOADED_WAIT, server.complete_shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    receiver.join().unwrap();
+    assert!(writer.is_complete());
+    assert!(!writer.was_aborted());
 }
 
 #[test]
@@ -921,6 +1068,23 @@ fn test_client_writer() -> (
         control_rx,
         render_rx,
     )
+}
+
+fn simulate_render_drain(
+    server: &mut HeadlessServer,
+    client_id: u64,
+    frames: &std::sync::mpsc::Receiver<Vec<u8>>,
+) -> bool {
+    assert!(matches!(
+        frames.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    server.clients[&client_id]
+        .writer
+        .as_ref()
+        .unwrap()
+        .test_notify_drained(client_id, &server.server_event_tx);
+    server.drain_server_events()
 }
 
 #[tokio::test]
@@ -2809,7 +2973,7 @@ async fn backpressured_shell_does_not_disable_retained_patches_for_responsive_pe
         read_server_message(slow_render.recv().expect("slow queued first patch")),
         ServerMessage::PaneSurfacePatch(_)
     ));
-    assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 8 }));
+    assert!(simulate_render_drain(&mut server, 8, &slow_render));
     server.render_and_stream();
     assert!(matches!(
         read_server_message(slow_render.recv().expect("slow full recovery surface")),
@@ -2851,7 +3015,7 @@ async fn full_render_backpressure_does_not_disable_responsive_peer_patches() {
     ));
 
     let _ = slow_render.recv().expect("slow queued initial surface");
-    assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 8 }));
+    assert!(simulate_render_drain(&mut server, 8, &slow_render));
     server.render_and_stream();
     assert!(matches!(
         read_server_message(slow_render.recv().expect("slow full recovery surface")),
@@ -3006,22 +3170,8 @@ async fn deferred_worktree_response_moves_only_its_source_client() {
     let _ = source_control.recv().expect("source snapshot");
     let _ = other_control.recv().expect("other snapshot");
     let original_tab_id = server.shell_tab_id_for_client(51).unwrap();
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_endpoint_command_in_flight = true;
-    let source_surface_revision = server.clients[&51].shell_projection_revision;
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_endpoint_command_surface_revision = Some(source_surface_revision);
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_deferred_navigation_response = Some(Vec::new());
+    let create_ticket =
+        endpoint_responses::command_ticket(&mut server, 51, "create-worktree", true);
     let mut response = serde_json::json!({
         "id": "create-worktree",
         "result": {
@@ -3031,13 +3181,7 @@ async fn deferred_worktree_response_moves_only_its_source_client() {
     });
 
     assert!(
-        server.handle_server_event(ServerEvent::ClientShellEndpointResponseChunkReady {
-            client_id: 51,
-            boot_id: server.client_shell_boot_id.clone(),
-            request_id: "create-worktree".into(),
-            final_chunk: true,
-            data: serde_json::to_vec(&response).unwrap(),
-        })
+        server.handle_server_event(endpoint_responses::response_event(create_ticket, &response))
     );
     assert_eq!(
         server.shell_tab_id_for_client(51).as_deref(),
@@ -3052,30 +3196,8 @@ async fn deferred_worktree_response_moves_only_its_source_client() {
 
     assert!(server.focus_shell_client_on_tab(51, &original_tab_id));
     response["result"]["type"] = serde_json::json!("worktree_opened");
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_endpoint_command_surface_revision = Some(source_surface_revision);
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_endpoint_command_in_flight = true;
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_deferred_navigation_response = Some(Vec::new());
-    assert!(
-        server.handle_server_event(ServerEvent::ClientShellEndpointResponseChunkReady {
-            client_id: 51,
-            boot_id: server.client_shell_boot_id.clone(),
-            request_id: "open-worktree".into(),
-            final_chunk: true,
-            data: serde_json::to_vec(&response).unwrap(),
-        })
-    );
+    let open_ticket = endpoint_responses::command_ticket(&mut server, 51, "open-worktree", true);
+    assert!(server.handle_server_event(endpoint_responses::response_event(open_ticket, &response)));
     assert_eq!(
         server.shell_tab_id_for_client(51).as_deref(),
         Some(created_tab_id.as_str())
@@ -3085,44 +3207,39 @@ async fn deferred_worktree_response_moves_only_its_source_client() {
         Some(original_tab_id.as_str())
     );
     assert!(server.focus_shell_client_on_tab(51, &original_tab_id));
-    // A source command begun in the old presentation epoch may finish after source-off and
-    // source-on rollback. Its response remains endpoint-local, but it must not apply deferred
-    // client navigation to the restored source.
+    let old_ticket =
+        endpoint_responses::command_ticket(&mut server, 51, "background-worktree", true);
+    let old_response = endpoint_responses::response_event(old_ticket, &response);
     assert!(server.set_client_shell_surface_active(51, false).is_some());
     assert!(server.set_client_shell_surface_active(51, true).is_some());
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_endpoint_command_in_flight = true;
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_endpoint_command_surface_revision = Some(source_surface_revision);
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_deferred_navigation_request_id = Some("background-worktree".into());
-    server
-        .clients
-        .get_mut(&51)
-        .unwrap()
-        .shell_deferred_navigation_response = Some(Vec::new());
-    assert!(
-        !server.handle_server_event(ServerEvent::ClientShellEndpointResponseChunkReady {
-            client_id: 51,
-            boot_id: server.client_shell_boot_id.clone(),
-            request_id: "background-worktree".into(),
-            final_chunk: true,
-            data: serde_json::to_vec(&response).unwrap(),
-        })
-    );
+    let new_ticket = endpoint_responses::command_ticket(&mut server, 51, "new-command", true);
+    let new_revision = server.clients[&51].shell_endpoint_command_surface_revision;
+    let new_request = server.clients[&51]
+        .shell_deferred_navigation_request_id
+        .clone();
+    assert!(!server.handle_server_event(old_response));
     assert_eq!(
         server.shell_tab_id_for_client(51).as_deref(),
         Some(original_tab_id.as_str())
     );
+    assert_eq!(
+        server.shell_tab_id_for_client(52).as_deref(),
+        Some(original_tab_id.as_str())
+    );
+    assert!(server.clients[&51].shell_endpoint_command_in_flight);
+    assert_eq!(
+        server.clients[&51].shell_endpoint_command_surface_revision,
+        new_revision
+    );
+    assert_eq!(
+        server.clients[&51].shell_deferred_navigation_request_id,
+        new_request
+    );
+    assert!(server.clients[&51]
+        .endpoint_responses
+        .command
+        .as_ref()
+        .is_some_and(|identity| Arc::ptr_eq(identity, &new_ticket.identity)));
     shutdown_test_runtimes(&mut server);
 }
 
@@ -5356,7 +5473,6 @@ fn terminal_attach_disconnect_restores_client_shell_pane_size() {
     rt.shutdown_timeout(Duration::from_millis(100));
 }
 
-#[cfg(unix)]
 #[test]
 fn backpressured_observer_skips_runtime_access_and_recovers_without_new_output() {
     with_terminal_session_test_server(|server, terminal_id, target, _| {
@@ -5393,7 +5509,7 @@ fn backpressured_observer_skips_runtime_access_and_recovers_without_new_output()
         assert!(control.try_recv().is_err());
 
         let _ = frames.recv().expect("previously accepted frame");
-        assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 7 }));
+        assert!(simulate_render_drain(server, 7, &frames));
         server.render_and_stream();
         let ServerMessage::Terminal(frame) = read_server_message(frames.recv().unwrap()) else {
             panic!("terminal update");

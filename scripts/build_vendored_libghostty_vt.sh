@@ -11,7 +11,9 @@ if [[ ! -f "$VENDORED_DIR/build.zig" ]]; then
 fi
 
 cd "$VENDORED_DIR"
-zig build -Demit-lib-vt -Doptimize="$OPTIMIZE" "$@"
+ZIG_GLOBAL_CACHE_DIR=${ZIG_GLOBAL_CACHE_DIR-"$ROOT_DIR/.local/zig-cache/global"} \
+ZIG_LOCAL_CACHE_DIR=${ZIG_LOCAL_CACHE_DIR-"$ROOT_DIR/.local/zig-cache/local"} \
+  zig build -Demit-lib-vt -Doptimize="$OPTIMIZE" "$@"
 
 echo
 printf 'built libghostty-vt in %s/zig-out\n' "$VENDORED_DIR"

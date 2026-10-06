@@ -1,7 +1,10 @@
 use std::io;
-use std::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    mpsc, Arc, Mutex,
+};
 
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{mpsc as tokio_mpsc, OwnedSemaphorePermit, Semaphore};
 
 use crate::api::schema::{ErrorBody, ErrorResponse, Method};
 
@@ -10,7 +13,263 @@ use super::client_transport::ServerEvent;
 pub(crate) const MAX_ENDPOINT_COMMAND_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_ENDPOINT_BOOT_ID_BYTES: usize = 128;
 pub(crate) const MAX_ENDPOINT_REQUEST_ID_BYTES: usize = 128;
-const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
+pub(crate) const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_ENDPOINT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_CLIENT_RESPONSES: usize = 3;
+pub(crate) const MAX_SERVER_RESPONSES: usize = 6;
+pub(crate) const ENDPOINT_BLOCKS_PER_TURN: usize = 4;
+const MAX_CONTROL_RESPONSE_BYTES: usize = crate::protocol::MAX_FRAME_SIZE - 1024;
+
+#[derive(Debug)]
+pub(crate) struct EndpointResponseIdentity {
+    pub(crate) client_id: u64,
+    pub(crate) boot_id: String,
+    pub(crate) request_id: String,
+    pub(crate) order: u64,
+    pub(crate) deferred_request_id: std::sync::OnceLock<String>,
+    active: AtomicBool,
+    tickets: AtomicUsize,
+}
+
+impl EndpointResponseIdentity {
+    pub(crate) fn new(client_id: u64, boot_id: String, request_id: String) -> Arc<Self> {
+        static NEXT_ORDER: AtomicU64 = AtomicU64::new(1);
+        let order = NEXT_ORDER.fetch_add(1, Ordering::Relaxed);
+        Arc::new(Self {
+            client_id,
+            boot_id,
+            request_id,
+            order,
+            deferred_request_id: std::sync::OnceLock::new(),
+            active: AtomicBool::new(true),
+            tickets: AtomicUsize::new(0),
+        })
+    }
+
+    pub(crate) fn live(&self) -> bool {
+        self.tickets.load(Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndpointResponseKind {
+    Command {
+        surface_revision: u64,
+        navigate: bool,
+    },
+    Reading,
+    Background,
+}
+
+#[derive(Debug)]
+pub(crate) struct EndpointResponseTicket {
+    pub(crate) identity: Arc<EndpointResponseIdentity>,
+    _global: OwnedSemaphorePermit,
+    _client: OwnedSemaphorePermit,
+}
+
+impl EndpointResponseTicket {
+    pub(crate) fn acquire(
+        global: &Arc<Semaphore>,
+        client: &Arc<Semaphore>,
+        identity: Arc<EndpointResponseIdentity>,
+    ) -> Option<Self> {
+        let global = global.clone().try_acquire_owned().ok()?;
+        let client = client.clone().try_acquire_owned().ok()?;
+        identity.tickets.fetch_add(1, Ordering::AcqRel);
+        Some(Self {
+            identity,
+            _global: global,
+            _client: client,
+        })
+    }
+}
+
+impl Drop for EndpointResponseTicket {
+    fn drop(&mut self) {
+        if self.identity.tickets.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.identity.cancel();
+        }
+    }
+}
+
+pub(crate) struct EndpointResponseReady {
+    // Field order frees the body before returning its permits, including a dropped send future.
+    pub(crate) body: Box<[u8]>,
+    pub(crate) ticket: EndpointResponseTicket,
+}
+
+impl std::fmt::Debug for EndpointResponseReady {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EndpointResponseReady")
+            .field("bytes", &self.body.len())
+            .field("identity", &self.ticket.identity)
+            .finish()
+    }
+}
+
+impl EndpointResponseReady {
+    pub(crate) fn new(ticket: EndpointResponseTicket, response: String) -> Self {
+        let response = correlate_response_id(response, &ticket.identity.request_id);
+        let response = if response.len() > MAX_ENDPOINT_RESPONSE_BYTES {
+            drop(response);
+            error_response(
+                ticket.identity.request_id.clone(),
+                "endpoint_response_too_large",
+                "endpoint response exceeds 64 MiB; the operation may already have completed",
+            )
+        } else {
+            response
+        };
+        Self {
+            body: response.into_bytes().into_boxed_slice(),
+            ticket,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct EndpointControlResponse {
+    pub(crate) identity: Arc<EndpointResponseIdentity>,
+    pub(crate) writer: super::client_transport::ClientControlWriter,
+}
+
+impl Drop for EndpointControlResponse {
+    fn drop(&mut self) {
+        self.identity.cancel();
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum EndpointResponseTarget {
+    Bulk(EndpointResponseTicket),
+    Control(EndpointControlResponse),
+}
+
+impl EndpointResponseTarget {
+    fn active(&self) -> bool {
+        match self {
+            Self::Bulk(ticket) => ticket.identity.active(),
+            Self::Control(control) => control.identity.active(),
+        }
+    }
+
+    pub(crate) fn send(self, response: String, events: &tokio_mpsc::Sender<ServerEvent>) {
+        if !self.active() {
+            return;
+        }
+        let ready = match self {
+            Self::Bulk(ticket) => EndpointResponseReady::new(ticket, response),
+            Self::Control(control) => {
+                send_control_response(
+                    &control.writer,
+                    &control.identity.boot_id,
+                    &control.identity.request_id,
+                    response,
+                );
+                return;
+            }
+        };
+        let event = ServerEvent::EndpointResponseReady { response: ready };
+        if let Err(tokio_mpsc::error::TrySendError::Full(event)) = events.try_send(event) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let events = events.clone();
+                runtime.spawn(async move {
+                    let _ = events.send(event).await;
+                });
+            } else {
+                let _ = events.blocking_send(event);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EndpointResponseSender(Arc<Mutex<Option<EndpointResponseTarget>>>);
+
+#[cfg(test)]
+pub(crate) fn test_response_ticket(
+    client_id: u64,
+    boot_id: &str,
+    request_id: &str,
+) -> EndpointResponseTicket {
+    EndpointResponseTicket::acquire(
+        &Arc::new(Semaphore::new(MAX_SERVER_RESPONSES)),
+        &Arc::new(Semaphore::new(MAX_CLIENT_RESPONSES)),
+        EndpointResponseIdentity::new(client_id, boot_id.into(), request_id.into()),
+    )
+    .unwrap()
+}
+
+impl EndpointResponseSender {
+    #[cfg(test)]
+    pub(crate) fn test_empty() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
+    pub(crate) fn new(target: EndpointResponseTarget) -> Self {
+        Self(Arc::new(Mutex::new(Some(target))))
+    }
+
+    pub(crate) fn take(&self) -> Option<EndpointResponseTarget> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .filter(EndpointResponseTarget::active)
+    }
+}
+
+pub(crate) fn send_control_response(
+    writer: &super::client_transport::ClientControlWriter,
+    boot_id: &str,
+    request_id: &str,
+    response: String,
+) {
+    let response = correlate_response_id(response, request_id);
+    let response = if response.len() > MAX_CONTROL_RESPONSE_BYTES {
+        drop(response);
+        error_response(request_id.into(), "endpoint_response_too_large",
+            "control acknowledgement exceeds its bounded control-frame limit; the operation may already have completed")
+    } else {
+        response
+    };
+    let message = crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
+        boot_id: boot_id.into(),
+        request_id: request_id.into(),
+        final_chunk: true,
+        data: response.into_bytes(),
+    };
+    let mut frame = Vec::new();
+    if crate::protocol::write_message(&mut frame, &message).is_ok() {
+        let _ = writer.send(frame);
+    }
+}
+
+pub(crate) fn response_text(
+    request_id: &str,
+    result: Result<crate::api::schema::ResponseResult, (&str, String)>,
+) -> String {
+    match result {
+        Ok(result) => serde_json::to_string(&crate::api::schema::SuccessResponse {
+            id: request_id.into(),
+            result,
+        })
+        .unwrap_or_else(|error| {
+            error_response(request_id.into(), "serialization_error", error.to_string())
+        }),
+        Err((code, message)) => error_response(request_id.into(), code, message),
+    }
+}
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
     "account.binding.set",
@@ -111,30 +370,6 @@ pub(crate) fn error_response(id: String, code: &str, message: impl Into<String>)
     })
 }
 
-pub(crate) fn success_message_with_result(
-    boot_id: String,
-    request_id: String,
-    result: crate::api::schema::ResponseResult,
-) -> crate::protocol::ServerMessage {
-    let response = serde_json::to_string(&crate::api::schema::SuccessResponse {
-        id: request_id.clone(),
-        result,
-    })
-    .unwrap_or_else(|_| {
-        error_response(
-            request_id.clone(),
-            "serialization_error",
-            "failed to serialize endpoint response",
-        )
-    });
-    crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
-        boot_id,
-        request_id,
-        final_chunk: true,
-        data: response.into_bytes(),
-    }
-}
-
 pub(crate) fn error_message(
     boot_id: String,
     request_id: String,
@@ -165,9 +400,7 @@ fn correlate_response_id(response: String, request_id: &str) -> String {
 }
 
 pub(crate) fn spawn_response_waiter(
-    client_id: u64,
-    boot_id: String,
-    request_id: String,
+    ticket: EndpointResponseTicket,
     response_rx: mpsc::Receiver<String>,
     server_event_tx: tokio_mpsc::Sender<ServerEvent>,
 ) -> io::Result<()> {
@@ -176,39 +409,17 @@ pub(crate) fn spawn_response_waiter(
         .spawn(move || {
             let response = response_rx.recv().unwrap_or_else(|_| {
                 error_response(
-                    request_id.clone(),
+                    ticket.identity.request_id.clone(),
                     "server_unavailable",
                     "endpoint command ended without a response",
                 )
             });
-            let response = correlate_response_id(response, &request_id).into_bytes();
-            if response.is_empty() {
-                let _ = server_event_tx.blocking_send(
-                    ServerEvent::ClientShellEndpointResponseChunkReady {
-                        client_id,
-                        boot_id,
-                        request_id,
-                        final_chunk: true,
-                        data: Vec::new(),
-                    },
-                );
+            if !ticket.identity.active() {
+                drop(response);
                 return;
             }
-            let chunk_count = response.len().div_ceil(ENDPOINT_RESPONSE_CHUNK_BYTES);
-            for (index, chunk) in response.chunks(ENDPOINT_RESPONSE_CHUNK_BYTES).enumerate() {
-                if server_event_tx
-                    .blocking_send(ServerEvent::ClientShellEndpointResponseChunkReady {
-                        client_id,
-                        boot_id: boot_id.clone(),
-                        request_id: request_id.clone(),
-                        final_chunk: index + 1 == chunk_count,
-                        data: chunk.to_vec(),
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
+            let response = EndpointResponseReady::new(ticket, response);
+            let _ = server_event_tx.blocking_send(ServerEvent::EndpointResponseReady { response });
         })
         .map(|_| ())
 }
@@ -497,6 +708,124 @@ mod tests {
         )));
     }
 
+    #[tokio::test]
+    async fn response_matrix_waiting_event_future_keeps_64mib_permit_after_cancel() {
+        let global = Arc::new(Semaphore::new(MAX_SERVER_RESPONSES));
+        let client = Arc::new(Semaphore::new(MAX_CLIENT_RESPONSES));
+        let identity = EndpointResponseIdentity::new(7, "boot".into(), "held".into());
+        let ticket = EndpointResponseTicket::acquire(&global, &client, identity.clone()).unwrap();
+        let (events, mut receiver) = tokio_mpsc::channel(1);
+        events.try_send(ServerEvent::QuitSignal).unwrap();
+        let reply = crate::server::observability::Reply::Endpoint {
+            client_id: 7,
+            boot_id: "boot".into(),
+            events,
+            active: Arc::new(AtomicBool::new(true)),
+            response: EndpointResponseSender::new(EndpointResponseTarget::Bulk(ticket)),
+        };
+        let subscription = reply.clone();
+        let overhead = response_text(
+            "held",
+            Ok(crate::api::schema::ResponseResult::PaneLinkActivated {
+                url: Some(String::new()),
+                handled: true,
+            }),
+        )
+        .len();
+        reply.response(
+            "held",
+            Ok(crate::api::schema::ResponseResult::PaneLinkActivated {
+                url: Some("x".repeat(MAX_ENDPOINT_RESPONSE_BYTES - overhead)),
+                handled: true,
+            }),
+        );
+        subscription.response(
+            "held",
+            Err(("duplicate", "must not create a second response".into())),
+        );
+        identity.cancel();
+        tokio::task::yield_now().await;
+        assert_eq!(receiver.len(), 1);
+        assert_eq!(
+            global.available_permits(),
+            5,
+            "cancel must not refund a body retained by the send future"
+        );
+        assert_eq!(client.available_permits(), 2);
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ServerEvent::QuitSignal)
+        ));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(30), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ServerEvent::EndpointResponseReady { response } = &event else {
+            panic!("complete response");
+        };
+        assert_eq!(response.body.len(), 64 * 1024 * 1024);
+        assert_eq!(global.available_permits(), 5);
+        drop(event);
+        assert_eq!(global.available_permits(), 6);
+        assert_eq!(client.available_permits(), 3);
+        subscription.response("held", Ok(crate::api::schema::ResponseResult::Ok {}));
+        tokio::task::yield_now().await;
+        assert!(receiver.try_recv().is_err());
+        println!("waiting_future body_bytes=67108864 permits_while_cancelled=5 permits_after_body_drop=6 client_after=3 subscription_clone_alive=true");
+    }
+
+    #[test]
+    fn response_matrix_small_control_response_has_an_enforced_byte_boundary() {
+        let writer = crate::server::client_transport::ClientWriter::test_paused();
+        let identity = EndpointResponseIdentity::new(1, "boot".into(), "control".into());
+        let target = EndpointResponseTarget::Control(EndpointControlResponse {
+            identity: identity.clone(),
+            writer: writer.control.clone(),
+        });
+        let (events, mut receiver) = tokio_mpsc::channel(1);
+        events.try_send(ServerEvent::QuitSignal).unwrap();
+        let text = response_text(
+            "control",
+            Ok(crate::api::schema::ResponseResult::PaneLinkActivated {
+                url: Some("x".repeat(MAX_CONTROL_RESPONSE_BYTES + 1)),
+                handled: true,
+            }),
+        );
+        target.send(text, &events);
+        assert!(!identity.active());
+        assert_eq!(
+            receiver.len(),
+            1,
+            "small-control delivery does not queue an event or a waiting future"
+        );
+        let frames = writer.test_drain();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].len() <= crate::protocol::MAX_FRAME_SIZE + 4);
+        let message: crate::protocol::ServerMessage = crate::protocol::read_message(
+            &mut frames[0].as_slice(),
+            crate::protocol::MAX_FRAME_SIZE,
+        )
+        .unwrap();
+        let crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
+            boot_id,
+            request_id,
+            final_chunk,
+            data,
+        } = message
+        else {
+            panic!("control final");
+        };
+        assert_eq!(
+            (boot_id.as_str(), request_id.as_str(), final_chunk),
+            ("boot", "control", true)
+        );
+        let error: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(error["error"]["code"], "endpoint_response_too_large");
+        assert!(error.get("result").is_none());
+        assert!(!writer.was_aborted());
+        assert!(matches!(receiver.try_recv(), Ok(ServerEvent::QuitSignal)));
+    }
+
     #[test]
     fn endpoint_response_uses_the_client_request_id() {
         let response = serde_json::json!({
@@ -512,41 +841,26 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_responses_are_chunked_without_truncation() {
+    fn endpoint_responses_are_handed_off_once_without_truncation() {
         let (response_tx, response_rx) = mpsc::channel();
         let (event_tx, mut event_rx) = tokio_mpsc::channel(8);
         spawn_response_waiter(
-            7,
-            "boot-a".into(),
-            "request-a".into(),
+            test_response_ticket(7, "boot-a", "request-a"),
             response_rx,
             event_tx,
         )
         .unwrap();
-        let response = "x".repeat(ENDPOINT_RESPONSE_CHUNK_BYTES + 17);
-        response_tx.send(response.clone()).unwrap();
-
-        let mut received = Vec::new();
-        loop {
-            let ServerEvent::ClientShellEndpointResponseChunkReady {
-                client_id,
-                boot_id,
-                request_id,
-                final_chunk,
-                data,
-            } = event_rx.blocking_recv().expect("response chunk")
-            else {
-                panic!("expected response chunk");
-            };
-            assert_eq!(client_id, 7);
-            assert_eq!(boot_id, "boot-a");
-            assert_eq!(request_id, "request-a");
-            received.extend(data);
-            if final_chunk {
-                break;
-            }
-        }
-
-        assert_eq!(received, response.as_bytes());
+        let text = "x".repeat(ENDPOINT_RESPONSE_CHUNK_BYTES + 17);
+        response_tx.send(text.clone()).unwrap();
+        let ServerEvent::EndpointResponseReady { response } =
+            event_rx.blocking_recv().expect("complete response")
+        else {
+            panic!("expected complete response");
+        };
+        assert_eq!(response.ticket.identity.client_id, 7);
+        assert_eq!(response.ticket.identity.boot_id, "boot-a");
+        assert_eq!(response.ticket.identity.request_id, "request-a");
+        assert_eq!(response.body.as_ref(), text.as_bytes());
+        assert!(event_rx.try_recv().is_err());
     }
 }

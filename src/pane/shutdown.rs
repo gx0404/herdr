@@ -1678,102 +1678,120 @@ mod tests {
         fn pty_close_preserves_save_window_for_runtime_shutdown_and_drop() {
             for panes in [1, 15] {
                 for implicit_drop in [false, true] {
-                    let runtime = tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(1)
-                        .enable_all()
-                        .build()
-                        .unwrap();
-                    let reaper = Arc::new(Reaper::new());
-                    reaper.worker_started.store(true, Ordering::Release);
-                    let _hook = SubmitGuard::install(Arc::clone(&reaper));
-                    let mut actors = Vec::new();
-                    let mut runtimes = Vec::new();
-                    let mut results = Vec::new();
-                    for pane_id in 1..=panes {
-                        let actor = ShutdownActor::new(runtime.handle());
-                        let (mut pane, _) = {
-                            let _entered = runtime.enter();
-                            PaneRuntime::test_with_channel(80, 24)
-                        };
-                        pane.pane_id = PaneId::from_raw(pane_id);
-                        pane.io = PaneRuntimeIo::Actor(actor.handle.as_ref().unwrap().clone());
-                        pane.child_pid.store(std::process::id(), Ordering::Release);
-                        pane.preserve_processes_on_drop = false;
-                        results.push(
-                            pane.queue_user_input_submission(
-                                Bytes::from_static(b"save"),
-                                Bytes::from_static(b"\r"),
-                                Duration::ZERO,
-                                None,
-                            )
-                            .unwrap(),
-                        );
-                        actor.wait_for_enter();
-                        actors.push(actor);
-                        runtimes.push(pane);
-                    }
-                    let control = SavingProcesses {
-                        closed: actors
-                            .iter()
-                            .map(|actor| Arc::clone(&actor.closed_at))
-                            .collect(),
-                        now: Mutex::new(Some(Instant::now())),
-                        killed: Mutex::new(Vec::new()),
-                        scanned: AtomicUsize::new(0),
-                    };
-                    let started = Instant::now();
-                    for pane in runtimes {
-                        if implicit_drop {
-                            drop(pane);
-                        } else {
-                            pane.shutdown();
+                    for first_poll_ms in [0, 250] {
+                        let runtime = test_runtime();
+                        let reaper = Arc::new(Reaper::new());
+                        reaper.worker_started.store(true, Ordering::Release);
+                        let _hook = SubmitGuard::install(Arc::clone(&reaper));
+                        let mut actors = Vec::new();
+                        let mut runtimes = Vec::new();
+                        let mut results = Vec::new();
+                        for pane_id in 1..=panes {
+                            let actor = ShutdownActor::new(runtime.handle());
+                            let pane = runtime_with_actor(&runtime, &actor, pane_id);
+                            results.push(
+                                pane.queue_user_input_submission(
+                                    Bytes::from_static(b"save"),
+                                    Bytes::from_static(b"\r"),
+                                    Duration::ZERO,
+                                    None,
+                                )
+                                .unwrap(),
+                            );
+                            actor.wait_for_enter();
+                            actor.block_control();
+                            actors.push(actor);
+                            runtimes.push(pane);
                         }
-                    }
-                    assert!(
-                        !reaper.drain(Duration::ZERO),
-                        "drain must see registered requests before PTY close"
-                    );
-                    let mut targets = take_targets(&reaper, &control);
-                    assert_eq!(control.scanned.load(Ordering::Relaxed), panes as usize);
-                    let first = Instant::now();
-                    advance(&reaper, &mut targets, &control, first);
-                    assert!(targets.iter().all(|target| target.stage == 0), "PTY close must precede the first ladder timer; blocked Enter cannot consume the process save window");
-                    assert!(!reaper.drain(Duration::ZERO));
-                    let closed = actors
-                        .iter()
-                        .map(ShutdownActor::wait_for_close)
-                        .max()
-                        .unwrap();
-                    assert!(
-                        started.elapsed() < Duration::from_secs(2),
-                        "pane close grace must run concurrently"
-                    );
-                    let after_close = (closed + Duration::from_millis(10))
-                        .max(first + Duration::from_millis(250));
-                    advance(&reaper, &mut targets, &control, after_close);
-                    advance(
-                        &reaper,
-                        &mut targets,
-                        &control,
-                        after_close + Duration::from_millis(250),
-                    );
-                    advance(
-                        &reaper,
-                        &mut targets,
-                        &control,
-                        after_close + Duration::from_millis(350),
-                    );
-                    assert!(
-                        control.killed.lock().unwrap().is_empty(),
-                        "saving processes must get 350ms after CLOSE without Kill"
-                    );
-                    assert!(reaper.drain(Duration::ZERO));
-                    for (actor, result) in actors.into_iter().zip(results) {
-                        assert!(result
-                            .recv_timeout(Duration::from_secs(2))
+                        let control = SavingProcesses {
+                            closed: (0..panes).map(|_| Arc::new(Mutex::new(None))).collect(),
+                            now: Mutex::new(None),
+                            killed: Mutex::new(Vec::new()),
+                            scanned: AtomicUsize::new(0),
+                        };
+                        for pane in runtimes {
+                            if implicit_drop {
+                                drop(pane);
+                            } else {
+                                pane.shutdown();
+                            }
+                        }
+                        assert!(actors.iter().all(|actor| actor
+                            .closed_at
+                            .lock()
                             .unwrap()
-                            .is_err());
-                        actor.finish();
+                            .is_none()));
+                        assert!(
+                            !reaper.drain(Duration::ZERO),
+                            "drain must see registered requests before PTY close"
+                        );
+                        let mut targets = take_targets(&reaper, &control);
+                        assert_eq!(targets.len(), panes as usize);
+                        assert_eq!(control.scanned.load(Ordering::Relaxed), panes as usize);
+                        let before_close = targets
+                            .iter()
+                            .map(|target| target.pty_close.as_ref().unwrap().deadline())
+                            .min()
+                            .unwrap()
+                            - crate::pty::actor::PTY_CLOSE_TIMEOUT;
+                        advance(&reaper, &mut targets, &control, before_close);
+                        assert!(targets.iter().all(|target| target.stage == 0), "PTY close must precede the first ladder timer; blocked Enter cannot consume the process save window");
+                        assert!(!reaper.drain(Duration::ZERO));
+                        std::thread::scope(|scope| {
+                            for (actor, result) in actors.into_iter().zip(results) {
+                                scope.spawn(move || {
+                                    let closed_at = Arc::clone(&actor.closed_at);
+                                    actor.finish();
+                                    assert!(closed_at.lock().unwrap().is_some());
+                                    assert_eq!(
+                                        result.try_recv().unwrap().unwrap_err().kind(),
+                                        std::io::ErrorKind::BrokenPipe
+                                    );
+                                });
+                            }
+                        });
+                        let mut timelines: Vec<_> = targets
+                            .into_iter()
+                            .map(|target| {
+                                let completion = target.pty_close.as_ref().unwrap();
+                                let closed = completion
+                                    .ready_at(before_close)
+                                    .expect("actual CLOSE completion, not timeout fallback");
+                                *control.closed[target.child_pid as usize - 1]
+                                    .lock()
+                                    .unwrap() = Some(closed);
+                                (vec![target], closed)
+                            })
+                            .collect();
+                        for elapsed_ms in [first_poll_ms, 250, 349, 350] {
+                            for (targets, closed) in &mut timelines {
+                                let now = *closed + Duration::from_millis(elapsed_ms);
+                                *control.now.lock().unwrap() = Some(now);
+                                advance_targets(targets, &SIGNAL_LADDER, &control, now);
+                                if elapsed_ms < 350 {
+                                    assert_eq!(
+                                        targets.len(),
+                                        1,
+                                        "each pane retains its own save window"
+                                    );
+                                    let expected_stage = if elapsed_ms >= first_poll_ms + 250 {
+                                        2
+                                    } else {
+                                        1
+                                    };
+                                    assert_eq!(targets[0].stage, expected_stage, "first poll at CLOSE+{first_poll_ms}ms, now CLOSE+{elapsed_ms}ms");
+                                } else {
+                                    assert!(targets.is_empty());
+                                }
+                            }
+                            lock_state(&reaper).in_flight =
+                                timelines.iter().map(|(targets, _)| targets.len()).sum();
+                            assert_eq!(reaper.drain(Duration::ZERO), elapsed_ms == 350);
+                            assert!(
+                                control.killed.lock().unwrap().is_empty(),
+                                "saving processes must get 350ms after CLOSE without Kill"
+                            );
+                        }
                     }
                 }
             }

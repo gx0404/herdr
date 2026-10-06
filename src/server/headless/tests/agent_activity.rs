@@ -4,6 +4,7 @@
 use super::*;
 use crate::api::schema::{AgentActivityNode, AgentActivityReadParams, AgentActivityStatus};
 use crate::detect::{Agent, AgentState};
+use crate::server::client_commands;
 
 fn server_with_agent_pane() -> (HeadlessServer, crate::layout::PaneId) {
     let mut server = test_headless_server();
@@ -976,29 +977,69 @@ async fn activity_results_land_in_start_order_whatever_order_they_arrive_in() {
     shutdown_test_runtimes(&mut server);
 }
 
-fn endpoint_responses(
+async fn endpoint_responses(
+    server: &mut HeadlessServer,
     control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    client_id: u64,
     request_id: &str,
 ) -> serde_json::Value {
-    let mut data = Vec::new();
-    loop {
-        let bytes = control_rx.recv_timeout(LOADED_WAIT).expect("等待端点应答");
-        if let ServerMessage::ClientShellEndpointResponseChunk {
-            request_id: chunk_request,
-            final_chunk,
-            data: chunk,
-            ..
-        } = read_server_message(bytes)
-        {
-            if chunk_request != request_id {
-                continue;
+    tokio::time::timeout(LOADED_WAIT, async {
+        let boot_id = server.client_shell_boot_id.clone();
+        let writer = server.clients[&client_id].writer.as_ref().unwrap().clone();
+        let ready = server.server_event_rx.recv().await.expect("端点应答 Ready");
+        let ServerEvent::EndpointResponseReady { response } = &ready else {
+            panic!("expected EndpointResponseReady, got {ready:?}");
+        };
+        assert_eq!(response.ticket.identity.client_id, client_id);
+        assert_eq!(response.ticket.identity.boot_id, boot_id);
+        assert_eq!(response.ticket.identity.request_id, request_id);
+        let mut ready = Some(ready);
+        let mut data = Vec::new();
+        loop {
+            let before = writer.test_endpoint_frames_sent();
+            server.endpoint_pump_remaining = client_commands::ENDPOINT_BLOCKS_PER_TURN;
+            if let Some(ready) = ready.take() {
+                assert_eq!(
+                    server.handle_server_event_with_render_impact(ready),
+                    RenderImpact::None
+                );
             }
-            data.extend(chunk);
-            if final_chunk {
-                return serde_json::from_slice(&data).expect("应答是 JSON");
+            assert!(!server.drain_server_events());
+            assert!(
+                writer.test_endpoint_frames_sent() - before
+                    <= client_commands::ENDPOINT_BLOCKS_PER_TURN
+            );
+            assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+            loop {
+                let bytes = match control_rx.try_recv() {
+                    Ok(bytes) => bytes,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(error) => panic!("端点应答通道关闭: {error}"),
+                };
+                let ServerMessage::ClientShellEndpointResponseChunk {
+                    boot_id: chunk_boot,
+                    request_id: chunk_request,
+                    final_chunk,
+                    data: chunk,
+                } = read_server_message(bytes)
+                else {
+                    panic!("expected endpoint response chunk");
+                };
+                assert_eq!(chunk_boot, boot_id);
+                assert_eq!(chunk_request, request_id);
+                data.extend(chunk);
+                if final_chunk {
+                    let response: serde_json::Value =
+                        serde_json::from_slice(&data).expect("应答是 JSON");
+                    assert_eq!(response["id"], request_id);
+                    return response;
+                }
             }
+            tokio::task::yield_now().await;
         }
-    }
+    })
+    .await
+    .expect("等待端点应答")
 }
 
 #[tokio::test]
@@ -1020,7 +1061,7 @@ async fn client_endpoint_activity_reads_bypass_the_command_lane() {
         );
     }
 
-    // 参数错误：主线程同步回错误分块。
+    // 参数错误也由 Ready 事件进入有界响应泵，错误内容不变。
     assert!(
         !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
             client_id,
@@ -1031,8 +1072,11 @@ async fn client_endpoint_activity_reads_bypass_the_command_lane() {
             }),
         })
     );
-    let invalid = endpoint_responses(&control_rx, "client-shell:invalid");
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+    let invalid =
+        endpoint_responses(&mut server, &control_rx, client_id, "client-shell:invalid").await;
     assert_eq!(invalid["error"]["code"], "invalid_params");
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
 
     // 合法读取：不占终端命令的 in-flight 名额，应答经 server 事件通道回来。
     assert!(
@@ -1049,13 +1093,9 @@ async fn client_endpoint_activity_reads_bypass_the_command_lane() {
         })
     );
     assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
-    let ready = tokio::time::timeout(LOADED_WAIT, server.server_event_rx.recv())
-        .await
-        .expect("后台应答")
-        .expect("通道未关闭");
-    assert!(matches!(ready, ServerEvent::ObservationResponse { .. }));
-    assert!(!server.handle_server_event(ready));
-    let response = endpoint_responses(&control_rx, "client-shell:activity");
+    let response =
+        endpoint_responses(&mut server, &control_rx, client_id, "client-shell:activity").await;
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
     // claude 适配器仍是空壳。
     assert_eq!(
         response["error"]["code"],

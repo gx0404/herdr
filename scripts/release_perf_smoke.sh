@@ -49,6 +49,7 @@ export HERDR_HOME="$isolated_herdr_home"
 export CODEX_HOME="$isolated_codex_home"
 export KIMI_CODE_HOME="$isolated_kimi_home"
 export TMPDIR="$isolated_tmp"
+unset HERDR_CONFIG_PATH
 printf '%s\n' "$run_id" > "$run_dir/run-id.txt"
 printf 'run_id=%s\nstarted_at=%s\nrepository=%s\nisolation_root=%s\n' \
   "$run_id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo_root" "$temporary_root" > "$metadata"

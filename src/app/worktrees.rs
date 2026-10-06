@@ -17,9 +17,10 @@ impl App {
             .filter(|space| space.is_linked_worktree)
             .map(|space| space.key.clone());
 
+        let before = self.capture_session_layout();
         self.state.selected = ws_idx;
         self.state.close_selected_workspace();
-        self.authorize_session_layout_change();
+        self.authorize_session_layout_change(before);
 
         if !removed_workspace_was_active {
             return;

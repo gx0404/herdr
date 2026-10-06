@@ -44,8 +44,9 @@
 //! - 待办：根会话的全部，外加仍在跑的子 agent 的，id 为 `todo:<会话 id>:<position>`。
 //! - `read` 只有子 agent 节点有内容；游标是 `t:<偏移>`（转录）或 `o:<偏移>`
 //!   （output.txt）。读到末尾时 `eof=true` 只表示「暂时读完」，`next_cursor` 仍给出
-//!   当前位置供跟随续读；转录里不以换行结尾的半截末行不消费，游标留在行首。待办与
-//!   其余会话节点（旁支对话等）没有内容，回空页（`eof=true`、无游标，查看器显示
+//!   当前位置供跟随续读；可保留的半截转录行不消费，游标留在行首。超长行按扫描预算
+//!   分次丢弃，续读时以游标前的换行边界区分整行与中段。待办与其余会话节点
+//!   （旁支对话等）没有内容，回空页（`eof=true`、无游标，查看器显示
 //!   「无输出」），不当读取失败；认不出形状的节点 id 回 `Malformed`。
 //!
 //! # 本机取证（2026-09-22，只读核对结构、键名与枚举取值，未读取任何对话正文）
@@ -1160,19 +1161,35 @@ fn read_transcript_page(
     budget: usize,
 ) -> Result<ContentChunk, SourceError> {
     let (file, len) = open_content(path)?;
+    read_transcript(file, len, offset, budget)
+}
+
+fn read_transcript<R: Read + Seek>(
+    mut source: R,
+    len: u64,
+    offset: u64,
+    budget: usize,
+) -> Result<ContentChunk, SourceError> {
     if offset >= len {
         return Ok(empty_chunk(
             AgentActivityContentFormat::Text,
             Some(format!("t:{offset}")),
         ));
     }
-    let mut reader = BufReader::new(file);
-    reader
-        .seek(SeekFrom::Start(offset))
+    source
+        .seek(SeekFrom::Start(offset.saturating_sub(1)))
         .map_err(SourceError::Io)?;
+    let mut reader = BufReader::new(source.take(SCAN_BUDGET_BYTES));
+    let mut discarding = false;
+    let mut scanned = 0_u64;
+    if offset > 0 {
+        let mut previous = [0];
+        reader.read_exact(&mut previous).map_err(SourceError::Io)?;
+        discarding = previous[0] != b'\n';
+        scanned = 1;
+    }
 
     let mut position = offset;
-    let mut scanned = 0_u64;
     let mut text = String::new();
     let mut truncated = false;
     let mut drained = false;
@@ -1180,21 +1197,25 @@ fn read_transcript_page(
     while text.len() < budget && scanned < SCAN_BUDGET_BYTES {
         let line_start = position;
         line.clear();
-        let raw =
-            read_line_capped(&mut reader, &mut line, LINE_KEEP_BYTES).map_err(SourceError::Io)?;
+        let keep = if discarding { 0 } else { LINE_KEEP_BYTES };
+        let raw = read_line_capped(&mut reader, &mut line, keep).map_err(SourceError::Io)?;
         if raw.consumed == 0 {
-            drained = true;
-            break;
-        }
-        if !raw.terminated {
-            // 没有换行符结尾 = 这一行 ZCode 还在写。不消费：游标退回行首，下一次
-            // 读到完整行再渲染，免得半截 JSON 被静默丢掉。
-            position = line_start;
             drained = true;
             break;
         }
         position = position.saturating_add(raw.consumed as u64);
         scanned = scanned.saturating_add(raw.consumed as u64);
+        if !raw.terminated {
+            drained = scanned < SCAN_BUDGET_BYTES || position >= len;
+            if !discarding && !raw.overflow {
+                position = line_start;
+            }
+            break;
+        }
+        if discarding {
+            discarding = false;
+            continue;
+        }
         let Some(entry) = render_transcript_line(&line, raw.overflow) else {
             continue;
         };
@@ -1233,8 +1254,8 @@ struct RawLine {
     terminated: bool,
 }
 
-/// 读一行（含换行符），只在 `out` 里留前 `cap` 字节。文件末尾没有换行符时
-/// `terminated` 为 false，由调用方决定是否消费这半截行。
+/// 读一行（含换行符），只在 `out` 里留前 `cap` 字节。reader 到末尾或耗尽扫描预算
+/// 仍没有换行符时 `terminated` 为 false，由调用方决定是否消费这半截行。
 fn read_line_capped<R: BufRead>(
     reader: &mut R,
     out: &mut Vec<u8>,
@@ -2524,6 +2545,317 @@ mod tests {
         assert!(chunk.eof);
     }
 
+    const AUDIT_NODE: &str = "sess_subagent_agent_audit";
+
+    fn audit_content_home(tag: &str) -> (crate::config::test_dirs::TempDir, PathBuf) {
+        let home = crate::config::test_dirs::TempDir::new(tag);
+        let dir = agents_dir(home.path())
+            .join("sess_audit")
+            .join("agent_audit");
+        std::fs::create_dir_all(&dir).expect("建立合成子 agent 目录");
+        (home, dir)
+    }
+
+    fn audit_transcript_offset(cursor: Option<&str>) -> u64 {
+        match parse_cursor(cursor).expect("来源返回的 opaque cursor 可解析") {
+            Cursor::Transcript(offset) => offset,
+            other => panic!("应为可续读转录游标：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn audit_p1_zcode_long_line_resumes_within_scan_budget_without_rendering_its_suffix() {
+        let (home, dir) = audit_content_home("audit-zcode-long-line");
+        let mut body = transcript_line("model_streaming", "{}").into_bytes();
+        body.resize(SCAN_BUDGET_BYTES as usize, b'x');
+        let forged = transcript_line("model_complete", "{\"content\":\"forged-mid-line\"}");
+        body.extend_from_slice(forged.trim_end_matches('\n').as_bytes());
+        body.resize(2 * SCAN_BUDGET_BYTES as usize, b'x');
+        body.extend_from_slice(forged.as_bytes());
+        body.extend_from_slice(
+            transcript_line("model_complete", "{\"content\":\"合法下一条\"}").as_bytes(),
+        );
+        std::fs::write(dir.join(TRANSCRIPT_FILE), &body).expect("写入跨多个预算的单行夹具");
+        let cx = context(home.path(), None);
+        let mut cursor = None;
+        let mut offset = 0;
+        let mut text = String::new();
+        let mut reached_eof = false;
+        for _ in 0..8 {
+            let page = ZCode
+                .read(&cx, AUDIT_NODE, cursor.as_deref(), MIN_READ_BYTES)
+                .expect("长行按现有读取接口续读");
+            let next = audit_transcript_offset(page.next_cursor.as_deref());
+            assert!(
+                next > offset && next - offset <= SCAN_BUDGET_BYTES,
+                "单次扫描不可越过预算：offset={offset}, next={next}, budget={SCAN_BUDGET_BYTES}"
+            );
+            assert!(next <= body.len() as u64);
+            assert!(
+                page.text.is_empty() || page.text == "合法下一条\n",
+                "预算中断后的行中段不得冒充完整记录：{:?}",
+                page.text
+            );
+            text.push_str(&page.text);
+            offset = next;
+            cursor = page.next_cursor;
+            if page.eof {
+                assert_eq!(offset, body.len() as u64);
+                reached_eof = true;
+                break;
+            }
+        }
+        assert!(reached_eof, "必须以有限次有界读取越过长行");
+        assert_eq!(text, "合法下一条\n", "下一条合法记录恰好读取一次");
+    }
+
+    #[test]
+    fn audit_p1_zcode_unterminated_long_line_advances_and_follow_discards_its_suffix() {
+        let (home, dir) = audit_content_home("audit-zcode-open-line");
+        let path = dir.join(TRANSCRIPT_FILE);
+        let body = vec![b'x'; 2 * SCAN_BUDGET_BYTES as usize + 37];
+        std::fs::write(&path, &body).expect("写入尚未换行的超长行");
+        let cx = context(home.path(), None);
+        let mut cursor = None;
+        let mut offset = 0;
+        let mut reached_eof = false;
+        for _ in 0..8 {
+            let page = ZCode
+                .read(&cx, AUDIT_NODE, cursor.as_deref(), MIN_READ_BYTES)
+                .expect("未终止的长行仍可有界读取");
+            let next = audit_transcript_offset(page.next_cursor.as_deref());
+            assert!(next >= offset && next - offset <= SCAN_BUDGET_BYTES);
+            assert!(next <= body.len() as u64);
+            assert!(page.text.is_empty());
+            if offset == 0 {
+                assert!(next > 0, "不能每次都重扫超长末行后退回行首");
+                assert!(!page.eof, "超过剩余扫描预算的字节留给后续调用");
+            }
+            offset = next;
+            cursor = page.next_cursor;
+            if page.eof {
+                assert!(body.len() as u64 - offset <= SCAN_BUDGET_BYTES);
+                reached_eof = true;
+                break;
+            }
+        }
+        assert!(reached_eof, "未终止长行也不能永久卡在同一个前缀");
+        let waiting = ZCode
+            .read(&cx, AUDIT_NODE, cursor.as_deref(), MIN_READ_BYTES)
+            .expect("暂时 EOF 可以继续跟随");
+        assert!(waiting.text.is_empty() && waiting.eof);
+        assert_eq!(waiting.next_cursor, cursor);
+
+        let mut file = File::options().append(true).open(&path).expect("追加转录");
+        file.write_all(
+            transcript_line("model_complete", "{\"content\":\"forged-at-old-eof\"}").as_bytes(),
+        )
+        .expect("追加仍属旧长行的伪记录并终止该行");
+        file.write_all(
+            transcript_line("model_complete", "{\"content\":\"after-long-line\"}").as_bytes(),
+        )
+        .expect("追加下一条合法记录");
+        drop(file);
+        let mut text = String::new();
+        reached_eof = false;
+        for _ in 0..4 {
+            let resumed = ZCode
+                .read(&cx, AUDIT_NODE, cursor.as_deref(), MIN_READ_BYTES)
+                .expect("跨旧 EOF 续读");
+            let next = audit_transcript_offset(resumed.next_cursor.as_deref());
+            assert!(next > offset && next - offset <= SCAN_BUDGET_BYTES);
+            text.push_str(&resumed.text);
+            offset = next;
+            cursor = resumed.next_cursor;
+            if resumed.eof {
+                assert_eq!(next, std::fs::metadata(&path).expect("夹具大小").len());
+                reached_eof = true;
+                break;
+            }
+        }
+        assert!(reached_eof);
+        assert_eq!(text, "after-long-line\n");
+    }
+
+    #[test]
+    fn audit_p1_zcode_preserves_utf8_output_eof_and_pending_transcript_boundaries() {
+        let (home, dir) = audit_content_home("audit-zcode-boundaries");
+        let output = format!("{}尾", "解析".repeat(100));
+        std::fs::write(dir.join(OUTPUT_FILE), &output).expect("写无末尾换行的 UTF-8 输出");
+        let cx = context(home.path(), None);
+        let mut cursor = None;
+        let mut text = String::new();
+        let mut reached_eof = false;
+        for _ in 0..8 {
+            let page = ZCode
+                .read(&cx, AUDIT_NODE, cursor.as_deref(), MIN_READ_BYTES)
+                .expect("无换行输出可分页");
+            assert_eq!(page.format, AgentActivityContentFormat::Markdown);
+            assert!(!page.text.contains('\u{fffd}'));
+            assert!(!page.text.is_empty() && page.text.len() <= MIN_READ_BYTES);
+            assert!(!page.truncated);
+            text.push_str(&page.text);
+            cursor = page.next_cursor;
+            if page.eof {
+                reached_eof = true;
+                break;
+            }
+        }
+        assert!(reached_eof);
+        assert_eq!(text, output);
+        let at_eof = ZCode
+            .read(&cx, AUDIT_NODE, cursor.as_deref(), MIN_READ_BYTES)
+            .expect("无换行输出 EOF 可跟随");
+        assert!(at_eof.text.is_empty() && at_eof.eof);
+        assert_eq!(at_eof.next_cursor, cursor);
+
+        let path = dir.join(TRANSCRIPT_FILE);
+        let complete = transcript_line("model_complete", "{\"content\":\"已完成\"}");
+        let pending = transcript_line("model_complete", "{\"content\":\"续读解析\"}");
+        let split = pending.find('续').expect("夹具含多字节字符") + 1;
+        let mut body = complete.as_bytes().to_vec();
+        body.extend_from_slice(&pending.as_bytes()[..split]);
+        std::fs::write(&path, body).expect("写字符中途截断的 JSONL 末行");
+        let first = ZCode
+            .read(&cx, AUDIT_NODE, None, MIN_READ_BYTES)
+            .expect("完整行可读，半截 UTF-8 末行暂存");
+        assert_eq!(first.text, "已完成\n");
+        assert!(first.eof && !first.truncated);
+        assert_eq!(
+            audit_transcript_offset(first.next_cursor.as_deref()),
+            complete.len() as u64
+        );
+
+        let mut file = File::options().append(true).open(&path).expect("补齐 JSON");
+        file.write_all(&pending.as_bytes()[split..pending.len() - 1])
+            .expect("先补齐字符和 JSON，但尚未换行");
+        drop(file);
+        let waiting = ZCode
+            .read(
+                &cx,
+                AUDIT_NODE,
+                first.next_cursor.as_deref(),
+                MIN_READ_BYTES,
+            )
+            .expect("没有换行仍可等待");
+        assert!(waiting.text.is_empty() && waiting.eof);
+        assert_eq!(waiting.next_cursor, first.next_cursor);
+        let mut file = File::options().append(true).open(&path).expect("完成末行");
+        file.write_all(b"\n").expect("追加记录边界");
+        drop(file);
+        let resumed = ZCode
+            .read(
+                &cx,
+                AUDIT_NODE,
+                waiting.next_cursor.as_deref(),
+                MIN_READ_BYTES,
+            )
+            .expect("记录终止后再渲染");
+        assert_eq!(resumed.text, "续读解析\n");
+        assert!(resumed.eof && !resumed.truncated);
+        let repeated = ZCode
+            .read(
+                &cx,
+                AUDIT_NODE,
+                resumed.next_cursor.as_deref(),
+                MIN_READ_BYTES,
+            )
+            .expect("EOF 原地读取不重复内容");
+        assert!(repeated.text.is_empty() && repeated.eof);
+        assert_eq!(repeated.next_cursor, resumed.next_cursor);
+    }
+
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: u64,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let bytes = self.inner.read(buf)?;
+            self.bytes_read += bytes as u64;
+            Ok(bytes)
+        }
+    }
+
+    impl<R: Seek> Seek for CountingReader<R> {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+
+    #[test]
+    fn audit_p1_zcode_budget_caps_underlying_reads_including_cursor_lookbehind() {
+        let (home, dir) = audit_content_home("audit-zcode-read-count");
+        let path = dir.join(TRANSCRIPT_FILE);
+        let body = vec![b'x'; 2 * SCAN_BUDGET_BYTES as usize + 128];
+        std::fs::write(&path, &body).expect("写入计量用长行");
+        for offset in [0, 1, SCAN_BUDGET_BYTES] {
+            let mut reader = CountingReader {
+                inner: File::open(&path).expect("打开临时转录"),
+                bytes_read: 0,
+            };
+            let page = read_transcript(&mut reader, body.len() as u64, offset, MIN_READ_BYTES)
+                .expect("通过生产读取核心计量实际 Read 字节");
+            let next = audit_transcript_offset(page.next_cursor.as_deref());
+            assert!(next > offset && !page.eof && page.text.is_empty());
+            assert!(
+                reader.bytes_read <= SCAN_BUDGET_BYTES,
+                "包括 BufReader 预读和边界探测：{} > {SCAN_BUDGET_BYTES}",
+                reader.bytes_read
+            );
+            assert_eq!(reader.bytes_read, next - offset + u64::from(offset > 0));
+        }
+        assert!(ZCode
+            .read(
+                &context(home.path(), None),
+                AUDIT_NODE,
+                None,
+                MIN_READ_BYTES
+            )
+            .expect("现有来源入口仍可读")
+            .next_cursor
+            .is_some());
+    }
+
+    #[test]
+    fn audit_p1_zcode_scan_boundary_preserves_newlines_and_complete_short_records() {
+        let (home, dir) = audit_content_home("audit-zcode-scan-edge");
+        let path = dir.join(TRANSCRIPT_FILE);
+        let scan = SCAN_BUDGET_BYTES as usize;
+        for prefix_len in [scan - 17, scan, scan + 1] {
+            let mut body = vec![b'x'; prefix_len - 1];
+            body.push(b'\n');
+            body.extend_from_slice(
+                transcript_line("model_complete", "{\"content\":\"边界后的完整记录\"}").as_bytes(),
+            );
+            std::fs::write(&path, &body).expect("写入扫描边界夹具");
+            let cx = context(home.path(), None);
+            let first = ZCode
+                .read(&cx, AUDIT_NODE, None, MIN_READ_BYTES)
+                .expect("扫描到换行或下一条记录中段");
+            assert!(first.text.is_empty() && !first.eof);
+            assert_eq!(
+                audit_transcript_offset(first.next_cursor.as_deref()),
+                prefix_len.min(scan) as u64
+            );
+            let next = ZCode
+                .read(
+                    &cx,
+                    AUDIT_NODE,
+                    first.next_cursor.as_deref(),
+                    MIN_READ_BYTES,
+                )
+                .expect("下一页只解析真实行首的记录");
+            assert_eq!(next.text, "边界后的完整记录\n");
+            assert!(next.eof && !next.truncated);
+            assert_eq!(
+                audit_transcript_offset(next.next_cursor.as_deref()),
+                body.len() as u64
+            );
+        }
+    }
+
     #[test]
     fn a_single_read_scans_a_bounded_number_of_bytes() {
         let dir = TempDir::new("scan-budget");
@@ -2548,7 +2880,7 @@ mod tests {
         let Ok(Cursor::Transcript(offset)) = parse_cursor(first.next_cursor.as_deref()) else {
             panic!("缺少续读游标");
         };
-        assert!(offset >= SCAN_BUDGET_BYTES && offset < SCAN_BUDGET_BYTES + streaming.len() as u64);
+        assert!(offset > 0 && offset <= SCAN_BUDGET_BYTES);
         let second = read_transcript_page(&path, offset, 4096).expect("续读");
         assert_eq!(second.text, "done\n");
         assert!(second.eof);

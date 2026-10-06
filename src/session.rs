@@ -1354,6 +1354,63 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_sessions_without_markers_preserve_live_data() {
+        for (endpoint, check_wait) in [
+            ("herdr.sock", false),
+            ("herdr-client.sock", false),
+            ("herdr.sock", true),
+            ("herdr-client.sock", true),
+        ] {
+            let dirs = crate::config::test_dirs::isolate_dirs("long-no-marker");
+            let deep = dirs
+                .config_dir()
+                .join("a".repeat(80))
+                .join("管".repeat(80))
+                .join("🦀".repeat(40))
+                .join("z".repeat(80));
+            crate::config::test_dirs::set_config_dir(deep);
+            let session_name = "running";
+            let session_dir = data_dir_for(Some(session_name));
+            let socket_path = session_dir.join(endpoint);
+            let units = format!(r"\\.\pipe\{}", socket_path.to_string_lossy())
+                .encode_utf16()
+                .count();
+            assert!(units > 420);
+            let sentinel = session_dir.join("keep");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            std::fs::write(&sentinel, b"do not remove").unwrap();
+            let listener = crate::ipc::bind_local_listener(&socket_path).unwrap();
+            std::fs::remove_file(&socket_path).unwrap();
+            assert!(
+                !crate::ipc::local_listener_accepting(&socket_path).unwrap(),
+                "readiness keeps its marker gate"
+            );
+            if check_wait {
+                let paths = [
+                    api_socket_path_for(Some(session_name)),
+                    client_socket_path_for(Some(session_name)),
+                ];
+                assert_eq!(
+                    wait_until_stopped_until(&paths, Instant::now()).unwrap(),
+                    vec![socket_path.clone()]
+                );
+            } else {
+                assert_eq!(
+                    delete_session(session_name).unwrap_err(),
+                    format!("session {session_name} is running; stop it before deleting")
+                );
+            }
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"do not remove");
+            drop(listener);
+            let removed = delete_session(session_name).unwrap();
+            assert!(!removed.running);
+            assert!(!session_dir.exists());
+            println!("long-session endpoint={endpoint} raw_utf16={units} marker=false stop_wait={check_wait} live_preserved=PASS stopped_deleted=PASS");
+        }
+    }
+
     #[test]
     fn delete_session_refuses_linked_session_directories() {
         #[cfg(windows)]

@@ -504,6 +504,63 @@ pub(super) fn parse_response(
 }
 
 #[cfg(test)]
+pub(crate) struct EndpointResponseTestAssembler(EndpointCommands);
+
+#[cfg(test)]
+impl EndpointResponseTestAssembler {
+    pub(crate) fn new(boot_id: &str, requests: &[(&str, usize)]) -> Self {
+        let mut assembler = Self(EndpointCommands::default());
+        for (request_id, lane) in requests {
+            assembler.start(boot_id, request_id, *lane);
+        }
+        assembler
+    }
+
+    pub(crate) fn start(&mut self, boot_id: &str, request_id: &str, lane: usize) {
+        let lanes = match lane {
+            1 => &mut self.0.background,
+            2 => &mut self.0.reading,
+            _ => &mut self.0.lanes,
+        };
+        let lane = lanes.entry(ClientEndpointId::Local).or_default();
+        assert!(lane.in_flight.is_none());
+        lane.in_flight = Some(InFlightCommand {
+            generation: 1,
+            boot_id: boot_id.into(),
+            request_id: request_id.into(),
+            response: Vec::new(),
+            response_chunks: 0,
+            sent_at: Instant::now(),
+        });
+    }
+
+    pub(crate) fn receive(
+        &mut self,
+        boot_id: &str,
+        request_id: &str,
+        final_chunk: bool,
+        data: Vec<u8>,
+    ) -> io::Result<Option<Result<ResponseResult, String>>> {
+        self.0
+            .receive_chunk(
+                &ClientEndpointId::Local,
+                1,
+                boot_id,
+                request_id,
+                final_chunk,
+                data,
+            )
+            .map(|result| {
+                result.map(|result| {
+                    result
+                        .result
+                        .map_err(|error| error.code.unwrap_or(error.message))
+                })
+            })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::schema::{ResponseResult, SuccessResponse};

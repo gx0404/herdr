@@ -13,28 +13,29 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod client_stream;
+#[cfg(test)]
+pub(crate) use client_stream::client_transport_process_sample;
+pub(crate) use client_stream::{
+    client_stream_control, finish_client_stream, prepare_server_client_stream,
+    read_client_handshake, write_client_stream, ClientStreamControl, ServerClientStream,
+};
 mod clipboard_image;
 mod command_search;
 mod config_backup;
+mod local_socket;
+pub(crate) use local_socket::{connect_local_pipe, windows_pipe_names};
 mod notifications;
+pub(super) mod persist_files;
 pub(crate) use notifications::{
     foreground_desktop_notification_host, maybe_activate_desktop_notification,
     show_actionable_desktop_notification, show_desktop_notification,
 };
 
 pub(crate) fn probe_local_server(path: &std::path::Path) -> std::io::Result<()> {
-    use interprocess::os::windows::named_pipe::{pipe_mode::Bytes, DuplexPipeStream};
-    use interprocess::ConnectWaitMode;
-
-    // The local-socket wrapper ignores wait_mode on Windows in interprocess
-    // 2.4.2. Its named-pipe API honors it without importing/reopening a handle.
-    let name = format!(r"\\.\pipe\{}", path.to_string_lossy());
-    DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
-        name.as_str(),
-        ConnectWaitMode::Timeout(Duration::from_millis(500)),
-    )
-    .map(|_| ())
-    .map_err(local_server_connection_error)
+    connect_local_pipe(path, Some(Instant::now() + Duration::from_millis(500)))
+        .map(|_| ())
+        .map_err(local_server_connection_error)
 }
 
 pub(crate) fn local_server_security_descriptor(
@@ -268,20 +269,24 @@ pub(crate) fn replace_file(
 }
 
 fn flush_parent_directory(path: &std::path::Path) -> std::io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    flush_directory(parent)
+}
+
+pub(super) fn flush_directory(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{FlushFileBuffers, FILE_FLAG_BACKUP_SEMANTICS};
 
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
     // FlushFileBuffers requires a handle with write access; a read-only
     // directory handle fails with ERROR_ACCESS_DENIED.
     let directory = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(parent)?;
+        .open(path)?;
     if unsafe { FlushFileBuffers(directory.as_raw_handle() as _) } == 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -537,6 +542,9 @@ struct ProcessInspectionCounts {
     snapshots: u64,
     opens: u64,
     command_reads: u64,
+    creation_queries: u64,
+    parent_queries: u64,
+    image_queries: u64,
 }
 
 #[cfg(test)]
@@ -1112,9 +1120,9 @@ impl ProcessSignature {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ProcessIdentity {
-    Handle(OwnedHandle),
+    Handle(Arc<OwnedHandle>),
     #[cfg(test)]
     Stub {
         running: bool,
@@ -1131,7 +1139,15 @@ impl ProcessIdentity {
             return None;
         }
         let handle = unsafe { OwnedHandle::from_raw_handle(handle.cast()) };
-        Some(Self::Handle(handle))
+        Some(Self::Handle(Arc::new(handle)))
+    }
+
+    fn handle(&self) -> Option<HANDLE> {
+        match self {
+            Self::Handle(handle) => Some(handle.as_raw_handle().cast()),
+            #[cfg(test)]
+            Self::Stub { .. } => None,
+        }
     }
 
     fn running(&self) -> bool {
@@ -1155,6 +1171,13 @@ impl ProcessIdentity {
             Self::Stub { creation_time, .. } => *creation_time,
         }
     }
+
+    fn matches_observation(&self, observation: &ProcessObservation) -> bool {
+        match (self, &observation.identity) {
+            (Self::Handle(handle), Self::Handle(observed)) if Arc::ptr_eq(handle, observed) => true,
+            _ => self.creation_time() == Some(observation.created),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1165,6 +1188,7 @@ struct CachedForegroundSelection {
     descendant_identities: Vec<ProcessIdentity>,
     shell_identity: ProcessIdentity,
     selected_identity: ProcessIdentity,
+    observations: Vec<(ProcessSignature, Arc<ProcessObservation>)>,
     job: ForegroundJob,
     verified_at: Instant,
     last_used: Instant,
@@ -1343,13 +1367,50 @@ struct WindowsProcessCommand {
     cmdline: Option<String>,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+struct ObservationReaderStub {
+    parent_pid: Option<u32>,
+    created: Option<u64>,
+    image: String,
+    command: WindowsProcessCommand,
+    observations: AtomicU32,
+    commands: AtomicU32,
+}
+
+#[derive(Debug)]
+struct ProcessObservation {
+    identity: ProcessIdentity,
+    parent_pid: Option<u32>,
+    created: u64,
+    image: Option<String>,
+}
+
+impl ProcessObservation {
+    fn same_metadata(&self, other: &Self) -> bool {
+        self.created == other.created
+            && self.parent_pid == other.parent_pid
+            && self.image == other.image
+    }
+
+    fn name(&self) -> &str {
+        self.image
+            .as_deref()
+            .and_then(|image| std::path::Path::new(image).file_name())
+            .and_then(OsStr::to_str)
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WindowsProcessEntry {
     pid: u32,
     parent_pid: u32,
     name: String,
     command: OnceLock<WindowsProcessCommand>,
-    creation_time: OnceLock<Option<u64>>,
+    observation: OnceLock<Option<Arc<ProcessObservation>>>,
+    #[cfg(test)]
+    reader: Option<Arc<ObservationReaderStub>>,
 }
 
 impl WindowsProcessEntry {
@@ -1359,24 +1420,78 @@ impl WindowsProcessEntry {
             parent_pid,
             name,
             command: OnceLock::new(),
-            creation_time: OnceLock::new(),
+            observation: OnceLock::new(),
+            #[cfg(test)]
+            reader: None,
         }
+    }
+
+    fn observation(&self) -> Option<&Arc<ProcessObservation>> {
+        self.observation
+            .get_or_init(|| {
+                #[cfg(test)]
+                if let Some(reader) = &self.reader {
+                    reader.observations.fetch_add(1, AtomicOrdering::Relaxed);
+                    return Some(Arc::new(ProcessObservation {
+                        identity: ProcessIdentity::Stub {
+                            running: true,
+                            creation_time: reader.created,
+                        },
+                        parent_pid: reader.parent_pid,
+                        created: reader.created?,
+                        image: Some(reader.image.clone()),
+                    }));
+                }
+                let identity = ProcessIdentity::open(self.pid)?;
+                let process = identity.handle()?;
+                let created = identity.creation_time()?;
+                let parent_pid = process_basic_information(process)
+                    .and_then(|basic| u32::try_from(basic.InheritedFromUniqueProcessId).ok());
+                let image = process_executable_path(process);
+                Some(Arc::new(ProcessObservation {
+                    identity,
+                    parent_pid,
+                    created,
+                    image,
+                }))
+            })
+            .as_ref()
+    }
+
+    fn observed_name(&self) -> &str {
+        self.observation()
+            .map_or("", |observation| observation.name())
     }
 
     fn command(&self) -> &WindowsProcessCommand {
-        self.command
-            .get_or_init(|| read_process_command(self.pid, &self.name))
+        self.command.get_or_init(|| {
+            let Some(observation) = self.observation() else {
+                return WindowsProcessCommand::from_cmdline("", None, None);
+            };
+            let command = self.read_command(observation);
+            if command.creation_time == Some(observation.created) {
+                command
+            } else {
+                WindowsProcessCommand::from_cmdline(
+                    observation.name(),
+                    Some(observation.created),
+                    None,
+                )
+            }
+        })
     }
 
-    /// The instance identity without reading the command line (one handle query).
-    fn creation_time(&self) -> Option<u64> {
-        if let Some(command) = self.command.get() {
-            return command.creation_time;
+    fn read_command(&self, observation: &ProcessObservation) -> WindowsProcessCommand {
+        #[cfg(test)]
+        if let Some(reader) = &self.reader {
+            reader.commands.fetch_add(1, AtomicOrdering::Relaxed);
+            return reader.command.clone();
         }
-        *self.creation_time.get_or_init(|| {
-            ProcessHandle::open(self.pid, PROCESS_QUERY_LIMITED_INFORMATION)
-                .and_then(|process| process_creation_time(process.0))
-        })
+        read_process_command(self.pid, observation)
+    }
+
+    fn creation_time(&self) -> Option<u64> {
+        self.observation().map(|observation| observation.created)
     }
 }
 
@@ -2031,19 +2146,20 @@ fn available_pane_shell_from_snapshot(
     child_pid: u32,
     snapshot: &ProcessSnapshot,
 ) -> Option<String> {
-    let shell = snapshot.entry(child_pid)?;
-    if !super::is_pane_shell_process_name(&shell.name) {
+    let shell = snapshot.entry(child_pid)?.observation()?;
+    if !super::is_pane_shell_process_name(shell.name()) {
         return None;
     }
-    let shell_created = shell.creation_time()?;
     let busy_or_unknown = snapshot.child_pids(child_pid).any(|pid| {
         snapshot.entry(pid).is_none_or(|child| {
-            child
-                .creation_time()
-                .is_none_or(|created| created >= shell_created)
+            child.observation().is_none_or(|observation| {
+                observation.parent_pid.is_none_or(|parent| {
+                    parent == child_pid && observation.created >= shell.created
+                })
+            })
         })
     });
-    (!busy_or_unknown).then(|| shell.name.clone())
+    (!busy_or_unknown).then(|| shell.name().to_owned())
 }
 
 pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
@@ -2108,8 +2224,8 @@ fn select_pane_foreground_job_from_snapshot_uncached(
     select_pane_foreground_job_from_snapshot_with_runtime_inspection(
         shell_pid,
         snapshot,
-        |shell| process_is_git_bash(shell.pid),
-        |entry| process_runtime_marker(entry.pid),
+        process_is_git_bash,
+        process_runtime_marker,
     )
 }
 
@@ -2167,7 +2283,7 @@ fn select_pane_foreground_job(
 }
 
 fn process_entry_identifies_agent(entry: &WindowsProcessEntry) -> bool {
-    if crate::detect::identify_agent(&entry.name).is_some() {
+    if crate::detect::identify_agent(entry.observed_name()).is_some() {
         return true;
     }
     let Some(creation_time) = entry.creation_time() else {
@@ -2177,8 +2293,6 @@ fn process_entry_identifies_agent(entry: &WindowsProcessEntry) -> bool {
         return identifies_agent;
     }
     let identifies_agent = process_command_identifies_agent(entry);
-    // Only cache a verdict read from the same process instance: the pid may have been reused
-    // between the identity query and the command-line read.
     let command = entry.command();
     if command.creation_time == Some(creation_time) {
         remember_agent_classification(
@@ -2218,11 +2332,14 @@ fn select_topmost_agent_chain_candidate<'a>(
 }
 
 fn verified_parent_child(parent: &WindowsProcessEntry, child: &WindowsProcessEntry) -> bool {
+    let Some(parent_observation) = parent.observation() else {
+        return false;
+    };
     parent.pid == child.parent_pid
-        && matches!(
-            (parent.creation_time(), child.creation_time()),
-            (Some(parent_created), Some(child_created)) if parent_created <= child_created
-        )
+        && child.observation().is_some_and(|child_observation| {
+            child_observation.parent_pid == Some(parent.pid)
+                && parent_observation.created <= child_observation.created
+        })
 }
 
 fn process_is_ancestor(ancestor_pid: u32, descendant_pid: u32, snapshot: &ProcessSnapshot) -> bool {
@@ -2272,7 +2389,7 @@ fn foreground_process_from_entry(entry: &WindowsProcessEntry) -> super::Foregrou
     let command = entry.command();
     super::ForegroundProcess {
         pid: entry.pid,
-        name: entry.name.clone(),
+        name: entry.observed_name().to_owned(),
         argv0: command.argv0.clone(),
         argv: command.argv.clone(),
         cmdline: command.cmdline.clone(),
@@ -2298,7 +2415,10 @@ fn snapshot_multiplexer_client_lineages_with(
             .entries
             .iter()
             .filter(|entry| matches(entry.pid, &entry.name))
-            .map(|entry| process_lineage_from_snapshot(entry.pid, &snapshot))
+            .map(|entry| {
+                matches(entry.pid, entry.observation()?.name())
+                    .then(|| process_lineage_from_snapshot(entry.pid, &snapshot))?
+            })
             .collect()
     })
 }
@@ -2312,15 +2432,20 @@ fn process_lineage_from_snapshot(pid: u32, snapshot: &ProcessSnapshot) -> Option
     let mut child_created = None;
     super::walk_process_lineage(pid, |pid| {
         let entry = snapshot.entry(pid)?;
-        let created = entry.creation_time()?;
-        if child_created.is_some_and(|child| created > child) {
+        let _parent_pin = snapshot
+            .entry(entry.parent_pid)
+            .and_then(WindowsProcessEntry::observation);
+        let observation = entry.observation()?;
+        if observation.parent_pid != Some(entry.parent_pid)
+            || child_created.is_some_and(|child| observation.created > child)
+        {
             return None;
         }
-        child_created = Some(created);
+        child_created = Some(observation.created);
         Some(ProcessParentEntry {
             pid: entry.pid,
             parent_pid: entry.parent_pid,
-            name: entry.name.clone(),
+            name: observation.name().to_owned(),
         })
     })
 }
@@ -2381,12 +2506,13 @@ fn prepare_cached_foreground_selection(
     if !CachedForegroundSelection::can_cache(shell_pid, snapshot, job) {
         return None;
     }
-    let shell_identity = ProcessIdentity::open(shell_pid)?;
-    let selected_identity = ProcessIdentity::open(job.process_group_id)?;
+    let identity = |pid| Some(snapshot.entry(pid)?.observation()?.identity.clone());
+    let shell_identity = identity(shell_pid)?;
+    let selected_identity = identity(job.process_group_id)?;
     let descendants = snapshot.descendant_signatures(shell_pid);
     let descendant_identities = descendants
         .iter()
-        .map(|entry| ProcessIdentity::open(entry.pid))
+        .map(|entry| identity(entry.pid))
         .collect::<Option<Vec<_>>>()?;
     CachedForegroundSelection::from_snapshot_with_identities(
         shell_pid,
@@ -2407,7 +2533,7 @@ impl CachedForegroundSelection {
             || (snapshot.entry(shell_pid).is_some_and(|shell| {
                 ["cmd.exe", "powershell.exe", "pwsh.exe"]
                     .iter()
-                    .any(|name| shell.name.eq_ignore_ascii_case(name))
+                    .any(|name| shell.observed_name().eq_ignore_ascii_case(name))
             }) && !snapshot.children_by_parent.contains_key(&shell_pid))
     }
 
@@ -2424,12 +2550,12 @@ impl CachedForegroundSelection {
             return None;
         }
         let shell_entry = snapshot.entry(shell_pid)?;
-        if shell_identity.creation_time() != shell_entry.command().creation_time {
+        if !shell_identity.matches_observation(shell_entry.observation()?) {
             return None;
         }
         let shell = ProcessSignature::from_entry(shell_entry);
         let selected_entry = snapshot.entry(job.process_group_id)?;
-        if selected_identity.creation_time() != selected_entry.command().creation_time {
+        if !selected_identity.matches_observation(selected_entry.observation()?) {
             return None;
         }
         let selected = ProcessSignature::from_entry(selected_entry);
@@ -2438,9 +2564,10 @@ impl CachedForegroundSelection {
                 .iter()
                 .zip(&descendant_identities)
                 .all(|(signature, identity)| {
-                    snapshot.entry(signature.pid).is_some_and(|entry| {
-                        identity.creation_time() == entry.command().creation_time
-                    })
+                    snapshot
+                        .entry(signature.pid)
+                        .and_then(WindowsProcessEntry::observation)
+                        .is_some_and(|observation| identity.matches_observation(observation))
                 });
         if !descendants_match_identities
             || !shell_identity.running()
@@ -2449,6 +2576,16 @@ impl CachedForegroundSelection {
         {
             return None;
         }
+        let observations = std::iter::once(&shell)
+            .chain(std::iter::once(&selected))
+            .chain(&descendants)
+            .map(|signature| {
+                Some((
+                    signature.clone(),
+                    Arc::clone(snapshot.entry(signature.pid)?.observation()?),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
         let now = Instant::now();
         Some(Self {
             shell,
@@ -2457,6 +2594,7 @@ impl CachedForegroundSelection {
             descendant_identities,
             shell_identity,
             selected_identity,
+            observations,
             job: job.clone(),
             verified_at: now,
             last_used: now,
@@ -2467,13 +2605,7 @@ impl CachedForegroundSelection {
 impl ForegroundSelectionCache {
     fn get(&mut self, shell_pid: u32, snapshot: &ProcessSnapshot) -> Option<ForegroundJob> {
         if let Some(cached) = self.entries.get_mut(&shell_pid) {
-            let current_descendants = descendant_entries(shell_pid, snapshot);
-            let topology_matches = current_descendants.len() == cached.descendants.len()
-                && cached
-                    .descendants
-                    .iter()
-                    .all(|entry| entry.matches(snapshot.entry(entry.pid)));
-            let valid = cached.verified_at.elapsed() < FOREGROUND_SELECTION_RECHECK
+            let pinned = cached.verified_at.elapsed() < FOREGROUND_SELECTION_RECHECK
                 && cached.shell_identity.running()
                 && cached.selected_identity.running()
                 && cached
@@ -2484,10 +2616,44 @@ impl ForegroundSelectionCache {
                 && cached
                     .selected
                     .matches(snapshot.entry(cached.job.process_group_id))
-                && topology_matches;
-            if valid {
-                cached.last_used = Instant::now();
-                return Some(cached.job.clone());
+                && cached
+                    .descendants
+                    .iter()
+                    .all(|entry| entry.matches(snapshot.entry(entry.pid)));
+            let metadata_matches = pinned
+                && cached.observations.iter().all(|(signature, observation)| {
+                    snapshot.entry(signature.pid).is_some_and(|entry| {
+                        entry.observation.get().is_none_or(|current| {
+                            current
+                                .as_ref()
+                                .is_some_and(|current| current.same_metadata(observation))
+                        })
+                    })
+                });
+            if metadata_matches {
+                // Share independently verified live pins; a cache hit still requires matching topology.
+                let observations_shared =
+                    cached.observations.iter().all(|(signature, observation)| {
+                        snapshot.entry(signature.pid).is_some_and(|entry| {
+                            entry
+                                .observation
+                                .get_or_init(|| Some(Arc::clone(observation)))
+                                .as_ref()
+                                .is_some_and(|current| current.same_metadata(observation))
+                        })
+                    });
+                if observations_shared {
+                    let mut descendants = descendant_entries(shell_pid, snapshot);
+                    descendants.sort_unstable_by_key(|entry| entry.pid);
+                    let topology_matches = descendants
+                        .iter()
+                        .map(|entry| entry.pid)
+                        .eq(cached.descendants.iter().map(|entry| entry.pid));
+                    if topology_matches {
+                        cached.last_used = Instant::now();
+                        return Some(cached.job.clone());
+                    }
+                }
             }
         }
         self.entries.remove(&shell_pid);
@@ -2559,31 +2725,22 @@ impl ProcessSnapshotCache {
     }
 }
 
-fn read_process_command(pid: u32, name: &str) -> WindowsProcessCommand {
-    // Prefer the command-line information class: it needs only
-    // `PROCESS_QUERY_LIMITED_INFORMATION`, while the PEB path below also needs
-    // `PROCESS_VM_READ`, which hardened runtimes (Electron/Node) and security
-    // products deny. Without a command line an agent launched through a runtime
-    // is indistinguishable from a bare `node.exe`/`bun.exe` process, so the
-    // pane would never register as an agent.
-    if let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) {
-        if let Some(cmdline) = read_process_command_line(process.0) {
-            let creation_time = process_creation_time(process.0);
-            return WindowsProcessCommand::from_cmdline(name, creation_time, Some(cmdline));
-        }
-    }
+fn read_process_command(pid: u32, observation: &ProcessObservation) -> WindowsProcessCommand {
+    let cmdline = observation
+        .identity
+        .handle()
+        .and_then(read_process_command_line)
+        .or_else(|| read_process_command_fallback(pid, observation));
+    WindowsProcessCommand::from_cmdline(observation.name(), Some(observation.created), cmdline)
+}
 
-    let Some(process) =
-        ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)
-    else {
-        let creation_time = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)
-            .and_then(|process| process_creation_time(process.0));
-        return WindowsProcessCommand::from_cmdline(name, creation_time, None);
-    };
-    let creation_time = process_creation_time(process.0);
-    let cmdline = read_process_parameters(process.0)
-        .and_then(|parameters| read_unicode_string(process.0, parameters.command_line));
-    WindowsProcessCommand::from_cmdline(name, creation_time, cmdline)
+fn read_process_command_fallback(pid: u32, observation: &ProcessObservation) -> Option<String> {
+    let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)?;
+    if process_creation_time(process.0) != Some(observation.created) {
+        return None;
+    }
+    read_process_parameters(process.0)
+        .and_then(|parameters| read_unicode_string(process.0, parameters.command_line))
 }
 
 impl WindowsProcessCommand {
@@ -2602,13 +2759,12 @@ impl WindowsProcessCommand {
     }
 }
 
-fn process_is_git_bash(pid: u32) -> bool {
-    let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
+fn process_is_git_bash(entry: &WindowsProcessEntry) -> bool {
+    let Some(observation) = entry.observation() else {
         return false;
     };
-    let Some(creation_time) = process_creation_time(process.0) else {
-        return false;
-    };
+    let pid = entry.pid;
+    let creation_time = observation.created;
     {
         let mut cache = GIT_BASH_PROCESS_CACHE
             .lock()
@@ -2621,7 +2777,8 @@ fn process_is_git_bash(pid: u32) -> bool {
         }
     }
 
-    let is_git_bash = process_executable_path(process.0)
+    let is_git_bash = observation
+        .image
         .as_deref()
         .is_some_and(|path| is_git_bash_executable_path(std::path::Path::new(path)));
     let mut cache = GIT_BASH_PROCESS_CACHE
@@ -2647,6 +2804,8 @@ fn process_is_git_bash(pid: u32) -> bool {
 }
 
 fn process_executable_path(process: HANDLE) -> Option<String> {
+    #[cfg(test)]
+    PROCESS_INSPECTION_COUNTS.with_borrow_mut(|counts| counts.image_queries += 1);
     let mut path = vec![0_u16; 32_768];
     let mut len = path.len() as u32;
     if unsafe { QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut len) } == 0 {
@@ -2726,9 +2885,10 @@ fn is_git_bash_executable_path(path: &std::path::Path) -> bool {
         && root.join("cmd").join("git.exe").is_file()
 }
 
-fn process_runtime_marker(pid: u32) -> Option<String> {
-    let process = ProcessHandle::open(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
-    let creation_time = process_creation_time(process.0)?;
+fn process_runtime_marker(entry: &WindowsProcessEntry) -> Option<String> {
+    let observation = entry.observation()?;
+    let pid = entry.pid;
+    let creation_time = observation.created;
     {
         let mut cache = PROCESS_RUNTIME_MARKER_CACHE
             .lock()
@@ -2744,6 +2904,10 @@ fn process_runtime_marker(pid: u32) -> Option<String> {
         }
     }
 
+    let process = ProcessHandle::open(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
+    if process_creation_time(process.0) != Some(creation_time) {
+        return None;
+    }
     let marker = process_runtime_marker_from_handle(process.0)?;
     let mut cache = PROCESS_RUNTIME_MARKER_CACHE
         .lock()
@@ -2769,6 +2933,8 @@ fn process_runtime_marker(pid: u32) -> Option<String> {
 }
 
 fn process_creation_time(process: HANDLE) -> Option<u64> {
+    #[cfg(test)]
+    PROCESS_INSPECTION_COUNTS.with_borrow_mut(|counts| counts.creation_queries += 1);
     let mut creation_time = FILETIME::default();
     let mut exit_time = FILETIME::default();
     let mut kernel_time = FILETIME::default();
@@ -2974,6 +3140,8 @@ fn read_process_command_line(process: HANDLE) -> Option<String> {
 }
 
 fn process_basic_information(process: HANDLE) -> Option<PROCESS_BASIC_INFORMATION> {
+    #[cfg(test)]
+    PROCESS_INSPECTION_COUNTS.with_borrow_mut(|counts| counts.parent_queries += 1);
     let mut basic_info = MaybeUninit::<PROCESS_BASIC_INFORMATION>::uninit();
     let status = unsafe {
         NtQueryInformationProcess(
@@ -5575,7 +5743,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut observed = None;
         while Instant::now() < deadline {
-            observed = super::process_runtime_marker(child.id());
+            observed = super::process_runtime_marker(&super::WindowsProcessEntry::new(
+                child.id(),
+                std::process::id(),
+                "cmd.exe".into(),
+            ));
             if observed.as_deref() == Some("pane-test") {
                 break;
             }
@@ -6197,13 +6369,16 @@ mod tests {
                 let cpu = cpu_time() - cpu_started;
                 let counts = super::PROCESS_INSPECTION_COUNTS.with_borrow(|counts| *counts);
                 println!(
-                    "panes={panes} sample={sample} polls=20 snapshots={} opens={} command_reads={} inspection_ms={:.3} cpu_ms={:.3} elapsed_ms={:.3}",
+                    "panes={panes} sample={sample} polls=20 snapshots={} opens={} command_reads={} inspection_ms={:.3} cpu_ms={:.3} elapsed_ms={:.3} creation_queries={} parent_queries={} image_queries={}",
                     counts.snapshots,
                     counts.opens,
                     counts.command_reads,
                     inspection_time.as_secs_f64() * 1000.0,
                     cpu.as_secs_f64() * 1000.0,
                     started.elapsed().as_secs_f64() * 1000.0,
+                    counts.creation_queries,
+                    counts.parent_queries,
+                    counts.image_queries,
                 );
             }
         }
@@ -6275,6 +6450,135 @@ mod tests {
             .checked_sub(super::FOREGROUND_SELECTION_RECHECK + Duration::from_secs(1))
             .unwrap();
         assert_eq!(cache.get(10, &snapshot), None);
+    }
+
+    #[test]
+    fn windows_foreground_selection_cache_rejects_initialized_unknown_parent_same_size_topology() {
+        let original = super::ProcessSnapshot::new(vec![
+            test_entry(10, 0, "pwsh.exe", &["pwsh.exe"]),
+            test_entry(20, 10, "codex.exe", &["codex.exe"]),
+        ]);
+        let job = super::foreground_job_from_entry(original.entry(20).unwrap());
+        let mut cache = super::ForegroundSelectionCache::default();
+        cache.remember_for_test(10, &original, &job);
+        assert_eq!(cache.entries.get(&10).unwrap().descendants.len(), 1);
+        let mut child = observation_entry(
+            (20, 10, "codex.exe"),
+            (10, Some(20), "codex.exe"),
+            Some(20),
+            Some("codex.exe"),
+        );
+        Arc::get_mut(child.reader.as_mut().unwrap())
+            .unwrap()
+            .parent_pid = None;
+        let fresh = super::ProcessSnapshot::new(vec![
+            test_entry(10, 0, "pwsh.exe", &["pwsh.exe"]),
+            child,
+            test_entry(30, 10, "claude.exe", &["claude.exe"]),
+        ]);
+        assert_eq!(
+            fresh.entry(20).unwrap().observation().unwrap().parent_pid,
+            None
+        );
+        assert_eq!(cache.get(10, &fresh), None);
+    }
+
+    #[test]
+    fn windows_foreground_selection_cache_rejects_initialized_image_conflict_before_sharing() {
+        let original = super::ProcessSnapshot::new(vec![
+            test_entry(10, 0, "pwsh.exe", &["pwsh.exe"]),
+            test_entry(20, 10, "codex.exe", &["codex.exe"]),
+        ]);
+        let job = super::foreground_job_from_entry(original.entry(20).unwrap());
+        let mut cache = super::ForegroundSelectionCache::default();
+        cache.remember_for_test(10, &original, &job);
+        let fresh = super::ProcessSnapshot::new(vec![
+            test_entry(10, 0, "pwsh.exe", &["pwsh.exe"]),
+            observation_entry(
+                (20, 10, "codex.exe"),
+                (10, Some(20), "worker.exe"),
+                Some(20),
+                None,
+            ),
+        ]);
+        assert_eq!(
+            fresh.entry(20).unwrap().observation().unwrap().name(),
+            "worker.exe"
+        );
+        assert!(fresh.entry(10).unwrap().observation.get().is_none());
+        assert_eq!(cache.get(10, &fresh), None);
+        assert!(
+            fresh.entry(10).unwrap().observation.get().is_none(),
+            "existing metadata conflicts are checked before any pin is shared"
+        );
+    }
+
+    #[test]
+    fn windows_foreground_selection_cache_rejects_added_or_replaced_descendants() {
+        let original = super::ProcessSnapshot::new(vec![
+            test_entry(10, 0, "pwsh.exe", &["pwsh.exe"]),
+            test_entry(20, 10, "codex.exe", &["codex.exe"]),
+        ]);
+        let job = super::foreground_job_from_entry(original.entry(20).unwrap());
+        for retains_previous in [true, false] {
+            let mut entries = vec![
+                test_entry(10, 0, "pwsh.exe", &["pwsh.exe"]),
+                test_entry(30, 10, "claude.exe", &["claude.exe"]),
+            ];
+            if retains_previous {
+                entries.push(test_entry(20, 10, "codex.exe", &["codex.exe"]));
+            }
+            let fresh = super::ProcessSnapshot::new(entries);
+            let mut cache = super::ForegroundSelectionCache::default();
+            cache.remember_for_test(10, &original, &job);
+            assert_eq!(
+                cache.get(10, &fresh),
+                None,
+                "retains_previous={retains_previous}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_foreground_selection_cache_accepts_initialized_matching_metadata_and_reordered_tree()
+    {
+        let entries = vec![
+            test_entry(10, 0, "pwsh.exe", &["pwsh.exe"]),
+            test_entry(20, 10, "codex.exe", &["codex.exe"]),
+            test_entry(30, 10, "worker.exe", &["worker.exe"]),
+        ];
+        let original = super::ProcessSnapshot::new(entries.clone());
+        let job = super::foreground_job_from_entry(original.entry(20).unwrap());
+        let mut cache = super::ForegroundSelectionCache::default();
+        cache.remember_for_test(10, &original, &job);
+        let fresh = super::ProcessSnapshot::new(entries.into_iter().rev().collect());
+        for entry in &fresh.entries {
+            assert!(entry.observation().is_some());
+        }
+        let reads = fresh
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .reader
+                    .as_ref()
+                    .unwrap()
+                    .observations
+                    .load(super::AtomicOrdering::Relaxed)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cache.get(10, &fresh), Some(job));
+        for (entry, reads) in fresh.entries.iter().zip(reads) {
+            let reader = entry.reader.as_ref().unwrap();
+            assert_eq!(
+                reader.observations.load(super::AtomicOrdering::Relaxed),
+                reads
+            );
+            assert_eq!(
+                reader.commands.load(super::AtomicOrdering::Relaxed),
+                u32::from(entry.pid == 20)
+            );
+        }
     }
 
     #[test]
@@ -7260,6 +7564,459 @@ mod tests {
         );
     }
 
+    fn observation_entry(
+        candidate: (u32, u32, &str),
+        actual: (u32, Option<u64>, &str),
+        command_created: Option<u64>,
+        cmdline: Option<&str>,
+    ) -> super::WindowsProcessEntry {
+        let (pid, parent, name) = candidate;
+        let mut entry = super::WindowsProcessEntry::new(pid, parent, name.into());
+        entry.reader = Some(Arc::new(super::ObservationReaderStub {
+            parent_pid: Some(actual.0),
+            created: actual.1,
+            image: actual.2.into(),
+            command: super::WindowsProcessCommand::from_cmdline(
+                actual.2,
+                command_created,
+                cmdline.map(str::to_owned),
+            ),
+            observations: super::AtomicU32::new(0),
+            commands: super::AtomicU32::new(0),
+        }));
+        entry
+    }
+
+    #[test]
+    fn windows_observation_identity_rejects_replaced_parent_relation() {
+        let snapshot = super::ProcessSnapshot::new(vec![
+            observation_entry(
+                (10, 0, "pwsh.exe"),
+                (0, Some(100), "pwsh.exe"),
+                Some(100),
+                None,
+            ),
+            observation_entry(
+                (20, 10, "codex.exe"),
+                (77, Some(300), "worker.exe"),
+                Some(300),
+                Some("worker.exe"),
+            ),
+        ]);
+        let reader = snapshot.entry(20).unwrap().reader.as_ref().unwrap();
+        assert_eq!(reader.parent_pid, Some(77));
+        assert_eq!(reader.image, "worker.exe");
+        assert!(super::descendant_entries(10, &snapshot).is_empty());
+        assert!(!super::process_is_ancestor(10, 20, &snapshot));
+        assert_ne!(
+            super::process_lineage_from_snapshot(20, &snapshot)
+                .and_then(|lineage| lineage.descends_from(10)),
+            Some(true)
+        );
+        assert_eq!(
+            super::available_pane_shell_from_snapshot(10, &snapshot).as_deref(),
+            Some("pwsh.exe")
+        );
+    }
+
+    #[test]
+    fn windows_observation_identity_unknown_parent_is_not_verified_or_idle() {
+        let mut child = observation_entry(
+            (20, 10, "worker.exe"),
+            (10, Some(200), "worker.exe"),
+            Some(200),
+            None,
+        );
+        Arc::get_mut(child.reader.as_mut().unwrap())
+            .unwrap()
+            .parent_pid = None;
+        let snapshot = super::ProcessSnapshot::new(vec![
+            test_entry(10, 0, "pwsh.exe", &["pwsh.exe"]),
+            child,
+            test_entry(30, 10, "codex.exe", &["codex.exe"]),
+        ]);
+        assert!(!super::process_is_ancestor(10, 20, &snapshot));
+        assert_eq!(super::process_lineage_from_snapshot(20, &snapshot), None);
+        assert_eq!(
+            super::descendant_entries(10, &snapshot)
+                .iter()
+                .map(|entry| entry.pid)
+                .collect::<Vec<_>>(),
+            vec![30]
+        );
+        assert!(super::available_pane_shell_from_snapshot(10, &snapshot).is_none());
+    }
+
+    #[test]
+    fn windows_observation_identity_command_cannot_replace_instance() {
+        let entry = observation_entry(
+            (20, 10, "node.exe"),
+            (10, Some(150), "node.exe"),
+            Some(300),
+            Some("node.exe codex.js"),
+        );
+        assert_eq!(entry.creation_time(), Some(150));
+        let command = entry.command();
+        assert!(
+            command.cmdline.is_none(),
+            "a command from another instance cannot be published"
+        );
+        assert_eq!(entry.creation_time(), Some(150));
+        assert!(!super::process_entry_identifies_agent(&entry));
+    }
+
+    #[test]
+    fn windows_observation_identity_does_not_publish_old_agent_name() {
+        let entry = observation_entry(
+            (20, 10, "codex.exe"),
+            (10, Some(300), "worker.exe"),
+            Some(300),
+            Some("worker.exe"),
+        );
+        assert!(!super::process_entry_identifies_agent(&entry));
+        assert_eq!(
+            super::foreground_process_from_entry(&entry).name,
+            "worker.exe"
+        );
+    }
+
+    #[test]
+    fn windows_observation_identity_accepts_valid_siblings_and_unreadable_command() {
+        for created in [100, 300] {
+            let snapshot = super::ProcessSnapshot::new(vec![
+                observation_entry(
+                    (10, 0, "pwsh.exe"),
+                    (0, Some(100), "pwsh.exe"),
+                    Some(100),
+                    None,
+                ),
+                observation_entry(
+                    (20, 10, "worker.exe"),
+                    (10, Some(created), "codex.exe"),
+                    Some(created),
+                    None,
+                ),
+                observation_entry((30, 10, "worker.exe"), (10, None, "worker.exe"), None, None),
+            ]);
+            assert_eq!(
+                super::descendant_entries(10, &snapshot)
+                    .iter()
+                    .map(|entry| entry.pid)
+                    .collect::<Vec<_>>(),
+                vec![20]
+            );
+            assert!(super::process_is_ancestor(10, 20, &snapshot));
+            assert_eq!(
+                super::process_lineage_from_snapshot(20, &snapshot)
+                    .unwrap()
+                    .descends_from(10),
+                Some(true)
+            );
+            assert!(super::process_entry_identifies_agent(
+                snapshot.entry(20).unwrap()
+            ));
+            assert!(super::available_pane_shell_from_snapshot(10, &snapshot).is_none());
+        }
+    }
+
+    #[test]
+    fn windows_observation_identity_shared_panes_reuse_reads_and_release_pins() {
+        for panes in [1, 16] {
+            let entries = || {
+                (0..panes)
+                    .flat_map(|index| {
+                        let shell = 100 + index * 10;
+                        [
+                            test_entry(shell, 0, "pwsh.exe", &["pwsh.exe"]),
+                            test_entry(shell + 1, shell, "codex.exe", &["codex.exe"]),
+                        ]
+                    })
+                    .collect()
+            };
+            let snapshot = super::ProcessSnapshot::new(entries());
+            let mut cache = super::ForegroundSelectionCache::default();
+            let mut pins = Vec::new();
+            for index in 0..panes {
+                let shell = 100 + index * 10;
+                for _ in 0..3 {
+                    assert!(super::process_is_ancestor(shell, shell + 1, &snapshot));
+                    assert_eq!(
+                        super::process_lineage_from_snapshot(shell + 1, &snapshot)
+                            .unwrap()
+                            .descends_from(shell),
+                        Some(true)
+                    );
+                }
+                for pid in [shell, shell + 1] {
+                    let entry = snapshot.entry(pid).unwrap();
+                    let reader = entry.reader.as_ref().unwrap();
+                    assert_eq!(reader.observations.load(super::AtomicOrdering::Relaxed), 1);
+                    assert_eq!(
+                        reader.commands.load(super::AtomicOrdering::Relaxed),
+                        0,
+                        "ancestry never reads command lines"
+                    );
+                    pins.push(Arc::downgrade(entry.observation().unwrap()));
+                }
+                let job = super::foreground_job_from_entry(snapshot.entry(shell + 1).unwrap());
+                let cached =
+                    super::prepare_cached_foreground_selection(shell, &snapshot, &job).unwrap();
+                cache.remember(shell, Some(cached));
+                assert_eq!(
+                    snapshot
+                        .entry(shell)
+                        .unwrap()
+                        .reader
+                        .as_ref()
+                        .unwrap()
+                        .commands
+                        .load(super::AtomicOrdering::Relaxed),
+                    0,
+                    "cache admission reuses identity without reading commands"
+                );
+            }
+            let refreshed = super::ProcessSnapshot::new(entries());
+            drop(snapshot);
+            assert!(pins.iter().all(|pin| pin.upgrade().is_some()));
+            for index in 0..panes {
+                let shell = 100 + index * 10;
+                assert_eq!(
+                    cache.get(shell, &refreshed).unwrap().process_group_id,
+                    shell + 1
+                );
+                for pid in [shell, shell + 1] {
+                    let reader = refreshed.entry(pid).unwrap().reader.as_ref().unwrap();
+                    assert_eq!(
+                        reader.observations.load(super::AtomicOrdering::Relaxed),
+                        0,
+                        "live cached pins avoid native reinspection"
+                    );
+                    assert_eq!(reader.commands.load(super::AtomicOrdering::Relaxed), 0);
+                }
+            }
+            cache.entries.clear();
+            assert!(pins.iter().all(|pin| pin.upgrade().is_some()));
+            drop(refreshed);
+            assert!(
+                pins.iter().all(|pin| pin.upgrade().is_none()),
+                "all observation pins are released with their last owner"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_observation_identity_lazy_unknown_and_command_read_once() {
+        let entry = test_entry(10, 0, "node.exe", &["node.exe", "worker.js"]);
+        let reader = Arc::clone(entry.reader.as_ref().unwrap());
+        assert_eq!(reader.observations.load(super::AtomicOrdering::Relaxed), 0);
+        for _ in 0..3 {
+            assert_eq!(entry.creation_time(), Some(10));
+            assert!(entry.command().cmdline.is_some());
+            assert_eq!(entry.observed_name(), "node.exe");
+        }
+        assert_eq!(reader.observations.load(super::AtomicOrdering::Relaxed), 1);
+        assert_eq!(reader.commands.load(super::AtomicOrdering::Relaxed), 1);
+        let unknown = test_entry_with_creation_time(20, 10, "codex.exe", &["codex.exe"], None);
+        for _ in 0..3 {
+            assert_eq!(unknown.creation_time(), None);
+            assert!(!super::process_entry_identifies_agent(&unknown));
+        }
+        let reader = unknown.reader.as_ref().unwrap();
+        assert_eq!(reader.observations.load(super::AtomicOrdering::Relaxed), 1);
+        assert_eq!(reader.commands.load(super::AtomicOrdering::Relaxed), 0);
+    }
+
+    #[test]
+    fn windows_observation_identity_git_bash_agent_index_shared_at_scale() {
+        for panes in [1, 16] {
+            super::with_agent_classification_cache(|cache| cache.clear());
+            let snapshot = super::ProcessSnapshot::new(
+                (0..panes)
+                    .flat_map(|index| {
+                        let shell = 100 + index * 10;
+                        [
+                            test_entry(shell, 0, "bash.exe", &["bash.exe"]),
+                            test_entry(shell + 1, 99, "node.exe", &["node.exe", "codex.js"]),
+                            test_entry(shell + 2, shell + 1, "codex.exe", &["codex.exe"]),
+                        ]
+                    })
+                    .collect(),
+            );
+            let mut indices: Option<&Vec<usize>> = None;
+            for index in 0..panes {
+                let shell = 100 + index * 10;
+                let job = super::select_pane_foreground_job_from_snapshot_with_runtime_inspection(
+                    shell,
+                    &snapshot,
+                    |_| true,
+                    |entry| Some((entry.pid / 10).to_string()),
+                )
+                .unwrap();
+                assert_eq!(job.process_group_id, shell + 1);
+                let current = snapshot.agent_indices.get().unwrap();
+                if let Some(previous) = indices {
+                    assert!(std::ptr::eq(previous, current));
+                }
+                indices = Some(current);
+            }
+            assert_eq!(indices.unwrap().len(), panes as usize * 2);
+            for entry in &snapshot.entries {
+                let reader = entry.reader.as_ref().unwrap();
+                assert_eq!(reader.observations.load(super::AtomicOrdering::Relaxed), 1);
+                assert_eq!(
+                    reader.commands.load(super::AtomicOrdering::Relaxed),
+                    u32::from(entry.pid % 10 != 2)
+                );
+            }
+        }
+    }
+
+    struct ObservationTestChild(std::process::Child);
+
+    impl ObservationTestChild {
+        fn spawn() -> Self {
+            let shell = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("cmd.exe");
+            let mut command = Command::new(shell);
+            command
+                .args(["/D", "/Q", "/K"])
+                .env(
+                    super::PANE_RUNTIME_MARKER_ENV_VAR,
+                    "observation-native-marker",
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            super::configure_status_command(&mut command);
+            Self(command.spawn().unwrap())
+        }
+    }
+
+    impl Drop for ObservationTestChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn windows_observation_identity_native_exited_before_inspection_is_not_cached() {
+        let mut child = ObservationTestChild::spawn();
+        let pid = child.0.id();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let entry = super::WindowsProcessEntry::new(pid, std::process::id(), "cmd.exe".into());
+        assert!(!entry.observation().unwrap().identity.running());
+        let job = super::foreground_job_from_entry(&entry);
+        let snapshot = super::ProcessSnapshot::new(vec![entry]);
+        assert!(super::prepare_cached_foreground_selection(pid, &snapshot, &job).is_none());
+    }
+
+    #[test]
+    fn windows_observation_identity_native_same_handle_limited_and_fallback() {
+        let child = ObservationTestChild::spawn();
+        let entry =
+            super::WindowsProcessEntry::new(child.0.id(), std::process::id(), "codex.exe".into());
+        super::PROCESS_INSPECTION_COUNTS.with_borrow_mut(|counts| *counts = Default::default());
+        let observation = entry.observation().unwrap();
+        let handle = observation.identity.handle().unwrap();
+        assert_eq!(observation.parent_pid, Some(std::process::id()));
+        assert_eq!(
+            Some(observation.created),
+            super::process_creation_time(handle)
+        );
+        assert_eq!(observation.image, super::process_executable_path(handle));
+        assert_eq!(observation.name().to_ascii_lowercase(), "cmd.exe");
+        let limited = entry.command().cmdline.as_ref().unwrap();
+        assert!(limited.contains("/K"));
+        let counts = super::PROCESS_INSPECTION_COUNTS.with_borrow(|counts| *counts);
+        assert_eq!(
+            counts.opens, 1,
+            "limited query reuses the observation handle"
+        );
+        assert_eq!(counts.command_reads, 1);
+        let fallback = super::read_process_command_fallback(child.0.id(), observation).unwrap();
+        assert_eq!(fallback, *limited);
+        let wrong = super::ProcessObservation {
+            identity: observation.identity.clone(),
+            parent_pid: observation.parent_pid,
+            created: observation.created + 1,
+            image: observation.image.clone(),
+        };
+        assert!(super::read_process_command_fallback(child.0.id(), &wrong).is_none());
+        assert_eq!(
+            super::process_runtime_marker(&entry).as_deref(),
+            Some("observation-native-marker")
+        );
+        assert_eq!(
+            super::foreground_process_from_entry(&entry)
+                .name
+                .to_ascii_lowercase(),
+            "cmd.exe"
+        );
+        let pid = entry.pid;
+        let job = super::foreground_job_from_entry(&entry);
+        let snapshot = super::ProcessSnapshot::new(vec![entry]);
+        super::PROCESS_INSPECTION_COUNTS.with_borrow_mut(|counts| *counts = Default::default());
+        let cached = super::prepare_cached_foreground_selection(pid, &snapshot, &job).unwrap();
+        let mut cache = super::ForegroundSelectionCache::default();
+        cache.remember(pid, Some(cached));
+        let refreshed = super::ProcessSnapshot::new(vec![super::WindowsProcessEntry::new(
+            pid,
+            std::process::id(),
+            "codex.exe".into(),
+        )]);
+        assert_eq!(cache.get(pid, &refreshed), Some(job.clone()));
+        let counts = super::PROCESS_INSPECTION_COUNTS.with_borrow(|counts| *counts);
+        assert_eq!(counts.opens, 0);
+        assert_eq!(counts.command_reads, 0);
+        assert_eq!(counts.creation_queries, 0);
+        assert_eq!(counts.parent_queries, 0);
+        assert_eq!(counts.image_queries, 0);
+
+        let initialized = super::ProcessSnapshot::new(vec![super::WindowsProcessEntry::new(
+            pid,
+            std::process::id(),
+            "codex.exe".into(),
+        )]);
+        let observed = initialized.entry(pid).unwrap().observation().unwrap();
+        assert!(observed.same_metadata(snapshot.entry(pid).unwrap().observation().unwrap()));
+        super::PROCESS_INSPECTION_COUNTS.with_borrow_mut(|counts| *counts = Default::default());
+        assert_eq!(cache.get(pid, &initialized), Some(job));
+        let counts = super::PROCESS_INSPECTION_COUNTS.with_borrow(|counts| *counts);
+        assert_eq!(counts.opens, 0);
+        assert_eq!(counts.command_reads, 0);
+        assert_eq!(counts.creation_queries, 0);
+        assert_eq!(counts.parent_queries, 0);
+        assert_eq!(counts.image_queries, 0);
+    }
+
+    #[test]
+    fn windows_observation_identity_native_exit_and_last_handle_release() {
+        let mut child = ObservationTestChild::spawn();
+        let entry =
+            super::WindowsProcessEntry::new(child.0.id(), std::process::id(), "cmd.exe".into());
+        let observation = entry.observation().unwrap();
+        let created = observation.created;
+        let super::ProcessIdentity::Handle(handle) = &observation.identity else {
+            panic!("native handle");
+        };
+        let weak = Arc::downgrade(handle);
+        let job = super::foreground_job_from_entry(&entry);
+        let pid = entry.pid;
+        let snapshot = super::ProcessSnapshot::new(vec![entry]);
+        let cached = super::prepare_cached_foreground_selection(pid, &snapshot, &job).unwrap();
+        drop(snapshot);
+        assert!(weak.upgrade().is_some());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert!(!cached.shell_identity.running());
+        assert_eq!(cached.shell_identity.creation_time(), Some(created));
+        drop(cached);
+        assert!(weak.upgrade().is_none());
+    }
+
     fn test_entry(
         pid: u32,
         parent_pid: u32,
@@ -7277,16 +8034,12 @@ mod tests {
         name: &str,
         creation_time: u64,
     ) -> super::WindowsProcessEntry {
-        let entry = super::WindowsProcessEntry::new(pid, parent_pid, name.to_string());
-        entry
-            .command
-            .set(super::WindowsProcessCommand::from_cmdline(
-                name,
-                Some(creation_time),
-                None,
-            ))
-            .unwrap();
-        entry
+        observation_entry(
+            (pid, parent_pid, name),
+            (parent_pid, Some(creation_time), name),
+            Some(creation_time),
+            None,
+        )
     }
 
     fn test_entry_with_creation_time(
@@ -7296,16 +8049,20 @@ mod tests {
         argv: &[&str],
         creation_time: Option<u64>,
     ) -> super::WindowsProcessEntry {
-        let entry = super::WindowsProcessEntry::new(pid, parent_pid, name.to_string());
-        entry
-            .command
-            .set(super::WindowsProcessCommand {
-                creation_time,
-                argv0: argv.first().map(|value| (*value).to_string()),
-                argv: Some(argv.iter().map(|value| (*value).to_string()).collect()),
-                cmdline: Some(argv.join(" ")),
-            })
-            .unwrap();
+        let mut entry = observation_entry(
+            (pid, parent_pid, name),
+            (parent_pid, creation_time, name),
+            creation_time,
+            None,
+        );
+        Arc::get_mut(entry.reader.as_mut().unwrap())
+            .unwrap()
+            .command = super::WindowsProcessCommand {
+            creation_time,
+            argv0: argv.first().map(|value| (*value).to_string()),
+            argv: Some(argv.iter().map(|value| (*value).to_string()).collect()),
+            cmdline: Some(argv.join(" ")),
+        };
         entry
     }
 

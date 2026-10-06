@@ -36,6 +36,7 @@ struct PaneRestoreStartup<'a> {
 }
 
 struct RestoreRuntimeContext<'a> {
+    pane_chrome: Option<crate::ui::PaneChrome>,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'a>,
     resume_agents_on_restore: bool,
@@ -63,11 +64,14 @@ type RestoredTab = (
 type RestoreFailures<T> = (T, usize);
 
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
+// Restore threads saved state, initial geometry, shell policy, and event/render channels.
+#[allow(clippy::too_many_arguments)]
 pub fn restore(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
     rows: u16,
     cols: u16,
+    pane_chrome: crate::ui::PaneChrome,
     scrollback_limit_bytes: usize,
     default_shell: &str,
     shell_mode: crate::config::ShellModeConfig,
@@ -82,6 +86,7 @@ pub fn restore(
         history,
         rows,
         cols,
+        pane_chrome,
         scrollback_limit_bytes,
         crate::pane::PaneShellConfig::new(default_shell, shell_mode),
         resume_agents_on_restore,
@@ -204,6 +209,7 @@ fn restore_with_imports_strict(
         history,
         rows,
         cols,
+        None,
         scrollback_limit_bytes,
         shell_config,
         resume_agents_on_restore,
@@ -226,11 +232,14 @@ fn restore_with_imports_strict(
     Ok(restored)
 }
 
+// Cold restore forwards geometry, launch policy, import state, and runtime channels together.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
     rows: u16,
     cols: u16,
+    pane_chrome: crate::ui::PaneChrome,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
     resume_agents_on_restore: bool,
@@ -244,6 +253,7 @@ fn restore_with_imports(
         history,
         rows,
         cols,
+        Some(pane_chrome),
         scrollback_limit_bytes,
         shell_config,
         resume_agents_on_restore,
@@ -255,11 +265,14 @@ fn restore_with_imports(
     .0
 }
 
+// Cold and handoff restore share saved state, geometry, launch policy, and runtime channels.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports_and_failures(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
     rows: u16,
     cols: u16,
+    pane_chrome: Option<crate::ui::PaneChrome>,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'_>,
     resume_agents_on_restore: bool,
@@ -283,6 +296,7 @@ fn restore_with_imports_and_failures(
     let mut failed_imports = 0;
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         let runtime_context = RestoreRuntimeContext {
+            pane_chrome,
             scrollback_limit_bytes,
             shell_config,
             resume_agents_on_restore,
@@ -511,6 +525,25 @@ fn restore_tab(
         .map(|(&old_id, &new_id)| (new_id, old_id))
         .collect();
     let pane_ids = collect_pane_ids(&node);
+    let initial_focus = snap
+        .focused
+        .and_then(|id| id_map.get(&id).copied())
+        .or_else(|| pane_ids.first().copied());
+    let (node, initial_sizes) =
+        if let (Some(chrome), Some(focus)) = (runtime_context.pane_chrome, initial_focus) {
+            let layout = TileLayout::from_saved(node, focus);
+            let sizes: HashMap<_, _> = crate::ui::layout_terminal_sizes(
+                ratatui::layout::Rect::new(0, 0, cols, rows),
+                &layout,
+                snap.zoomed,
+                chrome,
+            )
+            .into_iter()
+            .collect();
+            (layout.into_root(), sizes)
+        } else {
+            (node, HashMap::new())
+        };
 
     let mut panes = HashMap::new();
     let mut terminals = Vec::new();
@@ -641,6 +674,7 @@ fn restore_tab(
             continue;
         }
 
+        let (rows, cols) = initial_sizes.get(id).copied().unwrap_or((rows, cols));
         let runtime_result = {
             #[cfg(unix)]
             if let Some(imported) = imported_runtime {
@@ -1040,6 +1074,407 @@ mod tests {
     #[cfg(not(windows))]
     fn test_restore_shell() -> &'static str {
         "/bin/sh"
+    }
+
+    fn geometry_snapshot(cwd: &std::path::Path) -> SessionSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "version": 3, "active": 0, "selected": 0,
+            "workspaces": [{
+                "id": "w1", "identity_cwd": cwd,
+                "public_pane_numbers": {"101": 2, "102": 7},
+                "next_public_pane_number": 12,
+                "public_tab_numbers": [4], "next_public_tab_number": 8,
+                "tabs": [{
+                    "layout": {"Split": {"direction": "Horizontal", "ratio": 0.25,
+                        "first": {"Pane": 101}, "second": {"Pane": 102}}},
+                    "panes": {"101": {"cwd": cwd}, "102": {"cwd": cwd}},
+                    "zoomed": false, "focused": 102, "root_pane": 101
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn captured_sizes(workspace: &Workspace, attempts: &[(PaneId, u16, u16)]) -> Vec<(u16, u16)> {
+        let ids = workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.layout.pane_ids())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts.len(),
+            ids.len(),
+            "every leaf reaches its first spawn exactly once"
+        );
+        ids.into_iter()
+            .map(|id| {
+                let matching = attempts
+                    .iter()
+                    .filter(|(pane, _, _)| *pane == id)
+                    .collect::<Vec<_>>();
+                assert_eq!(matching.len(), 1);
+                (matching[0].1, matching[0].2)
+            })
+            .collect()
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cold_restore_native_conpty_reports_initial_leaf_sizes() {
+        use std::time::Duration;
+
+        struct RuntimeCleanup(HashMap<TerminalId, TerminalRuntime>);
+
+        impl RuntimeCleanup {
+            fn close(&mut self) -> bool {
+                for (_, runtime) in self.0.drain() {
+                    runtime.shutdown();
+                }
+                crate::pane::drain_pending_pane_shutdowns(
+                    crate::pane::PANE_SHUTDOWN_LADDER_WORST_CASE + Duration::from_secs(5),
+                )
+            }
+        }
+
+        impl Drop for RuntimeCleanup {
+            fn drop(&mut self) {
+                if !self.0.is_empty() {
+                    let drained = self.close();
+                    eprintln!("native cold restore unwind cleanup drained={drained}");
+                }
+            }
+        }
+
+        fn console_size(output: &str) -> Option<(u16, u16)> {
+            let status = output.split_once("CON:")?.1;
+            let mut values = status
+                .lines()
+                .filter_map(|line| line.rsplit([':', '：']).next()?.trim().parse::<u16>().ok());
+            Some((values.next()?, values.next()?))
+        }
+
+        let dirs = crate::config::test_dirs::isolate_dirs("cold-restore-native-size");
+        std::fs::create_dir_all(dirs.config_dir()).unwrap();
+        let snapshot = geometry_snapshot(dirs.config_dir());
+        let mode = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+            .join("System32")
+            .join("mode.com");
+        assert!(mode.is_file(), "native console geometry probe must exist");
+        let (events, mut received) = mpsc::channel(32);
+        let (workspaces, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            40,
+            120,
+            crate::ui::PaneChrome {
+                borders: crate::config::PaneBordersConfig::Off,
+                ..Default::default()
+            },
+            4096,
+            mode.to_str().unwrap(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let mut cleanup = RuntimeCleanup(runtimes);
+        assert_eq!(cleanup.0.len(), 2, "restore must create both real PTYs");
+        assert!(terminals
+            .values()
+            .all(|terminal| terminal.restore_error.is_none()));
+        let workspace = &workspaces[0];
+        let owners = workspace.tabs[0]
+            .layout
+            .pane_ids()
+            .into_iter()
+            .map(|pane| (pane, workspace.terminal_id(pane).unwrap().clone()))
+            .collect::<Vec<_>>();
+        let mut outputs = vec![String::new(); owners.len()];
+        let mut exited = HashSet::new();
+        let observed = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                while let Ok(event) = received.try_recv() {
+                    if let AppEvent::PaneDied {
+                        pane_id,
+                        exit_reason,
+                    } = event
+                    {
+                        assert!(owners.iter().any(|(pane, _)| *pane == pane_id));
+                        assert_eq!(exit_reason, crate::platform::ChildExitReason::Exited);
+                        assert!(exited.insert(pane_id), "one reaped-child event per pane");
+                    }
+                }
+                for (index, (_, terminal)) in owners.iter().enumerate() {
+                    outputs[index] = cleanup.0[terminal].recent_unwrapped_text(40);
+                }
+                let sizes = outputs
+                    .iter()
+                    .map(|output| console_size(output))
+                    .collect::<Option<Vec<_>>>();
+                if exited.len() == owners.len() {
+                    if let Some(sizes) = sizes {
+                        break sizes;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        let pids = owners
+            .iter()
+            .map(|(_, terminal)| cleanup.0[terminal].child_pid())
+            .collect::<Vec<_>>();
+        let drained = cleanup.close();
+        println!("native-cold-restore executable={} owners={owners:?} pids={pids:?} reaped={exited:?} shutdown_drained={drained} outputs={outputs:?}", mode.display());
+        assert!(drained, "all owned runtime shutdown requests must complete");
+        let sizes = observed.expect("native CON status and both child wait completions");
+        assert_eq!(
+            sizes,
+            [(40, 30), (40, 90)],
+            "native child-visible initial dimensions"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_restore_initial_spawn_uses_each_remapped_leaf() {
+        let dirs = crate::config::test_dirs::isolate_dirs("cold-restore-spawn");
+        std::fs::create_dir_all(dirs.config_dir()).unwrap();
+        let snapshot = geometry_snapshot(dirs.config_dir());
+        let (events, _rx) = mpsc::channel(32);
+        let ((workspaces, terminals, runtimes), attempts) =
+            crate::pane::capture_initial_spawns(|| {
+                restore(
+                    &snapshot,
+                    None,
+                    40,
+                    120,
+                    crate::ui::PaneChrome {
+                        borders: crate::config::PaneBordersConfig::Off,
+                        ..Default::default()
+                    },
+                    0,
+                    test_restore_shell(),
+                    crate::config::ShellModeConfig::NonLogin,
+                    false,
+                    events,
+                    Arc::new(Notify::new()),
+                    Arc::new(RenderSignal::new()),
+                )
+            });
+        assert!(
+            runtimes.is_empty(),
+            "capture stops before terminal and PTY creation"
+        );
+        assert_eq!(terminals.len(), 2);
+        assert!(terminals
+            .values()
+            .all(|terminal| terminal.cwd == dirs.config_dir()
+                && terminal
+                    .restore_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("captured initial pane spawn"))));
+        let workspace = &workspaces[0];
+        assert_eq!(workspace.id, "w1");
+        assert_eq!(workspace.tabs[0].number, 4);
+        assert_eq!(
+            workspace.public_pane_numbers[&workspace.tabs[0].root_pane],
+            2
+        );
+        assert_eq!(
+            workspace.public_pane_numbers[&workspace.tabs[0].layout.focused()],
+            7
+        );
+        assert_eq!(
+            captured_sizes(workspace, &attempts),
+            [(40, 30), (40, 90)],
+            "first spawn must use leaf content geometry, not the whole tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_restore_initial_spawn_app_uses_configured_headless_area() {
+        let _env = crate::config::test_config_env_lock().lock().unwrap();
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        let dirs = crate::config::test_dirs::isolate_dirs("cold-restore-app-spawn");
+        std::fs::create_dir_all(dirs.config_dir()).unwrap();
+        let snapshot = geometry_snapshot(dirs.config_dir());
+        let path = crate::session::data_dir().join("session.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let mut config = crate::config::Config::default();
+        config.server.headless_cols = 120;
+        config.server.headless_rows = 40;
+        config.ui.pane_borders = crate::config::PaneBordersConfig::Off;
+        config.ui.pane_gaps = false;
+        config.ui.pane_scrollbars = false;
+        config.terminal.default_shell = test_restore_shell().into();
+        config.terminal.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        config.session.resume_agents_on_restore = false;
+        let (_api_tx, api_rx) = mpsc::unbounded_channel();
+        let (app, attempts) = crate::pane::capture_initial_spawns(|| {
+            crate::app::App::new(
+                &config,
+                crate::app::AppPolicy {
+                    restore_session: true,
+                    ..crate::app::AppPolicy::TEST
+                },
+                None,
+                api_rx,
+                crate::api::EventHub::default(),
+            )
+        });
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "App::new must actually load the private snapshot"
+        );
+        assert_eq!(app.terminal_runtimes.len(), 0);
+        assert_eq!(
+            captured_sizes(&app.state.workspaces[0], &attempts),
+            [(40, 30), (40, 90)],
+            "first spawn must use configured headless geometry, not 24x80"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_restore_initial_spawn_nested_background_zoom_chrome_and_tiny() {
+        use crate::config::PaneBordersConfig::{Always, Off};
+        use crate::ui::PaneChrome;
+        let dirs = crate::config::test_dirs::isolate_dirs("cold-restore-spawn-matrix");
+        std::fs::create_dir_all(dirs.config_dir()).unwrap();
+        let plain = PaneChrome {
+            borders: Off,
+            ..Default::default()
+        };
+        let framed = PaneChrome {
+            borders: Always,
+            gaps: false,
+            outer_borders: true,
+            scrollbars: true,
+        };
+        for (rows, cols, chrome, zoomed, expected) in [
+            (
+                40,
+                120,
+                plain,
+                false,
+                vec![(40, 30), (10, 90), (30, 90), (40, 90), (40, 30)],
+            ),
+            (
+                40,
+                120,
+                framed,
+                false,
+                vec![(38, 28), (9, 87), (28, 87), (38, 88), (38, 27)],
+            ),
+            (
+                40,
+                120,
+                PaneChrome {
+                    gaps: true,
+                    ..plain
+                },
+                false,
+                vec![(40, 29), (9, 90), (30, 90), (40, 89), (40, 30)],
+            ),
+            (
+                40,
+                120,
+                framed,
+                true,
+                vec![(38, 28), (38, 117), (28, 87), (38, 88), (38, 27)],
+            ),
+            (
+                1,
+                3,
+                PaneChrome {
+                    scrollbars: true,
+                    ..plain
+                },
+                false,
+                vec![(2, 4); 5],
+            ),
+        ] {
+            let mut snapshot = geometry_snapshot(dirs.config_dir());
+            let workspace = &mut snapshot.workspaces[0];
+            let tab = &mut workspace.tabs[0];
+            tab.layout = LayoutSnapshot::Split {
+                direction: DirectionSnapshot::Horizontal,
+                ratio: 0.25,
+                first: Box::new(LayoutSnapshot::Pane(101)),
+                second: Box::new(LayoutSnapshot::Split {
+                    direction: DirectionSnapshot::Vertical,
+                    ratio: 0.25,
+                    first: Box::new(LayoutSnapshot::Pane(102)),
+                    second: Box::new(LayoutSnapshot::Pane(103)),
+                }),
+            };
+            tab.zoomed = zoomed;
+            tab.panes.insert(
+                103,
+                serde_json::from_value(serde_json::json!({"cwd": dirs.config_dir()})).unwrap(),
+            );
+            workspace.tabs.push(
+                serde_json::from_value(serde_json::json!({
+                    "layout": {"Split": {"direction": "Horizontal", "ratio": 0.75,
+                        "first": {"Pane": 201}, "second": {"Pane": 202}}},
+                    "panes": {"201": {"cwd": dirs.config_dir()}, "202": {"cwd": dirs.config_dir()}},
+                    "zoomed": false, "focused": 201, "root_pane": 201
+                }))
+                .unwrap(),
+            );
+            workspace
+                .public_pane_numbers
+                .extend([(103, 11), (201, 13), (202, 19)]);
+            workspace.next_public_pane_number = 20;
+            workspace.public_tab_numbers = vec![4, 9];
+            workspace.next_public_tab_number = 10;
+            let (events, _rx) = mpsc::channel(32);
+            let ((workspaces, terminals, runtimes), attempts) =
+                crate::pane::capture_initial_spawns(|| {
+                    restore(
+                        &snapshot,
+                        None,
+                        rows,
+                        cols,
+                        chrome,
+                        0,
+                        test_restore_shell(),
+                        crate::config::ShellModeConfig::NonLogin,
+                        false,
+                        events,
+                        Arc::new(Notify::new()),
+                        Arc::new(RenderSignal::new()),
+                    )
+                });
+            assert!(runtimes.is_empty());
+            assert_eq!(terminals.len(), 5);
+            assert!(terminals
+                .values()
+                .all(|terminal| terminal.restore_error.is_some()));
+            let workspace = &workspaces[0];
+            assert_eq!(workspace.active_tab, 0);
+            assert_eq!(workspace.tabs[0].zoomed, zoomed);
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.number)
+                    .collect::<Vec<_>>(),
+                [4, 9]
+            );
+            assert_eq!(workspace.next_public_pane_number, 20);
+            assert_eq!(workspace.next_public_tab_number, 10);
+            let public_numbers = workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| tab.layout.pane_ids())
+                .map(|id| workspace.public_pane_numbers[&id])
+                .collect::<Vec<_>>();
+            assert_eq!(public_numbers, [2, 7, 11, 13, 19]);
+            assert_eq!(captured_sizes(workspace, &attempts), expected);
+        }
     }
 
     #[test]
@@ -1493,6 +1928,7 @@ mod tests {
                 None,
                 24,
                 80,
+                crate::ui::PaneChrome::default(),
                 0,
                 if missing_shell {
                     "__herdr_missing_restore_shell__"
@@ -1604,6 +2040,7 @@ mod tests {
             None,
             24,
             80,
+            crate::ui::PaneChrome::default(),
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
@@ -1699,6 +2136,7 @@ mod tests {
             None,
             24,
             80,
+            crate::ui::PaneChrome::default(),
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
@@ -1808,6 +2246,7 @@ mod tests {
             None,
             24,
             80,
+            crate::ui::PaneChrome::default(),
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
@@ -1920,6 +2359,7 @@ mod tests {
             None,
             24,
             80,
+            crate::ui::PaneChrome::default(),
             0,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
@@ -1982,6 +2422,7 @@ mod tests {
                 None,
                 24,
                 80,
+                crate::ui::PaneChrome::default(),
                 4096,
                 test_restore_shell(),
                 crate::config::ShellModeConfig::NonLogin,
@@ -2085,6 +2526,7 @@ mod tests {
             Some(&history),
             5,
             40,
+            crate::ui::PaneChrome::default(),
             4096,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
@@ -2123,6 +2565,7 @@ mod tests {
             None,
             5,
             40,
+            crate::ui::PaneChrome::default(),
             4096,
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
@@ -2171,6 +2614,7 @@ mod tests {
                 Some(&history),
                 5,
                 80,
+                crate::ui::PaneChrome::default(),
                 4096,
                 test_restore_shell(),
                 crate::config::ShellModeConfig::NonLogin,

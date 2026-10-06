@@ -53,7 +53,7 @@ chmod 700 "$state" "$home" "$xdg" "$xdg_state" "$runtime" "$xdg_data" "$xdg_cach
 tmux_cmd=(env -u TMUX TMUX_TMPDIR="$tmux_root" tmux)
 
 launch_env=(env
-  -u HERDR_BIN_PATH -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH
+  -u HERDR_BIN_PATH -u HERDR_ENV -u HERDR_CONFIG_PATH -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH
   -u HERDR_SESSION -u HERDR_STARTUP_CWD -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID
   HOME="$home" USERPROFILE="$home" XDG_CONFIG_HOME="$xdg" XDG_STATE_HOME="$xdg_state"
   XDG_RUNTIME_DIR="$runtime" XDG_DATA_HOME="$xdg_data" XDG_CACHE_HOME="$xdg_cache"
@@ -61,7 +61,7 @@ launch_env=(env
   CODEX_HOME="$codex_home" KIMI_CODE_HOME="$kimi_home" TMPDIR="$tmp"
   HERDR_DISABLE_SOUND=1 SHELL=/bin/sh)
 control_env=(env
-  -u HERDR_BIN_PATH -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH
+  -u HERDR_BIN_PATH -u HERDR_ENV -u HERDR_CONFIG_PATH -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH
   -u HERDR_STARTUP_CWD -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID
   HOME="$home" USERPROFILE="$home" XDG_CONFIG_HOME="$xdg" XDG_STATE_HOME="$xdg_state"
   XDG_RUNTIME_DIR="$runtime" XDG_DATA_HOME="$xdg_data" XDG_CACHE_HOME="$xdg_cache"

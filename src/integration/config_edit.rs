@@ -349,25 +349,39 @@ fn insert_codex_hooks(content: &str, mut document: toml_edit::DocumentMut) -> io
     Ok(candidate)
 }
 
-/// Replace only Herdr's marked Kimi hook block. Removing the old marker first
-/// makes repeated installs idempotent and leaves unmarked user TOML untouched.
-pub(crate) fn build_kimi_config_with_hooks(content: &str, hook_path: &Path) -> String {
-    let mut result = remove_kimi_config_block(content)
-        .trim_end_matches('\n')
-        .to_string();
-    if !result.is_empty() {
-        result.push('\n');
-        result.push('\n');
-    }
-
-    result.push_str(KIMI_CONFIG_BLOCK_BEGIN);
-    result.push('\n');
+/// Validate and replace Herdr's marked Kimi hooks without rewriting unmarked TOML.
+pub(crate) fn build_kimi_config_with_hooks(content: &str, hook_path: &Path) -> io::Result<String> {
+    let mut result = remove_kimi_config_block(content)?;
+    let mut expected = parse_kimi_config(&result)?;
+    let mut managed = format!("{KIMI_CONFIG_BLOCK_BEGIN}\n");
     for (event, matcher, action) in KIMI_HOOK_EVENTS {
-        result.push_str(&kimi_hook_table(event, matcher, hook_path, action));
+        managed.push_str(&kimi_hook_table(event, matcher, hook_path, action));
     }
-    result.push_str(KIMI_CONFIG_BLOCK_END);
-    result.push('\n');
-    result
+    managed.push_str(KIMI_CONFIG_BLOCK_END);
+    managed.push('\n');
+    let managed_config = parse_kimi_config(&managed)?;
+    let managed_hooks = managed_config
+        .get("hooks")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| invalid_kimi_config("cannot validate managed hooks"))?;
+    expected
+        .entry("hooks".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| invalid_kimi_config("hooks must be an array"))?
+        .extend(managed_hooks.iter().cloned());
+
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    if !result.is_empty() && !result.ends_with('\n') {
+        result.push_str(newline);
+    }
+    result.push_str(&managed.replace('\n', newline));
+    verify_kimi_config(&result, expected)?;
+    Ok(result)
 }
 
 pub(crate) fn kimi_hook_table(
@@ -387,39 +401,154 @@ pub(crate) fn kimi_hook_table(
     )
 }
 
-pub(crate) fn remove_kimi_config_block(content: &str) -> String {
-    let trailing_newline = content.ends_with('\n');
-    let mut lines = Vec::new();
-    let mut in_block = false;
-    let mut removed_block = false;
-
-    for line in content.lines() {
-        if line.trim() == KIMI_CONFIG_BLOCK_BEGIN {
-            in_block = true;
-            removed_block = true;
-            continue;
+pub(crate) fn remove_kimi_config_block(content: &str) -> io::Result<String> {
+    let document =
+        toml_edit::ImDocument::parse(content).map_err(|_| invalid_kimi_config("invalid TOML"))?;
+    let Some(range) = kimi_config_block_range(content, &document)? else {
+        return Ok(content.to_string());
+    };
+    let mut expected = parse_kimi_config(content)?;
+    if let Some(tables) = document
+        .get("hooks")
+        .and_then(toml_edit::Item::as_array_of_tables)
+    {
+        let hooks = expected
+            .get_mut("hooks")
+            .and_then(toml::Value::as_array_mut)
+            .ok_or_else(|| invalid_kimi_config("cannot locate managed hooks"))?;
+        if hooks.len() != tables.len() {
+            return Err(invalid_kimi_config("cannot locate managed hooks"));
         }
-        if in_block {
-            if line.trim() == KIMI_CONFIG_BLOCK_END {
-                in_block = false;
+        let mut removed = Vec::new();
+        for (index, table) in tables.iter().enumerate() {
+            let span = table
+                .span()
+                .ok_or_else(|| invalid_kimi_config("cannot locate hook table"))?;
+            if span.start < range.end && range.start < span.end {
+                if span.start < range.start || span.end > range.end {
+                    return Err(invalid_kimi_config(
+                        "managed block overlaps an unmarked hook",
+                    ));
+                }
+                removed.push(index);
             }
+        }
+        for index in removed.into_iter().rev() {
+            hooks.remove(index);
+        }
+        if hooks.is_empty() {
+            expected.remove("hooks");
+        }
+    }
+    let mut result = content.to_string();
+    result.replace_range(range, "");
+    verify_kimi_config(&result, expected)?;
+    Ok(result)
+}
+
+#[derive(Default)]
+struct KimiStringSpans {
+    spans: Vec<std::ops::Range<usize>>,
+    missing: bool,
+}
+
+impl<'doc> toml_edit::visit::Visit<'doc> for KimiStringSpans {
+    fn visit_string(&mut self, value: &'doc toml_edit::Formatted<String>) {
+        if let Some(span) = value.span() {
+            self.spans.push(span);
+        } else {
+            self.missing = true;
+        }
+    }
+}
+
+fn kimi_config_block_range(
+    content: &str,
+    document: &toml_edit::ImDocument<&str>,
+) -> io::Result<Option<std::ops::Range<usize>>> {
+    let mut strings = KimiStringSpans::default();
+    toml_edit::visit::Visit::visit_item(&mut strings, document.as_item());
+    if strings.missing {
+        return Err(invalid_kimi_config("cannot locate TOML strings"));
+    }
+    let mut offset = 0;
+    let mut begin = None;
+    let mut block = None;
+    for line in content.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let marker = line.trim();
+        if marker != KIMI_CONFIG_BLOCK_BEGIN && marker != KIMI_CONFIG_BLOCK_END {
             continue;
         }
-        lines.push(line.to_string());
+        let marker_offset = start + line.len() - line.trim_start().len();
+        if strings
+            .spans
+            .iter()
+            .any(|span| span.contains(&marker_offset))
+        {
+            continue;
+        }
+        if marker == KIMI_CONFIG_BLOCK_BEGIN {
+            if begin.is_some() || block.is_some() {
+                return Err(invalid_kimi_config("nested or duplicate managed markers"));
+            }
+            begin = Some(start);
+        } else {
+            let start = begin
+                .take()
+                .ok_or_else(|| invalid_kimi_config("unpaired managed end marker"))?;
+            block = Some(start..offset);
+        }
     }
+    if begin.is_some() {
+        return Err(invalid_kimi_config("unpaired managed begin marker"));
+    }
+    Ok(block)
+}
 
-    if !removed_block {
-        return content.to_string();
-    }
+fn invalid_kimi_config(reason: &'static str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("invalid Kimi config.toml: {reason}"),
+    )
+}
 
-    let mut result = join_toml_lines(lines, trailing_newline);
-    while result.ends_with("\n\n") {
-        result.pop();
+fn parse_kimi_config(content: &str) -> io::Result<toml::Table> {
+    toml::from_str(content).map_err(|_| invalid_kimi_config("invalid TOML"))
+}
+
+fn verify_kimi_config(content: &str, expected: toml::Table) -> io::Result<()> {
+    let parsed = parse_kimi_config(content)?;
+    if !kimi_values_equal(&toml::Value::Table(parsed), &toml::Value::Table(expected)) {
+        return Err(invalid_kimi_config(
+            "editing managed hooks would change unrelated settings",
+        ));
     }
-    if result == "\n" {
-        String::new()
-    } else {
-        result
+    Ok(())
+}
+
+fn kimi_values_equal(left: &toml::Value, right: &toml::Value) -> bool {
+    match (left, right) {
+        (toml::Value::Float(left), toml::Value::Float(right)) => {
+            left == right || (left.is_nan() && right.is_nan())
+        }
+        (toml::Value::Array(left), toml::Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| kimi_values_equal(left, right))
+        }
+        (toml::Value::Table(left), toml::Value::Table(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| kimi_values_equal(left, right))
+                })
+        }
+        _ => left == right,
     }
 }
 
@@ -442,13 +571,5 @@ pub(crate) fn toml_basic_string(value: &str) -> String {
         }
     }
     result.push('"');
-    result
-}
-
-pub(crate) fn join_toml_lines(lines: Vec<String>, trailing_newline: bool) -> String {
-    let mut result = lines.join("\n");
-    if trailing_newline || result.is_empty() {
-        result.push('\n');
-    }
     result
 }

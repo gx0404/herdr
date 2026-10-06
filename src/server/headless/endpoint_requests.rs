@@ -1,4 +1,9 @@
 use super::*;
+use crate::server::client_commands::{
+    self, EndpointResponseIdentity, EndpointResponseKind, EndpointResponseReady,
+    EndpointResponseSender, EndpointResponseTarget, EndpointResponseTicket,
+    ENDPOINT_RESPONSE_CHUNK_BYTES,
+};
 
 impl HeadlessServer {
     pub(super) fn submit_observation(
@@ -42,210 +47,465 @@ impl HeadlessServer {
         }
     }
 
+    fn endpoint_control_result(
+        &self,
+        client_id: u64,
+        boot_id: &str,
+        request_id: &str,
+        result: Result<api::schema::ResponseResult, (&str, String)>,
+    ) {
+        if let Some(writer) = self
+            .clients
+            .get(&client_id)
+            .and_then(|client| client.writer.as_ref())
+        {
+            client_commands::send_control_response(
+                &writer.control,
+                boot_id,
+                request_id,
+                client_commands::response_text(request_id, result),
+            );
+        }
+    }
+
+    pub(super) fn admit_endpoint_response(
+        &mut self,
+        client_id: u64,
+        boot_id: String,
+        request_id: String,
+        kind: EndpointResponseKind,
+    ) -> Option<EndpointResponseTicket> {
+        let client = self.clients.get_mut(&client_id)?;
+        client.prune_endpoint_responses();
+        if client.endpoint_responses.contains(&boot_id, &request_id) {
+            return None;
+        }
+        let ticket = client.endpoint_responses.admit(
+            &self.endpoint_response_budget,
+            client_id,
+            boot_id,
+            request_id,
+            kind,
+        )?;
+        self.endpoint_response_owners
+            .retain(|owner| owner.upgrade().is_some_and(|identity| identity.live()));
+        self.endpoint_response_owners
+            .push(Arc::downgrade(&ticket.identity));
+        Some(ticket)
+    }
+
+    fn cancel_endpoint_response(&mut self, identity: &Arc<EndpointResponseIdentity>) {
+        if let Some(client) = self.clients.get_mut(&identity.client_id) {
+            if client.endpoint_responses.remove(identity).is_some() {
+                client.finish_endpoint_command(identity);
+            }
+        }
+    }
+
+    pub(super) fn accept_endpoint_response(&mut self, response: EndpointResponseReady) -> bool {
+        let identity = response.ticket.identity.clone();
+        if self.shutting_down || identity.boot_id != self.client_shell_boot_id || !identity.active()
+        {
+            self.cancel_endpoint_response(&identity);
+            return false;
+        }
+        let Some(client) = self.clients.get_mut(&identity.client_id) else {
+            return false;
+        };
+        let Some(slot) = client
+            .endpoint_responses
+            .slots
+            .iter_mut()
+            .find(|slot| Arc::ptr_eq(&slot.identity, &identity))
+        else {
+            return false;
+        };
+        if slot.ready.is_some() {
+            return false;
+        }
+        if matches!(
+            slot.kind,
+            EndpointResponseKind::Command { navigate: true, .. }
+        ) {
+            slot.navigation_tab = Self::deferred_endpoint_navigation_tab_id(&response.body);
+        }
+        slot.ready = Some(response);
+        self.pump_endpoint_response(identity.client_id)
+    }
+
+    pub(super) fn pump_endpoint_response(&mut self, client_id: u64) -> bool {
+        if self.shutting_down {
+            return false;
+        }
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        client.prune_endpoint_responses();
+        if !client.endpoint_responses.has_ready() {
+            return false;
+        }
+        let Some(writer) = client.writer.clone() else {
+            return false;
+        };
+        if self.endpoint_pump_remaining == 0 {
+            writer.defer_endpoint_credit();
+            self.transport_notifications.more_pending = true;
+            return false;
+        }
+        let attempts = client.endpoint_responses.slots.len();
+        let mut completed = None;
+        let mut closed = false;
+        let mut sent = false;
+        for _ in 0..attempts {
+            let Some(mut slot) = client.endpoint_responses.slots.pop_front() else {
+                break;
+            };
+            if slot.identity.boot_id != self.client_shell_boot_id {
+                client.finish_endpoint_command(&slot.identity);
+                continue;
+            }
+            if !slot.identity.active() {
+                client.endpoint_responses.slots.push_back(slot);
+                continue;
+            }
+            let Some(response) = slot.ready.as_ref() else {
+                client.endpoint_responses.slots.push_back(slot);
+                continue;
+            };
+            let end = slot
+                .offset
+                .saturating_add(ENDPOINT_RESPONSE_CHUNK_BYTES)
+                .min(response.body.len());
+            let final_chunk = end == response.body.len();
+            let message = ServerMessage::ClientShellEndpointResponseChunk {
+                boot_id: slot.identity.boot_id.clone(),
+                request_id: slot.identity.request_id.clone(),
+                final_chunk,
+                data: response.body[slot.offset..end].to_vec(),
+            };
+            let frame = match Self::frame_server_message(&message) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    warn!(client_id, %error, "endpoint frame encoding failed");
+                    writer.abort();
+                    closed = true;
+                    break;
+                }
+            };
+            match writer.control.try_send_endpoint_frame(frame) {
+                Ok(()) => {
+                    self.endpoint_pump_remaining -= 1;
+                    sent = true;
+                    slot.offset = end;
+                    if final_chunk {
+                        completed = Some(slot);
+                    } else {
+                        client.endpoint_responses.slots.push_back(slot);
+                    }
+                    break;
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    client.endpoint_responses.slots.push_back(slot);
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        if closed {
+            client.cancel_endpoint_responses();
+            self.remove_client_and_resize_if_needed(client_id);
+            return true;
+        }
+        let mut navigation = None;
+        if let Some(mut slot) = completed {
+            if let EndpointResponseKind::Command {
+                surface_revision, ..
+            } = slot.kind
+            {
+                if client.finish_endpoint_command(&slot.identity)
+                    && client.is_active_shell_client()
+                    && client.shell_projection_revision == surface_revision
+                {
+                    navigation = slot.navigation_tab.take();
+                }
+            }
+            drop(slot);
+        }
+        if sent && client.endpoint_responses.has_ready() {
+            writer.defer_endpoint_credit();
+            self.transport_notifications.more_pending = true;
+        }
+        let focus_before = self.shell_focus_target(client_id);
+        let focused_tabs_before = self.focused_shell_tabs();
+        let navigation_changed = navigation
+            .as_deref()
+            .is_some_and(|tab| self.focus_shell_client_on_tab(client_id, tab));
+        let geometry_changed =
+            navigation_changed && self.claim_shell_tab_geometry(client_id, false);
+        if navigation_changed {
+            self.reconcile_client_shell_locations();
+            let focus_after = self.shell_focus_target(client_id);
+            let focused_tabs_after = self.focused_shell_tabs();
+            self.app.accept_current_focus_without_events();
+            self.send_shell_navigation_focus_events(
+                focus_before.as_ref(),
+                focus_after.as_ref(),
+                &focused_tabs_before,
+                &focused_tabs_after,
+            );
+        }
+        navigation_changed | geometry_changed
+    }
+
     pub(super) fn handle_client_shell_endpoint_request(
         &mut self,
         client_id: u64,
         boot_id: String,
         mut request: Box<api::schema::Request>,
     ) -> bool {
-        let Some(client) = self.clients.get(&client_id) else {
+        use api::schema::Method;
+        if self.shutting_down {
+            return false;
+        }
+        let Some(client) = self.clients.get_mut(&client_id) else {
             return false;
         };
-        if !matches!(client.mode, ClientConnectionMode::ClientShell) {
+        client.prune_endpoint_responses();
+        if !client.is_shell_client() {
             self.remove_client_and_resize_if_needed(client_id);
             return true;
         }
         let request_id = request.id.clone();
-        if !crate::server::client_commands::supports_client_shell_method(&request.method) {
-            let message = crate::server::client_commands::error_message(
-                boot_id,
-                request_id,
-                "unsupported_endpoint_command",
-                "this method is not available through the client shell command lane",
+        if client.endpoint_responses.contains(&boot_id, &request_id) {
+            return false;
+        }
+        let surface_active = client.shell_surface_active;
+        let surface_revision = client.shell_projection_revision;
+        let command_busy = client.shell_endpoint_command_in_flight;
+        if !client_commands::supports_client_shell_method(&request.method) {
+            self.endpoint_control_result(
+                client_id,
+                &boot_id,
+                &request_id,
+                Err((
+                    "unsupported_endpoint_command",
+                    "this method is not available through the client shell command lane".into(),
+                )),
             );
-            self.send_to_client(client_id, message);
             return false;
         }
         if boot_id != self.client_shell_boot_id {
-            let message = crate::server::client_commands::error_message(
-                boot_id,
-                request_id,
-                "stale_boot",
-                "endpoint command targeted an earlier server boot",
-            );
-            self.send_to_client(client_id, message);
-            return false;
-        }
-        if crate::server::text_snapshots::handles(&request.method) {
-            let response = match self.text_snapshot_request(&request.method, Some(client_id)) {
-                Ok(result) => serde_json::to_string(&api::schema::SuccessResponse {
-                    id: request_id.clone(),
-                    result,
-                })
-                .unwrap_or_else(|error| {
-                    crate::server::client_commands::error_response(
-                        request_id.clone(),
-                        "serialization_error",
-                        error.to_string(),
-                    )
-                }),
-                Err((code, message)) => crate::server::client_commands::error_response(
-                    request_id.clone(),
-                    code,
-                    message,
-                ),
-            };
-            let chunks = response.as_bytes().chunks(512 * 1024);
-            let count = chunks.len();
-            for (index, data) in chunks.enumerate() {
-                self.send_to_client(
-                    client_id,
-                    crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
-                        boot_id: boot_id.clone(),
-                        request_id: request_id.clone(),
-                        final_chunk: index + 1 == count,
-                        data: data.to_vec(),
-                    },
-                );
-            }
-            return false;
-        }
-        if let api::schema::Method::ClientViewsSet(params) = &request.method {
-            let result = self.set_client_views(client_id, params.clone());
-            let message = match &result {
-                Ok(_) => crate::server::client_commands::success_message_with_result(
-                    boot_id,
-                    request_id,
-                    self.client_views_result(client_id),
-                ),
-                Err(message) => crate::server::client_commands::error_message(
-                    boot_id,
-                    request_id,
-                    "invalid_views",
-                    message,
-                ),
-            };
-            self.send_to_client(client_id, message);
-            return result.unwrap_or(false);
-        }
-        if crate::server::agent_activity::handles(&request.method) {
-            // 与观测请求一样不占终端命令的焦点与 in-flight 名额：读取在活动树后台
-            // 线程执行，应答经 server 事件通道按分块回到本客户端。
-            let reply = crate::server::agent_activity::Reply::Endpoint {
+            self.endpoint_control_result(
                 client_id,
-                boot_id: boot_id.clone(),
+                &boot_id,
+                &request_id,
+                Err((
+                    "stale_boot",
+                    "endpoint command targeted an earlier server boot".into(),
+                )),
+            );
+            return false;
+        }
+        if let Method::ClientShellSurfaceSet(params) = &request.method {
+            let Some((changed, projection_revision)) =
+                self.set_client_shell_surface_active(client_id, params.active)
+            else {
+                return false;
+            };
+            self.endpoint_control_result(
+                client_id,
+                &boot_id,
+                &request_id,
+                Ok(api::schema::ResponseResult::ClientShellSurfaceSet {
+                    active: params.active,
+                    projection_revision,
+                }),
+            );
+            return changed;
+        }
+        if let Method::ClientViewsSet(params) = &request.method {
+            let result = self.set_client_views(client_id, params.clone());
+            let changed = result.as_ref().copied().unwrap_or(false);
+            let result = result
+                .map(|_| self.client_views_result(client_id))
+                .map_err(|error| ("invalid_views", error));
+            self.endpoint_control_result(client_id, &boot_id, &request_id, result);
+            return changed;
+        }
+        if matches!(&request.method, Method::PaneTextSnapshotRelease(_)) {
+            let result = self.text_snapshot_request(&request.method, Some(client_id));
+            self.endpoint_control_result(client_id, &boot_id, &request_id, result);
+            return false;
+        }
+        if matches!(
+            &request.method,
+            Method::SystemMetricsUnsubscribe(_) | Method::AccountUsageUnsubscribe(_)
+        ) {
+            let target = self.clients.get_mut(&client_id).and_then(|client| {
+                let writer = client.writer.as_ref()?.control.clone();
+                client.endpoint_responses.admit_control(
+                    client_id,
+                    boot_id.clone(),
+                    request_id.clone(),
+                    writer,
+                )
+            });
+            let Some(target) = target else {
+                self.endpoint_control_result(
+                    client_id,
+                    &boot_id,
+                    &request_id,
+                    Err((
+                        "endpoint_busy",
+                        "an asynchronous control request is already pending".into(),
+                    )),
+                );
+                return false;
+            };
+            let reply = self.observation_endpoint_reply(
+                client_id,
+                boot_id,
+                EndpointResponseSender::new(target),
+            );
+            self.submit_observation(*request, reply);
+            return false;
+        }
+        let reading = crate::server::text_snapshots::handles(&request.method);
+        let activity = crate::server::agent_activity::handles(&request.method);
+        let observation = crate::server::observability::is_background_method(&request.method);
+        let kind = if reading {
+            EndpointResponseKind::Reading
+        } else if activity || observation {
+            EndpointResponseKind::Background
+        } else {
+            if command_busy || !surface_active {
+                let (code, message) = if command_busy {
+                    (
+                        "endpoint_busy",
+                        "this endpoint is still processing another command",
+                    )
+                } else {
+                    (
+                        "surface_inactive",
+                        "this method requires an active client shell surface",
+                    )
+                };
+                self.endpoint_control_result(
+                    client_id,
+                    &boot_id,
+                    &request_id,
+                    Err((code, message.into())),
+                );
+                return false;
+            }
+            let navigate = match &request.method {
+                Method::WorktreeCreate(params) => params.focus,
+                Method::WorktreeOpen(params) => params.focus,
+                _ => false,
+            };
+            EndpointResponseKind::Command {
+                surface_revision,
+                navigate,
+            }
+        };
+        let Some(ticket) =
+            self.admit_endpoint_response(client_id, boot_id.clone(), request_id.clone(), kind)
+        else {
+            self.endpoint_control_result(
+                client_id,
+                &boot_id,
+                &request_id,
+                Err((
+                    "endpoint_busy",
+                    "endpoint response capacity is exhausted".into(),
+                )),
+            );
+            return false;
+        };
+        if reading {
+            let result = self.text_snapshot_request(&request.method, Some(client_id));
+            let response = EndpointResponseReady::new(
+                ticket,
+                client_commands::response_text(&request_id, result),
+            );
+            return self.accept_endpoint_response(response);
+        }
+        if activity {
+            let response = EndpointResponseSender::new(EndpointResponseTarget::Bulk(ticket));
+            let reply = crate::server::agent_activity::Reply::Endpoint {
+                response: response.clone(),
                 events: self.server_event_tx.clone(),
             };
             if let Err((code, message)) =
                 self.agent_activity
                     .submit_request(&self.app, *request, reply, Instant::now())
             {
-                self.send_to_client(
-                    client_id,
-                    crate::server::client_commands::error_message(
-                        boot_id, request_id, code, message,
-                    ),
-                );
+                if let Some(target) = response.take() {
+                    target.send(
+                        client_commands::error_response(request_id, code, message),
+                        &self.server_event_tx,
+                    );
+                }
             }
             return false;
         }
-        if crate::server::observability::is_background_method(&request.method) {
-            let reply = crate::server::observability::Reply::Endpoint {
+        if observation {
+            let reply = self.observation_endpoint_reply(
                 client_id,
                 boot_id,
-                events: self.server_event_tx.clone(),
-                active: self
-                    .observation_liveness
-                    .entry(client_id)
-                    .or_insert_with(|| Arc::new(AtomicBool::new(true)))
-                    .clone(),
-            };
+                EndpointResponseSender::new(EndpointResponseTarget::Bulk(ticket)),
+            );
             self.submit_observation(*request, reply);
             return false;
         }
-        let surface_active = client.shell_surface_active;
-        if let api::schema::Method::ClientShellSurfaceSet(params) = &request.method {
-            let Some((changed, projection_revision)) =
-                self.set_client_shell_surface_active(client_id, params.active)
-            else {
-                return false;
-            };
-            self.send_to_client(
-                client_id,
-                crate::server::client_commands::success_message_with_result(
-                    boot_id,
-                    request_id,
-                    api::schema::ResponseResult::ClientShellSurfaceSet {
-                        active: params.active,
-                        projection_revision,
-                    },
-                ),
-            );
-            return changed;
-        }
-        if client.shell_endpoint_command_in_flight {
-            let message = crate::server::client_commands::error_message(
-                boot_id,
-                request_id,
-                "endpoint_busy",
-                "this endpoint is still processing another command",
-            );
-            self.send_to_client(client_id, message);
-            return false;
-        }
-        if !surface_active {
-            let message = crate::server::client_commands::error_message(
-                boot_id,
-                request_id,
-                "surface_inactive",
-                "this method requires an active client shell surface",
-            );
-            self.send_to_client(client_id, message);
-            return false;
-        }
-
+        let identity = ticket.identity.clone();
         let api_request_id = format!(
             "endpoint:{}:{client_id}:{request_id}",
             self.client_shell_boot_id
         );
         request.id = api_request_id.clone();
         let (respond_to, response_rx) = std::sync::mpsc::channel();
-        if let Err(err) = crate::server::client_commands::spawn_response_waiter(
-            client_id,
-            boot_id.clone(),
-            request_id.clone(),
+        if let Err(error) = client_commands::spawn_response_waiter(
+            ticket,
             response_rx,
             self.server_event_tx.clone(),
         ) {
-            let message = crate::server::client_commands::error_message(
-                boot_id,
-                request_id,
-                "server_unavailable",
-                format!("failed to start endpoint response bridge: {err}"),
+            self.cancel_endpoint_response(&identity);
+            self.endpoint_control_result(
+                client_id,
+                &boot_id,
+                &request_id,
+                Err((
+                    "server_unavailable",
+                    format!("failed to start endpoint response bridge: {error}"),
+                )),
             );
-            self.send_to_client(client_id, message);
             return false;
         }
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.shell_endpoint_command_in_flight = true;
-            // A later source restore has a new projection revision. Keep this request's lease
-            // so a delayed worktree response cannot focus a pane after endpoint switching.
-            client.shell_endpoint_command_surface_revision = Some(client.shell_projection_revision);
-            let deferred_worktree = matches!(
+            client.shell_endpoint_command_surface_revision = Some(surface_revision);
+            let deferred = matches!(
                 &request.method,
-                api::schema::Method::WorktreeCreate(_)
-                    | api::schema::Method::WorktreeRemove(_)
-                    | api::schema::Method::WorktreeList(_)
-                    | api::schema::Method::WorktreeOpen(_)
+                Method::WorktreeCreate(_)
+                    | Method::WorktreeRemove(_)
+                    | Method::WorktreeList(_)
+                    | Method::WorktreeOpen(_)
             );
-            let deferred_navigation = match &request.method {
-                api::schema::Method::WorktreeCreate(params) => params.focus,
-                api::schema::Method::WorktreeOpen(params) => params.focus,
-                _ => false,
-            };
-            client.shell_deferred_navigation_request_id =
-                deferred_worktree.then(|| api_request_id.clone());
-            client.shell_deferred_navigation_response = deferred_navigation.then(Vec::new);
+            client.shell_deferred_navigation_request_id = deferred.then(|| api_request_id.clone());
+            if deferred {
+                let _ = identity.deferred_request_id.set(api_request_id.clone());
+            }
+            if let Some(slot) = client
+                .endpoint_responses
+                .slots
+                .iter_mut()
+                .find(|slot| Arc::ptr_eq(&slot.identity, &identity))
+            {
+                slot.deferred_request_id = client.shell_deferred_navigation_request_id.clone();
+            }
         }
         let foreground_changed = self.promote_client_to_foreground(client_id);
         foreground_changed
@@ -260,5 +520,24 @@ impl HeadlessServer {
                     stream_active: None,
                 },
             )
+    }
+
+    fn observation_endpoint_reply(
+        &mut self,
+        client_id: u64,
+        boot_id: String,
+        response: EndpointResponseSender,
+    ) -> crate::server::observability::Reply {
+        crate::server::observability::Reply::Endpoint {
+            client_id,
+            boot_id,
+            response,
+            events: self.server_event_tx.clone(),
+            active: self
+                .observation_liveness
+                .entry(client_id)
+                .or_insert_with(|| Arc::new(AtomicBool::new(true)))
+                .clone(),
+        }
     }
 }

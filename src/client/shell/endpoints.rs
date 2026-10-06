@@ -203,9 +203,8 @@ impl ClientShellState {
         }
     }
 
-    /// Mirrors the supervisor's structured connection-failure kind into the
-    /// render state; `None` clears it (on connect or when the endpoint is
-    /// retired).
+    /// Mirrors the supervisor's accepted structured connection-failure kind;
+    /// `None` clears it on an accepted unclassified status, connect, or retirement.
     pub(crate) fn set_endpoint_connection_error_kind(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -984,5 +983,101 @@ pub(super) fn acknowledge_active_surface_agents_on(
         endpoint.snapshot.clone()
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    use crate::client::{endpoint, endpoint_commands, shell_runtime, ClientState};
+
+    struct NoIo;
+
+    impl endpoint::EndpointTransport for NoIo {
+        fn send(&mut self, _: &crate::protocol::ClientMessage) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn endpoint_lifecycle_clears_only_accepted_generation_diagnostics() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("client-kind-generation");
+        for attention in [false, true] {
+            for accepted in [false, true] {
+                for active in [false, true] {
+                    let now = std::time::Instant::now();
+                    let id = ClientEndpointId::Local;
+                    let other = ClientEndpointId::Ssh(
+                        endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+                    );
+                    let kind = crate::remote::ConnectionErrorKind::AuthRequired {
+                        methods: vec!["publickey".into()],
+                        identity_file: Some("in-memory-identity".into()),
+                    };
+                    let mut supervisors = endpoint::EndpointSupervisors::new(&[], now);
+                    supervisors.add_local("unused-local".into(), Some(3), now);
+                    assert!(supervisors.record_status(
+                        &id,
+                        3,
+                        ClientEndpointStatus::Attention,
+                        Some(kind.clone()),
+                        now,
+                    ));
+                    let mut endpoints =
+                        endpoint::EndpointRegistry::new(NoIo, 3, Default::default());
+                    if !active {
+                        endpoints.insert(other.clone(), NoIo, 1, Default::default(), true);
+                        assert!(endpoints.set_active(&other));
+                    }
+                    let mut state = ClientState::test_new();
+                    let shell = state.shell.as_mut().unwrap();
+                    shell.set_endpoint_connection_error_kind(&id, Some(kind.clone()));
+                    shell.set_endpoint_connection_error_kind(
+                        &other,
+                        Some(crate::remote::ConnectionErrorKind::Dns),
+                    );
+                    let mut commands = endpoint_commands::EndpointCommands::default();
+                    let mut pending = None;
+                    let generation = if accepted { 3 } else { 2 };
+                    let was_active = if attention {
+                        shell_runtime::handle_endpoint_attention(
+                            &mut state,
+                            &mut endpoints,
+                            &mut commands,
+                            &mut supervisors,
+                            &mut pending,
+                            &id,
+                            generation,
+                            now,
+                            "protocol mismatch".into(),
+                        )
+                    } else {
+                        shell_runtime::handle_endpoint_disconnect(
+                            &mut state,
+                            &mut endpoints,
+                            &mut commands,
+                            &mut supervisors,
+                            &mut pending,
+                            &id,
+                            generation,
+                            now,
+                            "transport closed",
+                        )
+                    };
+                    assert_eq!(
+                        was_active, active,
+                        "return value is endpoint activity, not status acceptance"
+                    );
+                    let expected = (!accepted).then_some(kind);
+                    assert_eq!(supervisors.connection_error_kind(&id), expected);
+                    let shell = state.shell.as_ref().unwrap();
+                    assert_eq!(shell.endpoint_connection_error_kind(&id), expected.as_ref());
+                    assert_eq!(
+                        shell.endpoint_connection_error_kind(&other),
+                        Some(&crate::remote::ConnectionErrorKind::Dns)
+                    );
+                }
+            }
+        }
     }
 }

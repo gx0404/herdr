@@ -2196,6 +2196,9 @@ impl ClientShellState {
             self.observability.epoch = self.observability.epoch.saturating_add(1);
             self.observability.metrics = None;
             self.observability.history.clear();
+            self.observability.usage_history.clear();
+            self.observability.net_history.clear();
+            self.observability.alerts.clear();
             self.observability.accounts.clear();
             self.observability.providers.clear();
             self.observability.pending.clear();
@@ -2353,20 +2356,46 @@ impl ClientShellState {
                 );
             }
         }
-        if (self.observability.page == Some(Page::Monitor)
-            || self.workbench.visible(&dock::PanelId::Monitor)
-            || self.observability.monitor.alerts_enabled)
+        let system_page_visible = self.observability.page == Some(Page::Monitor)
+            || (self.workbench.visible(&dock::PanelId::Monitor)
+                && self.observability.monitor_tab == Page::Monitor);
+        if (system_page_visible || self.observability.monitor.alerts_enabled)
             && now >= self.observability.next_metrics
         {
             let config = &self.observability.monitor;
-            let interval_ms = config.interval_ms.clamp(500, 5000);
-            let params = SystemMetricsParams {
-                interval_ms,
-                include_processes: config.visible.iter().any(|item| item == "processes"),
-                groups: config.visible.clone(),
+            let mut groups = if system_page_visible {
+                config.visible.clone()
+            } else {
+                Vec::new()
             };
+            if config.alerts_enabled {
+                for rule in &config.alerts {
+                    let group = match rule.metric.as_str() {
+                        "cpu" => "cpu",
+                        "memory" => "memory",
+                        "gpu" => "gpu",
+                        "disk" => "disks",
+                        _ => continue,
+                    };
+                    if !groups.iter().any(|item| item == group) {
+                        groups.push(group.to_string());
+                    }
+                }
+            }
+            let interval_ms = config.interval_ms.clamp(500, 5000);
             self.observability.next_metrics = now + Duration::from_millis(interval_ms);
-            self.observation_request(Method::SystemMetricsGet(params), Purpose::Metrics, outcome);
+            if system_page_visible || !groups.is_empty() {
+                let params = SystemMetricsParams {
+                    interval_ms,
+                    include_processes: groups.iter().any(|item| item == "processes"),
+                    groups,
+                };
+                self.observation_request(
+                    Method::SystemMetricsGet(params),
+                    Purpose::Metrics,
+                    outcome,
+                );
+            }
         }
         let settings_open = self.observability.page == Some(Page::Settings);
         // 页面作用域的订阅：账号页可见、厂商未关闭且端点宣告了订阅
@@ -4333,6 +4362,94 @@ mod alert_tests {
             ..Default::default()
         }));
         state
+    }
+
+    fn observation_client_with_history() -> ClientShellState {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(
+            &crate::config::Config::default(),
+        ));
+        state.set_snapshot(Box::new(crate::client::shell::tests::snapshot()));
+        state.tick_observability(Instant::now(), &mut ClientShellInput::default());
+        let mut fixture = memory_alert_state();
+        let mut metrics = fixture.metrics.take().unwrap();
+        metrics.boot_id = state.snapshot.as_ref().unwrap().boot_id.clone();
+        state.observability.monitor = fixture.monitor;
+        state.observability.now_ms = fixture.now_ms;
+        state.observability.apply_metrics(metrics);
+        state.observability.usage_history.insert(
+            "shared-account".into(),
+            VecDeque::from([UsageSample {
+                at_ms: 100_000,
+                percent: 70.0,
+            }]),
+        );
+        state
+            .observability
+            .net_history
+            .insert("shared-nic".into(), VecDeque::from([(10.0, 20.0)]));
+        assert!(state.observability.alert().is_some());
+        state
+    }
+
+    #[test]
+    fn audit_p1_observability_new_source_clears_histories_and_rearms_alerts() {
+        for (new_endpoint, new_boot) in [(false, true), (true, false), (true, true)] {
+            let mut state = observation_client_with_history();
+            let mut projection = crate::client::shell::tests::snapshot();
+            projection.revision += 1;
+            if new_boot {
+                projection.boot_id = "next-boot".into();
+            }
+            let boot_id = projection.boot_id.clone();
+            if new_endpoint {
+                let profile = crate::client::endpoint::SavedSshEndpoint::new(
+                    "other",
+                    "user@other.invalid",
+                    "default",
+                )
+                .unwrap();
+                let endpoint = ClientEndpointId::Ssh(profile.id.clone());
+                state.set_endpoint_catalog(&[profile]);
+                state.set_endpoint_status(&endpoint, ClientEndpointStatus::Online);
+                state.set_endpoint_snapshot(&endpoint, Box::new(projection));
+                assert!(state.activate_endpoint_projection(&endpoint));
+            } else {
+                state.set_snapshot(Box::new(projection));
+            }
+            state.tick_observability(Instant::now(), &mut ClientShellInput::default());
+
+            assert!(state.observability.history.is_empty());
+            assert!(
+                state.observability.usage_history.is_empty(),
+                "new endpoint={new_endpoint}, new boot={new_boot}"
+            );
+            assert!(state.observability.net_history.is_empty());
+            assert!(state.observability.alerts.is_empty());
+            let mut metrics = memory_alert_state().metrics.take().unwrap();
+            metrics.boot_id = boot_id;
+            metrics.hostname = "new-host".into();
+            metrics.sampled_at_ms = state.observability.now_ms;
+            state.observability.apply_metrics(metrics);
+            let alert = state
+                .observability
+                .alert()
+                .expect("new host alert must not inherit the previous host latch");
+            assert!(alert.starts_with("new-host"));
+        }
+    }
+
+    #[test]
+    fn audit_p1_observability_same_source_retains_histories_and_alert_latch() {
+        let mut state = observation_client_with_history();
+        let mut projection = crate::client::shell::tests::snapshot();
+        projection.revision += 1;
+        state.set_snapshot(Box::new(projection));
+        state.tick_observability(Instant::now(), &mut ClientShellInput::default());
+
+        assert_eq!(state.observability.history.len(), 1);
+        assert_eq!(state.observability.usage_history["shared-account"].len(), 1);
+        assert_eq!(state.observability.net_history["shared-nic"].len(), 1);
+        assert!(state.observability.alerts["memory"].armed);
     }
 
     /// 冒烟 L11：资源告警通知与偏好页告警行同一份指标显示名，不把配置里的原始

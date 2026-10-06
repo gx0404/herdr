@@ -51,6 +51,7 @@ pub(crate) enum EndpointSupervisorEvent {
         generation: u64,
         status: ClientEndpointStatus,
         message: String,
+        error_kind: Option<crate::remote::ConnectionErrorKind>,
     },
     Connected {
         endpoint_id: ClientEndpointId,
@@ -95,11 +96,8 @@ pub(crate) struct EndpointSupervisors {
     endpoints: HashMap<ClientEndpointId, ReconnectState>,
     next_generation: u64,
     shutdown: Arc<AtomicBool>,
-    /// Latest structured connection-failure kind per endpoint, recorded
-    /// alongside the status event so detail views can react to the kind
-    /// (e.g. host-key or auth prompts) instead of parsing message text.
-    error_kinds:
-        Arc<std::sync::Mutex<HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>>>,
+    /// Structured failure kind from the latest accepted status for each endpoint.
+    error_kinds: HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>,
     /// Running SSH port forwards per endpoint: rebuilt after every successful
     /// connect and reconciled in place when catalog rules change underneath a
     /// healthy connection. A connection generation is prepared before its
@@ -129,7 +127,7 @@ impl EndpointSupervisors {
             endpoints,
             next_generation: 2,
             shutdown: Arc::new(AtomicBool::new(false)),
-            error_kinds: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            error_kinds: HashMap::new(),
             forwards: Arc::new(std::sync::Mutex::new(
                 crate::remote::PortForwardManager::new(),
             )),
@@ -203,10 +201,9 @@ impl EndpointSupervisors {
             keep
         });
         {
-            let mut error_kinds = lock_error_kinds(&self.error_kinds);
             let mut forwards = lock_forwards(&self.forwards);
             for endpoint_id in &retired {
-                error_kinds.remove(endpoint_id);
+                self.error_kinds.remove(endpoint_id);
                 if let ClientEndpointId::Ssh(profile_id) = endpoint_id {
                     forwards.stop(profile_id);
                 }
@@ -275,7 +272,6 @@ impl EndpointSupervisors {
             let attempt_cancel = state.attempt_cancel.clone();
             let event_tx = event_tx.clone();
             let shutdown = self.shutdown.clone();
-            let error_kinds = self.error_kinds.clone();
             let forwards = self.forwards.clone();
             tokio::spawn(async move {
                 if shutdown.load(Ordering::Acquire) {
@@ -316,53 +312,26 @@ impl EndpointSupervisors {
                     })
                 })
                 .await;
-                let event = match result {
-                    Ok(Ok(event)) => {
-                        lock_error_kinds(&error_kinds).remove(&task_endpoint_id);
-                        event
-                    }
-                    Ok(Err(error)) => {
-                        lock_error_kinds(&error_kinds).insert(
-                            task_endpoint_id.clone(),
-                            crate::remote::classify_connection_error(&error),
-                        );
-                        EndpointSupervisorEvent::Status {
-                            endpoint_id: task_endpoint_id,
-                            generation,
-                            status: if failure_needs_attention(&error) {
-                                ClientEndpointStatus::Attention
-                            } else {
-                                ClientEndpointStatus::Reconnecting
-                            },
-                            message: error.to_string(),
-                        }
-                    }
-                    Err(error) => EndpointSupervisorEvent::Status {
-                        endpoint_id: task_endpoint_id,
-                        generation,
-                        status: ClientEndpointStatus::Reconnecting,
-                        message: format!("endpoint connection task stopped unexpectedly: {error}"),
-                    },
-                };
-                if !shutdown.load(Ordering::Acquire) && !attempt_cancel.is_cancelled() {
-                    let _ = event_tx.send(event).await;
-                }
-                attempt_cancel.complete();
+                complete_connection_attempt(
+                    result,
+                    task_endpoint_id,
+                    generation,
+                    &shutdown,
+                    &attempt_cancel,
+                    &event_tx,
+                )
+                .await;
             });
         }
     }
 
-    /// The structured kind of the endpoint's latest connection failure, when
-    /// one has been recorded since the last successful connect. Cleared on
-    /// `Online`; kept for `Attention` so the detail view can offer the
-    /// matching remedy (approve host key, answer an auth prompt, ...).
+    /// The kind from the latest accepted status. An unclassified status,
+    /// `Online`, `Disabled`, or retirement clears the previous diagnosis.
     pub(crate) fn connection_error_kind(
         &self,
         endpoint_id: &ClientEndpointId,
     ) -> Option<crate::remote::ConnectionErrorKind> {
-        lock_error_kinds(&self.error_kinds)
-            .get(endpoint_id)
-            .cloned()
+        self.error_kinds.get(endpoint_id).cloned()
     }
 
     /// Latest per-rule port-forward status for an SSH endpoint (empty for
@@ -383,6 +352,7 @@ impl EndpointSupervisors {
         endpoint_id: &ClientEndpointId,
         generation: u64,
         status: ClientEndpointStatus,
+        error_kind: Option<crate::remote::ConnectionErrorKind>,
         now: Instant,
     ) -> bool {
         let Some(state) = self.endpoints.get_mut(endpoint_id) else {
@@ -390,6 +360,19 @@ impl EndpointSupervisors {
         };
         if state.generation != Some(generation) {
             return false;
+        }
+        match error_kind.filter(|_| {
+            !matches!(
+                status,
+                ClientEndpointStatus::Online | ClientEndpointStatus::Disabled
+            )
+        }) {
+            Some(kind) => {
+                self.error_kinds.insert(endpoint_id.clone(), kind);
+            }
+            None => {
+                self.error_kinds.remove(endpoint_id);
+            }
         }
         state.in_flight = false;
         match status {
@@ -399,7 +382,6 @@ impl EndpointSupervisors {
                 }
                 state.online_since.get_or_insert(now);
                 state.next_attempt = None;
-                lock_error_kinds(&self.error_kinds).remove(endpoint_id);
             }
             // Attention stops retries: recovery runs in-UI (approved interactive
             // authentication or a manual reconnect via `reconnect_now`), and a
@@ -454,6 +436,7 @@ impl EndpointSupervisors {
             endpoint_id,
             generation,
             ClientEndpointStatus::Reconnecting,
+            None,
             now,
         )
     }
@@ -468,6 +451,41 @@ impl Drop for EndpointSupervisors {
         lock_forwards(&self.forwards).stop_all();
         self.session_logs.stop_all();
     }
+}
+
+async fn complete_connection_attempt(
+    result: Result<std::io::Result<EndpointSupervisorEvent>, tokio::task::JoinError>,
+    endpoint_id: ClientEndpointId,
+    generation: u64,
+    shutdown: &AtomicBool,
+    attempt_cancel: &crate::remote::TaskCancellation,
+    event_tx: &tokio::sync::mpsc::Sender<EndpointSupervisorEvent>,
+) {
+    let event = match result {
+        Ok(Ok(event)) => event,
+        Ok(Err(error)) => EndpointSupervisorEvent::Status {
+            endpoint_id,
+            generation,
+            status: if failure_needs_attention(&error) {
+                ClientEndpointStatus::Attention
+            } else {
+                ClientEndpointStatus::Reconnecting
+            },
+            message: error.to_string(),
+            error_kind: Some(crate::remote::classify_connection_error(&error)),
+        },
+        Err(error) => EndpointSupervisorEvent::Status {
+            endpoint_id,
+            generation,
+            status: ClientEndpointStatus::Reconnecting,
+            message: format!("endpoint connection task stopped unexpectedly: {error}"),
+            error_kind: None,
+        },
+    };
+    if !shutdown.load(Ordering::Acquire) && !attempt_cancel.is_cancelled() {
+        let _ = event_tx.send(event).await;
+    }
+    attempt_cancel.complete();
 }
 
 fn connect_once(
@@ -576,14 +594,6 @@ fn failure_needs_attention(error: &std::io::Error) -> bool {
     crate::remote::saved_ssh_failure_needs_attention(error)
 }
 
-fn lock_error_kinds(
-    error_kinds: &std::sync::Mutex<HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>>,
-) -> std::sync::MutexGuard<'_, HashMap<ClientEndpointId, crate::remote::ConnectionErrorKind>> {
-    error_kinds
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 fn lock_forwards(
     forwards: &std::sync::Mutex<crate::remote::PortForwardManager>,
 ) -> std::sync::MutexGuard<'_, crate::remote::PortForwardManager> {
@@ -678,15 +688,15 @@ mod tests {
             supervisors.reconcile_profiles(&[profile.clone()], now),
             vec![id.clone()]
         );
-        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, None, now));
         profile.enabled = true;
         assert!(supervisors
             .reconcile_profiles(&[profile.clone()], now)
             .is_empty());
-        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, None, now));
         assert_eq!(supervisors.next_generation, 8);
         assert_eq!(supervisors.reconcile_profiles(&[], now), vec![id.clone()]);
-        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, None, now));
     }
 
     #[test]
@@ -717,7 +727,13 @@ mod tests {
         supervisors.endpoints.get_mut(&id).unwrap().generation = Some(2);
         for attempt in 1..=5 {
             let connected = now + Duration::from_secs(attempt * 20);
-            assert!(supervisors.record_status(&id, 2, ClientEndpointStatus::Online, connected));
+            assert!(supervisors.record_status(
+                &id,
+                2,
+                ClientEndpointStatus::Online,
+                None,
+                connected
+            ));
             let failed = connected + Duration::from_secs(15);
             assert!(supervisors.disconnected(&id, 2, failed));
             assert_eq!(
@@ -726,7 +742,7 @@ mod tests {
             );
         }
         let connected = now + Duration::from_secs(200);
-        assert!(supervisors.record_status(&id, 2, ClientEndpointStatus::Online, connected));
+        assert!(supervisors.record_status(&id, 2, ClientEndpointStatus::Online, None, connected));
         let failed = connected + Duration::from_secs(60);
         assert!(supervisors.disconnected(&id, 2, failed));
         assert_eq!(
@@ -751,7 +767,13 @@ mod tests {
         assert_eq!(state.next_attempt, Some(now));
 
         // Attention stops retries entirely; a manual reconnect resumes them.
-        assert!(supervisors.record_status(&endpoint_id, 3, ClientEndpointStatus::Attention, now));
+        assert!(supervisors.record_status(
+            &endpoint_id,
+            3,
+            ClientEndpointStatus::Attention,
+            None,
+            now
+        ));
         assert!(supervisors.endpoints[&endpoint_id].next_attempt.is_none());
         assert!(supervisors.reconnect_now(&endpoint_id, now));
         assert_eq!(supervisors.endpoints[&endpoint_id].next_attempt, Some(now));
@@ -774,35 +796,280 @@ mod tests {
         assert_eq!(retry_delay(100), MAX_RETRY_DELAY);
     }
 
+    fn auth_kind() -> crate::remote::ConnectionErrorKind {
+        crate::remote::ConnectionErrorKind::AuthRequired {
+            methods: vec!["publickey".into(), "keyboard-interactive".into()],
+            identity_file: Some("in-memory-identity".into()),
+        }
+    }
+
+    async fn completion_result(
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        case: usize,
+    ) -> Result<std::io::Result<EndpointSupervisorEvent>, tokio::task::JoinError> {
+        match case {
+            0 => Ok(Ok(EndpointSupervisorEvent::Status {
+                endpoint_id: endpoint_id.clone(),
+                generation,
+                status: ClientEndpointStatus::Online,
+                message: "synthetic successful completion".into(),
+                error_kind: None,
+            })),
+            1 => Ok(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "late timeout",
+            ))),
+            2 => Ok(Err(crate::remote::wrap_classified(
+                std::io::Error::other("classified authentication failure"),
+                auth_kind(),
+            ))),
+            3 => Ok(Err(std::io::Error::other("unclassified failure"))),
+            4 => tokio::spawn(async { panic!("injected connection completion panic") }).await,
+            5 => Ok(Err(crate::remote::wrap_classified(
+                std::io::Error::other("Too many authentication failures"),
+                crate::remote::ConnectionErrorKind::AuthDenied,
+            ))),
+            _ => unreachable!(),
+        }
+    }
+
+    fn accept_completion(
+        supervisors: &mut EndpointSupervisors,
+        event: EndpointSupervisorEvent,
+        now: Instant,
+    ) -> bool {
+        let EndpointSupervisorEvent::Status {
+            endpoint_id,
+            generation,
+            status,
+            error_kind,
+            ..
+        } = event
+        else {
+            panic!("expected synthetic status completion");
+        };
+        supervisors.record_status(&endpoint_id, generation, status, error_kind, now)
+    }
+
+    #[tokio::test]
+    async fn late_connection_completions_preserve_new_generation_diagnostics() {
+        for case in 0..6 {
+            let now = Instant::now();
+            let id = ClientEndpointId::Ssh(profile().id);
+            let mut supervisors = EndpointSupervisors::new(&[profile()], now);
+            supervisors.add_local(PathBuf::from("unused-local"), Some(1), now);
+            assert!(supervisors.record_status(
+                &ClientEndpointId::Local,
+                1,
+                ClientEndpointStatus::Reconnecting,
+                Some(crate::remote::ConnectionErrorKind::Dns),
+                now,
+            ));
+            let local_retry = supervisors.endpoints[&ClientEndpointId::Local].next_attempt;
+            let result = completion_result(&id, 2, case).await;
+            let (release, barrier) = tokio::sync::oneshot::channel();
+            let (events, mut received) = tokio::sync::mpsc::channel(1);
+            let stale_id = id.clone();
+            let shutdown = supervisors.shutdown.clone();
+            let worker = tokio::spawn(async move {
+                barrier.await.unwrap();
+                complete_connection_attempt(
+                    result,
+                    stale_id,
+                    2,
+                    &shutdown,
+                    &crate::remote::TaskCancellation::default(),
+                    &events,
+                )
+                .await;
+            });
+            supervisors.endpoints.get_mut(&id).unwrap().generation = Some(3);
+            assert!(supervisors.record_status(
+                &id,
+                3,
+                ClientEndpointStatus::Reconnecting,
+                Some(auth_kind()),
+                now,
+            ));
+            let retry = supervisors.endpoints[&id].next_attempt;
+            let attempts = supervisors.endpoints[&id].attempts;
+            release.send(()).unwrap();
+            worker.await.unwrap();
+            assert_eq!(
+                supervisors.connection_error_kind(&id),
+                Some(auth_kind()),
+                "before stale event consumption, case={case}"
+            );
+            assert!(!accept_completion(
+                &mut supervisors,
+                received.try_recv().unwrap(),
+                now
+            ));
+            assert_eq!(supervisors.connection_error_kind(&id), Some(auth_kind()));
+            assert_eq!(supervisors.endpoints[&id].generation, Some(3));
+            assert_eq!(supervisors.endpoints[&id].attempts, attempts);
+            assert_eq!(supervisors.endpoints[&id].next_attempt, retry);
+            assert!(!supervisors.endpoints[&id].in_flight);
+            assert_eq!(
+                supervisors.endpoints[&ClientEndpointId::Local].next_attempt,
+                local_retry
+            );
+            assert_eq!(
+                supervisors.connection_error_kind(&ClientEndpointId::Local),
+                Some(crate::remote::ConnectionErrorKind::Dns)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn current_connection_completions_commit_kind_only_on_acceptance() {
+        for case in 0..6 {
+            let now = Instant::now();
+            let id = ClientEndpointId::Ssh(profile().id);
+            let mut supervisors = EndpointSupervisors::new(&[profile()], now);
+            supervisors.endpoints.get_mut(&id).unwrap().generation = Some(3);
+            assert!(supervisors.record_status(
+                &id,
+                3,
+                ClientEndpointStatus::Attention,
+                Some(auth_kind()),
+                now,
+            ));
+            let (events, mut received) = tokio::sync::mpsc::channel(1);
+            complete_connection_attempt(
+                completion_result(&id, 3, case).await,
+                id.clone(),
+                3,
+                &supervisors.shutdown,
+                &crate::remote::TaskCancellation::default(),
+                &events,
+            )
+            .await;
+            assert_eq!(supervisors.connection_error_kind(&id), Some(auth_kind()));
+            let event = received.try_recv().unwrap();
+            let EndpointSupervisorEvent::Status {
+                status, error_kind, ..
+            } = &event
+            else {
+                panic!("expected status");
+            };
+            let expected = match case {
+                0 | 4 => None,
+                1 => Some(crate::remote::ConnectionErrorKind::Timeout),
+                2 => Some(auth_kind()),
+                3 => Some(crate::remote::ConnectionErrorKind::Other),
+                5 => Some(crate::remote::ConnectionErrorKind::AuthDenied),
+                _ => unreachable!(),
+            };
+            assert_eq!(error_kind, &expected);
+            assert_eq!(
+                *status,
+                match case {
+                    0 => ClientEndpointStatus::Online,
+                    2 => ClientEndpointStatus::Attention,
+                    _ => ClientEndpointStatus::Reconnecting,
+                }
+            );
+            assert!(accept_completion(&mut supervisors, event, now));
+            assert_eq!(supervisors.connection_error_kind(&id), expected);
+            assert_eq!(
+                supervisors.endpoints[&id].next_attempt,
+                (!matches!(case, 0 | 2)).then_some(now + INITIAL_RETRY_DELAY)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_connection_completions_cannot_restore_diagnostics() {
+        for mode in 0..5 {
+            for case in 0..2 {
+                let now = Instant::now();
+                let mut saved = profile();
+                let id = ClientEndpointId::Ssh(saved.id.clone());
+                let mut supervisors = EndpointSupervisors::new(&[saved.clone()], now);
+                supervisors.endpoints.get_mut(&id).unwrap().generation = Some(2);
+                let cancel = supervisors.endpoints[&id].attempt_cancel.clone();
+                assert!(supervisors.record_status(
+                    &id,
+                    2,
+                    ClientEndpointStatus::Attention,
+                    Some(auth_kind()),
+                    now,
+                ));
+                let result = completion_result(&id, 2, case).await;
+                match mode {
+                    0 => {
+                        supervisors.reconcile_profiles(&[], now);
+                    }
+                    1 => {
+                        saved.enabled = false;
+                        supervisors.reconcile_profiles(&[saved], now);
+                    }
+                    2 => {
+                        saved.session = "changed".into();
+                        supervisors.reconcile_profiles(&[saved], now);
+                    }
+                    3 => cancel.cancel(),
+                    4 => supervisors.shutdown.store(true, Ordering::Release),
+                    _ => unreachable!(),
+                }
+                let expected = (mode >= 3).then_some(auth_kind());
+                let (events, mut received) = tokio::sync::mpsc::channel(1);
+                complete_connection_attempt(
+                    result,
+                    id.clone(),
+                    2,
+                    &supervisors.shutdown,
+                    &cancel,
+                    &events,
+                )
+                .await;
+                assert!(received.try_recv().is_err());
+                assert_eq!(supervisors.connection_error_kind(&id), expected);
+                if mode == 2 {
+                    assert_eq!(supervisors.endpoints[&id].generation, None);
+                }
+            }
+        }
+    }
+
     #[test]
     fn connection_error_kind_is_exposed_until_online_or_retired() {
         let now = Instant::now();
-        let profile = profile();
-        let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
-        let mut supervisors = EndpointSupervisors::new(&[profile], now);
-        assert!(supervisors.connection_error_kind(&endpoint_id).is_none());
-
-        let kind = crate::remote::ConnectionErrorKind::HostKeyUnknown { fingerprint: None };
-        lock_error_kinds(&supervisors.error_kinds).insert(endpoint_id.clone(), kind.clone());
-        assert_eq!(
-            supervisors.connection_error_kind(&endpoint_id),
-            Some(kind.clone())
-        );
-
-        supervisors
-            .endpoints
-            .get_mut(&endpoint_id)
-            .unwrap()
-            .generation = Some(2);
-        assert!(supervisors.record_status(&endpoint_id, 2, ClientEndpointStatus::Online, now));
-        assert!(supervisors.connection_error_kind(&endpoint_id).is_none());
-
-        lock_error_kinds(&supervisors.error_kinds).insert(endpoint_id.clone(), kind);
-        assert_eq!(
-            supervisors.reconcile_profiles(&[], now),
-            vec![endpoint_id.clone()]
-        );
-        assert!(supervisors.connection_error_kind(&endpoint_id).is_none());
+        let id = ClientEndpointId::Ssh(profile().id);
+        let mut supervisors = EndpointSupervisors::new(&[profile()], now);
+        supervisors.endpoints.get_mut(&id).unwrap().generation = Some(2);
+        for status in [
+            ClientEndpointStatus::Online,
+            ClientEndpointStatus::Disabled,
+            ClientEndpointStatus::Attention,
+            ClientEndpointStatus::Reconnecting,
+        ] {
+            assert!(supervisors.record_status(
+                &id,
+                2,
+                ClientEndpointStatus::Attention,
+                Some(auth_kind()),
+                now,
+            ));
+            let incoming = matches!(
+                status,
+                ClientEndpointStatus::Online | ClientEndpointStatus::Disabled
+            )
+            .then_some(auth_kind());
+            assert!(supervisors.record_status(&id, 2, status, incoming, now));
+            assert!(supervisors.connection_error_kind(&id).is_none());
+        }
+        assert!(supervisors.record_status(
+            &id,
+            2,
+            ClientEndpointStatus::Attention,
+            Some(auth_kind()),
+            now,
+        ));
+        assert_eq!(supervisors.reconcile_profiles(&[], now), vec![id.clone()]);
+        assert!(supervisors.connection_error_kind(&id).is_none());
     }
 
     #[test]
@@ -852,7 +1119,13 @@ mod tests {
             .get_mut(&endpoint_id)
             .unwrap()
             .generation = Some(4);
-        assert!(supervisors.record_status(&endpoint_id, 4, ClientEndpointStatus::Online, now));
+        assert!(supervisors.record_status(
+            &endpoint_id,
+            4,
+            ClientEndpointStatus::Online,
+            None,
+            now
+        ));
         assert!(!supervisors.disconnected(&endpoint_id, 3, now));
         assert!(supervisors.endpoints[&endpoint_id].next_attempt.is_none());
         assert!(supervisors.disconnected(&endpoint_id, 4, now));
@@ -860,7 +1133,13 @@ mod tests {
             supervisors.endpoints[&endpoint_id].next_attempt,
             Some(now + INITIAL_RETRY_DELAY)
         );
-        assert!(supervisors.record_status(&endpoint_id, 4, ClientEndpointStatus::Attention, now));
+        assert!(supervisors.record_status(
+            &endpoint_id,
+            4,
+            ClientEndpointStatus::Attention,
+            None,
+            now
+        ));
         assert!(supervisors.endpoints[&endpoint_id].next_attempt.is_none());
     }
 

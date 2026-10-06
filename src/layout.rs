@@ -352,6 +352,10 @@ impl TileLayout {
         &self.root
     }
 
+    pub(crate) fn into_root(self) -> Node {
+        self.root
+    }
+
     /// Reconstruct a layout from a saved tree.
     /// Reconstruct a layout from a saved tree.
     pub fn from_saved(root: Node, focus: PaneId) -> Self {

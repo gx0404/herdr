@@ -229,6 +229,27 @@ pub(crate) fn pane_env_test_lock() -> crate::config::TestEnvGuard {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static INITIAL_SPAWN_CAPTURE: std::cell::RefCell<Option<Vec<(PaneId, u16, u16)>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn capture_initial_spawns<T>(run: impl FnOnce() -> T) -> (T, Vec<(PaneId, u16, u16)>) {
+    struct Reset(Option<Vec<(PaneId, u16, u16)>>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            INITIAL_SPAWN_CAPTURE.with(|capture| *capture.borrow_mut() = self.0.take());
+        }
+    }
+    let _reset = Reset(INITIAL_SPAWN_CAPTURE.with(|capture| capture.replace(Some(Vec::new()))));
+    let result = run();
+    let attempts = INITIAL_SPAWN_CAPTURE.with(|capture| capture.borrow_mut().take().unwrap());
+    (result, attempts)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PaneLaunchEnv {
     extra: Vec<(String, String)>,
@@ -2762,6 +2783,18 @@ impl PaneRuntime {
         initial_state: SpawnInitialState<'_>,
         agent_detection: AgentDetection,
     ) -> std::io::Result<Self> {
+        #[cfg(test)]
+        if INITIAL_SPAWN_CAPTURE.with(|capture| {
+            let mut capture = capture.borrow_mut();
+            if let Some(attempts) = capture.as_mut() {
+                attempts.push((pane_id, rows, cols));
+                true
+            } else {
+                false
+            }
+        }) {
+            return Err(std::io::Error::other("captured initial pane spawn"));
+        }
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
