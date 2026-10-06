@@ -729,12 +729,31 @@ fn posix_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\"'\"'"))
 }
 
+const PYTHON_HTTP_FIXTURE: &str = r#"import http.server
+import socketserver
+import sys
+
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
+
+if __name__ == "__main__":
+    with LoopbackHTTPServer(("127.0.0.1", int(sys.argv[1])), http.server.SimpleHTTPRequestHandler) as server:
+        print(f"Serving HTTP on 127.0.0.1 port {server.server_port}", flush=True)
+        server.serve_forever()
+"#;
+
 fn python_http_command(web_root: &Path, port: u16) -> String {
+    let script = web_root.join("handoff_http.py");
+    fs::write(&script, PYTHON_HTTP_FIXTURE).unwrap();
+    let script = posix_quote(&script.canonicalize().unwrap().to_string_lossy());
     let log = posix_quote(&web_root.join("startup.stdout").to_string_lossy());
     let err = posix_quote(&web_root.join("startup.stderr").to_string_lossy());
     let probe = posix_quote("import os, sys; print('sys.executable=' + sys.executable); print('sys.version=' + sys.version); print('cwd=' + os.getcwd()); print('probe_pid=' + str(os.getpid())); print('import http.server: starting', flush=True); import http.server; print('import http.server: ok', flush=True)");
     let launch = posix_quote(&format!(
-        "printf 'server_pid=%s\\n' \"$$\" >> {log}; exec python3 -m http.server {port} --bind 127.0.0.1"
+        "printf 'server_pid=%s\\n' \"$$\" >> {log}; exec python3 {script} {port}"
     ));
     format!(
         "{{ pwd; command -v python3; python3 -c {probe}; printf 'probe_exit=%s\\n' \"$?\"; }} > {log} 2> {err}; sh -c {launch}; printf 'server_exit=%s\\n' \"$?\" >> {log}"
@@ -951,17 +970,11 @@ fn python_process_identity(ps: &str, cwd: &str, pid: u32, port: u16, web_root: &
         .and_then(|name| Path::new(name).file_name())
         .and_then(|name| name.to_str());
     let python = matches!(executable, Some("Python" | "python3"));
-    fields.len() == 13
+    fields.len() == 10
         && fields[0] == pid.to_string()
         && python
-        && fields[8..]
-            == [
-                "-m",
-                "http.server",
-                &port.to_string(),
-                "--bind",
-                "127.0.0.1",
-            ]
+        && Path::new(fields[8]) == web_root.join("handoff_http.py")
+        && fields[9] == port.to_string()
         && cwd.lines().any(|line| line == format!("p{pid}"))
         && cwd
             .lines()
@@ -1155,14 +1168,16 @@ mod http_helper_tests {
 
     #[test]
     fn process_identity_requires_exact_command_port_and_private_cwd() {
-        let ps = "123 S Tue Oct 6 19:17:38 2026 /usr/local/bin/python3 -m http.server 49421 --bind 127.0.0.1\n";
+        let ps = "123 S Tue Oct 6 19:17:38 2026 /usr/local/bin/python3 /private/tmp/hlh-1/web/handoff_http.py 49421\n";
         let cwd = "p123\nn/private/tmp/hlh-1/web\n";
         let root = Path::new("/private/tmp/hlh-1/web");
         assert!(python_process_identity(ps, cwd, 123, 49421, root));
         for wrong in [
             ps.replace("123 S", "124 S"),
             ps.replace("49421", "49422"),
-            ps.replace("python3 -m", "not-python3 -m"),
+            ps.replace("python3", "not-python3"),
+            ps.replace("handoff_http.py", "different.py"),
+            ps.replace("hlh-1", "hlh-2"),
             format!("{ps} extra"),
         ] {
             assert!(!python_process_identity(&wrong, cwd, 123, 49421, root));
@@ -1396,6 +1411,64 @@ mod http_helper_tests {
     }
 
     #[test]
+    fn python_fixture_serves_payload_without_reverse_dns() {
+        let base = unique_test_dir();
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("handoff_http.py"), PYTHON_HTTP_FIXTURE).unwrap();
+        fs::write(
+            base.join("index.html"),
+            "hello-from-python-before-and-after",
+        )
+        .unwrap();
+        let check = r#"import http.client, runpy, socket, sys, threading
+module = runpy.run_path("handoff_http.py")
+def reject_fqdn(frame, event, arg):
+    if event == "call" and frame.f_code is socket.getfqdn.__code__:
+        raise AssertionError("unexpected getfqdn call")
+sys.setprofile(reject_fqdn)
+try:
+    socket.getfqdn("127.0.0.1")
+except AssertionError:
+    pass
+else:
+    raise AssertionError("getfqdn guard did not fire")
+sys.setprofile(reject_fqdn)
+threading.setprofile(reject_fqdn)
+with module["LoopbackHTTPServer"](("127.0.0.1", 0), module["http"].server.SimpleHTTPRequestHandler) as server:
+    assert server.server_name == "127.0.0.1"
+    assert server.server_port == server.socket.getsockname()[1] != 0
+    server.timeout = 1
+    worker = threading.Thread(target=server.handle_request)
+    worker.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=1)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.read() == b"hello-from-python-before-and-after"
+    finally:
+        connection.close()
+    worker.join(1)
+    assert not worker.is_alive()
+print("fixture-no-reverse-dns-ok")
+"#;
+        let (status, output) = diagnostic_command(
+            std::process::Command::new("python3")
+                .args(["-c", check])
+                .current_dir(&base),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        fs::remove_dir_all(&base).unwrap();
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
+        assert!(String::from_utf8_lossy(&output).contains("fixture-no-reverse-dns-ok"));
+    }
+
+    #[test]
     fn startup_logs_quote_paths_and_leave_http_output_in_pane() {
         use std::os::unix::fs::PermissionsExt;
         let base = unique_test_dir();
@@ -1414,11 +1487,12 @@ mod http_helper_tests {
             .unwrap();
         let startup = fs::read_to_string(web_root.join("startup.stdout")).unwrap();
         let stderr = fs::read(web_root.join("startup.stderr")).unwrap();
+        let script = web_root.join("handoff_http.py").canonicalize().unwrap();
         fs::remove_dir_all(&base).unwrap();
         assert!(output.status.success());
         assert_eq!(
             output.stdout,
-            b"http-stdout:-m http.server 12345 --bind 127.0.0.1\n"
+            format!("http-stdout:{} 12345\n", script.display()).as_bytes()
         );
         assert_eq!(output.stderr, b"http-stderr\n");
         assert!(stderr.is_empty());
