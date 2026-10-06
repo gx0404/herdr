@@ -67,6 +67,10 @@ Windows integration installation supports all five official integrations: Pi, Cl
 
 Plugins support `windows` as a manifest platform in preview. GitHub install, local link, build commands, actions, events, and plugin panes are best-effort on Windows. Commands are argv commands and must be Windows-compatible; Node package shims such as `npm`, `bun`, and `node` are expected to work when they are on `PATH`, while Unix-only examples using `sh` or Bash need Windows-specific alternatives. Platform filters skip unsupported build commands and return `platform_unsupported` for unsupported actions or panes.
 
+### Codex updater paths
+
+The native Windows tar wrapper supports Chinese characters in the archive file path and output directory used by the Codex updater, only for exactly four arguments: `-xzf archive -C output`. Herdr opens the archive in Rust, passes it to system tar through standard input, and sets the output directory as tar's working directory, avoiding ANSI code-page conversion of those external paths. Other argument forms pass through unchanged to system tar, retaining the existing CMD `%` expansion boundary. This does not guarantee Unicode filenames inside archives and does not change GNU tar or Bash selection.
+
 ## Partial support
 
 | Capability | Status |

@@ -65,6 +65,10 @@ Windows 支持安装全部五家官方集成:Pi、Claude Code、Codex、OpenCode
 
 插件以预览状态支持在清单中声明 `windows` 平台。GitHub 安装、本地链接、构建命令、动作、事件和插件窗格在 Windows 上尽力而为。命令是 argv 命令,必须兼容 Windows;`npm`、`bun`、`node` 之类的 Node 包 shim 只要在 `PATH` 上就应该能用,而使用 `sh` 或 Bash 的 Unix 专用示例需要 Windows 专用的替代方案。平台过滤器会跳过不支持的构建命令,并对不支持的动作或窗格返回 `platform_unsupported`。
 
+### Codex 更新器路径
+
+原生 Windows tar 包装器支持 Codex 更新器使用的归档文件路径和输出目录中的中文字符，仅适用于恰好四个参数的形式：`-xzf archive -C output`。Herdr 用 Rust 打开归档，通过标准输入交给系统 tar，并将输出目录设为 tar 的工作目录，避免这些外部路径经过 ANSI 代码页转换。其他参数形式仍原样交给系统 tar，保留既有 CMD `%` 展开边界。这不保证归档内部 Unicode 文件名的兼容性，也不改变 GNU tar 或 Bash 的选择。
+
 ## 部分支持
 
 | 能力 | 状态 |

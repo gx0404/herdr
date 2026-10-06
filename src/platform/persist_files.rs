@@ -174,7 +174,7 @@ fn persist_xattrs(file: &File) -> io::Result<std::collections::BTreeMap<Vec<u8>,
 }
 
 #[cfg(target_os = "macos")]
-fn persist_acl(file: &File) -> io::Result<Vec<u8>> {
+fn persist_acl(file: &File) -> io::Result<Option<Vec<u8>>> {
     use std::os::fd::AsRawFd;
     unsafe extern "C" {
         fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
@@ -183,7 +183,12 @@ fn persist_acl(file: &File) -> io::Result<Vec<u8>> {
     }
     let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), 0x100) };
     if acl.is_null() {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ENOENT) {
+            Ok(None)
+        } else {
+            Err(error)
+        };
     }
     let mut length = 0;
     let text = unsafe { acl_to_text(acl, &mut length) };
@@ -192,7 +197,9 @@ fn persist_acl(file: &File) -> io::Result<Vec<u8>> {
     } else if length < 0 {
         Err(io::Error::other("invalid persist ACL text length"))
     } else {
-        Ok(unsafe { std::slice::from_raw_parts(text.cast(), length as usize) }.to_vec())
+        Ok(Some(
+            unsafe { std::slice::from_raw_parts(text.cast(), length as usize) }.to_vec(),
+        ))
     };
     unsafe {
         acl_free(acl);
@@ -300,6 +307,117 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn replace_macos_file_twice(dir: &Path, source_path: &Path) {
+        let original_acl = persist_acl(&File::open(source_path).unwrap()).unwrap();
+        for bytes in [b"replacement one".as_slice(), b"replacement two".as_slice()] {
+            let source = File::open(source_path).unwrap();
+            let original = source.metadata().unwrap();
+            let pending = dir.join("pending");
+            let mut temp = create_persist_temporary(&pending).unwrap();
+            assert_eq!(temp.metadata().unwrap().len(), 0);
+            assert_eq!(temp.metadata().unwrap().mode() & 0o777, 0o600);
+            assert_eq!(
+                persist_acl(&temp).unwrap().as_deref(),
+                Some(b"!#acl 1 no_inherit\n".as_slice())
+            );
+            prepare_persist_metadata(&source, &temp).unwrap();
+            assert_eq!(temp.metadata().unwrap().len(), 0);
+            assert_eq!(persist_acl(&temp).unwrap(), original_acl);
+            temp.write_all(bytes).unwrap();
+            temp.sync_all().unwrap();
+            std::fs::rename(&pending, source_path).unwrap();
+            sync_directory(dir).unwrap();
+            assert_eq!(std::fs::read(source_path).unwrap(), bytes);
+            let replaced = File::open(source_path).unwrap();
+            assert!(!same_persist_file(&source, &replaced).unwrap());
+            assert_eq!(persist_acl(&replaced).unwrap(), original_acl);
+            let metadata = replaced.metadata().unwrap();
+            assert_eq!(
+                (metadata.uid(), metadata.gid(), metadata.mode()),
+                (original.uid(), original.gid(), original.mode())
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn persist_macos_private_file_replacement_keeps_no_inherit() {
+        let dir = Directory::new();
+        let path = dir.0.join("private");
+        let mut source = create_persist_temporary(&path).unwrap();
+        source.write_all(b"original private bytes").unwrap();
+        source.sync_all().unwrap();
+        assert_eq!(
+            persist_acl(&source).unwrap().as_deref(),
+            Some(b"!#acl 1 no_inherit\n".as_slice())
+        );
+        replace_macos_file_twice(&dir.0, &path);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn persist_macos_replacement_distinguishes_absent_and_empty_acl() {
+        use std::os::fd::AsRawFd;
+        unsafe extern "C" {
+            fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+            fn acl_set_fd_np(
+                fd: libc::c_int,
+                acl: *mut libc::c_void,
+                kind: libc::c_int,
+            ) -> libc::c_int;
+            fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+        }
+        let dir = Directory::new();
+        let path = dir.0.join("source");
+        std::fs::write(&path, b"original").unwrap();
+        let removed = std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "{removed:?}");
+        assert_eq!(persist_acl(&File::open(&path).unwrap()).unwrap(), None);
+        replace_macos_file_twice(&dir.0, &path);
+        let source = File::options().read(true).write(true).open(&path).unwrap();
+        let acl = unsafe { acl_init(0) };
+        assert!(!acl.is_null(), "{}", io::Error::last_os_error());
+        let result = unsafe { acl_set_fd_np(source.as_raw_fd(), acl, 0x100) };
+        let error = io::Error::last_os_error();
+        assert_eq!(unsafe { acl_free(acl) }, 0);
+        assert_eq!(result, 0, "{error}");
+        assert_eq!(
+            persist_acl(&source).unwrap().as_deref(),
+            Some(b"!#acl 1\n".as_slice())
+        );
+        replace_macos_file_twice(&dir.0, &path);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn persist_macos_replacement_keeps_explicit_and_inherited_aces() {
+        let dir = Directory::new();
+        let inherited = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read,file_inherit"])
+            .arg(&dir.0)
+            .output()
+            .unwrap();
+        assert!(inherited.status.success(), "{inherited:?}");
+        let path = dir.0.join("source");
+        std::fs::write(&path, b"original").unwrap();
+        let explicit = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone deny execute"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(explicit.status.success(), "{explicit:?}");
+        let acl =
+            String::from_utf8(persist_acl(&File::open(&path).unwrap()).unwrap().unwrap()).unwrap();
+        assert!(acl.contains("allow,inherited:read"), "{acl}");
+        assert!(acl.contains("deny:execute"), "{acl}");
+        replace_macos_file_twice(&dir.0, &path);
     }
 
     #[test]

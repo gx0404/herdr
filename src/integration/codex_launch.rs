@@ -16,6 +16,9 @@ const OUTPUT_LIMIT: usize = 64 * 1024;
 
 /// Dispatch before the ordinary UTF-8 CLI parser, preserving native argv.
 pub(crate) fn dispatch(argv: &[OsString]) -> Option<io::Result<()>> {
+    if let Some(result) = crate::platform::codex_launch::dispatch_native_tool(argv) {
+        return Some(result);
+    }
     let shim = argv.first().and_then(|arg| Path::new(arg).file_stem()) == Some(OsStr::new("codex"));
     let explicit = argv.get(1).is_some_and(|arg| arg == ENTRY);
     (shim || explicit).then(|| launch(&argv[if shim { 1 } else { 2 }..]))

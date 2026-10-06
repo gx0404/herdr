@@ -161,15 +161,44 @@ pub(crate) fn prepare_config_metadata(
     {
         return Err(std::io::Error::last_os_error());
     }
-    // Prepare access controls while the temporary is still empty. Copy ACLs
-    // before mode bits so no inherited/default grant can expose the content.
-    // Do not copy data or old timestamps.
+    // Darwin <sys/acl.h>: replace the complete ACL, not fcopyfile's ACE merge.
+    // This preserves ACL-wide flags and inherited ACEs while the temporary is empty.
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
+        fn acl_set_fd_np(fd: libc::c_int, acl: *mut libc::c_void, kind: libc::c_int)
+            -> libc::c_int;
+        fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+    }
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x100;
+    struct Acl(NonNull<libc::c_void>);
+    impl Drop for Acl {
+        fn drop(&mut self) {
+            unsafe { acl_free(self.0.as_ptr()) };
+        }
+    }
+    let acl = match NonNull::new(unsafe { acl_get_fd_np(input.as_raw_fd(), ACL_TYPE_EXTENDED) }) {
+        Some(acl) => Some(Acl(acl)),
+        None => {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ENOENT) {
+                return Err(error);
+            }
+            None
+        }
+    };
+    // <sys/fcntl.h> _FILESEC_REMOVE_ACL is distinct from an allocated empty ACL.
+    let raw_acl = acl
+        .as_ref()
+        .map_or(std::ptr::without_provenance_mut(1), |acl| acl.0.as_ptr());
+    if unsafe { acl_set_fd_np(output.as_raw_fd(), raw_acl, ACL_TYPE_EXTENDED) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     if unsafe {
         libc::fcopyfile(
             input.as_raw_fd(),
             output.as_raw_fd(),
             std::ptr::null_mut(),
-            libc::COPYFILE_ACL | libc::COPYFILE_XATTR,
+            libc::COPYFILE_XATTR,
         )
     } != 0
     {
