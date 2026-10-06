@@ -31,7 +31,8 @@ class ReleasePerfScriptContractTests(unittest.TestCase):
         self.assertNotIn("/var/tmp", self.smoke)
 
     def test_smoke_isolates_user_state_inside_run_temp(self):
-        self.assertIn('temporary_root="$run_dir/tmp"', self.smoke)
+        self.assertIn('temporary_root=$(mktemp -d "$repo_root/.local/p-XXXXXX")', self.smoke)
+        self.assertIn('runtime-owner.txt', self.smoke)
         for fragment in (
             'export HOME="$isolated_home"',
             'export USERPROFILE="$isolated_home"',
@@ -59,7 +60,7 @@ class ReleasePerfScriptContractTests(unittest.TestCase):
 
     def test_case_keeps_raw_samples_and_cleans_only_the_temporary_state(self):
         self.assertIn("usage: $0 <binary> <variant> <scenario> <round> <seconds> <warmup> <output-root> <temporary-root> <platform>", self.case)
-        self.assertIn('state="$temporary_root/$name"', self.case)
+        self.assertIn('state=$(mktemp -d "$temporary_root/c-XXXXXX")', self.case)
         self.assertIn('raw="$out/cpu-raw.txt"', self.case)
         self.assertIn('printf \'%s\\n\' "$status" > "$out/exit-code.txt"', self.case)
         self.assertIn('rm -rf "$state"', self.case)
@@ -69,7 +70,7 @@ class ReleasePerfScriptContractTests(unittest.TestCase):
     def test_case_passes_isolated_user_state_to_herdr(self):
         for definition in (
             'home="$state/home"',
-            'xdg="$state/xdg"',
+            'xdg="$state/c"',
             'xdg_state="$state/xdg-state"',
             'runtime="$state/run"',
             'xdg_data="$state/xdg-data"',
@@ -137,29 +138,50 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
         "HERDR_STARTUP_CWD", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID",
     )
 
-    def _run_contract(self, script: Path, status: int, remove_config_guard: bool = False):
+    def _run_contract(self, script: Path, status: int, remove_config_guard: bool = False,
+                      fault: str = "", full_case: bool = False, platform: str = "linux"):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash, "bash is required for performance environment contracts")
         source = script.read_text(encoding="utf-8")
         if script == SMOKE:
-            start = source.index('temporary_root="$run_dir/tmp"\n')
+            start = source.index('umask 077\n')
             end = source.index('exec > >(tee -a "$run_dir/run.log") 2>&1\n', start)
             source = source[start:end]
-            phases = ("smoke-launch", "smoke-cleanup")
+            phases = ("smoke-launch", "smoke-cleanup") if not fault else ("smoke-launch",)
         else:
-            source = source[:source.index('\npanes_json=\n')]
+            if not full_case:
+                source = source[:source.index('\npanes_json=\n')]
             phases = ("launch", "control", "stop", "delete")
         if remove_config_guard:
             source = source.replace("unset HERDR_CONFIG_PATH\n", "").replace("-u HERDR_CONFIG_PATH", "")
 
-        with tempfile.TemporaryDirectory(prefix="herdr-perf-environment-") as temporary:
-            root = Path(temporary) / "private state"
-            for directory in ("bin", "probes", "inherited", "run", "output", "tmp"):
+        local = ROOT / ".local"
+        local.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="t-", dir=local) as temporary:
+            root = Path(temporary)
+            for directory in ("bin", "probes", "inherited", "run", "output", "tmp", ".local"):
                 (root / directory).mkdir(parents=True)
             sentinel = root / "inherited/config-sentinel.toml"
             sentinel.write_bytes(b"do not read or modify this fake user config\n")
             baseline = root / "baseline"
             baseline.write_bytes(b"fake baseline override; never executed\n")
+            outside_files = {}
+            if fault.startswith("symlink-"):
+                for relative in ("herdr-server.log", "p/herdr-server.log",
+                                 "sessions/p/herdr-server.log", "herdr/sessions/p/herdr-server.log"):
+                    external = root / "outside" / relative
+                    external.parent.mkdir(parents=True, exist_ok=True)
+                    external.write_bytes(b"external sentinel: must not read or change\n")
+                    outside_files[external] = external.read_bytes()
+                link = root / "middle-link"
+                if os.name == "nt":
+                    linked = subprocess.run(
+                        ["cmd.exe", "/c", "mklink", "/J", str(link), str(root / "outside")],
+                        capture_output=True, text=True, timeout=20, check=False,
+                    )
+                    self.assertEqual(linked.returncode, 0, linked.stdout + linked.stderr)
+                else:
+                    link.symlink_to(root / "outside", target_is_directory=True)
             environment = {
                 key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR")
                 if key in os.environ
@@ -179,11 +201,9 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
             environment.update(
                 HERDR_CONFIG_PATH=f"{shell_root}/inherited/config-sentinel.toml",
                 HERDR_PERF_BASELINE_BIN=f"{shell_root}/baseline",
-                HERDR_SESSION="inherited-session",
-                TMUX="inherited-tmux",
-                CONTRACT_ROOT=shell_root,
-                PROBE_DIR=f"{shell_root}/probes",
-                CONTRACT_STATUS=str(status),
+                HERDR_SESSION="inherited-session", TMUX="inherited-tmux",
+                CONTRACT_ROOT=shell_root, PROBE_DIR=f"{shell_root}/probes",
+                CONTRACT_STATUS=str(status), CONTRACT_FAULT=fault,
             )
             stubs = {
                 "capture": '''#!/usr/bin/env bash
@@ -193,26 +213,79 @@ env -0 > "$PROBE_DIR/$1.env"
                 "herdr": '''#!/usr/bin/env bash
 set -euo pipefail
 case "$1 ${2:-}" in
-  '--session '*) phase=launch ;;
+  '--session '*)
+    phase=launch
+    printf '%s' "$2" > "$PROBE_DIR/launch-name.txt"
+    mkdir -p "$XDG_CONFIG_HOME/herdr/sessions/$2"
+    printf 'synthetic server failure\\n' > "$XDG_CONFIG_HOME/herdr/sessions/$2/herdr-server.log"
+    printf 'not allowlisted\\n' > "$XDG_CONFIG_HOME/herdr/sessions/$2/private.txt"
+    ;;
   'pane list') phase=control ;;
   'session stop') phase=stop ;;
   'session delete') phase=delete ;;
+  'session list') phase=list ;;
+  'workspace list') printf '{"result":{"workspaces":[{"workspace_id":"w"}]}}'; exit 0 ;;
+  'pane run') exit 0 ;;
+  'pane read') printf 'bench-output-'; exit 0 ;;
   *) exit 91 ;;
 esac
-exec "$CONTRACT_ROOT/bin/capture" "$phase"
+"$CONTRACT_ROOT/bin/capture" "$phase"
+[[ $CONTRACT_FAULT != "$phase" ]] || exit 41
+case "$phase" in
+  control)
+    if [[ $CONTRACT_FAULT == readiness ]]; then printf 'last failure' >&2; printf 'partial'; exit 37; fi
+    printf '{"result":{"panes":[{"pane_id":"p"}]}}'
+    ;;
+  list) printf '{"sessions":[]}' ;;
+esac
 ''',
                 "tmux": '''#!/usr/bin/env bash
 set -euo pipefail
+[[ $1 == -S && $3 == -f ]] || exit 90
+printf '%s\\n' "$1 $2 $3 $4" >> "$PROBE_DIR/tmux-args.txt"
+shift 4
 case "$1" in
   new-session)
     "$CONTRACT_ROOT/bin/capture" tmux-launch
     exec "$BASH" --noprofile --norc -c "${@: -1}"
     ;;
-  kill-session) exec "$CONTRACT_ROOT/bin/capture" tmux-cleanup ;;
+  kill-server)
+    "$CONTRACT_ROOT/bin/capture" tmux-cleanup
+    [[ $CONTRACT_FAULT != tmux ]]
+    ;;
+  list-panes)
+    if [[ ${@: -1} == '#{pane_pid}' ]]; then printf '202'; else printf '202 1 37\\n'; fi
+    ;;
+  capture-pane)
+    [[ $CONTRACT_FAULT != capture-failure ]] || exit 43
+    printf 'synthetic dead pane\\n'
+    ;;
   *) exit 92 ;;
 esac
 ''',
+                "jq": '''#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *'.sessions |'*) [[ $(<"${@: -1}") == '{"sessions":[]}' ]] ;;
+  *pane_id*) cat >/dev/null; printf 'p' ;;
+  *workspace_id*) cat >/dev/null; printf 'w' ;;
+  *) exit 96 ;;
+esac
+''',
+                "lsof": '#!/usr/bin/env bash\nprintf "101\\n"\n',
+                "pidstat": '#!/usr/bin/env bash\nprintf "0 0 101 1.0 0 0\\n0 0 202 2.0 0 0\\n"\n',
+                "sleep": '#!/usr/bin/env bash\nexit 0\n',
+                "tail": '''#!/usr/bin/env bash
+printf '%s\\n' "${@: -1}" >> "$PROBE_DIR/log-reads.txt"
+[[ $CONTRACT_FAULT != tail-failure ]] || exit 44
+exec /usr/bin/tail "$@"
+''',
             }
+            if os.name == "nt":
+                stubs["perl"] = '''#!/usr/bin/env bash
+[[ $1 == -e && $2 == *lstat*0700* && -d $3 ]] || exit 98
+[[ $CONTRACT_FAULT != public-root ]]
+'''
             for name, contents in stubs.items():
                 path = root / "bin" / name
                 path.write_text(contents, encoding="utf-8", newline="\n")
@@ -223,10 +296,11 @@ export PATH="$CONTRACT_ROOT/bin:/usr/bin:/bin"
 rm() {
   [[ $# -eq 2 && $1 == -rf ]] || return 93
   case "$2" in
-    "$CONTRACT_ROOT/run/tmp") "$CONTRACT_ROOT/bin/capture" smoke-cleanup ;;
+    "$CONTRACT_ROOT/.local/p-"*) "$CONTRACT_ROOT/bin/capture" smoke-cleanup ;;
     "$CONTRACT_ROOT/tmp/"*) ;;
     *) return 94 ;;
   esac
+  [[ $CONTRACT_FAULT != remove ]] || return 95
   command rm "$@"
 }
 '''
@@ -238,45 +312,131 @@ set -- "$CONTRACT_ROOT/bin/herdr"
 '''
                 harness += source
                 harness += '\n"$CONTRACT_ROOT/bin/capture" smoke-launch\n'
+                if fault == "owner":
+                    harness += 'printf "wrong owner\\n" > "$temporary_root/owner.txt"\n'
                 evidence = root / "run"
-                state = root / "run/tmp"
             else:
-                harness += '''set -- "$CONTRACT_ROOT/bin/herdr" candidate visible30 1 1 0 \
-  "$CONTRACT_ROOT/output" "$CONTRACT_ROOT/tmp" linux
+                harness += '''printf 'uid=%s\\nruntime=%s\\n' "$(id -u)" "$CONTRACT_ROOT/tmp" > "$CONTRACT_ROOT/tmp/owner.txt"
+cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
+'''
+                if fault == "owner":
+                    harness += 'rm -f "$CONTRACT_ROOT/tmp/owner.txt"\n'.replace('rm -f', 'command rm -f')
+                output = "output/" + "long-evidence-" * 12 if fault == "long-evidence" else "output"
+                (root / output).mkdir(parents=True, exist_ok=True)
+                if fault == "long-evidence":
+                    harness += f'cp "$CONTRACT_ROOT/runtime-owner.txt" "$CONTRACT_ROOT/{output}/../runtime-owner.txt"\n'
+                runtime = "tmp"
+                if fault in ("long-runtime", "unicode-runtime"):
+                    runtime += "/" + ("x" * 110 if fault == "long-runtime" else "界" * 37)
+                    harness += f'mkdir -p "$CONTRACT_ROOT/{runtime}"\n'
+                    harness += f'printf "uid=%s\\nruntime=%s\\n" "$(id -u)" "$CONTRACT_ROOT/{runtime}" > "$CONTRACT_ROOT/{runtime}/owner.txt"\n'
+                    harness += f'cp "$CONTRACT_ROOT/{runtime}/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"\n'
+                mode = "755" if fault == "public-root" else "700"
+                harness += f'chmod {mode} "$CONTRACT_ROOT/{runtime}"\n'
+                harness += f'''set -- "$CONTRACT_ROOT/bin/herdr" candidate visible30 1 1 0 \\
+  "$CONTRACT_ROOT/{output}" "$CONTRACT_ROOT/{runtime}" {platform}
 '''
                 harness += source
-                harness += '\n"${control_env[@]}" "$bin" pane list\n'
-                evidence = root / "output/candidate/visible30/r1"
-                state = root / "tmp"
+                if not full_case:
+                    harness += '\n"${control_env[@]}" "$bin" pane list\n'
+                    if fault == "case-owner":
+                        harness += 'printf "wrong owner\\n" > "$state/owner.txt"\n'
+                if fault.startswith("symlink-"):
+                    relative = {"symlink-c": "c", "symlink-herdr": "c/herdr",
+                                "symlink-sessions": "c/herdr/sessions",
+                                "symlink-session": "c/herdr/sessions/p"}[fault]
+                    harness += f'command rm -rf "$state/{relative}"\n'
+                    harness += f'mv "$CONTRACT_ROOT/middle-link" "$state/{relative}"\n'
+                    harness += f'[[ -L "$state/{relative}" ]] || exit 99\n'
+                elif fault == "redirect-failure":
+                    harness += 'mkdir "$out/tmux-pane.txt"\n'
+                elif fault == "missing-log":
+                    harness += 'command rm "$xdg/herdr/sessions/$name/herdr-server.log"\n'
+                evidence = root / output / "candidate/visible30/r1"
             harness += 'exit "$CONTRACT_STATUS"\n'
             harness_path = root / "contract.sh"
             harness_path.write_text(harness, encoding="utf-8", newline="\n")
             result = subprocess.run(
                 [bash, "--noprofile", "--norc", f"{shell_root}/contract.sh"],
-                cwd=root, env=environment, capture_output=True, text=True, timeout=20, check=False,
+                cwd=root, env=environment, capture_output=True, text=True, timeout=60, check=False,
             )
-            self.assertEqual(result.returncode, status, result.stdout + result.stderr)
-            self.assertEqual((evidence / "exit-code.txt").read_text().strip(), str(status))
+            expected = status
+            if script == CASE and fault in ("owner", "public-root", "long-runtime", "unicode-runtime"):
+                expected = 2
+            elif fault and fault not in ("long-evidence", "missing-log") and not status:
+                expected = 1
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
             self.assertEqual(sentinel.read_bytes(), b"do not read or modify this fake user config\n")
             self.assertEqual(baseline.read_bytes(), b"fake baseline override; never executed\n")
+            if script == CASE and fault in ("owner", "public-root"):
+                self.assertIn("ownership receipt", result.stderr)
+                self.assertFalse((root / "probes/launch.env").exists())
+                return
+            self.assertEqual((evidence / "exit-code.txt").read_text().strip(), str(expected))
             if script == SMOKE:
-                self.assertFalse(state.exists())
+                receipt = (evidence / "runtime-owner.txt").read_text()
+                runtime_path = next(line.split("=", 1)[1] for line in receipt.splitlines() if line.startswith("runtime="))
+                self.assertIn("/.local/p-", runtime_path)
                 self.assertTrue((evidence / "metadata.txt").is_file())
                 self.assertIn(f"source={shell_root}/baseline", (evidence / "baseline-command.txt").read_text())
+                self.assertEqual(len(list((root / ".local").glob("p-*"))), 1 if fault else 0)
             else:
-                self.assertEqual([path.name for path in state.iterdir()], ["tmux"])
                 self.assertTrue((evidence / "case-metadata.txt").is_file())
+                if fault in ("long-runtime", "unicode-runtime"):
+                    self.assertIn("Unix socket path too long", result.stderr)
+                    self.assertEqual((evidence / "cleanup.txt").read_text(), "state=not-started\n")
+                    self.assertFalse((root / "probes/launch.env").exists())
+                    return
                 self.assertTrue((evidence / "launch-command.txt").is_file())
+                diagnostics_failed = fault in ("capture-failure", "tail-failure", "redirect-failure")
+                unsafe_path = fault.startswith("symlink-")
+                if fault in ("stop", "delete", "list", "tmux", "remove", "case-owner") or diagnostics_failed or unsafe_path:
+                    self.assertTrue((root / "tmp/retain").exists())
+                    self.assertTrue(list((root / "tmp").glob("c-*")))
+                else:
+                    self.assertFalse(list((root / "tmp").glob("c-*")))
+                if unsafe_path:
+                    self.assertIn("ownership=refused", (evidence / "cleanup.txt").read_text())
+                    self.assertFalse((root / "probes/log-reads.txt").exists())
+                    for phase in ("stop", "delete", "list", "tmux-cleanup"):
+                        self.assertFalse((root / f"probes/{phase}.env").exists())
+                    self.assertFalse((evidence / "herdr-server.log.txt").exists())
+                    for external, content in outside_files.items():
+                        self.assertEqual(external.read_bytes(), content)
+                elif diagnostics_failed:
+                    self.assertIn("diagnostics=failed", (evidence / "cleanup.txt").read_text())
+                    self.assertTrue((root / "probes/stop.env").exists())
+                    self.assertFalse((root / "probes/delete.env").exists())
+                    self.assertFalse((root / "probes/tmux-cleanup.env").exists())
+                    originals = list((root / "tmp").glob("c-*/c/herdr/sessions/p/herdr-server.log"))
+                    self.assertEqual(len(originals), 1)
+                    self.assertIn("synthetic server failure", originals[0].read_text())
+                elif fault != "case-owner":
+                    self.assertIn("synthetic dead pane", (evidence / "tmux-pane.txt").read_text())
+                    self.assertIn("202 1 37", (evidence / "tmux-status.txt").read_text())
+                    if fault == "missing-log":
+                        self.assertIn("herdr-server.log=absent", (evidence / "diagnostics-status.txt").read_text())
+                    else:
+                        self.assertIn("synthetic server failure", (evidence / "herdr-server.log.txt").read_text())
+                    self.assertFalse((evidence / "private.txt").exists())
+                if fault == "readiness":
+                    self.assertEqual((evidence / "readiness-exit-code.txt").read_text().strip(), "37")
+                    self.assertEqual((evidence / "readiness-stderr.txt").read_text(), "last failure")
+                    self.assertEqual((evidence / "readiness-stdout.txt").read_text(), "partial")
+                elif full_case:
+                    self.assertEqual(float((evidence / "total-cpu.txt").read_text()), 3.0)
+                tmux_args = (root / "probes/tmux-args.txt").read_text().splitlines()
+                self.assertEqual(len(set(tmux_args)), 1)
             observations = {
                 path.stem: dict(entry.split("=", 1) for entry in path.read_text().split("\0") if entry)
                 for path in (root / "probes").glob("*.env")
             }
-            self.assertEqual(
-                observations["before"]["HERDR_CONFIG_PATH"],
-                f"{shell_root}/inherited/config-sentinel.toml",
-            )
-            for phase in phases:
-                self.assertIn(phase, observations)
+            self.assertEqual(observations["before"]["HERDR_CONFIG_PATH"], f"{shell_root}/inherited/config-sentinel.toml")
+            if not fault:
+                for phase in phases:
+                    self.assertIn(phase, observations)
+            if script == CASE:
+                self.assertEqual((root / "probes/launch-name.txt").read_text(), observations["control"]["HERDR_SESSION"])
             return observations, shell_root, phases
 
     def _assert_isolated(self, observations, shell_root, phases, temporary_root):
@@ -292,7 +452,9 @@ set -- "$CONTRACT_ROOT/bin/herdr"
         for status in (0, 23):
             with self.subTest(exit_status=status):
                 observations, shell_root, phases = self._run_contract(SMOKE, status)
-                self._assert_isolated(observations, shell_root, phases, f"{shell_root}/run/tmp")
+                runtime = observations["smoke-launch"]["HOME"].rsplit("/", 1)[0]
+                self.assertTrue(runtime.startswith(f"{shell_root}/.local/p-"))
+                self._assert_isolated(observations, shell_root, phases, runtime)
 
     def test_standalone_case_drops_config_path_for_launch_control_and_cleanup(self):
         for status in (0, 23):
@@ -301,7 +463,7 @@ set -- "$CONTRACT_ROOT/bin/herdr"
                 self._assert_isolated(observations, shell_root, phases, f"{shell_root}/tmp")
                 self.assertNotIn("HERDR_SESSION", observations["launch"])
                 session = observations["control"]["HERDR_SESSION"]
-                self.assertTrue(session.startswith("rpslcv3r1x"), session)
+                self.assertEqual(session, "p")
                 for phase in ("control", "stop", "delete"):
                     self.assertEqual(observations[phase]["HERDR_SESSION"], session)
                 for phase in phases:
@@ -320,6 +482,56 @@ set -- "$CONTRACT_ROOT/bin/herdr"
                         observations[phase]["HERDR_CONFIG_PATH"],
                         f"{shell_root}/inherited/config-sentinel.toml",
                     )
+
+    def test_long_evidence_does_not_lengthen_runtime_sockets(self):
+        self._run_contract(CASE, 0, fault="long-evidence", full_case=True)
+
+    def test_socket_preflight_fails_closed_on_both_unix_platforms(self):
+        for platform in ("linux", "macos"):
+            with self.subTest(platform=platform):
+                self._run_contract(CASE, 0, fault="long-runtime", platform=platform)
+
+    def test_successful_samples_fail_when_cleanup_is_uncertain(self):
+        for fault in ("stop", "delete", "list", "tmux", "remove"):
+            with self.subTest(fault=fault):
+                self._run_contract(CASE, 0, fault=fault, full_case=True)
+
+    def test_cleanup_failure_preserves_first_failure(self):
+        self._run_contract(CASE, 23, fault="stop")
+        self._run_contract(SMOKE, 23, fault="remove")
+
+    def test_missing_or_changed_ownership_refuses_cleanup(self):
+        self._run_contract(CASE, 0, fault="owner")
+        self._run_contract(CASE, 0, fault="case-owner")
+        self._run_contract(SMOKE, 0, fault="owner")
+
+    def test_readiness_failure_retains_diagnostics_before_cleanup(self):
+        self._run_contract(CASE, 0, fault="readiness", full_case=True)
+
+    def test_socket_limit_counts_utf8_bytes_not_characters(self):
+        self._run_contract(CASE, 0, fault="unicode-runtime", platform="macos")
+
+    def test_world_readable_runtime_is_rejected_before_launch(self):
+        self._run_contract(CASE, 0, fault="public-root")
+
+    def test_smoke_cleanup_failure_cannot_report_success(self):
+        self._run_contract(SMOKE, 0, fault="remove")
+
+    def test_middle_symlinks_refuse_reads_and_cleanup_commands(self):
+        for component in ("c", "herdr", "sessions", "session"):
+            with self.subTest(component=component):
+                self._run_contract(CASE, 0, fault=f"symlink-{component}")
+
+    def test_diagnostic_failures_retain_originals_and_do_not_delete(self):
+        for fault in ("capture-failure", "tail-failure", "redirect-failure"):
+            with self.subTest(fault=fault):
+                self._run_contract(CASE, 0, fault=fault, full_case=True)
+
+    def test_diagnostic_failure_preserves_first_failure(self):
+        self._run_contract(CASE, 23, fault="tail-failure")
+
+    def test_absent_optional_logs_do_not_fail_cleanup(self):
+        self._run_contract(CASE, 0, fault="missing-log")
 
 
 if __name__ == "__main__":

@@ -65,7 +65,7 @@ Windows x64 的独立 smoke 入口与所有权约束见 `DEVELOPMENT.md`「Windo
 | `just bench-retained-graphics` | full/retained text、静态图与 unchanged-image 更新画像 | release 构建 | 控制台画像 |
 | `just bench-api-fairness` | 外部 API burst 的首批延迟与 drain 成本画像 | release 构建 | 控制台画像 |
 | `just bench-process-inspection` | Windows 进程检查扩展画像：空闲 shell、进程快照/句柄打开/命令读取次数 | 原生 Windows、release 构建 | 控制台画像；非 Windows 不适用 |
-| `just bench-release-smoke` | 发布前 CPU 对比（~3–5 分钟；未设 `HERDR_PERF_BASELINE_BIN` 下载 stable；Linux/macOS；候选与 baseline 在 `hidden50`/`visible30` 两轮串行运行） | 网络或本地基线 | `.local/perf-baseline/run-*/` 保留 run-id、metadata、candidate/baseline 命令、原始采样、summary、run log 与退出码；smoke/case 将 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、`KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）全部指向 run 内私有临时 state；smoke 顶层及 case 启动/控制/清理清除继承的 `HERDR_CONFIG_PATH`，case 隔离 herdr socket/session；仅清理临时运行态，显著回归须调查 |
+| `just bench-release-smoke` | 发布前 CPU 对比（~3–5 分钟；未设 `HERDR_PERF_BASELINE_BIN` 下载 stable；Linux/macOS；候选与 baseline 在 `hidden50`/`visible30` 两轮串行运行） | 网络或本地基线 | `.local/perf-baseline/run-*/` 保留 run-id、metadata、candidate/baseline 命令、原始采样、summary、run log 与退出码；smoke/case 将 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、`KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）全部指向 receipt 关联的项目 `.local/p-*/` 0700 短运行根；case 使用独占 `c-*` 和短 session，并按字节预检 API/client/tmux socket；smoke 顶层及 case 启动/控制/清理清除继承的 `HERDR_CONFIG_PATH`，case 隔离 herdr socket/session；清理前保留 readiness/dead-pane/允许列表日志 txt，仅删除归属匹配且已确认清理的临时态，清理不确定必须失败并保留现场，显著回归须调查 |
 
 ## 发布链（上游保留入口；见 `AGENT_RULES/release-channels.md`）
 

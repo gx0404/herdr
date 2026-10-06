@@ -45,12 +45,14 @@ AI agent 默认通过 `just test` 进入五阶段编排，不要把单个 phase 
 `just nextest-all`、`just test-one`、`just ci-tests` 是直接 nextest 入口，justfile 使用
 `HERDR_NEXTEST_JOBS`，未设置时默认 4；直接 `run_parallel_unittest.py` 的 `--jobs` 与
 `HERDR_MAINTENANCE_JOBS` 只影响 maintenance 执行器。`bench-release-smoke` 仅支持
-Linux/macOS，且候选与 baseline 必须在 run 内隔离的 `HOME`、`USERPROFILE`、
+Linux/macOS，且候选与 baseline 必须在 run 认领的短运行根中隔离 `HOME`、`USERPROFILE`、
 `XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、
 `XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、
 `KIMI_CODE_HOME`、`TMPDIR` 中运行；case 还设置 `TMUX_TMPDIR` 并清除继承的 herdr
-socket/session。只清理 `.local/perf-baseline/run-*/tmp` 临时态，保留 metadata、命令、
-采样、summary、run log 与 exit-code，避免 AI 工具用户状态污染。
+socket/session。运行根为 receipt 关联的项目 `.local/p-*/` 0700 私有目录，case 独占
+子目录并预检 socket 字节长度；仅清理归属匹配且已确认停止的临时态，清理不确定须失败。
+长证据目录保留 metadata、命令、采样、summary、run log、exit-code 与清理前诊断 txt，
+避免 AI 工具用户状态污染。
 
 ## 维护
 

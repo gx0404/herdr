@@ -68,9 +68,13 @@
   采样、摘要、run log 和退出码。smoke 与每个 case 都把 `HOME`、`USERPROFILE`、
   `XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、
   `XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、
-  `KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）指向 run 内私有临时状态。
+  `KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）指向项目 `.local/p-*/` 的
+  0700 短运行根，每 case 使用独占 `c-*` 子目录和短 session；`runtime-owner.txt` 将其
+  与长证据路径关联，启动前按 Linux/macOS 字节上限校验 API/client/tmux socket。
   smoke 顶层清除继承的 `HERDR_CONFIG_PATH`；独立 case 的启动、控制和 stop/delete 清理
-  命令也清除此覆盖，且不继承调用者的 herdr socket/session。只删除临时运行态。
+  命令也清除此覆盖，且不继承调用者的 herdr socket/session。清理前保存 readiness
+  stdout/stderr/退出码、dead-pane 状态及允许列表内的私有日志为 txt；仅删除 receipt
+  匹配且已确认清理的临时态，清理不确定会保留运行根并失败，不掩盖已有失败码。
   其余 `bench-*` recipe 是非门禁画像，命令与证据口径见 `MAKE_COMMANDS.md`。
 
 ## 定向 CI Release 资格

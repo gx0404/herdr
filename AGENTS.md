@@ -128,9 +128,11 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   只在 Linux/macOS 运行；每个 `.local/perf-baseline/run-*/` 将 `HOME`、`USERPROFILE`、
   `XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、
   `XDG_CACHE_HOME`、`APPDATA`、`LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、
-  `KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）指向 run 内临时根；smoke 顶层及
-  case 启动、控制、清理均清除继承的 `HERDR_CONFIG_PATH`。只清理临时运行态，
-  保留命令、原始采样、摘要与退出码。
+  `KIMI_CODE_HOME`、`TMPDIR`（case 另设 `TMUX_TMPDIR`）指向 receipt 关联的项目
+  `.local/p-*/` 0700 短运行根；case 独占子目录，预检 API/client/tmux socket 字节长度。
+  smoke 顶层及 case 启动、控制、清理均清除继承的 `HERDR_CONFIG_PATH`。清理前保留
+  readiness/dead-pane/允许列表日志 txt；仅删除归属匹配且已确认清理的临时态，清理
+  不确定必须失败并保留现场；保留命令、原始采样、摘要与退出码。
 
 ## 提交规范
 

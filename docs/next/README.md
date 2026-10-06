@@ -118,8 +118,13 @@ raw samples, summary, run log, and exit code, while removing only its temporary 
 The smoke and each case isolate all user state by setting `HOME`, `USERPROFILE`,
 `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `XDG_DATA_HOME`,
 `XDG_CACHE_HOME`, `APPDATA`, `LOCALAPPDATA`, `HERDR_HOME`, `CODEX_HOME`,
-`KIMI_CODE_HOME`, and `TMPDIR` to private directories under that run; each case also
-sets `TMUX_TMPDIR` and clears inherited herdr socket/session variables before launch.
+`KIMI_CODE_HOME`, and `TMPDIR` to a short, private `.local/p-*` runtime root linked
+to the evidence run by an ownership receipt. Each case uses an exclusive subdirectory,
+a short session name, and a private `TMUX_TMPDIR`; inherited herdr socket/session
+variables are cleared. API, client, and tmux socket paths are checked against the
+platform's byte limit before launch. Readiness output, dead-pane status, and allowlisted
+private logs are retained as text before cleanup. Uncertain cleanup fails the run and
+retains the runtime root; only receipt-matched, confirmed-stopped state is removed.
 
 ## license
 

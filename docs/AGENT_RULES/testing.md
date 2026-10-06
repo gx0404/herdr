@@ -85,10 +85,14 @@ native-tools 只在 Windows 实机或 Windows CI 证据成立时标 PASS。
   跑 `hidden50`/`visible30`；每次运行把 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、
   `XDG_STATE_HOME`、`XDG_RUNTIME_DIR`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`APPDATA`、
   `LOCALAPPDATA`、`HERDR_HOME`、`CODEX_HOME`、`KIMI_CODE_HOME`、`TMPDIR` 指到
-  `.local/perf-baseline/run-*/tmp` 下的私有目录，case 另外用同一临时根的 `TMUX_TMPDIR`。
+  项目 `.local/p-*/` 0700 短运行根，与 `.local/perf-baseline/run-*/` 证据目录以
+  `runtime-owner.txt` 关联；case 独占 `c-*` 子目录、短 session 和私有 tmux socket，
+  启动前按 Linux/macOS 字节上限校验 API/client/tmux 路径，不回退到项目外。
   smoke 顶层清除继承的 `HERDR_CONFIG_PATH`；独立 case 的启动、控制及 stop/delete 清理
-  命令也清除此覆盖，并隔离 herdr socket/session。只删除临时 state，保留命令、metadata、
-  原始 CPU 采样、summary、exit-code 与 run log。该隔离语义是性能证据的一部分。
+  命令也清除此覆盖，并隔离 herdr socket/session。清理前保留 readiness stdout/stderr/
+  退出码、dead-pane 状态和允许列表内日志 txt，不导出环境或用户目录。只删除 receipt
+  匹配且已确认清理的临时态，清理不确定须非零并保留现场，已有失败保留首个退出码。
+  保留命令、metadata、原始 CPU 采样、summary、exit-code 与 run log。隔离是性能证据的一部分。
 
 宽泛重构或发布风险回归先分类风险：触及两个以上核心面、持久化状态、协议/API
 ID、workspace/tab/pane 身份、restore/handoff、agent 检测权威或 UI/输入状态投影
