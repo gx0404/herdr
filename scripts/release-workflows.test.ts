@@ -111,6 +111,34 @@ describe("scoped native release qualification", () => {
     }
   }, 30000);
 
+  test.skipIf(process.platform !== "win32")("PowerShell toolchain loop preserves complete arguments for every command", () => {
+    const loop = build.run.slice(build.run.indexOf("foreach ($spec in"), build.run.indexOf("$env:CARGO_TERM_VERBOSE ="));
+    const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", `
+$ErrorActionPreference = 'Stop'
+$out = 'unused-stub-output'
+foreach ($name in @('rustc', 'cargo', 'just', 'bun', 'zig')) {
+  Set-Item "Function:$name" {
+    [ordered]@{ command = $MyInvocation.MyCommand.Name; arguments = @($args) } | ConvertTo-Json -Compress
+    $global:LASTEXITCODE = 0
+  }
+}
+function Tee-Object {
+  param([Parameter(ValueFromPipeline)]$InputObject, [string]$FilePath, [switch]$Append)
+  process { $InputObject }
+}
+${loop}
+`], { encoding: "utf8" });
+    expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+    expect(result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line))).toEqual([
+      { command: "rustc", arguments: ["-vV"] },
+      { command: "cargo", arguments: ["-V"] },
+      { command: "just", arguments: ["--version"] },
+      { command: "bun", arguments: ["--version"] },
+      { command: "zig", arguments: ["version"] },
+      { command: "cargo", arguments: ["nextest", "--version"] },
+    ]);
+  }, 30000);
+
   test("macOS missing tests run explicitly before unchanged serial 60s smoke", () => {
     expect(handoff.if).toContain("runner.os == 'macOS'");
     expect(handoff.run).toContain("-E 'binary(live_handoff)'");

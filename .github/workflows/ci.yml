@@ -258,7 +258,8 @@ jobs:
           Copy-Item .cargo/config.toml "$out/cargo-config.toml"
           Copy-Item rust-toolchain.toml "$out/rust-toolchain.toml"
           foreach ($spec in @(@('rustc', '-vV'), @('cargo', '-V'), @('just', '--version'), @('bun', '--version'), @('zig', 'version'), @('cargo', 'nextest', '--version'))) {
-            $command, $arguments = $spec
+            $command = $spec[0]
+            [string[]]$arguments = @($spec | Select-Object -Skip 1)
             & $command @arguments 2>&1 | Tee-Object -FilePath "$out/toolchains.log" -Append
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }

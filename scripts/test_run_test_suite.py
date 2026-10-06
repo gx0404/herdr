@@ -4,7 +4,6 @@ import json
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -149,18 +148,25 @@ class PhaseConfigurationTests(unittest.TestCase):
     def test_phase_limit_bounds_active_workers(self) -> None:
         active = 0
         maximum = 0
+        entered = 0
         lock = threading.Lock()
+        first_workers = threading.Barrier(2, timeout=30)
 
         def runner(name: str, recipe: str, log_path: Path) -> tuple[int, float]:
-            nonlocal active, maximum
+            nonlocal active, maximum, entered
             log_path.write_text("ok\n", encoding="utf-8")
             with lock:
                 active += 1
                 maximum = max(maximum, active)
-            time.sleep(0.02)
-            with lock:
-                active -= 1
-            return 0, 0.02
+                entered += 1
+                synchronize = entered <= 2
+            try:
+                if synchronize:
+                    first_workers.wait()
+                return 0, 0.02
+            finally:
+                with lock:
+                    active -= 1
 
         with tempfile.TemporaryDirectory() as temporary:
             results = run_test_suite.run_all(
@@ -170,6 +176,9 @@ class PhaseConfigurationTests(unittest.TestCase):
                 phase_runner=runner,
             )
         self.assertEqual(len(results), len(run_test_suite.PHASES))
+        self.assertEqual(active, 0)
+        for name, (code, _) in results.items():
+            self.assertEqual(code, 0, name)
         self.assertEqual(maximum, 2)
 
 
