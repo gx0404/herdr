@@ -1224,13 +1224,26 @@ mod http_helper_tests {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
-                        stream
                             .set_write_timeout(Some(Duration::from_secs(1)))
                             .unwrap();
+                        let request_deadline = Instant::now() + Duration::from_secs(1);
                         let mut request = [0; 128];
-                        let _ = stream.read(&mut request);
+                        let mut received = 0;
+                        while !request[..received].ends_with(b"\r\n\r\n") {
+                            assert!(received < request.len(), "mock request header too large");
+                            stream
+                                .set_read_timeout(Some(remaining(request_deadline).unwrap()))
+                                .unwrap();
+                            let count = match stream.read(&mut request[received..]) {
+                                Ok(count) => count,
+                                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                    continue
+                                }
+                                Err(error) => panic!("mock request read: {error}"),
+                            };
+                            assert!(count > 0, "mock request closed before complete headers");
+                            received += count;
+                        }
                         reply(stream);
                         return;
                     }
@@ -1243,6 +1256,36 @@ mod http_helper_tests {
             }
         });
         (port, worker)
+    }
+
+    #[test]
+    fn mock_waits_for_fragmented_headers_before_reply_and_close() {
+        let (port, worker) = mock_http(|mut stream| stream.write_all(&[0xff]).unwrap());
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        stream.write_all(b"G").unwrap();
+        let error = stream
+            .read(&mut [0; 1])
+            .expect_err("mock replied before headers completed");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        stream
+            .write_all(b"ET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        worker.join().unwrap();
+        assert_eq!(response, [0xff]);
     }
 
     #[test]

@@ -141,7 +141,9 @@ ${loop}
 
   test("macOS missing tests run explicitly before unchanged serial 60s smoke", () => {
     expect(handoff.if).toContain("runner.os == 'macOS'");
-    expect(handoff.run).toContain("-E 'binary(live_handoff)'");
+    expect(handoff.run).toContain("cargo nextest run --locked --no-fail-fast -E 'binary(live_handoff)'");
+    expect(handoff["continue-on-error"]).toBeUndefined();
+    expect(handoff.run).toContain('if (( codes[0] != 0 )); then exit "${codes[0]}"; fi');
     expect(job.steps.indexOf(handoff)).toBeLessThan(job.steps.indexOf(perf));
     expect(perf.if).toContain("matrix.kind == 'unix'");
     expect(perf.env).toEqual({ HERDR_PERF_SAMPLE_SECONDS: "60" });

@@ -288,7 +288,7 @@ jobs:
         run: |
           set -uo pipefail
           set +e
-          cargo nextest run --locked -E 'binary(live_handoff)' --status-level leak --final-status-level slow --failure-output final --success-output never 2>&1 | tee target/ci-release-evidence/live-handoff.log
+          cargo nextest run --locked --no-fail-fast -E 'binary(live_handoff)' --status-level leak --final-status-level slow --failure-output final --success-output never 2>&1 | tee target/ci-release-evidence/live-handoff.log
           codes=("${PIPESTATUS[@]}")
           set -e
           printf '%s\n' "${codes[0]}" > target/ci-release-evidence/live-handoff-exit-code.txt
