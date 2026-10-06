@@ -718,7 +718,7 @@ mod tests {
         let dir = Directory::new(case);
         let source_path = dir.0.join("source");
         std::fs::write(&source_path, b"original").unwrap();
-        if case == "legacy" {
+        if matches!(case, "legacy" | "legacy-save") {
             let mut descriptor =
                 super::super::config_security_descriptor(&source_path, DACL_SECURITY_INFORMATION)
                     .unwrap();
@@ -808,13 +808,26 @@ $acl.AddAccessRule($rule)
         let before = security(&source_path);
         let text = String::from_utf16_lossy(&before);
         match case {
-            "legacy" => assert!(text.contains("D:("), "{text}"),
+            "legacy" | "legacy-save" => assert!(text.contains("D:("), "{text}"),
             "protected" | "restricted" => assert!(text.contains("D:PAI"), "{text}"),
             "unprotected" | "moved" => assert!(text.contains("D:AI"), "{text}"),
             "metadata" => assert!(text.contains("G:BU") && text.contains(";;;LW)"), "{text}"),
             _ => unreachable!(),
         }
         let source = File::open(&source_path).unwrap();
+        if case == "legacy-save" {
+            let expected = Security::read(&source).unwrap().semantic().unwrap();
+            crate::persist::assert_legacy_save_rejected(&source_path);
+            assert_eq!(security(&source_path), before);
+            assert_eq!(
+                Security::read(&File::open(&source_path).unwrap())
+                    .unwrap()
+                    .semantic()
+                    .unwrap(),
+                expected
+            );
+            return;
+        }
         let temp_path = source_path.with_file_name("pending");
         let mut temp = create_persist_temporary(&temp_path).unwrap();
         let result = prepare_persist_metadata(&source, &temp);
@@ -851,6 +864,10 @@ $acl.AddAccessRule($rule)
     #[test]
     fn persist_native_legacy_rejected() {
         descriptor_case("legacy", false);
+    }
+    #[test]
+    fn persist_native_legacy_save_rejected_before_write() {
+        descriptor_case("legacy-save", false);
     }
     #[test]
     fn persist_native_moved_rejected() {

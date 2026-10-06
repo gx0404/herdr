@@ -201,6 +201,35 @@ pub(super) fn save_history_to_path(
     }
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn assert_legacy_save_rejected(path: &Path) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let writes = Rc::new(Cell::new(0));
+    let observed = writes.clone();
+    let err = test_io::with(
+        Box::new(move |phase, _| {
+            if phase == "save.write" {
+                observed.set(observed.get() + 1);
+            }
+            Ok(())
+        }),
+        || save_bytes_to_path(path, b"replacement"),
+    )
+    .unwrap_err();
+    assert_eq!(err.phase, "save.metadata", "{err:?}");
+    assert_eq!(err.source.kind(), io::ErrorKind::Unsupported, "{err:?}");
+    assert!(!err.replaced);
+    assert!(err.cleanup.is_none(), "{err:?}");
+    assert_eq!(writes.get(), 0);
+    assert_eq!(std::fs::read(path).unwrap(), b"original");
+    assert_eq!(
+        std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+        1
+    );
+}
+
 #[cfg(test)]
 pub(super) mod test_io {
     use std::cell::RefCell;
@@ -507,8 +536,7 @@ mod tests {
             ] {
                 let path = temp_session_path("save-stages");
                 if existed {
-                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                    std::fs::write(&path, b"original bytes").unwrap();
+                    save_bytes_to_path(&path, b"original bytes").unwrap();
                 }
                 let expected = serde_json::to_vec_pretty(&empty_snapshot()).unwrap();
                 let err = test_io::with(
@@ -539,6 +567,7 @@ mod tests {
                 };
                 assert_eq!(err.replaced, replaced, "{}", diagnostic());
                 assert_eq!(err.phase, phase, "{}", diagnostic());
+                assert_eq!(err.source.to_string(), "injected persistence failure");
                 assert!(err.to_string().contains(&format!("replaced={replaced}")));
                 assert!(err.cleanup.is_none(), "{err}");
                 if replaced {
@@ -560,8 +589,7 @@ mod tests {
     #[test]
     fn partial_write_failure_discards_only_the_owned_temporary() {
         let path = temp_session_path("partial-write");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"original").unwrap();
+        save_bytes_to_path(&path, b"original").unwrap();
         let foreign = path.with_extension("json.tmp");
         std::fs::write(&foreign, b"foreign").unwrap();
         let mut pending = PathBuf::new();
@@ -579,6 +607,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(!err.replaced);
+        assert_eq!(err.phase, "save.write");
+        assert_eq!(err.source.to_string(), "injected partial write failure");
         assert!(err.cleanup.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
         assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign");
@@ -591,8 +621,7 @@ mod tests {
     #[test]
     fn temporary_cleanup_failure_is_reported_without_touching_the_target() {
         let path = temp_session_path("cleanup-error");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"original").unwrap();
+        save_bytes_to_path(&path, b"original").unwrap();
         let err = test_io::with(
             Box::new(|phase, _| {
                 if matches!(phase, "save.write" | "save.cleanup") {
@@ -606,8 +635,12 @@ mod tests {
         .unwrap_err();
         assert!(!err.replaced);
         assert!(err.to_string().contains("temporary cleanup failed"));
-        assert!(err.to_string().contains("save.write"));
-        assert!(err.cleanup.is_some());
+        assert_eq!(err.phase, "save.write");
+        assert_eq!(err.source.to_string(), "injected save.write");
+        assert_eq!(
+            err.cleanup.as_ref().unwrap().to_string(),
+            "injected save.cleanup"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
         assert_eq!(
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),

@@ -10,6 +10,8 @@ mod restore;
 mod snapshot;
 mod writer;
 
+#[cfg(all(test, windows))]
+pub(crate) use self::io::assert_legacy_save_rejected;
 pub use self::io::{clear_history, load, load_history};
 pub use self::restore::restore;
 #[cfg(unix)]
