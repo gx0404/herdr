@@ -880,6 +880,186 @@ fn diagnostic_file(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn diagnostic_command(
+    command: &mut std::process::Command,
+    deadline: Instant,
+) -> std::io::Result<(Option<std::process::ExitStatus>, Vec<u8>)> {
+    use std::os::fd::OwnedFd;
+    use std::process::Stdio;
+    remaining(deadline)?;
+    let (mut reader, writer) = UnixStream::pair()?;
+    reader.set_nonblocking(true)?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(OwnedFd::from(writer.try_clone()?)))
+        .stderr(Stdio::from(OwnedFd::from(writer)))
+        .spawn()?;
+    let mut output = Vec::new();
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                thread::Builder::new()
+                    .spawn(move || {
+                        let _ = child.wait();
+                    })
+                    .map_err(|reap_error| {
+                        std::io::Error::other(format!("{error}; reaper unavailable: {reap_error}"))
+                    })?;
+                return Err(error);
+            }
+        };
+        for _ in 0..32 {
+            let mut buffer = [0; 4096];
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    output.extend_from_slice(&buffer[..count.min(DIAGNOSTIC_LIMIT - output.len())])
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        if status.is_some() {
+            return Ok((status, output));
+        }
+        let Ok(budget) = remaining(deadline) else {
+            let _ = child.kill();
+            // Reaping must not renew the expired evidence deadline.
+            thread::Builder::new()
+                .spawn(move || {
+                    let _ = child.wait();
+                })
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "deadline exhausted; reaper unavailable: {error}"
+                    ))
+                })?;
+            return Ok((None, output));
+        };
+        thread::sleep(budget.min(Duration::from_millis(10)));
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn python_process_identity(ps: &str, cwd: &str, pid: u32, port: u16, web_root: &Path) -> bool {
+    let fields: Vec<_> = ps.split_whitespace().collect();
+    let executable = fields
+        .get(7)
+        .and_then(|name| Path::new(name).file_name())
+        .and_then(|name| name.to_str());
+    let python = matches!(executable, Some("Python" | "python3"));
+    fields.len() == 13
+        && fields[0] == pid.to_string()
+        && python
+        && fields[8..]
+            == [
+                "-m",
+                "http.server",
+                &port.to_string(),
+                "--bind",
+                "127.0.0.1",
+            ]
+        && cwd.lines().any(|line| line == format!("p{pid}"))
+        && cwd
+            .lines()
+            .any(|line| line == format!("n{}", web_root.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn capture_python_process(
+    context: &HttpContext<'_>,
+    port: u16,
+    directory: &Path,
+) -> std::io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let startup = diagnostic_file(&context.web_root.join("startup.stdout"))?;
+    let startup = String::from_utf8_lossy(&startup);
+    let pids: Vec<_> = startup
+        .lines()
+        .filter_map(|line| line.strip_prefix("server_pid="))
+        .collect();
+    let pid = pids
+        .first()
+        .filter(|_| {
+            pids.len() == 1 && !startup.lines().any(|line| line.starts_with("server_exit="))
+        })
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unavailable: missing/ambiguous/or exited PID marker",
+            )
+        })?;
+    let pid_text = pid.to_string();
+    let web_root = context.web_root.canonicalize()?;
+    let mut captures = Vec::new();
+    let mut run = |name: &str, executable: &str, args: &[&str]| -> std::io::Result<String> {
+        let (status, output) = diagnostic_command(
+            std::process::Command::new(executable)
+                .env("LC_ALL", "C")
+                .args(args),
+            deadline,
+        )
+        .map_err(|error| std::io::Error::other(format!("unavailable: {name}: {error}")))?;
+        let text = String::from_utf8_lossy(&output).into_owned();
+        captures.push((
+            name.to_string(),
+            output,
+            format!("exit={status:?}; deadline_exhausted={}\n", status.is_none()),
+        ));
+        if !status.is_some_and(|status| status.success()) {
+            return Err(std::io::Error::other(format!(
+                "unavailable: {name} exit={status:?}"
+            )));
+        }
+        Ok(text)
+    };
+    let ps_args = ["-ww", "-p", &pid_text, "-o", "pid=,stat=,lstart=,command="];
+    let cwd_args = ["-nP", "-a", "-p", &pid_text, "-d", "cwd", "-Fpn"];
+    let ps = run("python-ps.txt", "/bin/ps", &ps_args)?;
+    let cwd = run("python-cwd.txt", "/usr/sbin/lsof", &cwd_args)?;
+    if !python_process_identity(&ps, &cwd, pid, port, &web_root) {
+        return Err(std::io::Error::other(
+            "unavailable: Python command/port/private cwd identity not confirmed",
+        ));
+    }
+    let _ = run(
+        "python-tcp.txt",
+        "/usr/sbin/lsof",
+        &["-nP", "-a", "-p", &pid_text, "-i", &format!("TCP:{port}")],
+    );
+    let current_ps = run("python-ps-recheck.txt", "/bin/ps", &ps_args)?;
+    let current_cwd = run("python-cwd-recheck.txt", "/usr/sbin/lsof", &cwd_args)?;
+    if ps
+        .split_whitespace()
+        .skip(2)
+        .ne(current_ps.split_whitespace().skip(2))
+        || !python_process_identity(&current_ps, &current_cwd, pid, port, &web_root)
+    {
+        return Err(std::io::Error::other(
+            "unavailable: process identity changed before sampling",
+        ));
+    }
+    let raw_sample = context.web_root.join("python-native-sample.raw");
+    let result = run(
+        "python-sample-command.txt",
+        "/usr/bin/sample",
+        &[&pid_text, "1", "10", "-file", &raw_sample.to_string_lossy()],
+    );
+    for (name, output, status) in captures {
+        fs::write(directory.join(&name), output)?;
+        fs::write(directory.join(format!("{name}.status")), status)?;
+    }
+    let bytes = diagnostic_file(&raw_sample)
+        .unwrap_or_else(|error| format!("capture unavailable: {error}\n").into_bytes());
+    fs::write(directory.join("python-native-sample.txt"), bytes)?;
+    result.map(|_| ())
+}
+
 fn preserve_http_failure(
     context: &HttpContext<'_>,
     port: u16,
@@ -947,6 +1127,11 @@ fn preserve_http_failure(
             )?;
         }
     }
+    #[cfg(target_os = "macos")]
+    capture(
+        "python-process-capture.txt",
+        capture_python_process(context, port, &directory).map(|()| b"capture completed\n".to_vec()),
+    )?;
     Ok(directory)
 }
 
@@ -967,6 +1152,67 @@ fn wait_for_http_contains(
 
 mod http_helper_tests {
     use super::*;
+
+    #[test]
+    fn process_identity_requires_exact_command_port_and_private_cwd() {
+        let ps = "123 S Tue Oct 6 19:17:38 2026 /usr/local/bin/python3 -m http.server 49421 --bind 127.0.0.1\n";
+        let cwd = "p123\nn/private/tmp/hlh-1/web\n";
+        let root = Path::new("/private/tmp/hlh-1/web");
+        assert!(python_process_identity(ps, cwd, 123, 49421, root));
+        for wrong in [
+            ps.replace("123 S", "124 S"),
+            ps.replace("49421", "49422"),
+            ps.replace("python3 -m", "not-python3 -m"),
+            format!("{ps} extra"),
+        ] {
+            assert!(!python_process_identity(&wrong, cwd, 123, 49421, root));
+        }
+        assert!(!python_process_identity(
+            ps,
+            "p123\nn/private/tmp/another/web\n",
+            123,
+            49421,
+            root
+        ));
+        assert!(!python_process_identity(
+            ps,
+            "p124\nn/private/tmp/hlh-1/web\n",
+            123,
+            49421,
+            root
+        ));
+    }
+
+    #[test]
+    fn diagnostic_subprocess_has_bounded_output_and_shared_deadline() {
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(150);
+        let (status, output) = diagnostic_command(
+            std::process::Command::new("/bin/sh").args([
+                "-c",
+                "printf start; printf error >&2; while :; do printf 0123456789; done",
+            ]),
+            deadline,
+        )
+        .unwrap();
+        assert!(status.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(output.starts_with(b"starterror"));
+        assert!(output.len() <= DIAGNOSTIC_LIMIT);
+        assert_eq!(
+            diagnostic_command(&mut std::process::Command::new("/does-not-exist"), deadline)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        let (status, output) = diagnostic_command(
+            std::process::Command::new("/bin/sh").args(["-c", "printf done; exit 7"]),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(status.and_then(|status| status.code()), Some(7));
+        assert_eq!(output, b"done");
+    }
 
     fn mock_http(reply: impl FnOnce(TcpStream) + Send + 'static) -> (u16, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

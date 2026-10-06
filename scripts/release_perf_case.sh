@@ -91,6 +91,7 @@ printf '%s\n' "$case_receipt" > "$out/runtime-owner.txt"
 state_physical=$(cd "$state" && pwd -P)
 started=0
 tmux_started=0
+tmux_server_pid=
 safe_case_path() {
   local target path remaining component resolved
   [[ -d "$state" && ! -L "$state" && -O "$state" && -r "$state" && -x "$state" ]] || return 1
@@ -209,15 +210,26 @@ cleanup() {
       code=$?
       printf 'tmux=%s\n' "$code" >> "$out/cleanup.txt" || cleanup_status=1
       [[ $code -eq 0 ]] || cleanup_status=1
-      for _ in $(seq 1 50); do
-        [[ ! -e "$tmux_socket" && ! -L "$tmux_socket" ]] && break
-        sleep 0.1
-      done
-      if [[ -e "$tmux_socket" || -L "$tmux_socket" ]]; then
-        printf 'tmux_socket=still-present\n' >> "$out/cleanup.txt"
+      code=4
+      if [[ $tmux_server_pid =~ ^[0-9]+$ && $tmux_server_pid -gt 1 ]]; then
+        for _ in $(seq 1 50); do
+          perl -e 'use Errno qw(ESRCH); exit 0 if kill 0, $ARGV[0]; exit($! == ESRCH ? 3 : 4)' "$tmux_server_pid"
+          code=$?
+          printf 'pid=%s probe=%s\n' "$tmux_server_pid" "$code" >> "$out/tmux-process-probe.txt" || cleanup_status=1
+          [[ $code -eq 0 ]] || break
+          sleep 0.1
+        done
+      fi
+      if [[ $code -ne 3 ]]; then
+        printf 'tmux_process=unknown-or-running\n' >> "$out/cleanup.txt"
         cleanup_status=1
       else
-        printf 'tmux_socket=absent\n' >> "$out/cleanup.txt" || cleanup_status=1
+        printf 'tmux_process=exited\n' >> "$out/cleanup.txt" || cleanup_status=1
+        if [[ -e "$tmux_socket" || -L "$tmux_socket" ]]; then
+          printf 'tmux_socket=stale-owned\n' >> "$out/cleanup.txt" || cleanup_status=1
+        else
+          printf 'tmux_socket=absent\n' >> "$out/cleanup.txt" || cleanup_status=1
+        fi
       fi
     fi
   fi
@@ -259,6 +271,9 @@ printf '%s\n' "$launch" > "$out/launch-command.txt"
 started=1
 "${tmux_cmd[@]}" new-session -d -s "$name" -x "$cols" -y "$rows" "$launch"
 tmux_started=1
+tmux_server_pid=$("${tmux_cmd[@]}" display-message -p '#{pid}')
+[[ $tmux_server_pid =~ ^[0-9]+$ && $tmux_server_pid -gt 1 ]] || { echo "invalid private tmux server pid" >&2; exit 1; }
+printf '%s\n' "$tmux_server_pid" > "$out/tmux-server-pid.txt"
 
 panes_json=
 ready=0

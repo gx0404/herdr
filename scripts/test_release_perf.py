@@ -140,7 +140,7 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
 
     def _run_contract(self, script: Path, status: int, remove_config_guard: bool = False,
                       fault: str = "", full_case: bool = False, platform: str = "linux",
-                      readiness_stderr: str = "last failure"):
+                      readiness_stderr: str = "last failure", rewrite_tmp: bool = False):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash, "bash is required for performance environment contracts")
         source = script.read_text(encoding="utf-8")
@@ -214,11 +214,19 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
                 CONTRACT_ROOT=shell_root, PROBE_DIR=f"{shell_root}/probes",
                 CONTRACT_STATUS=str(status), CONTRACT_FAULT=fault,
                 CONTRACT_READINESS_STDERR=readiness_stderr,
+                CONTRACT_PROCESS_TMP=f"{shell_root}/process tmp",
+                BASH_ENV=f"{shell_root}/private-bash-env.sh",
+            )
+            (root / "private-bash-env.sh").write_text(
+                'export TMP="$CONTRACT_PROCESS_TMP" TEMP="$CONTRACT_PROCESS_TMP"\n',
+                encoding="utf-8", newline="\n",
             )
             stubs = {
                 "capture": '''#!/usr/bin/env bash
 set -euo pipefail
+[[ $TMP == "$CONTRACT_PROCESS_TMP" && $TEMP == "$CONTRACT_PROCESS_TMP" ]] || exit 97
 [[ -d $TMP && -d $TEMP && -d $TMPDIR ]] || exit 97
+printf 'private temp write\\n' > "$TMP/capture-$1"
 env -0 > "$PROBE_DIR/$1.env"
 ''',
                 "herdr": '''#!/usr/bin/env bash
@@ -255,14 +263,18 @@ esac
 set -euo pipefail
 [[ $1 == -S && $3 == -f ]] || exit 90
 printf '%s\\n' "$1 $2 $3 $4" >> "$PROBE_DIR/tmux-args.txt"
+socket_path=$2
 shift 4
 case "$1" in
   new-session)
+    : > "$socket_path"
     "$CONTRACT_ROOT/bin/capture" tmux-launch
     exec "$BASH" --noprofile --norc -c "${@: -1}"
     ;;
+  display-message) printf '303\\n' ;;
   kill-server)
     "$CONTRACT_ROOT/bin/capture" tmux-cleanup
+    if [[ $CONTRACT_FAULT == tmux-alive-no-socket ]]; then command rm "$socket_path"; fi
     [[ $CONTRACT_FAULT != tmux ]]
     ;;
   list-panes)
@@ -292,10 +304,43 @@ printf '%s\\n' "${@: -1}" >> "$PROBE_DIR/log-reads.txt"
 exec /usr/bin/tail "$@"
 ''',
             }
-            if os.name == "nt":
-                stubs["perl"] = '''#!/usr/bin/env bash
-[[ $1 == -e && $2 == *lstat*0700* && -d $3 ]] || exit 98
-[[ $CONTRACT_FAULT != public-root ]]
+            real_perl = shutil.which("perl")
+            if os.name != "nt":
+                self.assertIsNotNone(real_perl)
+            environment.update(CONTRACT_PERL=Path(real_perl).as_posix() if real_perl else "",
+                               CONTRACT_WINDOWS=str(int(os.name == "nt")))
+            stubs["perl"] = '''#!/usr/bin/env bash
+set -euo pipefail
+[[ $1 == -e ]] || exit 98
+case "$2" in
+  *lstat*0700*)
+    [[ -d $3 ]] || exit 98
+    if [[ $CONTRACT_WINDOWS == 1 ]]; then
+      [[ $CONTRACT_FAULT != public-root ]]
+    else
+      exec "$CONTRACT_PERL" "$@"
+    fi
+    ;;
+  *'use Errno qw(ESRCH)'*)
+    [[ $3 == 303 && -f "$PROBE_DIR/tmux-cleanup.env" ]] || exit 98
+    count=0
+    [[ ! -f "$PROBE_DIR/tmux-probes.txt" ]] || count=$(<"$PROBE_DIR/tmux-probes.txt")
+    count=$((count + 1))
+    printf '%s\\n' "$count" > "$PROBE_DIR/tmux-probes.txt"
+    case "$CONTRACT_FAULT" in
+      tmux-alive|tmux-alive-no-socket) exit 0 ;;
+      tmux-unknown) exit 4 ;;
+      tmux-delay) [[ $count -gt 2 ]] || exit 0 ;;
+    esac
+    exit 3
+    ;;
+  *) exit 98 ;;
+esac
+'''
+            if rewrite_tmp:
+                stubs["bash"] = '''#!/bin/sh
+export TMP=/tmp TEMP=/tmp
+exec "$CONTRACT_BASH" "$@"
 '''
             for name, contents in stubs.items():
                 path = root / "bin" / name
@@ -303,6 +348,7 @@ exec /usr/bin/tail "$@"
                 path.chmod(0o755)
             harness = '''set -euo pipefail
 export PATH="$CONTRACT_ROOT/bin:/usr/bin:/bin"
+export CONTRACT_BASH="$BASH"
 sleep() { :; }
 "$CONTRACT_ROOT/bin/capture" before
 rm() {
@@ -375,7 +421,7 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
             expected = status
             if script == CASE and fault in ("owner", "public-root", "long-runtime", "unicode-runtime"):
                 expected = 2
-            elif fault and fault not in ("long-evidence", "missing-log") and not status:
+            elif fault and fault not in ("long-evidence", "missing-log", "tmux-delay") and not status:
                 expected = 1
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
             self.assertEqual(sentinel.read_bytes(), b"do not read or modify this fake user config\n")
@@ -402,7 +448,7 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                 self.assertTrue((evidence / "launch-command.txt").is_file())
                 diagnostics_failed = fault in ("capture-failure", "tail-failure", "redirect-failure")
                 unsafe_path = fault.startswith("symlink-")
-                if fault in ("stop", "delete", "list", "tmux", "remove", "case-owner") or diagnostics_failed or unsafe_path:
+                if fault in ("stop", "delete", "list", "tmux", "remove", "case-owner", "tmux-alive", "tmux-alive-no-socket", "tmux-unknown") or diagnostics_failed or unsafe_path:
                     self.assertTrue((root / "tmp/retain").exists())
                     self.assertTrue(list((root / "tmp").glob("c-*")))
                 else:
@@ -442,6 +488,17 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                     self.assertEqual((evidence / "readiness-stdout.txt").read_text(), "partial")
                 elif full_case:
                     self.assertEqual(float((evidence / "total-cpu.txt").read_text()), 3.0)
+                if not unsafe_path and not diagnostics_failed and fault != "case-owner":
+                    self.assertEqual((evidence / "tmux-server-pid.txt").read_text().strip(), "303")
+                    probes = (evidence / "tmux-process-probe.txt").read_text().splitlines()
+                    if fault in ("tmux-alive", "tmux-alive-no-socket", "tmux-unknown"):
+                        self.assertIn("tmux_process=unknown-or-running", (evidence / "cleanup.txt").read_text())
+                        self.assertEqual(len(probes), 1 if fault == "tmux-unknown" else 50)
+                        self.assertEqual(bool(list((root / "tmp").glob("c-*/t"))), fault != "tmux-alive-no-socket")
+                    else:
+                        self.assertIn("tmux_process=exited\ntmux_socket=stale-owned", (evidence / "cleanup.txt").read_text())
+                        self.assertEqual(probes[-1], "pid=303 probe=3")
+                        self.assertEqual(len(probes), 3 if fault == "tmux-delay" else 1)
                 tmux_args = (root / "probes/tmux-args.txt").read_text().splitlines()
                 self.assertEqual(len(set(tmux_args)), 1)
             observations = {
@@ -452,6 +509,7 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
             for observed in observations.values():
                 for key in ("TMP", "TEMP"):
                     self.assertIn(observed[key], (process_tmp.as_posix(), f"{shell_root}/process tmp"))
+            self.assertEqual((process_tmp / "capture-before").read_text(), "private temp write\n")
             self.assertNotIn("could not find /tmp", result.stderr)
             if not fault:
                 for phase in phases:
@@ -557,6 +615,19 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
     def test_readiness_preserves_multiline_stderr_without_filtering(self):
         stderr = "bash.exe: warning: could not find /tmp, please create!\n" * 2 + "last failure"
         self._run_contract(CASE, 0, fault="readiness", full_case=True, readiness_stderr=stderr)
+
+    def test_bash_startup_tmp_rewrite_still_uses_private_temp(self):
+        self._run_contract(CASE, 0, rewrite_tmp=True)
+        self._run_contract(SMOKE, 0, rewrite_tmp=True)
+
+    def test_tmux_delayed_exit_with_stale_socket_is_confirmed(self):
+        self._run_contract(CASE, 0, fault="tmux-delay", full_case=True)
+
+    def test_tmux_alive_or_unknown_retains_runtime_and_fails(self):
+        self._run_contract(CASE, 0, fault="tmux-alive", full_case=True)
+        self._run_contract(CASE, 0, fault="tmux-alive-no-socket", full_case=True)
+        self._run_contract(CASE, 0, fault="tmux-unknown", full_case=True)
+        self._run_contract(CASE, 23, fault="tmux-alive")
 
 
 if __name__ == "__main__":
