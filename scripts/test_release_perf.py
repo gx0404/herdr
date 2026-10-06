@@ -139,7 +139,8 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
     )
 
     def _run_contract(self, script: Path, status: int, remove_config_guard: bool = False,
-                      fault: str = "", full_case: bool = False, platform: str = "linux"):
+                      fault: str = "", full_case: bool = False, platform: str = "linux",
+                      readiness_stderr: str = "last failure"):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash, "bash is required for performance environment contracts")
         source = script.read_text(encoding="utf-8")
@@ -186,7 +187,15 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
                 key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR")
                 if key in os.environ
             }
-            environment.update(HOME=str(root / "inherited"), USERPROFILE=str(root / "inherited"))
+            process_tmp = root / "process tmp"
+            process_tmp.mkdir()
+            environment.update(
+                HOME=str(root / "inherited"), USERPROFILE=str(root / "inherited"),
+                TMP=process_tmp.as_posix(), TEMP=process_tmp.as_posix(),
+                TMPDIR=process_tmp.as_posix(),
+            )
+            for key in self.ISOLATED_DIRS:
+                (root / "inherited" / key).mkdir()
             shell_root = root.as_posix()
             if os.name == "nt":
                 converted = subprocess.run(
@@ -204,10 +213,12 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
                 HERDR_SESSION="inherited-session", TMUX="inherited-tmux",
                 CONTRACT_ROOT=shell_root, PROBE_DIR=f"{shell_root}/probes",
                 CONTRACT_STATUS=str(status), CONTRACT_FAULT=fault,
+                CONTRACT_READINESS_STDERR=readiness_stderr,
             )
             stubs = {
                 "capture": '''#!/usr/bin/env bash
 set -euo pipefail
+[[ -d $TMP && -d $TEMP && -d $TMPDIR ]] || exit 97
 env -0 > "$PROBE_DIR/$1.env"
 ''',
                 "herdr": '''#!/usr/bin/env bash
@@ -229,11 +240,12 @@ case "$1 ${2:-}" in
   'pane read') printf 'bench-output-'; exit 0 ;;
   *) exit 91 ;;
 esac
-"$CONTRACT_ROOT/bin/capture" "$phase"
+[[ -f "$PROBE_DIR/$phase.env" ]] || env -0 > "$PROBE_DIR/$phase.env"
+printf '%s\\n' "$phase" >> "$PROBE_DIR/calls.txt"
 [[ $CONTRACT_FAULT != "$phase" ]] || exit 41
 case "$phase" in
   control)
-    if [[ $CONTRACT_FAULT == readiness ]]; then printf 'last failure' >&2; printf 'partial'; exit 37; fi
+    if [[ $CONTRACT_FAULT == readiness ]]; then printf '%s' "$CONTRACT_READINESS_STDERR" >&2; printf 'partial'; exit 37; fi
     printf '{"result":{"panes":[{"pane_id":"p"}]}}'
     ;;
   list) printf '{"sessions":[]}' ;;
@@ -274,7 +286,6 @@ esac
 ''',
                 "lsof": '#!/usr/bin/env bash\nprintf "101\\n"\n',
                 "pidstat": '#!/usr/bin/env bash\nprintf "0 0 101 1.0 0 0\\n0 0 202 2.0 0 0\\n"\n',
-                "sleep": '#!/usr/bin/env bash\nexit 0\n',
                 "tail": '''#!/usr/bin/env bash
 printf '%s\\n' "${@: -1}" >> "$PROBE_DIR/log-reads.txt"
 [[ $CONTRACT_FAULT != tail-failure ]] || exit 44
@@ -292,6 +303,7 @@ exec /usr/bin/tail "$@"
                 path.chmod(0o755)
             harness = '''set -euo pipefail
 export PATH="$CONTRACT_ROOT/bin:/usr/bin:/bin"
+sleep() { :; }
 "$CONTRACT_ROOT/bin/capture" before
 rm() {
   [[ $# -eq 2 && $1 == -rf ]] || return 93
@@ -419,9 +431,14 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                     else:
                         self.assertIn("synthetic server failure", (evidence / "herdr-server.log.txt").read_text())
                     self.assertFalse((evidence / "private.txt").exists())
+                calls = (root / "probes/calls.txt").read_text().splitlines()
+                if fault == "delete":
+                    self.assertEqual(calls.count("delete"), 50)
+                    self.assertEqual((evidence / "cleanup.txt").read_text().count("delete=41\n"), 50)
                 if fault == "readiness":
+                    self.assertEqual(calls.count("control"), 150)
                     self.assertEqual((evidence / "readiness-exit-code.txt").read_text().strip(), "37")
-                    self.assertEqual((evidence / "readiness-stderr.txt").read_text(), "last failure")
+                    self.assertEqual((evidence / "readiness-stderr.txt").read_text(), readiness_stderr)
                     self.assertEqual((evidence / "readiness-stdout.txt").read_text(), "partial")
                 elif full_case:
                     self.assertEqual(float((evidence / "total-cpu.txt").read_text()), 3.0)
@@ -432,6 +449,10 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                 for path in (root / "probes").glob("*.env")
             }
             self.assertEqual(observations["before"]["HERDR_CONFIG_PATH"], f"{shell_root}/inherited/config-sentinel.toml")
+            for observed in observations.values():
+                for key in ("TMP", "TEMP"):
+                    self.assertIn(observed[key], (process_tmp.as_posix(), f"{shell_root}/process tmp"))
+            self.assertNotIn("could not find /tmp", result.stderr)
             if not fault:
                 for phase in phases:
                     self.assertIn(phase, observations)
@@ -532,6 +553,10 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
 
     def test_absent_optional_logs_do_not_fail_cleanup(self):
         self._run_contract(CASE, 0, fault="missing-log")
+
+    def test_readiness_preserves_multiline_stderr_without_filtering(self):
+        stderr = "bash.exe: warning: could not find /tmp, please create!\n" * 2 + "last failure"
+        self._run_contract(CASE, 0, fault="readiness", full_case=True, readiness_stderr=stderr)
 
 
 if __name__ == "__main__":

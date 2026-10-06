@@ -834,10 +834,7 @@ fn diagnostic_pane_read(socket: &Path, pane: &str) -> std::io::Result<Vec<u8>> {
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) =>
-            {
-                ()
-            }
+                ) => {}
             Err(error) => return Err(error),
         }
     }
@@ -858,10 +855,7 @@ fn diagnostic_pane_read(socket: &Path, pane: &str) -> std::io::Result<Vec<u8>> {
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) =>
-            {
-                ()
-            }
+                ) => {}
             Err(error) => return Err(error),
         }
     }
