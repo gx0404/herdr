@@ -23,7 +23,32 @@ fn powershell(dirs: &IsolatedDirs, script: &str) -> Command {
 }
 
 fn success(output: Output) -> Output {
-    assert!(output.status.success(), "{output:?}");
+    if !output.status.success() {
+        use windows_sys::Win32::Globalization::{GetACP, GetOEMCP};
+        use windows_sys::Win32::System::Console::{GetConsoleCP, GetConsoleOutputCP};
+
+        let code_pages = unsafe { (GetACP(), GetOEMCP(), GetConsoleCP(), GetConsoleOutputCP()) };
+        eprintln!("ACP/OEMCP/ConsoleCP/ConsoleOutputCP: {code_pages:?}");
+        if let Some(system) = std::env::var_os("SystemRoot") {
+            let native = PathBuf::from(system).join("System32/tar.exe");
+            match Command::new(&native).arg("--version").output() {
+                Ok(version) => eprintln!(
+                    "{native:?} --version: status={}\nstdout={}\nstderr={}",
+                    version.status,
+                    String::from_utf8_lossy(&version.stdout),
+                    String::from_utf8_lossy(&version.stderr),
+                ),
+                Err(error) => eprintln!("{native:?} --version: {error}"),
+            }
+        }
+    }
+    assert!(
+        output.status.success(),
+        "status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     output
 }
 
@@ -60,14 +85,12 @@ fn windows_codex_native_tar_installer_extracts_windows_paths_and_preserves_exit_
     let native = system_tar(&Command::new("codex")).unwrap();
     success(
         Command::new(&native)
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&source)
-            .arg("payload.txt")
+            .current_dir(&source)
+            .args(["-czf", "fixture.tar.gz", "payload.txt"])
             .output()
             .unwrap(),
     );
+    fs::rename(source.join("fixture.tar.gz"), &archive).unwrap();
     let output_dir = root.join("output 中文");
     fs::create_dir(&output_dir).unwrap();
     let script = "tar -xzf $env:HERDR_TEST_ARCHIVE -C $env:HERDR_TEST_OUTPUT; exit $LASTEXITCODE";

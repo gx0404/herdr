@@ -7,6 +7,35 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+fn success(output: &std::process::Output) {
+    if !output.status.success() {
+        use windows_sys::Win32::Globalization::{GetACP, GetOEMCP};
+        use windows_sys::Win32::System::Console::{GetConsoleCP, GetConsoleOutputCP};
+
+        let code_pages = unsafe { (GetACP(), GetOEMCP(), GetConsoleCP(), GetConsoleOutputCP()) };
+        eprintln!("ACP/OEMCP/ConsoleCP/ConsoleOutputCP: {code_pages:?}");
+        if let Some(system) = std::env::var_os("SystemRoot") {
+            let native = PathBuf::from(system).join("System32/tar.exe");
+            match Command::new(&native).arg("--version").output() {
+                Ok(version) => eprintln!(
+                    "{native:?} --version: status={}\nstdout={}\nstderr={}",
+                    version.status,
+                    String::from_utf8_lossy(&version.stdout),
+                    String::from_utf8_lossy(&version.stderr),
+                ),
+                Err(error) => eprintln!("{native:?} --version: {error}"),
+            }
+        }
+    }
+    assert!(
+        output.status.success(),
+        "status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 struct Sandbox(PathBuf);
 
 impl Sandbox {
@@ -36,15 +65,18 @@ impl Sandbox {
         )
         .unwrap();
         let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let source = sandbox.0.join("source 中文");
         let archive = Command::new(system.join("System32/tar.exe"))
-            .arg("-czf")
-            .arg(sandbox.0.join("archive 中文.tar.gz"))
-            .arg("-C")
-            .arg(sandbox.0.join("source 中文"))
-            .arg("payload.txt")
+            .current_dir(&source)
+            .args(["-czf", "fixture.tar.gz", "payload.txt"])
             .output()
             .unwrap();
-        assert!(archive.status.success(), "{archive:?}");
+        success(&archive);
+        fs::rename(
+            source.join("fixture.tar.gz"),
+            sandbox.0.join("archive 中文.tar.gz"),
+        )
+        .unwrap();
         fs::write(sandbox.0.join("bin/codex.cmd"), concat!(
             "@echo off\r\nsetlocal DisableDelayedExpansion\r\n",
             "if \"%~1\"==\"--help\" (echo Options: --no-daemon & exit /b 0)\r\n",
@@ -115,7 +147,7 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
         .args(["--internal-codex-launch", "exec", "中文 prompt"])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{output:?}");
+    success(&output);
     assert_eq!(
         fs::read(sandbox.0.join("output 中文/payload.txt")).unwrap(),
         b"launcher extraction\n"
@@ -143,7 +175,7 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
             .unwrap(),
         );
     let output = command.args(["resume", "中文 session"]).output().unwrap();
-    assert!(output.status.success(), "{output:?}");
+    success(&output);
     let report = sandbox.report();
     assert_eq!(report["arg1"], "--no-daemon");
     assert_eq!(report["arg2"], "resume");
