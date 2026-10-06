@@ -417,18 +417,64 @@ struct SecurityValue {
     control: u16,
 }
 
+#[cfg(test)]
+fn metadata_comparison_diagnostic(stage: &str, expected: &SecurityValue, actual: &SecurityValue) {
+    eprintln!(
+        "persist.metadata stage={stage} expected_control={:#06x} actual_control={:#06x} \
+         control_xor={:#06x} owner_eq={} group_eq={} dacl_eq={} label_eq={} \
+         expected_dacl_aces={:?} actual_dacl_aces={:?} \
+         expected_label_aces={:?} actual_label_aces={:?}",
+        expected.control,
+        actual.control,
+        expected.control ^ actual.control,
+        expected.owner == actual.owner,
+        expected.group == actual.group,
+        expected.dacl == actual.dacl,
+        expected.label == actual.label,
+        expected.dacl.as_ref().map(Vec::len),
+        actual.dacl.as_ref().map(Vec::len),
+        expected.label.as_ref().map(Vec::len),
+        actual.label.as_ref().map(Vec::len),
+    );
+}
+
 pub(crate) fn prepare_persist_metadata(source: &File, temp: &File) -> io::Result<()> {
-    check_persist_source(source)?;
-    check_persist_source(temp)?;
-    if source.metadata()?.permissions().readonly() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "persist source is readonly",
-        ));
+    macro_rules! stage {
+        ($stage:literal, $result:expr) => {{
+            let result = $result;
+            #[cfg(test)]
+            let result = result.inspect_err(|error| {
+                eprintln!(
+                    "persist.metadata stage={} error={error} debug={error:?} kind={:?} raw_os_error={:?} security_read_information={PERSIST_SECURITY_INFORMATION:#010x}",
+                    $stage,
+                    error.kind(),
+                    error.raw_os_error(),
+                );
+            });
+            result
+        }};
     }
-    let original = Security::read(source)?;
-    let expected = original.semantic()?;
-    let current = Security::read(temp)?.semantic()?;
+
+    stage!("source.check", check_persist_source(source))?;
+    stage!("temp.check", check_persist_source(temp))?;
+    if stage!("source.metadata", source.metadata())?
+        .permissions()
+        .readonly()
+    {
+        return stage!(
+            "source.readonly",
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "persist source is readonly",
+            ))
+        );
+    }
+    let original = stage!("source.security.read", Security::read(source))?;
+    let expected = stage!("source.security.semantic", original.semantic())?;
+    let current = stage!(
+        "temp.security.semantic",
+        stage!("temp.security.read", Security::read(temp))?.semantic()
+    )?;
     let mut information = 0;
     if expected.owner != current.owner {
         information |= OWNER_SECURITY_INFORMATION;
@@ -457,6 +503,8 @@ pub(crate) fn prepare_persist_metadata(source: &File, temp: &File) -> io::Result
             UNPROTECTED_DACL_SECURITY_INFORMATION
         };
     }
+    #[cfg(test)]
+    metadata_comparison_diagnostic("before_set", &expected, &current);
     if information != 0 {
         let status = unsafe {
             SetSecurityInfo(
@@ -469,17 +517,35 @@ pub(crate) fn prepare_persist_metadata(source: &File, temp: &File) -> io::Result
                 original.label,
             )
         };
+        #[cfg(test)]
+        eprintln!("persist.metadata stage=security.set information={information:#010x} status={status:#010x}");
         if status != 0 {
-            return Err(io::Error::from_raw_os_error(status as i32));
+            return stage!(
+                "security.set",
+                Err(io::Error::from_raw_os_error(status as i32))
+            );
         }
     }
-    if Security::read(temp)?.semantic()? != expected {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "file permissions cannot be preserved exactly during replacement",
-        ));
+    #[cfg(test)]
+    if information == 0 {
+        eprintln!("persist.metadata stage=security.set information=0x00000000 skipped=true");
     }
-    prepare_basic_attributes(source, temp)
+    let actual = stage!(
+        "readback.security.semantic",
+        stage!("readback.security.read", Security::read(temp))?.semantic()
+    )?;
+    if actual != expected {
+        #[cfg(test)]
+        metadata_comparison_diagnostic("readback.strict_compare", &expected, &actual);
+        return stage!(
+            "readback.strict_compare",
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "file permissions cannot be preserved exactly during replacement",
+            ))
+        );
+    }
+    stage!("attributes.prepare", prepare_basic_attributes(source, temp))
 }
 
 #[cfg(test)]

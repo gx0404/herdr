@@ -310,6 +310,30 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    struct MacosAclAllocation(std::ptr::NonNull<libc::c_void>);
+
+    #[cfg(target_os = "macos")]
+    impl MacosAclAllocation {
+        fn new(pointer: *mut libc::c_void) -> Self {
+            Self(
+                std::ptr::NonNull::new(pointer).unwrap_or_else(|| {
+                    panic!("ACL allocation failed: {}", io::Error::last_os_error())
+                }),
+            )
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for MacosAclAllocation {
+        fn drop(&mut self) {
+            unsafe extern "C" {
+                fn acl_free(pointer: *mut libc::c_void) -> libc::c_int;
+            }
+            unsafe { acl_free(self.0.as_ptr()) };
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn replace_macos_file_twice(dir: &Path, source_path: &Path) {
         let original_acl = persist_acl(&File::open(source_path).unwrap()).unwrap();
         for bytes in [b"replacement one".as_slice(), b"replacement two".as_slice()] {
@@ -320,8 +344,9 @@ mod tests {
             assert_eq!(temp.metadata().unwrap().len(), 0);
             assert_eq!(temp.metadata().unwrap().mode() & 0o777, 0o600);
             assert_eq!(
-                persist_acl(&temp).unwrap().as_deref(),
-                Some(b"!#acl 1 no_inherit\n".as_slice())
+                persist_acl(&temp).unwrap(),
+                None,
+                "private creation must reject inherited grants; unexpected filesystem ACL readback"
             );
             prepare_persist_metadata(&source, &temp).unwrap();
             assert_eq!(temp.metadata().unwrap().len(), 0);
@@ -344,31 +369,50 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn persist_macos_private_file_replacement_keeps_no_inherit() {
+    fn persist_macos_private_creation_blocks_inherited_grants() {
         let dir = Directory::new();
+        let inherited = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read,file_inherit"])
+            .arg(&dir.0)
+            .output()
+            .unwrap();
+        assert!(inherited.status.success(), "{inherited:?}");
+        let control_path = dir.0.join("control");
+        std::fs::write(&control_path, b"control").unwrap();
+        let control_acl = String::from_utf8(
+            persist_acl(&File::open(&control_path).unwrap())
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            control_acl.contains("allow,inherited:read"),
+            "{control_acl}"
+        );
         let path = dir.0.join("private");
         let mut source = create_persist_temporary(&path).unwrap();
+        assert_eq!(source.metadata().unwrap().len(), 0);
+        assert_eq!(source.metadata().unwrap().mode() & 0o777, 0o600);
+        assert_eq!(persist_acl(&source).unwrap(), None);
         source.write_all(b"original private bytes").unwrap();
         source.sync_all().unwrap();
-        assert_eq!(
-            persist_acl(&source).unwrap().as_deref(),
-            Some(b"!#acl 1 no_inherit\n".as_slice())
-        );
+        assert_eq!(persist_acl(&source).unwrap(), None);
         replace_macos_file_twice(&dir.0, &path);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn persist_macos_replacement_distinguishes_absent_and_empty_acl() {
+    fn persist_macos_replacement_preserves_native_absent_and_empty_acl_readback() {
         use std::os::fd::AsRawFd;
         unsafe extern "C" {
             fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+            fn acl_to_text(acl: *mut libc::c_void, length: *mut libc::ssize_t)
+                -> *mut libc::c_char;
             fn acl_set_fd_np(
                 fd: libc::c_int,
                 acl: *mut libc::c_void,
                 kind: libc::c_int,
             ) -> libc::c_int;
-            fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
         }
         let dir = Directory::new();
         let path = dir.0.join("source");
@@ -382,17 +426,86 @@ mod tests {
         assert_eq!(persist_acl(&File::open(&path).unwrap()).unwrap(), None);
         replace_macos_file_twice(&dir.0, &path);
         let source = File::options().read(true).write(true).open(&path).unwrap();
-        let acl = unsafe { acl_init(0) };
-        assert!(!acl.is_null(), "{}", io::Error::last_os_error());
-        let result = unsafe { acl_set_fd_np(source.as_raw_fd(), acl, 0x100) };
-        let error = io::Error::last_os_error();
-        assert_eq!(unsafe { acl_free(acl) }, 0);
-        assert_eq!(result, 0, "{error}");
+        let acl = MacosAclAllocation::new(unsafe { acl_init(0) });
+        let mut length = 0;
+        let text =
+            MacosAclAllocation::new(unsafe { acl_to_text(acl.0.as_ptr(), &mut length).cast() });
+        assert_eq!(length, b"!#acl 1\n".len() as libc::ssize_t);
         assert_eq!(
-            persist_acl(&source).unwrap().as_deref(),
-            Some(b"!#acl 1\n".as_slice())
+            unsafe { std::slice::from_raw_parts(text.0.as_ptr().cast::<u8>(), length as usize) },
+            b"!#acl 1\n"
         );
+        let control = File::create(dir.0.join("empty-control")).unwrap();
+        for file in [&control, &source] {
+            assert_eq!(
+                unsafe { acl_set_fd_np(file.as_raw_fd(), acl.0.as_ptr(), 0x100) },
+                0,
+                "{}",
+                io::Error::last_os_error()
+            );
+        }
+        let native_acl = persist_acl(&control).unwrap();
+        assert_eq!(persist_acl(&source).unwrap(), native_acl);
         replace_macos_file_twice(&dir.0, &path);
+        assert_eq!(
+            persist_acl(&File::open(&path).unwrap()).unwrap(),
+            native_acl
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn persist_macos_replacement_keeps_nonempty_acl_no_inherit() {
+        use std::os::fd::AsRawFd;
+        unsafe extern "C" {
+            fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
+            fn acl_get_flagset_np(
+                acl: *mut libc::c_void,
+                flags: *mut *mut libc::c_void,
+            ) -> libc::c_int;
+            fn acl_add_flag_np(flags: *mut libc::c_void, flag: libc::c_uint) -> libc::c_int;
+            fn acl_set_fd_np(
+                fd: libc::c_int,
+                acl: *mut libc::c_void,
+                kind: libc::c_int,
+            ) -> libc::c_int;
+        }
+        let dir = Directory::new();
+        let path = dir.0.join("source");
+        std::fs::write(&path, b"original").unwrap();
+        let explicit = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone deny execute"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(explicit.status.success(), "{explicit:?}");
+        let source = File::options().read(true).write(true).open(&path).unwrap();
+        let acl = MacosAclAllocation::new(unsafe { acl_get_fd_np(source.as_raw_fd(), 0x100) });
+        let mut flags = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { acl_get_flagset_np(acl.0.as_ptr(), &mut flags) },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        assert_eq!(
+            unsafe { acl_add_flag_np(flags, 1 << 17) },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        assert_eq!(
+            unsafe { acl_set_fd_np(source.as_raw_fd(), acl.0.as_ptr(), 0x100) },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        let before = persist_acl(&source).unwrap();
+        let text = std::str::from_utf8(before.as_deref().unwrap()).unwrap();
+        assert_eq!(text.lines().next(), Some("!#acl 1 no_inherit"));
+        assert!(text.contains("deny:execute"), "{text}");
+        replace_macos_file_twice(&dir.0, &path);
+        assert_eq!(persist_acl(&File::open(&path).unwrap()).unwrap(), before);
     }
 
     #[cfg(target_os = "macos")]

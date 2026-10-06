@@ -523,8 +523,22 @@ mod tests {
                 )
                 .unwrap_err();
                 let replaced = phase == "save.directory_sync";
-                assert_eq!(err.replaced, replaced);
-                assert_eq!(err.phase, phase);
+                let diagnostic = || {
+                    format!(
+                        "path={} existed={existed} injected_phase={phase} actual_phase={} \
+                         expected_replaced={replaced} error={err} debug={err:?} \
+                         source_kind={:?} source_raw_os_error={:?} \
+                         cleanup_kind={:?} cleanup_raw_os_error={:?}",
+                        path.display(),
+                        err.phase,
+                        err.source.kind(),
+                        err.source.raw_os_error(),
+                        err.cleanup.as_ref().map(io::Error::kind),
+                        err.cleanup.as_ref().and_then(io::Error::raw_os_error),
+                    )
+                };
+                assert_eq!(err.replaced, replaced, "{}", diagnostic());
+                assert_eq!(err.phase, phase, "{}", diagnostic());
                 assert!(err.to_string().contains(&format!("replaced={replaced}")));
                 assert!(err.cleanup.is_none(), "{err}");
                 if replaced {
