@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1188,
+  "chunk_count": 1189,
   "chunks": [
     {
       "anchor": "herdr",
@@ -1015,6 +1015,13 @@
       "id": "docs-development-md-herdr-开发闭环-分支与上游",
       "source_sha256": "29000930c8f856d88b16e67e36e1cfa3bdd1b1ce42cda7e90845fa3ad32c8a80",
       "text": "## 分支与上游\n\n本 fork（origin `gx0404/herdr`）跟踪 upstream `herdrdev/herdr`：维护分支为 `feature/gx_herdr`，\n特性分支从 `feature/gx_herdr` 派生；合并上游后按 `AGENT_RULES/README.md` 的章节映射表移植\nAGENTS.md 变化到领域文档。对上游的 issue/PR 行为遵守 `AGENT_RULES/governance.md`\n守门。较大特性建议独立 worktree（见 governance 维护者工作流小节的布局约定）。\n\n`master` 保留上游基线，GX 取舍与兼容修复留在 `feature/gx_herdr`。同步前确认工作区干净、\n保存两条分支的旧 SHA 与本地回退引用，再抓取并审查上游增量。固定本轮上游 SHA 后按以下顺序操作：\n\n```bash\ngit fetch upstream master\ngit switch master\ngit merge --ff-only <已审查的上游完整SHA>\ngit switch feature/gx_herdr\ngit merge --no-ff --no-commit master\n```\n\nmaster 不能快进时先核查分叉原因，不强制重置。feature 上逐块解决冲突，保留六家集成边界、\nGX 功能、端点冻结契约及工作流归档；不以整文件 ours/theirs、squash 或 cherry-pick 替代合并。\n运行 `python3 scripts/upstream_sync_drop_check.py`、相关回归与 `just check` 后，按提交规范完成\n真正的双亲 merge；用 `git merge-base --is-ancestor master feature/gx_herdr` 核对祖先关系。\n本地同步不自动推送或发布，远端更新另行授权。下次仍从上次 master 基线增量合并。"
+    },
+    {
+      "anchor": "herdr 开发闭环 > 定向 CI Release 资格",
+      "doc": "docs/DEVELOPMENT.md",
+      "id": "docs-development-md-herdr-开发闭环-定向-ci-release-资格",
+      "source_sha256": "797d4c50cd6403549fff8de19a2ce923b42d31becf910c5201aafebe6db24651",
+      "text": "## 定向 CI Release 资格\n\n现有 `ci.yml` 仅对 `gx0404/herdr` 中、head 仓库同为 `gx0404/herdr` 且 head ref 为\n`verify/runtime-sync-p11-20261006` 的 PR，在标准检查后追加三平台原生 `just build`。\n拒绝本机 Cargo 配置、外部 Cargo 配置及编译覆盖变量，保留 verbose 编译命令、工具版本、\n仓库配置、产物大小与 SHA256；Windows 证据包含完整 app-local ConPTY 目录。receipt 分别\n记录实际 checkout SHA、PR head SHA、事件 merge SHA，不把默认 PR merge checkout 冒充 head。\n只有真实构建退出后才记录 build-complete；它不等于整个资格通过。\n`CARGO_INCREMENTAL` 仅接受未设或精确 `0`（钉版 dtolnay 工具链 action 的受控默认值），\nreceipt 记录实际值及来源说明；其它值和 `RUSTFLAGS` 等覆盖仍拒绝。\n\nmacOS 另跑 `binary(live_handoff)` 集合，再与 Linux 串行执行原 `just bench-release-smoke`：\n每次采样 60 秒，保留两轮 hidden50/visible30 及原阈值。基线仍由原脚本按\n`distribution/latest.json` 下载上游 stable，附版本、URL、manifest 摘要及实际下载字节数与\nSHA256，不替换基线。缺工具只允许在 GitHub-hosted runner 通过 apt/brew 安装；不在开发机安装。\n定向 job 预算 75 分钟（原检查最多 25 分钟 + Release 30 分钟 + 8×60 秒采样 + 12 分钟\n启动、下载和 handoff 余量）；普通 PR 仍用原预算。\n\n失败也上传 14 天有界证据：`target/ci-release-evidence/`，以及本次唯一\n`.local/perf-baseline/run-*/` 的顶层文本、run log、baseline receipt 和 `results/**/*.txt`。\n不上传 run 的临时 home/state 或下载的 baseline 二进制，不上传整个 `.local/`。\n本地契约/语法检查不能代替真实云 runner 的 Release、handoff 与性能结果；未运行保持 PENDING。\n共享 runner 的 smoke 只说明该次环境的回归门结果，不代表 ABC 普遍性能收益保证。"
     },
     {
       "anchor": "herdr 开发闭环 > 本机构建与测试提速",

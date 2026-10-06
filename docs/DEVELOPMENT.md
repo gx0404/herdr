@@ -73,6 +73,30 @@
   命令也清除此覆盖，且不继承调用者的 herdr socket/session。只删除临时运行态。
   其余 `bench-*` recipe 是非门禁画像，命令与证据口径见 `MAKE_COMMANDS.md`。
 
+## 定向 CI Release 资格
+
+现有 `ci.yml` 仅对 `gx0404/herdr` 中、head 仓库同为 `gx0404/herdr` 且 head ref 为
+`verify/runtime-sync-p11-20261006` 的 PR，在标准检查后追加三平台原生 `just build`。
+拒绝本机 Cargo 配置、外部 Cargo 配置及编译覆盖变量，保留 verbose 编译命令、工具版本、
+仓库配置、产物大小与 SHA256；Windows 证据包含完整 app-local ConPTY 目录。receipt 分别
+记录实际 checkout SHA、PR head SHA、事件 merge SHA，不把默认 PR merge checkout 冒充 head。
+只有真实构建退出后才记录 build-complete；它不等于整个资格通过。
+`CARGO_INCREMENTAL` 仅接受未设或精确 `0`（钉版 dtolnay 工具链 action 的受控默认值），
+receipt 记录实际值及来源说明；其它值和 `RUSTFLAGS` 等覆盖仍拒绝。
+
+macOS 另跑 `binary(live_handoff)` 集合，再与 Linux 串行执行原 `just bench-release-smoke`：
+每次采样 60 秒，保留两轮 hidden50/visible30 及原阈值。基线仍由原脚本按
+`distribution/latest.json` 下载上游 stable，附版本、URL、manifest 摘要及实际下载字节数与
+SHA256，不替换基线。缺工具只允许在 GitHub-hosted runner 通过 apt/brew 安装；不在开发机安装。
+定向 job 预算 75 分钟（原检查最多 25 分钟 + Release 30 分钟 + 8×60 秒采样 + 12 分钟
+启动、下载和 handoff 余量）；普通 PR 仍用原预算。
+
+失败也上传 14 天有界证据：`target/ci-release-evidence/`，以及本次唯一
+`.local/perf-baseline/run-*/` 的顶层文本、run log、baseline receipt 和 `results/**/*.txt`。
+不上传 run 的临时 home/state 或下载的 baseline 二进制，不上传整个 `.local/`。
+本地契约/语法检查不能代替真实云 runner 的 Release、handoff 与性能结果；未运行保持 PENDING。
+共享 runner 的 smoke 只说明该次环境的回归门结果，不代表 ABC 普遍性能收益保证。
+
 ## 每个任务的闭环
 
 1. **定 scope**：列出本轮会读/改/审的路径；运行
