@@ -4,6 +4,7 @@ use super::*;
 mod agent_activity_tests;
 mod endpoint_responses;
 mod event_fairness;
+mod input_leases;
 mod multi_view;
 mod native_graphics;
 #[path = "pane_move.rs"]
@@ -90,7 +91,8 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         .set_nonblocking(ListenerNonblockingMode::Accept)
         .expect("set listener nonblocking");
     let (server_event_tx, server_event_rx) = mpsc::channel(64);
-    let should_quit = Arc::new(AtomicBool::new(false));
+    let server_stop = ServerStop::default();
+    let should_quit = server_stop.flag().clone();
     let client_handshake_limiter = crate::server::client_transport::ClientHandshakeLimiter::new();
     #[cfg(windows)]
     spawn_windows_client_accept_thread(
@@ -98,7 +100,8 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         should_quit.clone(),
         server_event_tx.clone(),
         client_handshake_limiter.clone(),
-    );
+    )
+    .expect("spawn client accept thread");
     let server_keybindings = app_keybindings(&app);
     let headless_size = app.state.headless_size;
     // 活动树运行时的 home 隔离到本测试的临时目录：适配器（zcode 等）会按 home 读
@@ -160,6 +163,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         #[cfg(unix)]
         pending_handoff_repaint_nudge: false,
         should_quit,
+        server_stop,
         server_event_rx,
         server_event_tx,
         _test_scratch_dir: Some(scratch),
@@ -5927,6 +5931,39 @@ fn unchanged_git_refresh_does_not_request_headless_render() {
 }
 
 #[test]
+fn failed_startup_git_refresh_retries_without_clients() {
+    let _dirs = crate::config::test_dirs::isolate_dirs("startup-git-retry");
+    let mut server = test_headless_server();
+    server
+        .app
+        .state
+        .workspaces
+        .push(crate::workspace::Workspace::test_new("restored"));
+    assert_eq!(server.app_client_count(), 0);
+
+    crate::thread_spawn::test_hook::fail_next_spawns(1);
+    server.app.refresh_restored_workspace_git_metadata();
+    assert!(!server.app.git_refresh_in_flight);
+
+    let now = Instant::now();
+    let retry_at = server
+        .app
+        .next_headless_loop_deadline_with_git_refresh(now, false, server.git_refresh_scheduled())
+        .expect("failed startup refresh schedules a retry");
+    assert_eq!(Some(retry_at), server.app.git_refresh_deadline());
+
+    server.handle_scheduled_tasks_headless(retry_at, false);
+    assert!(server.app.git_refresh_in_flight);
+    assert!(!server.app.git_identity_refresh_requested);
+
+    // Once the retry starts, clientless servers stop polling again.
+    server.app.git_refresh_in_flight = false;
+    server.app.request_git_identity_refresh(retry_at);
+    server.handle_scheduled_tasks_headless(retry_at, false);
+    assert!(!server.app.git_refresh_in_flight);
+}
+
+#[test]
 fn changed_git_refresh_requests_headless_render() {
     let mut server = test_headless_server();
     let workspace = crate::workspace::Workspace::test_new("one");
@@ -6193,6 +6230,19 @@ fn terminal_attach_client_exits_when_worktree_runtime_restore_fails() {
         .pending_worktree_remove_runtime_restores
         .insert(pane_id, 7);
 
+    server.handle_internal_event_with_forwarding(AppEvent::WorktreeRuntimeRestoreFailed {
+        pane_id,
+        operation_id: 7,
+    });
+    assert!(server.clients.contains_key(&7));
+    assert_eq!(server.terminal_attach_owners.get(&terminal_id), Some(&7));
+    assert!(server.app.state.workspaces[0].pane_state(pane_id).is_some());
+    assert!(control_rx.try_recv().is_err());
+
+    server
+        .app
+        .pending_worktree_remove_runtime_exits
+        .remove(&pane_id);
     assert!(
         server.handle_internal_event_with_forwarding(AppEvent::WorktreeRuntimeRestoreFailed {
             pane_id,
@@ -7359,6 +7409,74 @@ async fn client_shell_release_cleanup_does_not_promote_and_survives_disconnect()
     shutdown_test_runtimes(&mut server);
 }
 
+// Pixel mouse is a Unix client capability.
+#[cfg(unix)]
+#[tokio::test]
+async fn client_shell_requests_host_pixels_for_an_unfocused_pixel_pane() {
+    // #4750: host reports go to the pane under the pointer, focused or not.
+    let _dirs = crate::config::test_dirs::isolate_dirs("unfocused-pixel-pane");
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("pixel-split");
+    let first = workspace.tabs[0].root_pane;
+    let second = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let focused = workspace.focused_pane_id().expect("focused pane");
+    let unfocused = if focused == first { second } else { first };
+    workspace.insert_test_runtime(
+        focused,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 23, b"plain"),
+    );
+    workspace.insert_test_runtime(
+        unfocused,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(
+            40,
+            23,
+            b"\x1b[?1003h\x1b[?1006h\x1b[?1016h",
+        ),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            client_id: 7,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 10,
+            cell_height_px: 20,
+            pixel_mouse: true,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: true,
+            surface_active: true,
+            ssh_auth_sock: None,
+            writer,
+        })
+    );
+
+    server.stream_host_mouse_capture_mode();
+    let deadline = Instant::now() + LOADED_WAIT;
+    loop {
+        let bytes = control_rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("mouse capture mode for unfocused pixel pane");
+        if let ServerMessage::MouseCapture {
+            enabled,
+            sgr_pixels,
+        } = read_server_message(bytes)
+        {
+            assert!(enabled);
+            assert!(sgr_pixels);
+            break;
+        }
+    }
+    shutdown_test_runtimes(&mut server);
+}
+
 #[test]
 fn client_shell_mouse_capture_combines_local_preference_with_endpoint_demand() {
     let mut server = test_headless_server();
@@ -7539,11 +7657,12 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
         assert!(matches!(
             read_server_message(recv_forwarded(
                 &client_control_rx,
-                "modifyOtherKeys mode-one keyboard message"
+                "kitty flags change with modifyOtherKeys mode one"
             )),
+            // Like Ghostty, modifyOtherKeys level 1 is not a negotiated mode.
             ServerMessage::DirectTerminalKeyboardProtocol {
                 flags: 3,
-                modify_other_keys_level: 1
+                modify_other_keys_level: 0
             }
         ));
 

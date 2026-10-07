@@ -8,13 +8,10 @@ pub(super) use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::support::INHERITED_DIR_OVERRIDES;
 pub(super) use crate::support::{
-    app_dir_name, cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
+    app_dir_name, cleanup_test_base, isolate_herdr_test_process, register_runtime_dir,
+    register_spawned_herdr_pid, unregister_spawned_herdr_pid, CURRENT_PROTOCOL,
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-
-pub(super) const WORKTREE_BOOTSTRAP_MANAGED_COMPONENT: &str =
-    "example.worktree-bootstrap-ef876653ffc3";
 
 pub(super) fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
@@ -97,7 +94,7 @@ pub(super) fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {
     config_home
         .join(app_dir_name())
         .join("plugins")
-        .join("github")
+        .join("github-installations")
 }
 
 pub(super) fn path_missing_or_empty(path: &Path) -> bool {
@@ -154,7 +151,7 @@ impl Drop for SpawnedServerProcess {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        crate::support::stop_spawned_herdr(&mut *self.child);
 
         if let Some(pid) = pid {
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -257,6 +254,7 @@ pub(super) fn spawn_named_server(
         .env_remove("HERDR_ENV")
         // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD；server 会据此预建启动工作区，破坏用例的零工作区假设。
         .env_remove("HERDR_STARTUP_CWD")
+        .env_remove("HERDR_SESSION")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -323,7 +321,8 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
         .env_remove("HERDR_ENV")
         // 宿主在 herdr 窗格内跑测试时会注入 HERDR_STARTUP_CWD；server 会据此预建
         // 启动工作区，破坏用例的零工作区假设。
-        .env_remove("HERDR_STARTUP_CWD");
+        .env_remove("HERDR_STARTUP_CWD")
+        .env_remove("HERDR_SESSION");
     for key in INHERITED_DIR_OVERRIDES {
         command.env_remove(key);
     }
@@ -396,6 +395,7 @@ pub(super) fn spawn_herdr_with_config(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
     // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。

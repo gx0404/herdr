@@ -16,6 +16,7 @@
 //! reaper 用**一个**轮询循环驱动所有在办 pane，每个 pane 有自己的阶梯进度：新投递的
 //! 请求立刻登记并捕获成员，Windows 在后台 PTY 关闭后才开始首级宽限；关闭门限与阶梯预算
 //! （[`LADDER_WORST_CASE`]：unix 750 ms，Windows 3 s）不随同时关闭的 pane 数增长。
+//! 携带安装目录等资源的目标在信号预算耗尽后仍轮询真实退出；预算耗尽不能释放资源。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,16 +59,50 @@ const SLOW_POLL: Duration = Duration::from_millis(10);
 /// 轮询最短间隔：宽限窗口为 0（测试用的退化阶梯）时也不把循环变成忙等。
 const MIN_POLL: Duration = Duration::from_micros(200);
 
+type RetainedResources = Arc<dyn Send + Sync>;
+
+thread_local! {
+    static RETAINED_RESOURCES: std::cell::RefCell<Option<RetainedResources>> = const { std::cell::RefCell::new(None) };
+}
+
+struct RetainedResourcesScope(Option<RetainedResources>);
+
+impl Drop for RetainedResourcesScope {
+    fn drop(&mut self) {
+        RETAINED_RESOURCES.with(|slot| slot.replace(self.0.take()));
+    }
+}
+
+impl super::PaneRuntime {
+    /// Capture resource ownership in requests before runtime shutdown closes the PTY.
+    pub(crate) fn with_shutdown_resources<T>(
+        resources: RetainedResources,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let _scope =
+            RetainedResourcesScope(RETAINED_RESOURCES.with(|slot| slot.replace(Some(resources))));
+        operation()
+    }
+
+    pub(crate) fn wait_for_retained_shutdown_resources() {
+        if let Some(reaper) = REAPER.get() {
+            reaper.wait_for_retained_resources();
+        }
+    }
+}
+
 /// 一个 pane 的终止请求。
 ///
 /// `child_wait_completed` 是 spawn 路径上 wait 线程回收子进程后置位的标志；handoff
 /// 导入的 pane 没有这个标志（子进程不是本进程的子进程）。`session` 是投递时刻的会话
 /// 锚点，见模块文档。
+#[derive(Clone)]
 pub(crate) struct PaneShutdownRequest {
     pane_id: PaneId,
     child_pid: u32,
     child_wait_completed: Option<Arc<AtomicBool>>,
     session: Option<ProcessSessionId>,
+    retained_resources: Option<RetainedResources>,
     #[cfg(windows)]
     pty_close: Option<crate::pty::actor::PtyCloseCompletion>,
 }
@@ -97,6 +132,7 @@ impl PaneShutdownRequest {
             child_pid,
             child_wait_completed,
             session,
+            retained_resources: RETAINED_RESOURCES.with(|slot| slot.borrow().clone()),
             #[cfg(windows)]
             pty_close: None,
         }
@@ -111,6 +147,17 @@ impl PaneShutdownRequest {
         self
     }
 
+    fn requires_completion_tracking(&self) -> bool {
+        let pending = self.retained_resources.is_some()
+            && self
+                .child_wait_completed
+                .as_ref()
+                .is_some_and(|flag| !flag.load(Ordering::Acquire));
+        #[cfg(windows)]
+        let pending = pending || self.pty_close.is_some();
+        pending
+    }
+
     #[cfg(test)]
     fn with_session(
         pane_id: PaneId,
@@ -123,16 +170,17 @@ impl PaneShutdownRequest {
             child_pid,
             child_wait_completed,
             session,
+            retained_resources: RETAINED_RESOURCES.with(|slot| slot.borrow().clone()),
             #[cfg(windows)]
             pty_close: None,
         }
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 type TestSubmit = Arc<dyn Fn(PaneShutdownRequest)>;
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 thread_local! {
     static TEST_SUBMIT: std::cell::RefCell<Option<TestSubmit>> = const { std::cell::RefCell::new(None) };
 }
@@ -142,7 +190,7 @@ pub(crate) fn submit(request: PaneShutdownRequest) {
     if request.child_pid == 0 {
         return;
     }
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     if let Some(submit) = TEST_SUBMIT.with(|hook| hook.borrow().clone()) {
         submit(request);
         return;
@@ -199,6 +247,7 @@ struct ReapTarget {
     pane_id: PaneId,
     child_pid: u32,
     child_wait_completed: Option<Arc<AtomicBool>>,
+    retained_resources: Option<RetainedResources>,
     members: Vec<ProcessSessionMember>,
     /// 已经发出的信号级数，即下一次要发 `ladder[stage]`。
     stage: usize,
@@ -215,6 +264,7 @@ impl ReapTarget {
             pane_id: request.pane_id,
             child_pid: request.child_pid,
             child_wait_completed: request.child_wait_completed,
+            retained_resources: request.retained_resources,
             members,
             stage: 0,
             last_signal: None,
@@ -249,6 +299,9 @@ impl ReapTarget {
             })
         });
         self.members.is_empty()
+            && !(self.retained_resources.is_some()
+                && self.child_wait_completed.is_some()
+                && !child_wait_completed)
     }
 }
 
@@ -309,8 +362,7 @@ fn prepare_targets(
                 pid = request.child_pid,
                 "pane session anchor was already gone when shutdown was queued"
             );
-            #[cfg(windows)]
-            if request.pty_close.is_some() {
+            if request.requires_completion_tracking() {
                 targets.push(ReapTarget::new(request, Vec::new(), Instant::now()));
             }
             continue;
@@ -342,8 +394,7 @@ fn prepare_targets(
                         pid = request.child_pid,
                         "pane session had no live processes left"
                     );
-                    #[cfg(windows)]
-                    if request.pty_close.is_some() {
+                    if request.requires_completion_tracking() {
                         targets.push(ReapTarget::new(request, Vec::new(), now));
                     }
                     continue;
@@ -387,14 +438,18 @@ fn advance_targets(
             return true;
         }
         let Some((signal, grace)) = ladder.get(target.stage) else {
-            let pids: Vec<u32> = target.members.iter().map(|member| member.pid).collect();
-            warn!(
-                pane = target.pane_id.raw(),
-                pid = target.child_pid,
-                pids = ?pids,
-                "pane session still alive after forced shutdown"
-            );
-            return false;
+            if target.stage == ladder.len() {
+                let pids: Vec<u32> = target.members.iter().map(|member| member.pid).collect();
+                warn!(
+                    pane = target.pane_id.raw(),
+                    pid = target.child_pid,
+                    pids = ?pids,
+                    "pane session still alive after forced shutdown"
+                );
+                target.stage += 1;
+            }
+            target.next_signal_at = now + SLOW_POLL;
+            return target.retained_resources.is_some();
         };
         control.signal_processes(&target.members, *signal);
         target.stage += 1;
@@ -426,6 +481,7 @@ struct ReaperState {
     queue: VecDeque<PaneShutdownRequest>,
     /// 已从队列取走、阶梯尚未走完的 pane 数量。`drain` 用它判断是否收尾。
     in_flight: usize,
+    retained_in_flight: usize,
     stopped: bool,
 }
 
@@ -499,8 +555,7 @@ impl Reaper {
 
     /// reaper 主循环：一个轮询循环驱动所有在办 pane，新请求随时并入。
     ///
-    /// 单批次内的 panic 不会让终止机制静默失效：捕获后丢掉本轮目标、复位计数并继续服务，
-    /// 否则 `worker_started` 仍为 true、请求照常入队却再没有消费者。
+    /// 准备失败重试原请求；信号失败保留携带资源的目标，不能把 panic 当成进程退出。
     fn run_with(&self, control: &impl ProcessControl, ladder: &[(Signal, Duration)]) {
         let mut targets: Vec<ReapTarget> = Vec::new();
         loop {
@@ -527,31 +582,49 @@ impl Reaper {
                 }
                 let pending: Vec<PaneShutdownRequest> = state.queue.drain(..).collect();
                 state.in_flight = targets.len() + pending.len();
+                state.retained_in_flight = targets
+                    .iter()
+                    .filter(|target| target.retained_resources.is_some())
+                    .count()
+                    + pending
+                        .iter()
+                        .filter(|request| request.retained_resources.is_some())
+                        .count();
                 pending
             };
 
             if !pending.is_empty() {
                 debug!(panes = pending.len(), "reaping pane sessions");
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    prepare_targets(pending.clone(), control)
+                })) {
+                    Ok(prepared) => {
+                        targets.extend(prepared);
+                        drop(pending);
+                    }
+                    Err(_) => {
+                        error!("pane reaper preparation panicked; retrying its requests");
+                        lock_state(self).queue.extend(pending);
+                    }
+                }
             }
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if !pending.is_empty() {
-                    targets.extend(prepare_targets(pending, control));
-                }
                 advance_targets(&mut targets, ladder, control, Instant::now());
             }));
             if outcome.is_err() {
-                error!("pane reaper batch panicked; dropping its targets and continuing");
-                targets.clear();
+                error!("pane reaper batch panicked; retaining resource owners for retry");
+                targets.retain(|target| target.retained_resources.is_some());
             }
 
-            let idle = {
+            {
                 let mut state = lock_state(self);
                 state.in_flight = targets.len();
-                state.in_flight == 0 && state.queue.is_empty()
-            };
-            if idle {
-                self.idle.notify_all();
+                state.retained_in_flight = targets
+                    .iter()
+                    .filter(|target| target.retained_resources.is_some())
+                    .count();
             }
+            self.idle.notify_all();
         }
     }
 
@@ -566,6 +639,21 @@ impl Reaper {
     /// `drain` 必须立刻报告而不是空等满超时。
     fn worker_finished(&self) -> bool {
         self.worker.get().is_some_and(|handle| handle.is_finished())
+    }
+
+    fn wait_for_retained_resources(&self) {
+        let mut state = lock_state(self);
+        while state.retained_in_flight > 0
+            || state
+                .queue
+                .iter()
+                .any(|request| request.retained_resources.is_some())
+        {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
     }
 
     fn drain(&self, timeout: Duration) -> bool {
@@ -603,6 +691,110 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, AtomicUsize};
+
+    struct SubmitCaptureGuard;
+
+    impl Drop for SubmitCaptureGuard {
+        fn drop(&mut self) {
+            TEST_SUBMIT.with(|hook| hook.borrow_mut().take());
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_plugin_installation_survives_app_drop_until_processes_exit() {
+        for explicit_shutdown in [false, true] {
+            let _dirs = crate::config::test_dirs::isolate_dirs("pane-plugin-retirement");
+            let installation = crate::plugin_paths::create_managed_installation("example.retired")
+                .unwrap()
+                .canonicalize()
+                .unwrap();
+            std::fs::create_dir(installation.join("checkout")).unwrap();
+            std::fs::write(installation.join("checkout/payload"), "retained").unwrap();
+            std::fs::create_dir_all(crate::plugin_paths::managed_plugins_dir().join(".locks"))
+                .unwrap();
+            let mut app = crate::app::App::new(
+                &crate::config::Config::default(),
+                crate::app::AppPolicy::TEST,
+                None,
+                tokio::sync::mpsc::unbounded_channel().1,
+                crate::api::EventHub::default(),
+            );
+            app.plugin_installation_leases.insert(
+                installation.clone(),
+                Arc::new(crate::plugin_installations::create_lease(&installation).unwrap()),
+            );
+            let (mut runtime, _input) = super::super::PaneRuntime::test_with_channel(80, 24);
+            runtime
+                .child_pid
+                .store(std::process::id(), Ordering::Release);
+            runtime.preserve_processes_on_drop = false;
+            let terminal_id = crate::terminal::TerminalId::alloc();
+            app.terminal_runtimes.insert(
+                terminal_id.clone(),
+                crate::terminal::TerminalRuntime::test_from_pane_runtime(runtime),
+            );
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let requests = Arc::clone(&captured);
+            TEST_SUBMIT.with(|hook| {
+                *hook.borrow_mut() = Some(Arc::new(move |mut request| {
+                    request.child_pid = 7;
+                    request.session = Some(anchor(5));
+                    requests.lock().unwrap().push(request);
+                }));
+            });
+            let _hook = SubmitCaptureGuard;
+            if explicit_shutdown {
+                app.shutdown_terminal_runtime(terminal_id);
+            }
+            drop(app);
+            assert!(RETAINED_RESOURCES.with(|slot| slot.borrow().is_none()));
+            crate::plugin_installations::cleanup().unwrap();
+            assert!(installation.join("checkout/payload").is_file());
+
+            let control = FakeProcesses::session(5, &[7, 9], None);
+            let requests = std::mem::take(&mut *captured.lock().unwrap());
+            assert_eq!(requests.len(), 1);
+            let mut targets = prepare_targets(requests, &control);
+            let now = Instant::now();
+            let ladder = [(Signal::Kill, Duration::ZERO)];
+            advance_targets(&mut targets, &ladder, &control, now);
+            advance_targets(
+                &mut targets,
+                &ladder,
+                &control,
+                now + Duration::from_secs(10),
+            );
+            assert_eq!(
+                targets.len(),
+                1,
+                "a spent ladder does not prove process exit"
+            );
+            crate::plugin_installations::cleanup().unwrap();
+            assert!(installation.join("checkout/payload").is_file());
+            control.set_state(7, FakeState::Gone);
+            advance_targets(
+                &mut targets,
+                &ladder,
+                &control,
+                now + Duration::from_secs(11),
+            );
+            crate::plugin_installations::cleanup().unwrap();
+            assert!(
+                installation.exists(),
+                "a descendant still owns installation files"
+            );
+            control.set_state(9, FakeState::Gone);
+            advance_targets(
+                &mut targets,
+                &ladder,
+                &control,
+                now + Duration::from_secs(12),
+            );
+            assert!(targets.is_empty());
+            crate::plugin_installations::cleanup().unwrap();
+            assert!(!installation.exists(), "the last exit releases the lease");
+        }
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FakeState {
@@ -811,6 +1003,7 @@ mod tests {
             pane_id: PaneId::from_raw(1),
             child_pid: 7,
             child_wait_completed: None,
+            retained_resources: None,
             members: vec![ProcessSessionMember {
                 pid: 7,
                 instance: 0,
@@ -888,6 +1081,68 @@ mod tests {
             control.signal_log(),
             vec![Signal::Hangup, Signal::Terminate, Signal::Kill]
         );
+    }
+
+    #[test]
+    fn retained_resources_wait_for_child_completion_without_session_anchor() {
+        let resources = Arc::new(());
+        let weak = Arc::downgrade(&resources);
+        let completed = Arc::new(AtomicBool::new(false));
+        let request = super::super::PaneRuntime::with_shutdown_resources(resources, || {
+            PaneShutdownRequest::with_session(
+                PaneId::from_raw(1),
+                7,
+                Some(Arc::clone(&completed)),
+                None,
+            )
+        });
+        let control = FakeProcesses::new();
+        let mut targets = prepare_targets(vec![request], &control);
+        let now = Instant::now();
+        advance_targets(&mut targets, &[], &control, now);
+        assert_eq!(targets.len(), 1);
+        assert!(weak.upgrade().is_some());
+        assert!(control.signal_log().is_empty());
+        completed.store(true, Ordering::Release);
+        advance_targets(&mut targets, &[], &control, now + Duration::from_secs(10));
+        assert!(targets.is_empty());
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn reaper_retained_resource_wait_survives_signal_panic_and_finishes_after_exit() {
+        let resources = Arc::new(());
+        let weak = Arc::downgrade(&resources);
+        let request =
+            super::super::PaneRuntime::with_shutdown_resources(resources, || request(1, 7, 5));
+        let control = FakeProcesses::session(5, &[7], None);
+        control.panic_on_next_signal.store(true, Ordering::Release);
+        let reaper = Reaper::new();
+        reaper.worker_started.store(true, Ordering::Release);
+        let ladder = [(Signal::Kill, Duration::ZERO)];
+        std::thread::scope(|scope| {
+            scope.spawn(|| reaper.run_with(&control, &ladder));
+            reaper.submit(request);
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let waiter_reaper = &reaper;
+            scope.spawn(move || {
+                waiter_reaper.wait_for_retained_resources();
+                done_tx.send(()).unwrap();
+            });
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while control.signal_log().is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let signalled = !control.signal_log().is_empty();
+            let still_retained = weak.upgrade().is_some();
+            let still_waiting = done_rx.try_recv().is_err();
+            control.set_state(7, FakeState::Gone);
+            let completed = done_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+            reaper.stop();
+            assert!(signalled && still_retained && still_waiting);
+            assert!(completed);
+            assert!(weak.upgrade().is_none());
+        });
     }
 
     #[test]

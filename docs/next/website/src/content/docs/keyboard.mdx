@@ -18,6 +18,12 @@ Clicking the already selected workspace returns keyboard focus to its terminal i
 
 Agent shortcuts for previous, next, and a numbered agent scroll the agent list only far enough to reveal the destination. A destination already visible keeps the current scroll position, including on a single machine and in the collapsed sidebar.
 
+## Keys sent to pane applications
+
+Herdr uses libghostty to encode pane keys for the application's current keyboard modes, including Kitty keyboard protocol and `modifyOtherKeys` level 2. The outer terminal still has to report distinct keys; Herdr cannot recover a modifier that it never receives. Native Windows panes also keep the ConPTY input-record fallback when no enhanced keyboard protocol is active; see [Windows support](/docs/windows-beta/#keyboard-and-mouse).
+
+In a plain shell that has enabled neither protocol, `ctrl+shift` plus an ASCII letter sends the same C0 control character as `ctrl` plus that letter, not CSI-u. Modified Enter remains Enter; the classic `ctrl+i` / `ctrl+m` / `ctrl+[` chords remain Tab, Enter, and Escape, respectively. Unhandled Super/Command chords are not forwarded as bare letters or forced into CSI-u. Once the pane application enables an enhanced mode, its negotiated mode controls the encoding; `modifyOtherKeys` level 1 is treated as unnegotiated.
+
 ## What the prefix is
 
 A terminal multiplexer sits between your terminal and the programs running inside it. Those programs already use most key combinations: `ctrl+c` interrupts, `ctrl+r` searches history, editors claim nearly everything else. If Herdr grabbed common keys directly, it would break the programs inside it.

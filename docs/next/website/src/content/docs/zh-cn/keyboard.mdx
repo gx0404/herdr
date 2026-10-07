@@ -17,6 +17,12 @@ Herdr 是鼠标原生的。你可以点击窗格、标签页、工作区和智�
 
 使用上一个、下一个或按编号聚焦智能体的快捷键时，智能体列表只滚动到足以露出目标的位置。目标已可见时保持当前滚动位置；单机和折叠侧栏也遵循这一规则。
 
+## 发送给窗格应用的按键
+
+Herdr 使用 libghostty 按窗格应用当前的键盘模式编码按键，包括 Kitty 键盘协议和 `modifyOtherKeys` level 2。外层终端仍须报告可区分的按键；Herdr 无法恢复从未收到的修饰键信息。没有启用增强键盘协议时，原生 Windows 窗格仍保留 ConPTY 输入记录回退路径；参见 [Windows 支持](/zh-cn/docs/windows-beta/#键盘和鼠标)。
+
+未启用这两种协议的普通 shell 中，`ctrl+shift` 加 ASCII 字母发送与 `ctrl` 加该字母相同的 C0 控制字符，而不是 CSI-u。带修饰键的 Enter 仍按 Enter 处理；传统的 `ctrl+i` / `ctrl+m` / `ctrl+[` 组合则分别保留 Tab、Enter 和 Escape 行为。未被 Herdr 快捷键处理的 Super/Command 组合不会作为裸字母转发，也不会强行转换成 CSI-u。窗格应用启用增强模式后，编码遵循它协商的模式；`modifyOtherKeys` level 1 按未协商处理。
+
 ## 前缀键是什么
 
 终端复用器位于终端和其中运行的程序之间。这些程序已经占用了大多数按键组合: `ctrl+c` 中断,`ctrl+r` 搜索历史,编辑器几乎占用了剩下的一切。如果 Herdr 直接抢占常用按键,就会破坏其中运行的程序。

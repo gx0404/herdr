@@ -164,7 +164,6 @@ impl App {
         cache_updates: Vec<(std::path::PathBuf, crate::workspace::GitStatusCacheEntry)>,
     ) -> bool {
         self.git_refresh_in_flight = false;
-        // APP-008：缓存是 `Arc` 共享；刷新线程已退出，`make_mut` 不复制。
         let cache = std::sync::Arc::make_mut(&mut self.git_status_cache);
         for (key, entry) in cache_updates {
             cache.insert(key, entry);
@@ -247,6 +246,34 @@ impl App {
         {
             if self.state.agent_activity_is_current(pane_id, &identity) {
                 self.apply_agent_activity_refresh(pane_id, Ok(nodes));
+            }
+            return Vec::new();
+        }
+
+        if let AppEvent::RestoredWorktreeSpaceChecked {
+            workspace_id,
+            expected,
+            valid,
+        } = ev
+        {
+            self.pending_restored_worktree_spaces
+                .retain(|(id, space)| id != &workspace_id || space != &expected);
+            let changed_workspace = (!valid)
+                .then(|| {
+                    self.state.workspaces.iter().position(|workspace| {
+                        workspace.id == workspace_id
+                            && workspace.worktree_space.as_ref() == Some(&expected)
+                    })
+                })
+                .flatten();
+            self.state
+                .handle_app_event(AppEvent::RestoredWorktreeSpaceChecked {
+                    workspace_id,
+                    expected,
+                    valid,
+                });
+            if let Some(ws_idx) = changed_workspace {
+                self.emit_workspace_updated(ws_idx);
             }
             return Vec::new();
         }
@@ -779,7 +806,11 @@ impl App {
         pane_id: crate::layout::PaneId,
         operation_id: u64,
     ) -> bool {
-        if self.pending_worktree_remove_runtime_restores.get(&pane_id) != Some(&operation_id) {
+        if self.pending_worktree_remove_runtime_restores.get(&pane_id) != Some(&operation_id)
+            || self
+                .pending_worktree_remove_runtime_exits
+                .contains_key(&pane_id)
+        {
             return false;
         }
         self.pending_worktree_remove_runtime_restores
@@ -2554,7 +2585,7 @@ mod tests {
     }
 
     #[test]
-    fn stalled_worktree_runtime_exit_closes_pane() {
+    fn worktree_restore_failure_requires_completed_exit_and_current_operation() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -2602,6 +2633,16 @@ mod tests {
         );
         assert!(app.event_rx.try_recv().is_err());
 
+        app.handle_internal_event(AppEvent::WorktreeRuntimeRestoreFailed {
+            pane_id,
+            operation_id: 8,
+        });
+        assert!(app.find_pane(pane_id).is_some());
+        assert_eq!(
+            app.pending_worktree_remove_runtime_restores.get(&pane_id),
+            Some(&8)
+        );
+        app.pending_worktree_remove_runtime_exits.remove(&pane_id);
         app.handle_internal_event(AppEvent::WorktreeRuntimeRestoreFailed {
             pane_id,
             operation_id: 8,

@@ -203,12 +203,14 @@ paths = [
   "src/logging.rs",
   "src/metadata_tokens.rs",
   "src/plugin_command.rs",
+  "src/plugin_installations.rs",
   "src/plugin_paths.rs",
   "src/product_announcements.rs",
   "src/release_notes.rs",
   "src/render_prof.rs",
   "src/render_signal.rs",
   "src/sound.rs",
+  "src/thread_spawn.rs",
   "src/update.rs",
 ]
 tasks = []

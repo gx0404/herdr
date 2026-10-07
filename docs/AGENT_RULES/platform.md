@@ -34,6 +34,10 @@
   不迁移逻辑 socket 路径或 marker，不以 hash 分裂旧端点；保留短名及路径别名兼容、创建时
   DACL/first-instance/缓冲与 marker 内容身份。普通连接与有界 probe 共用命名，probe 的500ms
   绝对期限不得因 busy 重试续期；缺 marker 的活管道仍须阻止会话误删。
+- Windows 提权 server 默认只接受同账户提权客户端；跨权限控制必须在启动时通过
+  `ServerConfig::allow_unelevated_clients` 或 `--allow-unelevated-clients` 显式启用。
+  配置热重载不改变已运行 server 的访问策略；普通 server 仍接受同账户两类客户端，
+  连接不会改变 server 权限。配置与恢复文件的账户级权限不随该开关放宽。
 - Windows 服务端客户端管道由 `windows/client_stream.rs` 持有原生句柄，使用独立事件的
   OVERLAPPED 读写，空闲读不轮询。握手受 4 秒绝对 deadline 约束，碎片不能续期；握手协议
   与 2 MiB 首帧界限仍在共享传输层。取消请求不是完成，缓冲和状态块须存活至 I/O 真正结束。

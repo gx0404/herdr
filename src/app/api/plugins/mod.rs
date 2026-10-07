@@ -45,7 +45,7 @@ impl App {
         if !self.policy.persist_plugin_registry {
             return Ok(());
         }
-        let entries = crate::persist::plugin_registry::try_load()?;
+        let entries = crate::plugin_installations::load(&mut self.plugin_installation_leases)?;
         self.replace_installed_plugins(entries);
         Ok(())
     }
@@ -73,7 +73,7 @@ impl App {
         if !self.policy.persist_plugin_registry {
             return Ok(mutation(&mut self.state.installed_plugins));
         }
-        let (result, entries) = crate::persist::plugin_registry::update(|entries| {
+        let (result, _) = crate::persist::plugin_registry::update(|entries| {
             let mut registry = entries
                 .drain(..)
                 .map(|plugin| (plugin.plugin_id.clone(), plugin))
@@ -82,7 +82,7 @@ impl App {
             *entries = registry.into_values().collect();
             result
         })?;
-        self.replace_installed_plugins(entries);
+        self.refresh_installed_plugins()?;
         Ok(result)
     }
 
@@ -2678,6 +2678,33 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
     }
 
     #[test]
+    fn plugin_registry_refresh_has_a_deadline_without_clients_or_subscribers() {
+        let (_dirs, mut app) = test_app();
+        let root = unique_temp_path("plugin-registry-timer");
+        write_manifest(&root);
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        crate::persist::plugin_registry::update(|plugins| plugins.push(plugin)).unwrap();
+        app.policy.persist_plugin_registry = true;
+        let now = std::time::Instant::now();
+        let deadline = now + PLUGIN_REGISTRY_REFRESH_INTERVAL;
+        app.next_plugin_registry_refresh = Some(deadline);
+
+        assert_eq!(
+            app.next_headless_loop_deadline_with_git_refresh(now, false, false),
+            Some(deadline)
+        );
+        app.refresh_installed_plugins_registry_if_due(now);
+        assert!(app.state.installed_plugins.is_empty());
+        app.refresh_installed_plugins_registry_if_due(deadline);
+        assert!(!app.state.installed_plugins.is_empty());
+        assert_eq!(
+            app.next_plugin_registry_refresh,
+            Some(deadline + PLUGIN_REGISTRY_REFRESH_INTERVAL)
+        );
+        assert!(app.state.plugin_command_logs.is_empty());
+    }
+
+    #[test]
     fn event_hooks_skip_registry_refresh_without_cached_subscriber() {
         let (_dirs, mut app) = test_app();
         let root = unique_temp_path("plugin-cached-subscriber-precheck");
@@ -2717,6 +2744,70 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
         );
         // 内存缓存依旧为空：判空前置没有触发注册表加载。
         assert!(app.state.installed_plugins.is_empty());
+    }
+
+    #[test]
+    fn running_plugin_command_keeps_its_files_after_app_teardown() {
+        let (_dirs, mut app) = test_app();
+        let installation =
+            crate::plugin_paths::create_managed_installation("example.worktree-bootstrap").unwrap();
+        let root = installation.join("checkout");
+        write_manifest(&root);
+        std::fs::create_dir_all(crate::plugin_paths::managed_plugins_dir().join(".locks")).unwrap();
+        std::fs::write(root.join("payload"), "original").unwrap();
+        drop(crate::plugin_installations::create_lease(&installation).unwrap());
+        let mut plugin = load_plugin_manifest(&root.to_string_lossy(), true).unwrap();
+        plugin.source.managed_path = Some(root.display().to_string());
+        crate::persist::plugin_registry::update(|entries| *entries = vec![plugin.clone()]).unwrap();
+        crate::plugin_installations::load(&mut app.plugin_installation_leases).unwrap();
+        let command = if cfg!(windows) {
+            vec![
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Set-Content ready ready; $deadline = [DateTime]::UtcNow.AddSeconds(10); while (!(Test-Path release) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 10 }; Get-Content payload | Set-Content result",
+            ]
+        } else {
+            vec![
+                "sh",
+                "-c",
+                "printf ready > ready; i=0; while [ ! -f release ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done; cat payload > result",
+            ]
+        }
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        app.start_plugin_command(
+            &plugin,
+            None,
+            None,
+            command,
+            &app.current_plugin_context("lease-test"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            read_capture_when_ready(&root.join("ready"), || {}).trim(),
+            "ready"
+        );
+        crate::persist::plugin_registry::update(Vec::clear).unwrap();
+        drop(app);
+        crate::plugin_installations::cleanup().unwrap();
+        assert!(root.exists(), "the worker still owns the old installation");
+        std::fs::write(root.join("release"), "").unwrap();
+        assert_eq!(
+            read_capture_when_ready(&root.join("result"), || {}).trim(),
+            "original"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while installation.exists() {
+            crate::plugin_installations::cleanup().unwrap();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "finished worker must release its installation"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]

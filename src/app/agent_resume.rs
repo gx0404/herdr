@@ -306,7 +306,7 @@ impl App {
                 err = %err,
                 "failed to send deferred agent resume command to shell"
             );
-            runtime.shutdown();
+            self.shutdown_runtime_retaining_plugin_installations(runtime);
             return false;
         }
 

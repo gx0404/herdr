@@ -15,6 +15,7 @@ pub(super) struct ClientLoopConfig {
     /// 客户端启动时读取一次并交给 stdin 读线程。
     pub(super) stdin_flush_timeouts: input::StdinFlushTimeouts,
     pub(super) host_escape_disambiguation_active: bool,
+    pub(super) host_sgr_pixel_mouse: Option<bool>,
     pub(super) initial_host_input: Vec<u8>,
     pub(super) endpoint_keybindings: bool,
     pub(super) remote_image_paste_key:

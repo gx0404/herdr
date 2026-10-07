@@ -142,6 +142,13 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
 }
 
 pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
+    identify_agent_process_in_job(job).map(|(agent, name, _)| (agent, name))
+}
+
+/// Like [`identify_agent_in_job`], plus the pid of the process that matched.
+pub fn identify_agent_process_in_job(
+    job: &crate::platform::ForegroundJob,
+) -> Option<(Agent, String, u32)> {
     if let Some(process) = job
         .processes
         .iter()
@@ -149,11 +156,11 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
     {
         let candidate = normalized_process_name(process);
         if let Some(agent) = identify_agent(&candidate) {
-            return Some((agent, candidate));
+            return Some((agent, candidate, process.pid));
         }
     }
 
-    let mut best: Option<(u8, Agent, String)> = None;
+    let mut best: Option<(u8, Agent, String, u32)> = None;
 
     for process in &job.processes {
         let candidate = normalized_process_name(process);
@@ -163,12 +170,12 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
         let score = process_priority(process, &candidate);
 
         match &best {
-            Some((best_score, _, _)) if *best_score >= score => {}
-            _ => best = Some((score, agent, candidate)),
+            Some((best_score, ..)) if *best_score >= score => {}
+            _ => best = Some((score, agent, candidate, process.pid)),
         }
     }
 
-    best.map(|(_, agent, name)| (agent, name))
+    best.map(|(_, agent, name, pid)| (agent, name, pid))
 }
 
 /// Detect the state of an agent from the live terminal tail snapshot.
@@ -763,6 +770,62 @@ mod tests {
             identify_agent_in_job(&job),
             Some((Agent::Codex, "codex".to_string()))
         );
+    }
+
+    #[test]
+    fn identify_agent_process_in_job_returns_leader_pid_for_every_agent() {
+        for agent in Agent::ALL {
+            let label = agent_label(agent);
+            let job = crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![
+                    foreground_process(43, "node", &["node", "/tmp/bin/codex"]),
+                    foreground_process(42, label, &[label]),
+                ],
+            };
+            assert_eq!(
+                identify_agent_process_in_job(&job),
+                Some((agent, label.to_string(), 42))
+            );
+            assert_eq!(
+                identify_agent_in_job(&job),
+                Some((agent, label.to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn identify_agent_process_in_job_returns_wrapped_child_pid_for_every_agent() {
+        for agent in Agent::ALL {
+            let label = agent_label(agent);
+            let script = format!("/tmp/bin/{label}");
+            let job = crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![
+                    foreground_process(42, "bash", &["bash"]),
+                    foreground_process(43, "node", &["node", &script]),
+                ],
+            };
+            assert_eq!(
+                identify_agent_process_in_job(&job),
+                Some((agent, label.to_string(), 43))
+            );
+            assert_eq!(
+                identify_agent_in_job(&job),
+                Some((agent, label.to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn identify_agent_process_in_job_ignores_retired_and_external_agents() {
+        for label in RETIRED_AGENT_LABELS.into_iter().chain(["zcode"]) {
+            let job = crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![foreground_process(42, label, &[label])],
+            };
+            assert_eq!(identify_agent_process_in_job(&job), None, "{label}");
+        }
     }
 
     #[test]

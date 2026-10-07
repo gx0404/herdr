@@ -50,6 +50,8 @@ ZCode 作为只读外部来源，仅列出近期仍在运行的根会话；没�
 
 对于自身支持 Herdr 的智能体,由智能体自己的上报决定状态。
 
+当 Herdr 能确认同一个智能体进程仍存活于该窗格时，离开前台不会丢弃其会话身份、名称或生命周期钩子的状态上报权。例如，在 Unix shell 中用 `ctrl+z` 挂起后再用 `fg` 恢复，会保留同一身份。后台保留期间，Herdr 不会把前台 shell 或另一个命令的屏幕当作智能体状态来分类。确认进程退出或被另一个智能体进程取代后，旧身份才会清除；这不会新增 `suspended` API 状态。发送输入前请先恢复目标任务：窗格输入仍交给前台程序。Windows 的进程树检测不提供 Unix 作业控制。
+
 ## 虚拟机与沙箱包装器
 
 在 Linux 和 macOS 上,宿主可见的包装器可能会向 Herdr 隐藏真实的智能体进程。在包装器命令上设置 `HERDR_AGENT=<agent>`,告诉 Herdr 应使用哪个已有智能体的屏幕清单。例如,在 Linux 上运行 `HERDR_AGENT=claude fence -- claude`,或在 macOS 上运行 `HERDR_AGENT=claude nono run --profile claude-code -- claude`。这个提示的作用范围只限于该前台进程;仅在 VM 或容器内部设置时 Herdr 无法看到它,而且除非所有继承的前台进程都应被视为该智能体,否则不要全局 export。

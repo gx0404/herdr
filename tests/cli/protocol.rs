@@ -94,29 +94,39 @@ fn server_live_handoff_bypasses_protocol_guard() {
 }
 
 #[test]
-fn plugin_list_preserves_protocol_mismatch_envelope() {
-    let base = unique_test_dir();
-    fs::create_dir_all(&base).unwrap();
-    let socket_path = base.join("herdr.sock");
-    let listener = UnixListener::bind(&socket_path).unwrap();
+fn plugin_commands_preserve_protocol_mismatch_envelope() {
+    for args in [
+        &["plugin", "list", "--json"][..],
+        &["plugin", "update", "--yes"],
+    ] {
+        let base = unique_test_dir();
+        fs::create_dir_all(&base).unwrap();
+        let socket_path = base.join("herdr.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
 
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut line = String::new();
-        BufReader::new(stream.try_clone().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(request["method"], "ping");
-        write_fake_pong(&mut stream, &request, "0.7.1", 14);
-    });
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "ping");
+            write_fake_pong(&mut stream, &request, "0.7.1", CURRENT_PROTOCOL - 1);
+        });
 
-    let listed = run_cli(&socket_path, &["plugin", "list", "--json"]);
-    assert_eq!(listed.status.code(), Some(1));
-    assert!(listed.stdout.is_empty());
-    let error: serde_json::Value = serde_json::from_slice(&listed.stderr).unwrap();
-    assert_eq!(error["id"], "cli:plugin");
-    assert_eq!(error["error"]["code"], "protocol_mismatch");
-    server.join().unwrap();
-    cleanup_test_base(&base);
+        let output = run_cli(&socket_path, args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["id"], "cli:plugin");
+        assert_eq!(error["error"]["code"], "protocol_mismatch");
+        server.join().unwrap();
+        assert!(!base
+            .join("config")
+            .join(app_dir_name())
+            .join("plugins.json")
+            .exists());
+        cleanup_test_base(&base);
+    }
 }

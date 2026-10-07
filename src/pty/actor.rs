@@ -307,7 +307,7 @@ mod windows {
                 let control = control_tx.clone();
                 let responses = Arc::clone(&response_admission);
                 let input_admission = Arc::clone(&input_admission);
-                std::thread::spawn(move || {
+                crate::thread_spawn::spawn_named("herdr-pty-writer", move || {
                     run_writer(&mut writer, write_rx);
                     input_admission.close();
                     accepting
@@ -320,7 +320,7 @@ mod windows {
                     }
                     let _ = control.send(PtyIoControlCommand::Shutdown);
                     debug!(pane_id, "windows pty writer thread exiting");
-                });
+                })?;
             }
 
             {
@@ -340,7 +340,7 @@ mod windows {
                 let accepting = Arc::clone(&accepting);
                 let input = data_tx.downgrade();
                 let control = control_tx.clone();
-                std::thread::spawn(move || {
+                crate::thread_spawn::spawn_named("herdr-pty-reader", move || {
                     let mut buf = [0u8; 8192];
                     loop {
                         match reader.read(&mut buf) {
@@ -381,14 +381,14 @@ mod windows {
                         on_reader_exit();
                     }
                     debug!(pane_id, "windows pty reader thread exiting");
-                });
+                })?;
             }
 
             {
                 let write_tx = write_tx.clone();
                 let pending_resize = Arc::clone(&pending_resize);
                 let accepting = Arc::clone(&accepting);
-                std::thread::spawn(move || {
+                crate::thread_spawn::spawn_named("herdr-pty-control", move || {
                     run_control(
                         master,
                         |master, size| {
@@ -407,7 +407,7 @@ mod windows {
                         accepting,
                     );
                     debug!(pane_id, "windows pty control thread exiting");
-                });
+                })?;
             }
 
             Ok(PtyIoActorHandle {
@@ -891,6 +891,44 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[tokio::test]
+        async fn windows_pty_thread_spawn_failures_return_errors() {
+            for allowed in 0..3 {
+                let pair = portable_pty::native_pty_system()
+                    .openpty(PtySize {
+                        rows: 24,
+                        cols: 80,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .expect("create ConPTY");
+                drop(pair.slave);
+                let (exited, mut reader_exit) = tokio::sync::oneshot::channel();
+                crate::thread_spawn::test_hook::fail_spawns_after(allowed, 1);
+                let result = PtyIoActor::spawn(PtyIoActorConfig {
+                    pane_id: 1,
+                    master: pair.master,
+                    initially_quiesced: false,
+                    on_read: Box::new(|_| PtyReadResult {
+                        terminal_responses: Vec::new(),
+                    }),
+                    on_reader_exit: Some(Box::new(move || {
+                        let _ = exited.send(());
+                    })),
+                });
+                crate::thread_spawn::test_hook::fail_next_spawns(0);
+                assert!(
+                    matches!(result, Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock)
+                );
+                if allowed == 2 {
+                    tokio::time::timeout(Duration::from_secs(30), &mut reader_exit)
+                        .await
+                        .expect("reader stops after failed control spawn")
+                        .expect("reader exit callback");
+                }
+            }
+        }
 
         fn input_acceptance(accepting: bool) -> Arc<Mutex<InputAcceptance>> {
             Arc::new(Mutex::new(InputAcceptance {

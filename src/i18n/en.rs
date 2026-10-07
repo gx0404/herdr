@@ -1397,6 +1397,9 @@ pub const TEXTS: Texts = Texts {
         channel_show_about: "Print the configured update channel",
         channel_set_about: "Choose the update channel",
         server_about: "Run or control the headless server",
+        #[cfg(windows)]
+        server_allow_unelevated_clients_help:
+            "Allow ordinary same-account clients to control this elevated server",
         server_stop_about: "Stop the running server",
         server_reload_config_about: "Reload config in the running server",
         server_agent_manifests_about: "Show active agent detection manifests",
@@ -1514,6 +1517,7 @@ pub const TEXTS: Texts = Texts {
         integration_status_about: "Show integration status",
         plugin_about: "Install and run workflow plugins",
         plugin_install_about: "Install a plugin from GitHub",
+        plugin_update_about: "Update GitHub-installed plugins",
         plugin_uninstall_about: "Uninstall a plugin",
         plugin_link_about: "Link a local plugin",
         plugin_unlink_about: "Unlink a local plugin",
@@ -1721,6 +1725,13 @@ pub const TEXTS: Texts = Texts {
         session_state_stopped: "stopped",
         session_state_unavailable: "unavailable",
         plugin_installed_fmt: "Installed {plugin} from {source}.",
+        plugin_updated_fmt: "Updated {plugin} from {source}.",
+        plugin_up_to_date_fmt: "{plugin} is already up to date.",
+        plugin_none_github_installed: "No GitHub-managed plugins installed.",
+        plugin_install_preview: "Plugin install preview:",
+        plugin_update_preview: "Plugin update preview:",
+        plugin_install_confirm: "Install this plugin?",
+        plugin_update_confirm: "Update this plugin?",
         plugin_config_label: "Config: ",
         plugin_uninstalled_fmt: "Uninstalled {plugin}.",
         plugin_none_installed: "No plugins installed.",
@@ -2033,9 +2044,21 @@ pub const TEXTS: Texts = Texts {
             "running Herdr server did not persist GitHub plugin source metadata",
         plugin_registration_undo_failed_fmt:
             "{error}; failed to undo incompatible plugin registration: {detail}",
-        plugin_refusing_unmanaged_delete_fmt: "refusing to delete unmanaged plugin path: {path}",
-        plugin_checkout_lifecycle_fmt:
-            "failed to {operation} managed plugin checkout at {path}; close any Herdr plugin panes or plugin commands using that checkout, then retry: {error}",
+        plugin_update_local_fmt: "plugin is locally linked and cannot be updated: {target}",
+        plugin_update_requires_yes: "plugin update requires --yes when stdin is not interactive",
+        plugin_update_failed_fmt: "error updating {plugin}: {error}",
+        plugin_update_source_mismatch_fmt:
+            "update source now contains plugin {actual}, expected {expected}",
+        plugin_update_cancelled: "plugin update cancelled",
+        plugin_not_updated_after_failure: "Plugin was not updated.",
+        plugin_installation_retained_fmt: "{error}; plugin files retained at {path}",
+        plugin_installation_cleanup_failed_fmt:
+            "{error}; could not remove failed installation at {path}: {cleanup_error}",
+        plugin_cleanup_deferred_fmt: "Plugin cleanup deferred: {error}",
+        plugin_source_owner_missing: "installed GitHub plugin has no source owner",
+        plugin_source_repo_missing: "installed GitHub plugin has no source repository",
+        plugin_update_target_changed_fmt:
+            "plugin {plugin} changed while its update was in progress; retry the update",
 
         status_server_usage: "usage: herdr status server [--json]",
         status_client_usage: "usage: herdr status client [--json]",

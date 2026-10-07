@@ -21,6 +21,17 @@ impl TerminalRuntime {
         self.0.shutdown();
     }
 
+    pub(crate) fn with_shutdown_resources<T>(
+        resources: Arc<dyn Send + Sync>,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        crate::pane::PaneRuntime::with_shutdown_resources(resources, operation)
+    }
+
+    pub(crate) fn wait_for_retained_shutdown_resources() {
+        crate::pane::PaneRuntime::wait_for_retained_shutdown_resources();
+    }
+
     #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.0.duplicate_handoff_fd()
@@ -620,6 +631,10 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    pub(crate) fn test_from_pane_runtime(runtime: crate::pane::PaneRuntime) -> Self {
+        Self(runtime)
+    }
+
     pub(crate) fn test_scroll_metrics_reads(&self) -> usize {
         self.0.test_scroll_metrics_reads()
     }

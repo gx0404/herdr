@@ -230,6 +230,20 @@ pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {
         .join(format!("local-{hash:016x}.json"))
 }
 
+/// SSH preferences belong to the target/session, not its per-process bridge socket.
+pub(super) fn path_for_remote_endpoint(target: &str, session: &str) -> PathBuf {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hash = Sha256::new();
+    for part in [target, session] {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    crate::config::state_dir()
+        .join("client-shell")
+        .join(format!("remote-{:x}.json", hash.finalize()))
+}
+
 /// 读取偏好文件：逐字段容错——任一字段解析失败（类型不对、未知值）只丢该字段
 /// 并记一次诊断，其余字段照常恢复；整个文件不是 JSON 对象才视为不可用。
 pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
@@ -586,6 +600,22 @@ mod tests {
         );
         assert_eq!(loaded.usage_enabled, Some(true));
         std::fs::remove_file(path).expect("remove preferences");
+    }
+
+    #[test]
+    fn remote_preferences_distinguish_targets_sessions_and_component_boundaries() {
+        let original = path_for_remote_endpoint("dev@build", "agents");
+        assert_eq!(original, path_for_remote_endpoint("dev@build", "agents"));
+        assert_ne!(original, path_for_remote_endpoint("other@build", "agents"));
+        assert_ne!(original, path_for_remote_endpoint("dev@build", "other"));
+        assert_ne!(
+            path_for_remote_endpoint("ab", "c"),
+            path_for_remote_endpoint("a", "bc")
+        );
+        assert_ne!(
+            original,
+            path_for_local_endpoint(Path::new("dev@build/agents"))
+        );
     }
 
     #[test]

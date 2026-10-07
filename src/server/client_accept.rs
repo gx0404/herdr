@@ -44,7 +44,7 @@ pub(crate) fn accept_pending_client_connections(
 
                 let should_quit = should_quit.clone();
                 let server_event_tx = server_event_tx.clone();
-                std::thread::spawn(move || {
+                let spawned = crate::thread_spawn::spawn_named("herdr-client-conn", move || {
                     if let Err(err) = client_transport::handle_client_handshake_with_permit(
                         stream,
                         client_id,
@@ -55,6 +55,9 @@ pub(crate) fn accept_pending_client_connections(
                         debug!(client_id, err = %err, "client handshake failed");
                     }
                 });
+                if let Err(err) = spawned {
+                    warn!(client_id, err = %err, "failed to spawn client connection thread; dropping connection");
+                }
             }
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => {
@@ -73,8 +76,8 @@ pub(crate) fn spawn_windows_client_accept_thread(
     should_quit: Arc<AtomicBool>,
     server_event_tx: mpsc::Sender<ServerEvent>,
     handshake_limiter: Arc<ClientHandshakeLimiter>,
-) {
-    std::thread::spawn(move || {
+) -> io::Result<std::thread::JoinHandle<()>> {
+    crate::thread_spawn::spawn_named("herdr-client-accept", move || {
         let mut next_client_id = 1_u64;
         loop {
             if should_quit.load(Ordering::Acquire) {
@@ -111,7 +114,7 @@ pub(crate) fn spawn_windows_client_accept_thread(
 
             let should_quit = should_quit.clone();
             let server_event_tx = server_event_tx.clone();
-            std::thread::spawn(move || {
+            let spawned = crate::thread_spawn::spawn_named("herdr-client-conn", move || {
                 if let Err(err) = client_transport::handle_client_handshake_with_permit(
                     stream,
                     client_id,
@@ -122,8 +125,11 @@ pub(crate) fn spawn_windows_client_accept_thread(
                     debug!(client_id, err = %err, "client handshake failed");
                 }
             });
+            if let Err(err) = spawned {
+                warn!(client_id, err = %err, "failed to spawn client connection thread; dropping connection");
+            }
         }
-    });
+    })
 }
 
 /// Drains pending thin-client connections without starting handshakes.

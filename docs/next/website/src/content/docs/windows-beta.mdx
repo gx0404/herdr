@@ -49,9 +49,20 @@ For internal testing, `HERDR_MANIFEST_URL` can point the installer at a custom m
 
 Local persistent sessions continue running after the client detaches or its terminal window closes. Servers and pane processes launched through Windows OpenSSH also survive logout; run `herdr` again to reconnect.
 
-Local server and client connections support deeply nested session directories. Herdr normalizes named-pipe paths before opening them with Windows' long-path form; it does not relocate session data or change the socket paths reported by the CLI. Existing short-path connections and account access rules remain compatible. File-system permissions, directory-component limits, and the path support of programs launched inside panes still apply.
+Local server and client connections support deeply nested session directories. Herdr normalizes named-pipe paths before opening them with Windows' long-path form; it does not relocate session data or change the socket paths reported by the CLI. Existing short-path connections remain compatible. File-system permissions, directory-component limits, and the path support of programs launched inside panes still apply.
 
-The same Windows account can attach to a session from ordinary and administrator terminals, including sessions started through SSH. The server's privileges stay as they were at startup: attaching from an ordinary terminal to an elevated server still controls administrator panes, and attaching from an administrator terminal does not elevate an ordinary server. This deliberately trusts ordinary local processes belonging to that account to control its elevated Herdr sessions; other accounts are excluded. Older elevated servers need to be stopped from an administrator terminal and restarted with the updated build before ordinary clients can attach; stopping closes their panes.
+Elevated Windows servers require an administrator client by default, including servers started through an elevated SSH login. Ordinary servers accept clients from ordinary and administrator terminals belonging to the same account; attaching never changes the server's privileges.
+
+To deliberately share elevated sessions with ordinary clients, set:
+
+```toml
+[server]
+allow_unelevated_clients = true
+```
+
+This Windows-only setting is off by default and applies when a new server starts, including automatic startup. Reloading config does not change a running server's access policy. You can instead enable sharing for one server process from an administrator terminal with `herdr server --allow-unelevated-clients` (or `herdr --session <name> server --allow-unelevated-clients` for a named session). The flag enables sharing even when the config setting is false.
+
+Either option allows ordinary local processes belonging to that account to control administrator panes; other accounts remain excluded. The flag must be supplied again after a restart unless sharing is enabled in config. Existing servers retain their previous access policy until stopped and restarted with the updated build; stopping closes their panes. Config and recovery files retain their account-based permissions.
 
 Closing a pane ends the programs started from it. Closing the pane's ConPTY sends console programs a close event; after a short grace period Herdr terminates whatever is left of the pane's process tree, including GUI programs started from the pane, such as `start notepad`. Windows has no Unix sessions, so Herdr finds the tree by following child processes from the pane shell, checking process start times so that a reused process ID never pulls in an unrelated program. A program whose launcher has already exited is no longer linked to the pane and keeps running. Herdr's own background server is exempt: a server started by a `herdr` command inside the pane keeps running with all of its sessions. To keep a program running after its pane closes, start it outside Herdr, or through a launcher that exits right away, such as `cmd /c start notepad`.
 

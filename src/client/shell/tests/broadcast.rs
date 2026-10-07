@@ -369,6 +369,47 @@ fn terminal_input_fans_out_through_the_normal_pane_path() {
 }
 
 #[test]
+fn report_all_host_commits_broadcast_as_text_without_synthetic_releases() {
+    let build = profile("Build", "build.example", "45");
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    online_remote(&mut state, &build, "pane_r1");
+    state.broadcast = broadcast_set(
+        &[(None, "pane_1"), (Some(build.id.clone()), "pane_r1")],
+        true,
+    );
+    state.set_host_reports_key_releases(true);
+    state.set_host_reports_all_keys(true);
+
+    for text in ["a", "文"] {
+        let outcome = state.handle_input_bytes(text.as_bytes());
+        assert!(matches!(
+            &outcome.requests[..],
+            [ClientMessage::ClientShellPaneInput { pane_id, events }]
+                if pane_id == "pane_1"
+                    && matches!(&events[..], [ClientPaneInputEvent::TextCommit(value)] if value == text)
+        ));
+        assert!(matches!(
+            &outcome.actions[..],
+            [ClientShellAction::EndpointRequest { endpoint_id, request, .. }]
+                if endpoint_id == &ClientEndpointId::Ssh(build.id.clone())
+                    && matches!(
+                        &request.method,
+                        crate::api::schema::Method::PaneSendText(params)
+                            if params.pane_id == "pane_r1" && params.text == text
+                    )
+        ));
+        assert!(state.input_leases.is_empty());
+    }
+
+    let blur = state.handle_input_bytes(b"\x1b[O");
+    assert!(blur.actions.is_empty());
+    assert!(matches!(
+        &blur.requests[..],
+        [ClientMessage::ClientShellFocus { focused: false }]
+    ));
+}
+
+#[test]
 fn broadcast_send_failures_dedupe_per_endpoint_and_success_rearms() {
     let mut state = state_with_profiles(&[]);
     let error = || {

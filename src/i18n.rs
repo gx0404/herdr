@@ -1985,6 +1985,8 @@ pub struct CliHelpTexts {
     pub channel_show_about: &'static str,
     pub channel_set_about: &'static str,
     pub server_about: &'static str,
+    #[cfg(windows)]
+    pub server_allow_unelevated_clients_help: &'static str,
     pub server_stop_about: &'static str,
     pub server_reload_config_about: &'static str,
     pub server_agent_manifests_about: &'static str,
@@ -2097,6 +2099,7 @@ pub struct CliHelpTexts {
     pub integration_status_about: &'static str,
     pub plugin_about: &'static str,
     pub plugin_install_about: &'static str,
+    pub plugin_update_about: &'static str,
     pub plugin_uninstall_about: &'static str,
     pub plugin_link_about: &'static str,
     pub plugin_unlink_about: &'static str,
@@ -2303,6 +2306,13 @@ pub struct CliOutputTexts {
     pub session_state_stopped: &'static str,
     pub session_state_unavailable: &'static str,
     pub plugin_installed_fmt: &'static str,
+    pub plugin_updated_fmt: &'static str,
+    pub plugin_up_to_date_fmt: &'static str,
+    pub plugin_none_github_installed: &'static str,
+    pub plugin_install_preview: &'static str,
+    pub plugin_update_preview: &'static str,
+    pub plugin_install_confirm: &'static str,
+    pub plugin_update_confirm: &'static str,
     pub plugin_config_label: &'static str,
     pub plugin_uninstalled_fmt: &'static str,
     pub plugin_none_installed: &'static str,
@@ -2575,8 +2585,18 @@ pub struct CliErrorTexts {
     pub plugin_build_changed_manifest: &'static str,
     pub plugin_server_source_metadata_missing: &'static str,
     pub plugin_registration_undo_failed_fmt: &'static str, // args: error, detail
-    pub plugin_refusing_unmanaged_delete_fmt: &'static str, // args: path
-    pub plugin_checkout_lifecycle_fmt: &'static str,       // args: operation, path, error
+    pub plugin_update_local_fmt: &'static str,             // args: target
+    pub plugin_update_requires_yes: &'static str,
+    pub plugin_update_failed_fmt: &'static str, // args: plugin, error
+    pub plugin_update_source_mismatch_fmt: &'static str, // args: actual, expected
+    pub plugin_update_cancelled: &'static str,
+    pub plugin_not_updated_after_failure: &'static str,
+    pub plugin_installation_retained_fmt: &'static str, // args: error, path
+    pub plugin_installation_cleanup_failed_fmt: &'static str, // args: error, path, cleanup_error
+    pub plugin_cleanup_deferred_fmt: &'static str,      // args: error
+    pub plugin_source_owner_missing: &'static str,
+    pub plugin_source_repo_missing: &'static str,
+    pub plugin_update_target_changed_fmt: &'static str, // args: plugin
 
     // src/cli/status.rs
     pub status_server_usage: &'static str,

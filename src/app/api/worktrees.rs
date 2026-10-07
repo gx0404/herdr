@@ -246,6 +246,7 @@ impl App {
     }
 
     fn worktree_source_from_workspace(&self, ws_idx: usize) -> Result<WorktreeSource, ApiFailure> {
+        self.require_restored_worktree_ready(ws_idx)?;
         let Some(ws) = self.state.workspaces.get(ws_idx) else {
             return Err(ApiFailure::new(
                 "workspace_not_found",
@@ -292,6 +293,38 @@ impl App {
             repo_key: space.key,
             repo_name: space.repo_name,
         })
+    }
+
+    fn require_restored_worktree_ready(&self, ws_idx: usize) -> Result<(), ApiFailure> {
+        if self.state.workspaces.get(ws_idx).is_some_and(|workspace| {
+            self.pending_restored_worktree_spaces
+                .iter()
+                .any(|(id, expected)| {
+                    id == &workspace.id && workspace.worktree_space.as_ref() == Some(expected)
+                })
+        }) {
+            return Err(ApiFailure::new(
+                "worktree_operation_in_progress",
+                "Restored worktree is still loading. Try again shortly.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_restored_group_close_ready(
+        &self,
+        request_id: &str,
+        close_indices: &[usize],
+    ) -> Result<(), String> {
+        // Closing one workspace does not trust saved group identity and must
+        // remain possible even when that checkout's metadata is unavailable.
+        if close_indices.len() >= 2 {
+            for &ws_idx in close_indices {
+                self.require_restored_worktree_ready(ws_idx)
+                    .map_err(|err| encode_error(request_id.to_owned(), err.code, err.message))?;
+            }
+        }
+        Ok(())
     }
 
     fn ensure_source_parent_membership(
@@ -508,7 +541,7 @@ impl App {
         });
     }
 
-    fn emit_workspace_updated(&mut self, ws_idx: usize) {
+    pub(super) fn emit_workspace_updated(&mut self, ws_idx: usize) {
         self.emit_event(EventEnvelope {
             event: EventKind::WorkspaceUpdated,
             data: EventData::WorkspaceUpdated {
@@ -1112,6 +1145,83 @@ mod tests {
 
         remove_temp_dir(worktree_root);
         remove_temp_dir(repo);
+    }
+
+    #[test]
+    fn deferred_api_worktree_create_spawn_failure_reports_error_and_clears_pending() {
+        let _dirs = isolate_test_dirs();
+        let repo = create_committed_repo("api-worktree-create-spawn-failure-repo");
+        let worktree_root = unique_temp_path("api-worktree-create-spawn-failure-root");
+        let mut app = app_with_parent(&repo);
+        app.state.worktree_directory = worktree_root.clone();
+        let request = Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                workspace_id: Some(app.state.workspaces[0].id.clone()),
+                branch: Some("spawn-failure".into()),
+                ..WorktreeCreateParams::default()
+            }),
+        };
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        let response = run_deferred_api_request(&mut app, request);
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "worktree_create_failed");
+        assert!(app.pending_api_worktree_creates.is_empty());
+        assert!(!worktree_root.exists());
+
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn deferred_api_worktree_spawn_failure_survives_full_event_queue() {
+        let _dirs = isolate_test_dirs();
+        let repo = create_committed_repo("api-worktree-create-spawn-full-repo");
+        let worktree_root = unique_temp_path("api-worktree-create-spawn-full-root");
+        let mut app = app_with_parent(&repo);
+        app.state.worktree_directory = worktree_root.clone();
+        while app
+            .event_tx
+            .try_send(AppEvent::UpdateReady {
+                version: "9.9.9".into(),
+                install_command: "herdr update".into(),
+            })
+            .is_ok()
+        {}
+        let (respond_to, response_rx) = response_channel();
+        let request = Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                workspace_id: Some(app.state.workspaces[0].id.clone()),
+                branch: Some("spawn-failure".into()),
+                ..WorktreeCreateParams::default()
+            }),
+        };
+
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        assert!(app.handle_deferred_worktree_api_request(request, respond_to, false));
+
+        let finished = loop {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(2), app.event_rx.recv())
+                    .await
+                    .expect("failed completion is delivered once the queue drains")
+                    .expect("event channel open");
+            if matches!(event, AppEvent::WorktreeAddFinished(_)) {
+                break event;
+            }
+        };
+        app.handle_internal_event(finished);
+
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("request gets a response");
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "worktree_create_failed");
+        assert!(app.pending_api_worktree_creates.is_empty());
+
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[tokio::test]
@@ -2634,6 +2744,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deferred_api_worktree_remove_spawn_failure_preserves_live_runtime() {
+        let _dirs = isolate_test_dirs();
+        let checkout = unique_temp_path("api-worktree-remove-spawn-failure");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("worktree");
+        workspace.identity_cwd = checkout.clone();
+        workspace.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "repo".into(),
+            repo_root: checkout.clone(),
+            checkout_path: checkout.clone(),
+            is_linked_worktree: true,
+        });
+        let workspace_id = workspace.id.clone();
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+        app.state.workspaces.push(workspace);
+        app.state.ensure_test_terminals();
+        let argv = if cfg!(windows) {
+            vec!["powershell.exe", "-NoProfile", "-Command", "Write-Output HERDR_REMOVE_READY; while (!(Test-Path release)) { Start-Sleep -Milliseconds 20 }"]
+        } else {
+            vec!["/bin/sh", "-c", "printf 'HERDR_REMOVE_READY\\n'; while [ ! -f release ]; do sleep 0.02; done"]
+        }
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            checkout.clone(),
+            &argv,
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            4096,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .unwrap();
+        let pid = runtime.child_pid();
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        tokio::time::timeout(LOADED_WAIT, async {
+            while !app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .visible_text()
+                .contains("HERDR_REMOVE_READY")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pane command is running");
+        app.drain_all_internal_events();
+        let before = app.workspace_info(0);
+        let (respond_to, response_rx) = response_channel();
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        assert!(app.handle_deferred_worktree_api_request(
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeRemove(WorktreeRemoveParams {
+                    workspace_id,
+                    force: true,
+                    trust_repository: false,
+                }),
+            },
+            respond_to,
+            false,
+        ));
+        let response = tokio::time::timeout(LOADED_WAIT, async {
+            loop {
+                if let Ok(response) = response_rx.try_recv() {
+                    break response;
+                }
+                let event = app.event_rx.recv().await.expect("completion event");
+                app.handle_internal_event(event);
+            }
+        })
+        .await
+        .unwrap();
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "worktree_remove_failed");
+        assert!(error
+            .error
+            .message
+            .contains("could not start worktree removal"));
+        assert!(app.pending_api_worktree_removes.is_empty());
+        assert!(app.pending_api_worktree_remove_paths.is_empty());
+        assert!(app.pending_worktree_remove_runtime_exits.is_empty());
+        assert!(app.pending_worktree_remove_runtime_restores.is_empty());
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .and_then(|runtime| runtime.child_pid()),
+            pid
+        );
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.workspace_info(0), before);
+        assert!(checkout.is_dir());
+        shutdown_pane_processes(&mut app);
+        remove_temp_dir(checkout);
+    }
+
+    #[tokio::test]
     async fn failed_worktree_remove_preserves_and_restores_shutdown_pane() {
         let _dirs = isolate_test_dirs();
         let checkout = unique_temp_path("api-worktree-remove-failure-checkout");
@@ -2719,6 +2939,19 @@ mod tests {
         assert!(app
             .pending_worktree_remove_runtime_restores
             .contains_key(&pane_id));
+        app.handle_internal_event(AppEvent::WorktreeRuntimeRestoreFailed {
+            pane_id,
+            operation_id: 7,
+        });
+        assert!(app.find_pane(pane_id).is_some());
+        assert_eq!(
+            app.pending_worktree_remove_runtime_exits.get(&pane_id),
+            Some(&1)
+        );
+        assert_eq!(
+            app.pending_worktree_remove_runtime_restores.get(&pane_id),
+            Some(&7)
+        );
 
         let pane_updates = app.handle_internal_event_with_pane_updates(AppEvent::PaneDied {
             pane_id,

@@ -50,6 +50,8 @@ For agents Herdr supports, Herdr finds the agent's process in each pane and read
 
 For agents that support Herdr, the agent's own reports decide the state.
 
+When Herdr can verify that the same agent process is still alive in the pane, moving it out of the foreground does not discard its session identity, name, or lifecycle-hook authority. For example, suspending it with `ctrl+z` in a Unix shell and returning with `fg` keeps that identity. While it is held in the background, Herdr does not classify the foreground shell or another command's screen as the agent's state. A confirmed exit or a replacement agent process clears the old identity; this is not a separate `suspended` API status. Resume the intended job before sending it input: pane input still goes to the foreground program. Windows process-tree detection does not provide Unix job control.
+
 ## VMs and sandbox wrappers
 
 On Linux and macOS, a host-visible wrapper can hide the real agent process from Herdr. Set `HERDR_AGENT=<agent>` on the wrapper command to tell Herdr which existing agent screen manifest to use. For example, run `HERDR_AGENT=claude fence -- claude` on Linux or `HERDR_AGENT=claude nono run --profile claude-code -- claude` on macOS. The hint applies only to that foreground process. Herdr cannot see it if you set it only inside a VM or container. Avoid exporting it globally unless every inherited foreground process should be treated as that agent.

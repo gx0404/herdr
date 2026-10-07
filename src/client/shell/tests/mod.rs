@@ -309,6 +309,7 @@ mod feedback;
 mod floating_pages;
 mod frozen_selection;
 mod graphics;
+mod input_conformance;
 #[path = "input.rs"]
 mod input_domain;
 mod interaction;

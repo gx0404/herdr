@@ -92,7 +92,7 @@ fn prepare_basic_attributes(source: &File, temp: &File) -> io::Result<()> {
 
 pub(crate) fn create_persist_temporary(path: &Path) -> io::Result<File> {
     use interprocess::os::windows::security_descriptor::AsSecurityDescriptorExt as _;
-    let descriptor = super::user_security_descriptor("GA")?;
+    let descriptor = super::user_security_descriptor("GA", "")?;
     let mut attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: null_mut(),
@@ -565,7 +565,7 @@ mod tests {
             use windows_sys::Win32::Security::{
                 GetSecurityDescriptorDacl, CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE,
             };
-            let descriptor = super::super::user_security_descriptor("GA").unwrap();
+            let descriptor = super::super::user_security_descriptor("GA", "").unwrap();
             let mut attributes = SECURITY_ATTRIBUTES {
                 nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: null_mut(),

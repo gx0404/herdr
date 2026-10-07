@@ -196,32 +196,56 @@ impl App {
             focus: params.focus,
             respond_to,
         };
-        let path = checkout_path;
         let source_checkout_path = api_request.source_checkout_path.clone();
         let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let result = if let Some(parent_dir) = parent_dir {
-                std::fs::create_dir_all(&parent_dir).map_err(|err| err.to_string())
-            } else {
-                Ok(())
+        let finished = crate::events::WorktreeAddResult {
+            path: checkout_path,
+            api_request: Some(api_request),
+            result: Ok(()),
+        };
+        let spawned = crate::thread_spawn::spawn_named_with(
+            "herdr-worktree-add",
+            finished,
+            move |mut finished| {
+                finished.result = if let Some(parent_dir) = parent_dir {
+                    std::fs::create_dir_all(&parent_dir).map_err(|err| err.to_string())
+                } else {
+                    Ok(())
+                }
+                .and_then(|()| {
+                    crate::worktree::run_worktree_add_command(
+                        &source_checkout_path,
+                        &finished.path,
+                        &branch,
+                        &base,
+                        params.trust_repository,
+                    )
+                });
+                let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(finished)));
+            },
+        );
+        if let Err((mut finished, err)) = spawned {
+            finished.result = Err(format!("could not start worktree creation: {err}"));
+            self.queue_worktree_spawn_failure(AppEvent::WorktreeAddFinished(Box::new(finished)));
+        }
+    }
+
+    /// Reports a worker that never started through the normal completion path,
+    /// so pending-operation and runtime cleanup stay in one place.
+    fn queue_worktree_spawn_failure(&self, finished: AppEvent) {
+        tracing::warn!("failed to spawn worktree operation thread");
+        match self.event_tx.try_send(finished) {
+            Ok(()) => {}
+            // The event loop drains this channel, so wait for room on a task
+            // instead of dropping the only completion for this request.
+            Err(tokio::sync::mpsc::error::TrySendError::Full(finished)) => {
+                let event_tx = self.event_tx.clone();
+                tokio::spawn(async move {
+                    let _ = event_tx.send(finished).await;
+                });
             }
-            .and_then(|()| {
-                crate::worktree::run_worktree_add_command(
-                    &source_checkout_path,
-                    &path,
-                    &branch,
-                    &base,
-                    params.trust_repository,
-                )
-            });
-            let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(
-                crate::events::WorktreeAddResult {
-                    path,
-                    api_request: Some(api_request),
-                    result,
-                },
-            )));
-        });
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
     }
 
     fn start_api_worktree_remove(
@@ -241,6 +265,10 @@ impl App {
             );
             return;
         };
+        if let Err(err) = self.require_restored_worktree_ready(ws_idx) {
+            Self::send_api_response(respond_to, encode_error(id, err.code, err.message));
+            return;
+        }
         let Some(space) = self
             .state
             .workspaces
@@ -321,16 +349,6 @@ impl App {
             return;
         }
 
-        let shutdown_panes =
-            if Self::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(params.force) {
-                self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx)
-            } else {
-                Vec::new()
-            };
-        // 终止阶梯已移出事件循环（HSR-01），但删除检出目录要求 pane 进程真的退出
-        // （Windows 上进程持有目录会让删除失败），所以在执行 git 的后台线程里补等一次。
-        let wait_for_pane_shutdown = !shutdown_panes.is_empty();
-
         let operation_id = self.next_api_worktree_operation_id();
         self.pending_api_worktree_removes
             .insert(workspace_internal_id.clone(), operation_id);
@@ -348,53 +366,63 @@ impl App {
             id,
             operation_id,
             checkout_key,
-            shutdown_panes,
+            shutdown_panes: Vec::new(),
             respond_to,
         };
         let repo_root = space.repo_root;
-        let path = space.checkout_path;
-        let force = params.force;
         let trust_repository = params.trust_repository;
         let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
+        let mut finished = crate::events::WorktreeRemoveResult {
+            workspace_id: workspace_internal_id,
+            path: space.checkout_path,
+            workspace: Some(Box::new(workspace_snapshot)),
+            worktree: Some(Box::new(worktree)),
+            forced: params.force,
+            api_request: Some(api_request),
+            result: Ok(None),
+        };
+        let (handoff_tx, handoff_rx) =
+            std::sync::mpsc::channel::<crate::events::WorktreeRemoveResult>();
+        let spawned = crate::thread_spawn::spawn_named("herdr-worktree-remove", move || {
+            let Ok(mut finished) = handoff_rx.recv() else {
+                return;
+            };
+            let wait_for_pane_shutdown = finished
+                .api_request
+                .as_ref()
+                .is_some_and(|api| !api.shutdown_panes.is_empty());
             let panes_terminated = !wait_for_pane_shutdown
                 || crate::pane::drain_pending_pane_shutdowns(worktree_remove_pane_drain_timeout());
-            if !panes_terminated {
-                tracing::warn!(
-                    path = %path.display(),
-                    "removing a worktree checkout while its pane processes are still terminating"
-                );
-            }
-            let result = crate::worktree::run_worktree_remove_command_with_recovery(
-                &command,
-                &repo_root,
-                &path,
-                force,
-                trust_repository,
-            )
-            // 删除失败又没等到 pane 进程退出时，把失败归因写进错误：调用方能据此重试，
-            // 而不是看到一条与「进程仍持有目录」无关的 git 报错。
-            .map_err(|err| {
-                if panes_terminated {
-                    err
-                } else {
-                    format!(
-                        "{err}; pane processes were still terminating and may still hold the checkout"
-                    )
-                }
-            });
-            let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(
-                crate::events::WorktreeRemoveResult {
-                    workspace_id: workspace_internal_id,
-                    path,
-                    workspace: Some(Box::new(workspace_snapshot)),
-                    worktree: Some(Box::new(worktree)),
-                    forced: force,
-                    api_request: Some(api_request),
-                    result,
-                },
-            )));
+            finished.result = if panes_terminated {
+                crate::worktree::run_worktree_remove_command_with_recovery(
+                    &command,
+                    &repo_root,
+                    &finished.path,
+                    finished.forced,
+                    trust_repository,
+                )
+            } else {
+                Err("pane processes were still terminating and may still hold the checkout; worktree removal was not attempted".into())
+            };
+            let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(finished)));
         });
+        if let Err(err) = spawned {
+            finished.result = Err(format!("could not start worktree removal: {err}"));
+            self.queue_worktree_spawn_failure(AppEvent::WorktreeRemoveFinished(Box::new(finished)));
+            return;
+        }
+        if Self::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(params.force) {
+            if let Some(api) = finished.api_request.as_mut() {
+                api.shutdown_panes =
+                    self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+            }
+        }
+        if let Err(err) = handoff_tx.send(finished) {
+            let mut finished = err.0;
+            finished.result =
+                Err("worktree removal worker stopped before accepting request".into());
+            self.queue_worktree_spawn_failure(AppEvent::WorktreeRemoveFinished(Box::new(finished)));
+        }
     }
 
     pub(crate) fn handle_api_worktree_add_finished(
@@ -682,22 +710,8 @@ impl App {
                     .pending_worktree_remove_runtime_exits
                     .contains_key(&pane_id)
                 {
-                    if self
-                        .pending_worktree_remove_runtime_restores
-                        .insert(pane_id, operation_id)
-                        .is_none()
-                    {
-                        let event_tx = self.event_tx.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            let _ = event_tx
-                                .send(AppEvent::WorktreeRuntimeRestoreFailed {
-                                    pane_id,
-                                    operation_id,
-                                })
-                                .await;
-                        });
-                    }
+                    self.pending_worktree_remove_runtime_restores
+                        .insert(pane_id, operation_id);
                 } else {
                     pane_updates.extend(self.publish_worktree_runtime_agent_release(pane_id));
                     if !self.respawn_shell_for_launch_pane(pane_id, false) {

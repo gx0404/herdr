@@ -1707,7 +1707,7 @@ pub(crate) fn handle_client_handshake_with_permit(
     }
     let writer_event_tx = server_event_tx.clone();
     let worker_queue = writer_queue.clone();
-    if let Err(error) = std::thread::Builder::new().spawn(move || {
+    if let Err(error) = crate::thread_spawn::spawn_named("herdr-client-writer", move || {
         run_client_writer(write_stream, client_id, worker_queue, writer_event_tx);
     }) {
         writer_queue.close_writer();
@@ -2591,6 +2591,146 @@ mod tests {
     }
 
     const LOADED_WAIT: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn client_writer_spawn_failure_releases_registered_transport_and_handshake_permit() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("client-writer-spawn-failure");
+        let limiter = ClientHandshakeLimiter::new();
+        let pause = limiter.test_pause_at(HandshakeTestStage::BeforeSpawn);
+        let permit = limiter.try_acquire().expect("handshake slot");
+        let (client, server, _path) = local_stream_pair("writer-spawn-failure");
+        let (events, mut receiver) = mpsc::channel(4);
+        let (done_tx, done) = std::sync::mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            crate::thread_spawn::test_hook::fail_next_spawns(1);
+            let result = handle_client_handshake_with_permit(
+                server,
+                42,
+                &events,
+                &Arc::new(AtomicBool::new(false)),
+                Some(permit),
+            );
+            done_tx.send(result).unwrap();
+        });
+        let mut client =
+            crate::platform::prepare_server_client_stream(client, LOADED_WAIT).unwrap();
+        protocol::write_message(&mut client, &endpoint_hello(80, 24)).unwrap();
+        let welcome: ServerMessage = protocol::read_message(
+            &mut HandshakeReader::new(&mut client, Instant::now() + LOADED_WAIT),
+            MAX_FRAME_SIZE,
+        )
+        .unwrap();
+        assert!(endpoint_welcome(welcome).error.is_none());
+        let observer = pause.wait();
+        assert_eq!(limiter.test_transport_count(), 1);
+        assert!(!observer.writer_started());
+        drop(pause);
+
+        let err = done.recv_timeout(LOADED_WAIT).unwrap().unwrap_err();
+        reader.join().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert!(observer.is_complete());
+        assert!(observer.was_aborted());
+        assert!(!observer.writer_started());
+        assert_eq!(limiter.test_transport_count(), 0);
+        assert_eq!(limiter.active.load(Ordering::Acquire), 0);
+        assert!(receiver.try_recv().is_err());
+        assert!(limiter.try_acquire().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn client_accept_spawn_failure_releases_bound_listener() {
+        let path = TestSocketPath(unique_test_path("accept-spawn-failure"));
+        let listener = crate::ipc::bind_local_listener(&path.0).unwrap();
+        let limiter = ClientHandshakeLimiter::new();
+        let (events, _receiver) = mpsc::channel(4);
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        let err = crate::server::client_accept::spawn_windows_client_accept_thread(
+            listener,
+            Arc::new(AtomicBool::new(false)),
+            events,
+            limiter.clone(),
+        )
+        .expect_err("accept thread spawn fails");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(limiter.active.load(Ordering::Acquire), 0);
+        assert_eq!(limiter.test_transport_count(), 0);
+        let _listener = crate::ipc::bind_local_listener(&path.0).expect("listener was released");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_connection_spawn_failure_releases_permit_and_keeps_accepting() {
+        let path = TestSocketPath(unique_test_path("connection-spawn-failure"));
+        let listener = crate::ipc::bind_local_listener(&path.0).unwrap();
+        listener
+            .set_nonblocking(interprocess::local_socket::ListenerNonblockingMode::Accept)
+            .unwrap();
+        let limiter = ClientHandshakeLimiter::new();
+        let (events, mut receiver) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let mut next_client_id = 1;
+        let failed_client = crate::ipc::connect_local_stream(&path.0).unwrap();
+        crate::thread_spawn::test_hook::fail_next_spawns(1);
+        crate::server::client_accept::accept_pending_client_connections(
+            &listener,
+            &mut next_client_id,
+            &should_quit,
+            &events,
+            &limiter,
+        )
+        .unwrap();
+        assert_eq!(next_client_id, 2);
+        assert_eq!(limiter.active.load(Ordering::Acquire), 0);
+        assert_eq!(limiter.test_transport_count(), 0);
+        assert!(receiver.try_recv().is_err());
+        drop(failed_client);
+
+        let client = crate::ipc::connect_local_stream(&path.0).unwrap();
+        let mut client =
+            crate::platform::prepare_server_client_stream(client, LOADED_WAIT).unwrap();
+        protocol::write_message(&mut client, &endpoint_hello(80, 24)).unwrap();
+        crate::server::client_accept::accept_pending_client_connections(
+            &listener,
+            &mut next_client_id,
+            &should_quit,
+            &events,
+            &limiter,
+        )
+        .unwrap();
+        let welcome: ServerMessage = protocol::read_message(
+            &mut HandshakeReader::new(&mut client, Instant::now() + LOADED_WAIT),
+            MAX_FRAME_SIZE,
+        )
+        .unwrap();
+        assert!(endpoint_welcome(welcome).error.is_none());
+        let deadline = Instant::now() + LOADED_WAIT;
+        let connected = loop {
+            if let Ok(event) = receiver.try_recv() {
+                break event;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "second connection reaches the server"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let ServerEvent::ClientShellConnected {
+            client_id, writer, ..
+        } = connected
+        else {
+            panic!("expected second client connection");
+        };
+        assert_eq!(client_id, 2);
+        writer.test_close();
+        drop(client);
+        while !writer.is_complete() || limiter.active.load(Ordering::Acquire) != 0 {
+            assert!(Instant::now() < deadline, "second transport finishes");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(limiter.test_transport_count(), 0);
+    }
 
     #[cfg(windows)]
     struct LiveTransport {

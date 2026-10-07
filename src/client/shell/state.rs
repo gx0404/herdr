@@ -1578,6 +1578,15 @@ pub(crate) struct ClientShellState {
     /// Active link hints session (two-letter URL markers over the viewport).
     pub(super) link_hints: Option<super::link_hints::ClientLinkHints>,
     pub(super) url_click_consumes_until_up: bool,
+    /// The host terminal reports key releases (Kitty event types), so text
+    /// presses can be tracked until their release arrives.
+    pub(super) host_reports_key_releases: bool,
+    /// The host tty's erase character is `^H`: a raw 0x08 is Backspace, not
+    /// Ctrl+H (MobaXterm, PuTTY-style terminals; tmux reads VERASE the same way).
+    pub(super) host_erase_is_ctrl_h: bool,
+    /// The focused pane asks for every key as an escape code, so Herdr pushed
+    /// report-all to the host; plain text input then reaches it as text.
+    pub(super) host_reports_all_keys: bool,
     pub(super) replaying_url_click: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
     pub(super) selection_capture: Option<super::frozen_selection::Capture>,
@@ -1806,6 +1815,9 @@ impl ClientShellState {
             link_hover: None,
             link_hints: None,
             url_click_consumes_until_up: false,
+            host_reports_key_releases: false,
+            host_erase_is_ctrl_h: false,
+            host_reports_all_keys: false,
             replaying_url_click: false,
             selection: None,
             selection_capture: None,

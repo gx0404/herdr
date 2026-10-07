@@ -819,6 +819,10 @@ impl ClientShellState {
         }
     }
 
+    /// Routes mouse input through overlays, shell controls, and pane interactions.
+    ///
+    /// Hit-test order determines which overlapping control receives the event;
+    /// the sidebar toggle takes precedence over the agent scrollbar beneath it.
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
         if self.pending_selection_mouse(mouse, outcome) {
             return;
@@ -2488,9 +2492,20 @@ impl ClientShellState {
                 self.workspace_press = None;
                 self.tab_press = None;
                 self.chrome_drag = None;
-                if super::contains(self.hits.sidebar_divider, point)
-                    && !super::contains(self.hits.sidebar_toggle, point)
-                {
+                // The toggle is painted over the agent scrollbar's last cell.
+                if super::contains(self.hits.sidebar_toggle, point) {
+                    self.sidebar_collapsed = !self.sidebar_collapsed;
+                    self.sidebar_collapsed_manual = true;
+                    // 与键盘 `ToggleSidebar` 一致：折叠态与展开态的 `workspace_scroll`
+                    // 上限不同，切换后按聚焦行重新定位，而不是沿用被钳过的下标。
+                    self.reveal_focused_workspace = true;
+                    self.invalidate_pane_surface();
+                    outcome.repaint = true;
+                    outcome.resize = true;
+                    self.persist_chrome_preferences(outcome);
+                    return;
+                }
+                if super::contains(self.hits.sidebar_divider, point) {
                     let now = std::time::Instant::now();
                     let double_click = self.last_sidebar_divider_click.is_some_and(|last| {
                         now.duration_since(last) <= self.config.double_click_window
@@ -2618,18 +2633,6 @@ impl ClientShellState {
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
                     outcome.repaint = true;
-                    return;
-                }
-                if super::contains(self.hits.sidebar_toggle, point) {
-                    self.sidebar_collapsed = !self.sidebar_collapsed;
-                    self.sidebar_collapsed_manual = true;
-                    // 与键盘 `ToggleSidebar` 一致：折叠态与展开态的 `workspace_scroll`
-                    // 上限不同，切换后按聚焦行重新定位，而不是沿用被钳过的下标。
-                    self.reveal_focused_workspace = true;
-                    self.invalidate_pane_surface();
-                    outcome.repaint = true;
-                    outcome.resize = true;
-                    self.persist_chrome_preferences(outcome);
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

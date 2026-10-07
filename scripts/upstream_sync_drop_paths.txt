@@ -65,8 +65,9 @@ distribution/agent-detection/muse.toml
 distribution/agent-detection/qodercli.toml
 distribution/agent-detection/qwen.toml
 
-# 非六家专属的维护脚本测试（随 hermes 资产一起删除）
+# 非六家专属的维护脚本测试与进程识别 fixture
 scripts/test_hermes_integration_asset.py
+tests/fixtures/hermes-installer-process-info-4910.json
 
 # docs/next：目前没有任何集成商专属页面（集成说明集中在共享的 integrations.mdx
 # 等页面里，按共享文件口径处理）；上游日后新增非六家专属页面时追加到这里。

@@ -32,7 +32,7 @@ struct SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
 
         if let Some(pid) = pid {
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -168,6 +168,7 @@ fn spawn_herdr_with_config(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
     // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
@@ -348,6 +349,42 @@ fn ping_over_socket_returns_version() {
     // Intentionally hardcoded so wire protocol bumps require updating this test.
     // Changing this value means old clients/servers are no longer compatible.
     assert_eq!(value["result"]["protocol"], 23);
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[test]
+fn spawned_server_ignores_inherited_pane_env() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let startup_cwd = base.join("startup");
+    fs::create_dir_all(&startup_cwd).unwrap();
+
+    // A shell inside a herdr pane passes these to every process it starts.
+    let saved: Vec<_> = ["HERDR_STARTUP_CWD", "HERDR_SESSION"]
+        .into_iter()
+        .map(|name| (name, std::env::var_os(name)))
+        .collect();
+    std::env::set_var("HERDR_STARTUP_CWD", &startup_cwd);
+    std::env::set_var("HERDR_SESSION", "inherited");
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    for (name, value) in saved {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let value = send_request(
+        &socket_path,
+        r#"{"id":"req_1","method":"workspace.list","params":{}}"#,
+    );
+    assert_eq!(value["result"]["workspaces"], serde_json::json!([]));
+    assert!(!config_home.join(app_dir_name()).join("sessions").exists());
 
     cleanup_spawned_herdr(child, base);
 }

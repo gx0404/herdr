@@ -12,8 +12,9 @@
   文件系统访问（`app-render.md` 的频率×基数分析适用）。
 - `crates/ghostty-vt/src/**` 是 vendored libghostty-vt 的绑定层：语义问题先看上游补丁
   状态（`vendored-libghostty-vt.md`），不在绑定层复刻终端逻辑。
-- 输入编码/解析（`src/input/encode.rs`、`parse.rs`、`src/pane/kitty_keyboard.rs`
-  等与 pane 域并集）保持 platform-gated：Windows VT 输入路径见 `platform.md`。
+- 输入解析（`src/input/parse.rs`）与 pane 键盘编码（`src/pane/input.rs`、
+  `src/pane/terminal.rs`）保持 platform-gated：Windows VT 输入路径见 `platform.md`。
+  pane 按键统一交给 libghostty 编码；`src/pane/kitty_keyboard.rs` 仅跟踪 handoff 重放状态。
 - Windows PTY actor 的 admission 是明确预算而不是只依赖 channel 容量：输入最多 1024
   项/16 MiB，响应最多 256 项/1 MiB。输入超限返回 `Full`/`WouldBlock`；响应超限丢弃
   整个响应并只记录一次告警，许可随 `Bytes` 的最后一个所有者释放。预算检查不得放回

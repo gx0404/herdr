@@ -47,7 +47,7 @@ impl SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
         self.close_master();
 
         if let Some(pid) = pid {
@@ -120,6 +120,7 @@ fn spawn_server_with_path(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     // HOME 隔离到测试目录：server 的活动树适配器（zcode 等）会按 HOME 读开发机上
     // 真实的 CLI 数据，把外部会话塞进快照，让用例随开发机状态漂移。
@@ -168,6 +169,7 @@ fn spawn_client_process(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
     for key in INHERITED_DIR_OVERRIDES {

@@ -33,6 +33,43 @@ impl HeadlessServer {
             .map(|runtime| (runtime, pane_id))
     }
 
+    /// Whether a pane the client shows asked for SGR pixel mouse reports. Host
+    /// reports go to whichever pane is under the pointer, so an unfocused pane
+    /// needs pixels from the host too (#4750); others get them as cells.
+    fn shell_visible_pane_wants_sgr_pixels(
+        &self,
+        client_id: u64,
+        focused_pane: Option<crate::layout::PaneId>,
+    ) -> bool {
+        let Some(target) = self.shell_target_for_client(client_id) else {
+            return false;
+        };
+        let Some(tab) = self
+            .app
+            .state
+            .workspaces
+            .get(target.workspace_index)
+            .and_then(|workspace| workspace.tabs.get(target.tab_index))
+        else {
+            return false;
+        };
+        if tab.zoomed {
+            return false;
+        }
+        tab.panes.keys().copied().any(|pane_id| {
+            Some(pane_id) != focused_pane
+                && self
+                    .app
+                    .state
+                    .runtime_for_pane_in_workspace(
+                        &self.app.terminal_runtimes,
+                        target.workspace_index,
+                        pane_id,
+                    )
+                    .is_some_and(crate::terminal::TerminalRuntime::sgr_pixel_mouse_enabled)
+        })
+    }
+
     pub(super) fn stream_host_mouse_capture_mode(&mut self) {
         let requested = self
             .clients
@@ -48,7 +85,12 @@ impl HeadlessServer {
                     let child_requests_mouse =
                         metadata.is_some_and(|metadata| metadata.mouse_reporting);
                     let sgr_pixels = client.pixel_mouse
-                        && metadata.is_some_and(|metadata| metadata.sgr_pixel_mouse);
+                        && client.shell_surface_active
+                        && (metadata.is_some_and(|metadata| metadata.sgr_pixel_mouse)
+                            || self.shell_visible_pane_wants_sgr_pixels(
+                                client_id,
+                                focused.map(|(_, pane_id)| pane_id),
+                            ));
                     Some((
                         client_id,
                         client.shell_surface_active

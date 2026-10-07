@@ -57,12 +57,9 @@ MAX_MATCHERS_PER_GATE = 32
 MAX_TOTAL_MATCHERS = 1024
 MAX_MATCHER_CHARS = 512
 
-# Exact (bundled version, published version, published sha256) exceptions that
-# keep older-engine clients on an older published manifest until a release can
-# consume the bundled one. Empty in this fork: the only upstream entry belonged
-# to a manifest the fork no longer bundles (see docs/AGENT_RULES/
-# release-channels.md). The mechanism stays covered by self-made manifests in
-# scripts/test_agent_detection_manifest_check.py.
+# Keep older-engine clients on a published manifest until a release with the
+# bundled manifest's engine ships. Maps agent id to (bundled version, published
+# version, published sha256). Remove an entry once the bundled manifest ships.
 STAGED_PUBLISHED_MANIFESTS: dict[str, tuple[str, str, str]] = {}
 
 UNPUBLISHED_BUNDLED_MANIFESTS: dict[str, tuple[str, str]] = {}

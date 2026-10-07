@@ -205,7 +205,7 @@ compinit
 ## サーバー
 
 ```bash
-herdr server
+herdr server [--allow-unelevated-clients]
 herdr server stop
 herdr server reload-config
 herdr server agent-manifests [--json]
@@ -214,6 +214,8 @@ herdr server reload-agent-manifests
 ```
 
 `herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は、アクティブなエージェント検出マニフェストのソース、キャッシュされたリモートバージョン、直近のリモート更新結果を表示します。`update-agent-manifests` はリモートマニフェストの更新を即座に取得し、実行中のサーバーにリロードして、更新後のマニフェスト状態を表示します。生のステータスレスポンスが欲しいときは `--json` を渡してください。`reload-agent-manifests` は、ローカルオーバーライドの編集後にエージェント検出マニフェストを実行中のサーバーにリロードします。
+
+Windows 専用の `--allow-unelevated-clients` は、同じアカウントの通常権限のクライアントによる、昇格したサーバーの管理者ペインの操作を許可します。管理者サーバーはデフォルトで通常権限のクライアントを拒否します。このフラグは新しいサーバープロセスに適用され、false の `[server].allow_unelevated_clients` より優先されます。設定が true でない限り、再起動後はフラグを再指定してください。設定の再読み込みでは稼働中サーバーの方針は変わりません。セキュリティ上の意味は [Windows 対応](/ja/docs/windows-beta/) を参照してください。
 
 ## 通知
 
@@ -492,17 +494,20 @@ herdr integration status [--outdated-only]
 
 プラグインコマンドは、ローカル実行型ワークフロープラグインをインストールして実行します。プラグインはマニフェストとプロセス外コマンドの組み合わせです。ホスト側の面は Herdr が、実装言語はプラグインが担います。
 
-プラグインのインストール、一覧、削除:
+プラグインのインストール、更新、一覧、削除:
 
 ```bash
 herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]
+herdr plugin update [<plugin_id|owner/repo[/subdir...]>...] [--yes]
 herdr plugin list [--plugin ID] [--json]
 herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>
 herdr plugin enable <plugin_id>
 herdr plugin disable <plugin_id>
 ```
 
-`plugin install` は `ogulcancelik/herdr-plugin-examples/worktree-bootstrap` のような GitHub 省略記法のみを受け付けます。`git` を使い、対話的なターミナルでは信頼プレビューを表示し、サポートされるマニフェストのビルドコマンドを実行し、GitHub インストールを Herdr 管理のディレクトリに保存します。非対話的なインストールには `--yes` を使ってください。GitHub 管理プラグインの再インストールは、その管理チェックアウトを置き換えます。ローカルにリンクされたプラグインへの上書きインストールは拒否されます。プラグインのマニフェストは `min_herdr_version` を宣言しなければならず、プラグインがより新しい Herdr バイナリを要求する場合、install と link は失敗します。`plugin list` はデフォルトで人間可読です。生の API レスポンスが欲しいときは `--json` を渡してください。
+`plugin install` は `ogulcancelik/herdr-plugin-examples/worktree-bootstrap` のような GitHub 省略記法のみを受け付けます。`git` を使い、対話的なターミナルでは信頼プレビューを表示し、サポートされるマニフェストのビルドコマンドを実行し、GitHub インストールを Herdr 管理のディレクトリに保存します。非対話的なインストールには `--yes` を使ってください。`plugin update` は対象を指定しない場合、すべての GitHub 管理プラグインを更新し、指定した場合は列挙したプラグイン id または GitHub ソースだけを更新します。各インストールで指定した ref を維持し、コミットが変わらないものをスキップし、一括更新ではローカルリンクを無視します。非対話的な更新にも `--yes` が必要です。GitHub 管理プラグインの再インストールは新しいインストールディレクトリを作成します。実行中のプラグインは元のファイルを保持し、新しい呼び出しは新しいインストールを使います。ローカルにリンクされたプラグインへの上書きインストールは拒否されます。プラグインのマニフェストは `min_herdr_version` を宣言しなければならず、プラグインがより新しい Herdr バイナリを要求する場合、install と link は失敗します。`plugin list` はデフォルトで人間可読です。生の API レスポンスが欲しいときは `--json` を渡してください。
+
+プラグインのインストールと有効・無効の状態は現在のユーザー全体で共有されます。ある Herdr セッションでインストール、リンク、有効化、無効化すると、すべてのセッションですぐに同じ状態を利用できます。
 
 ローカル開発:
 
@@ -511,7 +516,7 @@ herdr plugin link <path> [--disabled]
 herdr plugin unlink <plugin_id>
 ```
 
-`plugin link` は `herdr-plugin.toml` を含むプラグインディレクトリ、またはマニフェストへの直接パスを受け付けます。ローカルチェックアウトからプラグインを作成・テストしている間はこれが正しいコマンドです。`plugin unlink` はプラグインの登録を解除し、ファイルには触れません。`plugin uninstall` はプラグインの登録を解除し、Herdr 管理の GitHub チェックアウトファイルも削除します。GitHub インストールの場合、uninstall はプラグイン id と、install で使うのと同じ `owner/repo[/subdir...]` 省略記法の両方を受け付けます。アクション、イベントフック、ペイン、リンクハンドラーはマニフェストで宣言します。ランタイムでのアクション登録は v1 の範囲外です。
+`plugin link` は `herdr-plugin.toml` を含むプラグインディレクトリ、またはマニフェストへの直接パスを受け付けます。ローカルチェックアウトからプラグインを作成・テストするときに使います。`plugin unlink` と `plugin uninstall` は登録を解除し、実行中のプラグインが完了できるようファイルを残します。更新と再インストールでも以前のインストールを残し、新しい呼び出しは設定の再読み込みなしで新しいものを使います。その後のインストールや更新の成功時、またはサーバー起動時に、利用していたサーバーがすべて終了済みの古い管理インストールを削除します。設定の再読み込みでは古いインストールを解放しません。プラグインは親コマンドやペインの終了前に、切り離したバックグラウンドプロセスを停止する必要があります。サーバー終了後も生き残るプロセスはクリーンアップから保護されません。追跡情報のない旧形式のインストールとローカルリンクのファイルは残します。GitHub インストールの場合、uninstall はプラグイン id と、install で使うのと同じ `owner/repo[/subdir...]` 省略記法の両方を受け付けます。アクション、イベントフック、ペイン、リンクハンドラーはマニフェストで宣言します。ランタイムでのアクション登録は v1 の範囲外です。
 
 設定ディレクトリ:
 

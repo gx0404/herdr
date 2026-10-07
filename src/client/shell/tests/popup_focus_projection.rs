@@ -1291,6 +1291,62 @@ fn shell_pages_own_keyboard_paste_and_mouse_above_terminal_popup() {
 }
 
 #[test]
+fn report_all_popup_lease_survives_overlay_commits_and_changed_modifiers() {
+    use crate::protocol::{ClientKeyCode, ClientKeyKind};
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_host_reports_key_releases(true);
+    state.set_host_reports_all_keys(true);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface_with_popup());
+
+    let press = state.handle_input_bytes(b"\x1b[1089::99;5u");
+    let [ClientMessage::ClientShellPopupInput {
+        terminal_id,
+        events,
+    }] = &press.requests[..]
+    else {
+        panic!("expected popup press");
+    };
+    let terminal_id = terminal_id.clone();
+    assert!(matches!(
+        &events[..],
+        [ClientPaneInputEvent::Key {
+            code: ClientKeyCode::Char('c'),
+            kind: ClientKeyKind::Press,
+            ..
+        }]
+    ));
+
+    state.open_command_search();
+    let commit = state.handle_input_bytes("a文".as_bytes());
+    assert!(commit.requests.is_empty());
+    assert!(matches!(
+        &state.overlay,
+        Some(ClientShellOverlay::CommandPalette(palette)) if palette.query.as_str() == "a文"
+    ));
+    let repeat = state.handle_input_bytes(b"\x1b[1089::99;5:2u");
+    assert!(repeat.requests.is_empty());
+
+    let release = state.handle_input_bytes(b"\x1b[1089::99;1:3u");
+    assert!(matches!(
+        &release.requests[..],
+        [ClientMessage::ClientShellPopupInput { terminal_id: released_target, events }]
+            if released_target == &terminal_id
+                && matches!(
+                    &events[..],
+                    [ClientPaneInputEvent::Key {
+                        code: ClientKeyCode::Char('c'),
+                        kind: ClientKeyKind::Release,
+                        modifiers: 0,
+                        ..
+                    }]
+                )
+    ));
+    assert!(state.input_leases.is_empty());
+}
+
+#[test]
 fn overlay_blocks_held_popup_repeats_but_delivers_original_release() {
     use crossterm::event::KeyEventKind;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));

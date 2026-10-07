@@ -88,7 +88,7 @@ fn refresh_host_mouse_capture(enabled: bool, sgr_pixels: bool) {
 }
 
 #[cfg(windows)]
-use terminal_setup::{is_ssh_session, windows_vti_input_backend_enabled};
+use terminal_setup::is_ssh_session;
 #[cfg(test)]
 use terminal_setup::{
     should_enable_host_color_scheme_reports, windows_virtual_terminal_input_mode,
@@ -185,7 +185,7 @@ fn run_client_with_mode(
             .with_startup_config_diagnostic(startup_config_diagnostic)
             .with_startup_onboarding(loaded_config.config.should_show_onboarding())
             .with_keybinding_source(keybinding_source)
-            .with_local_endpoint(&socket_path)
+            .with_process_endpoint_preferences(&socket_path)
     });
     let mouse_capture = loaded_config.config.ui.mouse_capture;
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
@@ -217,6 +217,7 @@ fn run_client_with_mode(
         mouse_capture_active: mouse_capture,
         stdin_flush_timeouts,
         host_escape_disambiguation_active: false,
+        host_sgr_pixel_mouse: None,
         initial_host_input: Vec::new(),
         endpoint_keybindings,
         remote_image_paste_key,
@@ -321,6 +322,7 @@ fn run_client_with_mode(
     })?;
     loop_config.host_escape_disambiguation_active =
         terminal_guard.host_escape_disambiguation_active();
+    loop_config.host_sgr_pixel_mouse = terminal_guard.host_sgr_pixel_mouse();
     loop_config.initial_host_input = terminal_guard.take_buffered_host_input();
 
     // Install a panic hook so the foreground client always restores its terminal.
@@ -468,6 +470,7 @@ async fn run_client_loop(
         kitty_graphics_enabled: config.kitty_graphics_enabled,
         pixel_geometry_enabled: config.pixel_geometry_enabled,
         pixel_geometry_exact: initial_pixel_geometry_exact,
+        host_sgr_pixel_mouse: config.host_sgr_pixel_mouse,
         #[cfg(unix)]
         direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
         #[cfg(unix)]
@@ -492,6 +495,8 @@ async fn run_client_loop(
     };
     let mut federated = endpoint_catalog.has_enabled_ssh();
     if let Some(shell) = state.shell.as_mut() {
+        shell.set_host_reports_key_releases(config.host_escape_disambiguation_active);
+        shell.set_host_erase_byte(crate::platform::terminal_erase_byte());
         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
         shell.set_endpoint_catalog(&endpoint_catalog.ssh);
         shell.set_endpoint_methods_for(
@@ -903,7 +908,7 @@ async fn run_client_loop(
                 );
                 if state.shell.is_some() {
                     if will_query_host_cell_size {
-                        let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                        let events = crate::raw_input::parse_framed_input(&data);
                         if let Some((width_px, height_px)) = reported_cell_size_from_events(&events)
                         {
                             store_reported_cell_size(&reported_cell_size, width_px, height_px);
@@ -944,7 +949,7 @@ async fn run_client_loop(
                             continue;
                         }
                     }
-                    let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                    let events = crate::raw_input::parse_framed_input(&data);
                     if crate::raw_input::events_require_host_mode_refresh(&events) {
                         refresh_host_mouse_capture(
                             state.mouse_capture_active,
@@ -1020,7 +1025,7 @@ async fn run_client_loop(
                         AttachInputAction::None => continue,
                     }
                 } else {
-                    let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                    let events = crate::raw_input::parse_framed_input(&data);
                     if crate::raw_input::events_require_host_surface_redraw(
                         &events,
                         state.redraw_on_focus_gained,
@@ -2345,11 +2350,12 @@ async fn run_client_loop(
                             enabled,
                             sgr_pixels,
                             state.pixel_geometry_exact,
+                            state.host_sgr_pixel_mouse,
                         );
                         let mouse_mode_changed = enabled != state.mouse_capture_active
                             || next_sgr_pixels != host_sgr_pixels_active.load(Ordering::Acquire);
                         #[cfg(windows)]
-                        if enabled && windows_vti_input_backend_enabled() && is_ssh_session() {
+                        if enabled && is_ssh_session() {
                             _terminal_guard
                                 .recover_windows_virtual_terminal_input()
                                 .map_err(ClientError::ConnectionFailed)?;
@@ -2359,7 +2365,7 @@ async fn run_client_loop(
                                 .map_err(ClientError::ConnectionFailed)?;
                         }
                         #[cfg(windows)]
-                        if enabled && windows_vti_input_backend_enabled() && !is_ssh_session() {
+                        if enabled && !is_ssh_session() {
                             _terminal_guard
                                 .recover_windows_virtual_terminal_input()
                                 .map_err(ClientError::ConnectionFailed)?;

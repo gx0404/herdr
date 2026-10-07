@@ -273,9 +273,8 @@ pub(super) fn render_agent_list<T>(
     }
 
     if show_scrollbar {
-        // 轨道让出底格：侧栏折叠开关 « 画在同一列的最后一行，几何重叠时
-        // `agent_scrollbar` 在鼠标分派里排在 `sidebar_toggle` 之前且无条件
-        // return，点 « 会变成「列表跳到底」，绘制上也会盖掉 «。
+        // 轨道让出底格，避免覆盖同列最后一行的侧栏折叠开关 «。
+        // 鼠标路由另以 `sidebar_toggle` 优先命中，防止重叠轨道吞掉点击。
         let track = Rect::new(
             body.right().saturating_sub(1),
             body.y,

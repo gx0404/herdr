@@ -124,13 +124,13 @@ class AgentDetectionManifestCheckTests(unittest.TestCase):
             with self.assertRaisesRegex(check.CheckError, "lower than bundled"):
                 check.validate_catalog(website, bundled_manifests, engine_version=1)
 
+    @patch.dict(check.STAGED_PUBLISHED_MANIFESTS, STAGED_TEST_EXCEPTION, clear=True)
     def test_allows_explicitly_staged_published_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             bundled, website = staged_manifest_dirs(Path(tmp))
 
             bundled_manifests = check.load_manifest_dir(bundled, engine_version=3)
-            with patch.object(check, "STAGED_PUBLISHED_MANIFESTS", STAGED_TEST_EXCEPTION):
-                check.validate_catalog(website, bundled_manifests, engine_version=3)
+            check.validate_catalog(website, bundled_manifests, engine_version=3)
 
     def test_rejects_staged_published_manifest_without_an_exception(self):
         with tempfile.TemporaryDirectory() as tmp:

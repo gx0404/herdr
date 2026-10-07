@@ -205,7 +205,7 @@ compinit
 ## 服务器
 
 ```bash
-herdr server
+herdr server [--allow-unelevated-clients]
 herdr server stop
 herdr server reload-config
 herdr server agent-manifests [--json]
@@ -214,6 +214,8 @@ herdr server reload-agent-manifests
 ```
 
 `herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的智能体检测清单来源、缓存的远程版本和最近的远程更新结果。`update-agent-manifests` 立即拉取远程清单更新,重载到运行中的服务器,并打印更新后的清单状态;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把智能体检测清单重载到运行中的服务器。
+
+仅在 Windows 上，`--allow-unelevated-clients` 允许同一账户的普通客户端控制已提权服务器的管理员窗格。管理员服务器默认拒绝普通客户端。该标志只作用于新启动的服务器进程，可覆盖值为 false 的 `[server].allow_unelevated_clients`；除非该设置为 true，否则重启后必须再次传入标志。重载配置不会改变运行中服务器的策略；安全影响详见 [Windows 支持](/zh-cn/docs/windows-beta/)。
 
 ## 通知
 
@@ -492,17 +494,20 @@ herdr integration status [--outdated-only]
 
 插件命令用于安装和运行本地可执行的工作流插件。插件是清单加进程外命令;Herdr 负责宿主侧,插件负责自己的实现语言。
 
-安装、列出和移除插件:
+安装、更新、列出和移除插件:
 
 ```bash
 herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]
+herdr plugin update [<plugin_id|owner/repo[/subdir...]>...] [--yes]
 herdr plugin list [--plugin ID] [--json]
 herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>
 herdr plugin enable <plugin_id>
 herdr plugin disable <plugin_id>
 ```
 
-`plugin install` 只接受 GitHub 简写,比如 `ogulcancelik/herdr-plugin-examples/worktree-bootstrap`。它使用 `git`,在交互式终端显示信任预览,运行受支持的清单构建命令,并把 GitHub 安装保存在 Herdr 管理的目录中。非交互式安装用 `--yes`。重新安装 GitHub 管理的插件会替换该托管检出。不允许覆盖安装到本地链接的插件之上。插件清单必须声明 `min_herdr_version`;当插件要求更新的 Herdr 二进制时,install 和 link 会失败。`plugin list` 默认是人类可读的;要原始 API 响应就传 `--json`。
+`plugin install` 只接受 GitHub 简写，比如 `ogulcancelik/herdr-plugin-examples/worktree-bootstrap`。它使用 `git`，在交互式终端显示信任预览，运行受支持的清单构建命令，并把 GitHub 安装保存在 Herdr 管理的目录中。非交互式安装用 `--yes`。`plugin update` 不指定目标时更新全部 GitHub 托管插件，也可以只更新列出的插件 id 或 GitHub 来源。它保留各安装原来请求的 ref，跳过提交未变化的插件，并在批量更新时忽略本地链接的插件。非交互式更新同样需要 `--yes`。重新安装 GitHub 托管插件会创建新的安装目录。运行中的插件保留原文件，新调用使用新安装。不允许覆盖安装到本地链接的插件之上。插件清单必须声明 `min_herdr_version`；当插件要求更新的 Herdr 二进制时，install 和 link 会失败。`plugin list` 默认是人类可读的；要原始 API 响应就传 `--json`。
+
+插件安装及启用状态对当前用户全局生效。在一个 Herdr 会话中安装、链接、启用或禁用插件后，所有会话都立即获得相同状态。
 
 本地开发:
 
@@ -511,7 +516,7 @@ herdr plugin link <path> [--disabled]
 herdr plugin unlink <plugin_id>
 ```
 
-`plugin link` 接受包含 `herdr-plugin.toml` 的插件目录,或直接指向清单的路径。从本地检出编写或测试插件时,它仍然是正确的命令。`plugin unlink` 注销插件、不动文件。`plugin uninstall` 注销插件,并同时删除 Herdr 管理的 GitHub 检出文件。对 GitHub 安装,uninstall 既接受插件 id,也接受与 install 相同的 `owner/repo[/subdir...]` 简写。动作、事件钩子、窗格和链接处理器在清单中声明;运行时动作注册不在 v1 范围内。
+`plugin link` 接受包含 `herdr-plugin.toml` 的插件目录，或直接指向清单的路径。编写或测试本地插件时使用它。`plugin unlink` 和 `plugin uninstall` 都会注销插件并保留文件，让运行中的插件完成工作。更新和重新安装也保留旧安装；新调用无需重载配置即可使用替代安装。之后成功的安装或更新，或服务器启动时，会在使用旧安装的服务器全部退出后清理不再使用的托管安装。重载配置不会释放旧安装。插件必须在其父命令或窗格退出前停止分离的后台进程；服务器退出后仍存活的进程不受清理保护。没有清理跟踪信息的旧版安装及本地链接文件会保留。对 GitHub 安装，uninstall 既接受插件 id，也接受与 install 相同的 `owner/repo[/subdir...]` 简写。动作、事件钩子、窗格和链接处理器在清单中声明；运行时动作注册不在 v1 范围内。
 
 配置目录:
 

@@ -158,6 +158,7 @@ PowerShell、Python、Rust、Go、Lua、Bun 或用户机器上可用的任何其
 
 ```bash
 herdr plugin install ogulcancelik/herdr-plugin-examples/agent-telegram-notify
+herdr plugin update
 herdr plugin config-dir examples.agent-telegram-notify
 herdr plugin list
 herdr plugin action list --plugin examples.agent-telegram-notify
@@ -174,23 +175,30 @@ herdr plugin pane open --plugin example.layout --entrypoint board
 herdr plugin log list --plugin example.layout
 ```
 
-`plugin install` 只接受 GitHub 简写,比如 `owner/repo/subdir`。它用 `git`
-克隆,在交互式终端展示预览,运行受支持的构建命令,然后把检出保存到
-Herdr 管理的插件数据下并注册。非交互式安装用 `--yes`。重新安装 GitHub
-管理的插件会替换该托管检出。已安装和已链接的插件及其启用状态对当前用户
-全局生效,可在所有 Herdr 会话中使用。即使 Herdr 服务器没有运行,也可以通过
-`plugin install` 和 `plugin link` 注册插件。仅安装在 Herdr 0.7.3 命名会话中的
-插件必须重新 install 或 link;现有的插件配置和状态会保留。
-不允许覆盖安装到本地链接的插件之上;请先 unlink 或 uninstall 本地插件。
-`plugin install` 和 `plugin link` 会创建
-插件的配置和状态目录,`plugin config-dir <id>` 打印配置目录,方便安装
-文档和 shell 脚本使用。
+`plugin install` 只接受 GitHub 简写，比如 `owner/repo/subdir`。它用 `git`
+克隆，在交互式终端展示预览，在新的 Herdr 托管安装目录中构建并注册。
+非交互式安装用 `--yes`。更新和重新安装都会保留上一份安装：运行中的命令和
+窗格继续使用原有文件，新调用无需重载配置即可使用新安装。既有进程不会重启，
+启动钩子仍在下一次服务器启动时运行。
+`plugin update` 不指定目标时更新全部 GitHub 托管插件，也可以指定一个或多个
+插件 id 或 GitHub 来源。它重新获取安装时记录的 ref，跳过提交未变化的插件，
+批量更新时忽略本地链接的插件。非交互式更新用 `--yes`。
+已安装和已链接的插件及其启用状态对当前用户全局生效，可在所有 Herdr 会话中
+使用。即使 Herdr 服务器没有运行，也可以通过 `plugin install` 和 `plugin link`
+注册插件。仅安装在 Herdr 0.7.3 命名会话中的插件必须重新 install 或 link；
+现有的插件配置和状态会保留。
+不允许覆盖安装到本地链接的插件之上；请先 unlink 或 uninstall 本地插件。
+`plugin install` 和 `plugin link` 会创建插件的配置和状态目录，
+`plugin config-dir <id>` 打印配置目录，方便安装文档和 shell 脚本使用。
 
-`plugin uninstall <id-or-source>` 注销插件。对 GitHub 管理的安装,它还会
-删除托管检出,并且既接受插件 id,也接受与 install 相同的
-`owner/repo[/subdir...]` 简写。`plugin unlink <id>` 只注销插件、不动文件,
-对本地开发很有用。v1 没有单独的 `plugin update`;要刷新托管插件,请从
-GitHub 重新安装。
+`plugin uninstall <id-or-source>` 注销插件，既接受插件 id，也接受与 install
+相同的 `owner/repo[/subdir...]` 简写。更新、重新安装和卸载后都会保留安装文件，
+让运行中的插件能够完成工作。之后成功的安装或更新，或服务器启动时，会自动
+清理不再使用的托管安装，但必须等使用它们的服务器都已退出。重载配置不会
+释放旧安装。关闭服务器前请先停止插件工作：服务器退出后仍存活的进程不受
+清理保护。插件必须在其父命令或窗格退出前停止分离的后台进程。没有清理跟踪
+信息的旧版安装会保留。配置和状态也会保留。
+`plugin unlink <id>` 只注销插件、不动文件，对本地开发很有用。
 
 示例菜谱仓库是 `ogulcancelik/herdr-plugin-examples`。它在子目录中包含
 多个独立示例插件,包括 `agent-telegram-notify`、`github-link-preview` 和
@@ -198,9 +206,9 @@ GitHub 重新安装。
 
 ## 构建命令
 
-构建命令在 GitHub `plugin install` 过程中运行,时机在确认之后、Herdr
-注册插件之前。如果构建命令失败,安装中止,插件不会被注册。`plugin link`
-不运行构建命令;本地作者自己构建工作树。构建命令可以生成文件,但在
+构建命令在 GitHub `plugin install` 或更新到不同提交时运行，时机在确认之后、
+Herdr 注册新安装之前。如果构建命令失败，本次安装或更新中止；已安装插件仍
+注册在原安装位置。`plugin link` 不运行构建命令；本地作者自己构建工作树。构建命令可以生成文件,但在
 安装预览之后修改 `herdr-plugin.toml` 会导致安装中止。构建失败时会显示
 插件 id、构建序号、工作目录、命令、退出状态或 spawn 错误,以及截断后的
 stdout/stderr,不会解读工具输出。

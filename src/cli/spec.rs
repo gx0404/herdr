@@ -233,7 +233,7 @@ fn snippet_command() -> Command {
 
 fn server_command() -> Command {
     let t = &crate::i18n::texts().cli_help;
-    Command::new("server")
+    let command = Command::new("server")
         .about(t.server_about)
         .subcommand(Command::new("stop").about(t.server_stop_about))
         .subcommand(Command::new("reload-config").about(t.server_reload_config_about))
@@ -249,7 +249,11 @@ fn server_command() -> Command {
         )
         .subcommand(
             Command::new("reload-agent-manifests").about(t.server_reload_agent_manifests_about),
-        )
+        );
+    #[cfg(windows)]
+    let command =
+        command.arg(flag("allow-unelevated-clients").help(t.server_allow_unelevated_clients_help));
+    command
 }
 
 fn api_command() -> Command {
@@ -901,6 +905,17 @@ fn plugin_command() -> Command {
                 .arg(required("plugin", "PLUGIN")),
         )
         .subcommand(
+            Command::new("update")
+                .about(t.plugin_update_about)
+                .arg(Arg::new("plugins").value_name("PLUGIN").num_args(0..))
+                .arg(
+                    Arg::new("yes")
+                        .short('y')
+                        .long("yes")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
             Command::new("link")
                 .about(t.plugin_link_about)
                 .arg(path_arg("path", "PATH"))
@@ -1173,6 +1188,36 @@ mod tests {
     fn spec_describes_all_completion_commands() {
         let cmd = super::command();
         assert_command_descriptions(&cmd, &mut Vec::new());
+    }
+
+    #[test]
+    fn plugin_update_help_follows_the_cli_language() {
+        use crate::i18n::{has_cjk, lang_guard, texts, Lang};
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let help = long_help(&["plugin", "update"]);
+            let about = texts().cli_help.plugin_update_about;
+            assert!(help.contains(about), "{lang:?}: {help}");
+            assert_eq!(has_cjk(about), chinese);
+            assert!(help.contains("--yes"), "{help}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unelevated_clients_help_follows_the_cli_language() {
+        use crate::i18n::{has_cjk, lang_guard, texts, Lang};
+        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
+            let _guard = lang_guard(lang);
+            let command = super::server_command();
+            let flag = command
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some("allow-unelevated-clients"))
+                .unwrap();
+            let help = flag.get_help().unwrap().to_string();
+            assert_eq!(help, texts().cli_help.server_allow_unelevated_clients_help);
+            assert_eq!(has_cjk(&help), chinese);
+        }
     }
 
     #[test]

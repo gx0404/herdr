@@ -212,6 +212,76 @@ fn state_with_scrollable_agents() -> (ClientShellState, ClientEndpointId) {
     (state, remote)
 }
 
+/// Checks both the reserved toggle cell and hit-test priority if a scrollbar overlaps it.
+#[test]
+fn sidebar_toggle_remains_clickable_with_overflowing_agents() {
+    for saved_machine in [false, true] {
+        for scroll_to_bottom in [false, true] {
+            for overlapping_hits in [false, true] {
+                let (mut state, _) = state_with_scrollable_agents();
+                if !saved_machine {
+                    state.set_endpoint_catalog(&[]);
+                }
+                state.agent_scroll = if scroll_to_bottom { usize::MAX } else { 0 };
+                // Eight local agents fit in the compact tree at 28 rows; this viewport
+                // overflows even after removing the remote endpoint.
+                let frame = state.compose(100, 18).expect("overflowing agent panel");
+                assert!(state.hits.agent_max_scroll > 0);
+                assert!(!state.hits.agent_scrollbar.is_empty());
+                let scroll = state.agent_scroll;
+                assert_eq!(
+                    scroll,
+                    if scroll_to_bottom {
+                        state.hits.agent_max_scroll
+                    } else {
+                        0
+                    }
+                );
+
+                let toggle = state.hits.sidebar_toggle;
+                let buffer = frame.to_ratatui_buffer().expect("sidebar buffer");
+                assert_eq!(buffer[(toggle.x, toggle.y)].symbol(), "«");
+                assert!(!contains(state.hits.agent_scrollbar, (toggle.x, toggle.y)));
+                if overlapping_hits {
+                    // The fork reserves the bottom cell. Extend only the hit rectangle
+                    // to exercise routing precedence independently of that safeguard.
+                    assert_eq!(state.hits.agent_scrollbar.x, toggle.x);
+                    state.hits.agent_scrollbar.height =
+                        toggle.bottom() - state.hits.agent_scrollbar.y;
+                    assert!(contains(state.hits.agent_scrollbar, (toggle.x, toggle.y)));
+                }
+                let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: toggle.x,
+                    row: toggle.y,
+                    modifiers: KeyModifiers::NONE,
+                })]);
+                assert!(
+                    state.sidebar_collapsed,
+                    "collapse with saved_machine={saved_machine}, scroll_to_bottom={scroll_to_bottom}, overlapping_hits={overlapping_hits}"
+                );
+                assert!(state.sidebar_collapsed_manual);
+                assert!(state.reveal_focused_workspace);
+                assert!(outcome.repaint && outcome.resize);
+                assert_eq!(state.agent_scroll, scroll);
+                assert!(state.chrome_drag.is_none());
+
+                state.compose(100, 18).expect("collapsed sidebar");
+                let toggle = state.hits.sidebar_toggle;
+                let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: toggle.x,
+                    row: toggle.y,
+                    modifiers: KeyModifiers::NONE,
+                })]);
+                assert!(!state.sidebar_collapsed);
+                assert!(outcome.repaint && outcome.resize);
+                assert!(state.chrome_drag.is_none());
+            }
+        }
+    }
+}
+
 #[test]
 fn agent_navigation_reveals_offscreen_targets() {
     use crate::input::KeybindAction;
