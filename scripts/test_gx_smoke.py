@@ -25,6 +25,14 @@ SMOKE_HOST = os.name == "nt" or sys.platform.startswith("linux")
 SMOKE_HOST_REASON = "GX smoke runtime supports only Linux and Windows hosts"
 
 
+def watchdog_log_directory() -> Path:
+    base = ROOT / "target/ci-release-evidence/watchdog-probes"
+    base.mkdir(parents=True, exist_ok=True)
+    logs = Path(tempfile.mkdtemp(prefix="probe-", dir=base))
+    print(f"watchdog diagnostic logs retained: {logs.relative_to(ROOT)}", file=sys.stderr, flush=True)
+    return logs
+
+
 def watchdog_diagnostics(logs: Path) -> str:
     tails = []
     for name in ("stdout", "stderr"):
@@ -298,12 +306,9 @@ class WatchdogTests(unittest.TestCase):
 
     def test_owner_killed_mid_probe_leaves_no_owned_processes(self):
         options = {} if os.name == "nt" else {"start_new_session": True}
-        log_base = ROOT / "target/tmp/gx-watchdog-tests"
-        log_base.mkdir(parents=True, exist_ok=True)
-        logs = tempfile.TemporaryDirectory(prefix="probe-", dir=log_base)
-        self.addCleanup(logs.cleanup)
-        stdout = self.enterContext((Path(logs.name) / "stdout.txt").open("w+b"))
-        stderr = self.enterContext((Path(logs.name) / "stderr.txt").open("w+b"))
+        logs = watchdog_log_directory()
+        stdout = self.enterContext((logs / "stdout.txt").open("w+b"))
+        stderr = self.enterContext((logs / "stderr.txt").open("w+b"))
 
         parent = subprocess.Popen([sys.executable, str(ROOT / "scripts/gx_smoke_runtime.py"), "--reaper-probe"],
                                   stdout=stdout, stderr=stderr, **options)
@@ -326,9 +331,9 @@ class WatchdogTests(unittest.TestCase):
                     break
                 time.sleep(0.05)
             if root is None:
-                self.fail(f"probe not ready, parent exit={parent.poll()}\n{watchdog_diagnostics(Path(logs.name))}")
+                self.fail(f"probe not ready, parent exit={parent.poll()}\n{watchdog_diagnostics(logs)}")
             if not all(smoke.same_process(item) for item in identities):
-                self.fail(f"probe processes not alive\n{watchdog_diagnostics(Path(logs.name))}")
+                self.fail(f"probe processes not alive\n{watchdog_diagnostics(logs)}")
             if os.name == "nt":
                 parent.kill()
             else:
@@ -338,9 +343,9 @@ class WatchdogTests(unittest.TestCase):
             while time.monotonic() < deadline and (root.exists() or any(smoke.same_process(item) for item in identities)):
                 time.sleep(0.1)
             if root.exists():
-                self.fail(f"watchdog left sandbox {root}\n{watchdog_diagnostics(Path(logs.name))}")
+                self.fail(f"watchdog left sandbox {root}\n{watchdog_diagnostics(logs)}")
             if any(smoke.same_process(item) for item in identities):
-                self.fail(f"watchdog left owned Python processes\n{watchdog_diagnostics(Path(logs.name))}")
+                self.fail(f"watchdog left owned Python processes\n{watchdog_diagnostics(logs)}")
         finally:
             if parent.poll() is None:
                 parent.kill()
@@ -348,6 +353,45 @@ class WatchdogTests(unittest.TestCase):
 
 
 class WatchdogDiagnosticTests(unittest.TestCase):
+    def test_logs_remain_writable_by_child_after_test_handle_closes(self):
+        logs = watchdog_log_directory()
+        ready, release = logs / "ready", logs / "release"
+        script = '''import pathlib, sys, time
+ready, release = map(pathlib.Path, sys.argv[1:])
+ready.write_text("ready")
+deadline = time.monotonic() + 5
+while not release.exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("test did not release log holder")
+    time.sleep(0.01)
+print("late guard output", file=sys.stderr, flush=True)
+'''
+        probe = unittest.TestCase()
+        child = None
+        try:
+            stdout = probe.enterContext((logs / "stdout.txt").open("w+b"))
+            stderr = probe.enterContext((logs / "stderr.txt").open("w+b"))
+            child = subprocess.Popen([sys.executable, "-c", script, str(ready), str(release)],
+                                     stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+            deadline = time.monotonic() + 5
+            while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), watchdog_diagnostics(logs))
+            self.assertTrue(probe.doCleanups())
+            self.assertTrue(stdout.closed)
+            self.assertTrue(stderr.closed)
+            self.assertIsNone(child.poll())
+            self.assertTrue((logs / "stderr.txt").exists())
+            release.touch()
+            self.assertEqual(child.wait(timeout=5), 0, watchdog_diagnostics(logs))
+            self.assertEqual((logs / "stderr.txt").read_text().strip(), "late guard output")
+        finally:
+            if child is not None:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+            probe.doCleanups()
+
     def test_tail_reads_only_last_8192_bytes_per_stream(self):
         stdout = MagicMock(wraps=io.BytesIO(b"discard" * 2000 + b"a" * 8192))
         stderr = MagicMock(wraps=io.BytesIO(b"b" * 8191 + b"\xff"))
