@@ -1,16 +1,45 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SMOKE = ROOT / "scripts/release_perf_smoke.sh"
 CASE = ROOT / "scripts/release_perf_case.sh"
+
+
+def _save_timeout_evidence(root: Path, diagnostics: Path, error: subprocess.TimeoutExpired):
+    stderr = error.stderr or b""
+    if isinstance(stderr, str):
+        stderr = stderr.encode("utf-8")
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    (diagnostics / "harness-stderr.txt").write_bytes(stderr[-65536:])
+    evidence = {"status": "timeout", "timeout_seconds": error.timeout,
+                "stderr_truncated": len(stderr) > 65536}
+    probes = root / "probes"
+    for name in ("last-step.txt", "calls.txt", "tmux-probes.txt"):
+        path = probes / name
+        if probes.is_symlink() or path.is_symlink() or not path.is_file():
+            continue
+        with path.open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - 4096))
+            content = stream.read(4096)
+        (diagnostics / name).write_bytes(content)
+        evidence[f"{name}_truncated"] = size > 4096
+        if name == "calls.txt":
+            phases = content.decode("utf-8", errors="replace").splitlines()
+            evidence["phase_counts_in_retained_tail"] = {
+                phase: phases.count(phase) for phase in ("launch", "control", "stop", "delete", "list")
+            }
+    (diagnostics / "timeout.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
 
 class ReleasePerfScriptContractTests(unittest.TestCase):
@@ -250,6 +279,7 @@ case "$1 ${2:-}" in
   'pane read') printf 'bench-output-'; exit 0 ;;
   *) exit 91 ;;
 esac
+printf 'herdr:%s\\n' "$phase" > "$PROBE_DIR/last-step.txt"
 [[ -f "$PROBE_DIR/$phase.env" ]] || env -0 > "$PROBE_DIR/$phase.env"
 printf '%s\\n' "$phase" >> "$PROBE_DIR/calls.txt"
 [[ $CONTRACT_FAULT != "$phase" ]] || exit 41
@@ -353,6 +383,7 @@ exec "$CONTRACT_BASH" "$@"
 export PATH="$CONTRACT_ROOT/bin:/usr/bin:/bin"
 export CONTRACT_BASH="$BASH"
 sleep() { :; }
+printf 'harness-start\\n' > "$PROBE_DIR/last-step.txt"
 "$CONTRACT_ROOT/bin/capture" before
 rm() {
   [[ $# -eq 2 && $1 == -rf ]] || return 93
@@ -417,12 +448,20 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
             harness += 'exit "$CONTRACT_STATUS"\n'
             harness_path = root / "contract.sh"
             harness_path.write_text(harness, encoding="utf-8", newline="\n")
-            result = subprocess.run(
-                [bash, "--noprofile", "--norc", f"{shell_root}/contract.sh"],
-                cwd=root, env=environment, capture_output=True, text=True, timeout=60, check=False,
-            )
+            diagnostics = ROOT / "target/ci-release-evidence/perf-fixtures" / f"{script.stem}-{fault or 'normal'}-{root.name}"
+            try:
+                result = subprocess.run(
+                    [bash, "--noprofile", "--norc", f"{shell_root}/contract.sh"],
+                    cwd=root, env=environment, capture_output=True, text=True, timeout=60, check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                try:
+                    _save_timeout_evidence(root, diagnostics, error)
+                except Exception as evidence_error:
+                    if hasattr(error, "add_note"):
+                        error.add_note(f"timeout evidence could not be saved: {type(evidence_error).__name__}")
+                raise
             if result.stderr:
-                diagnostics = ROOT / "target/ci-release-evidence/perf-fixtures" / f"{script.stem}-{fault or 'normal'}-{root.name}"
                 diagnostics.mkdir(parents=True)
                 stderr_path = diagnostics / "harness-stderr.txt"
                 stderr_path.write_bytes(result.stderr.encode("utf-8"))
@@ -648,6 +687,61 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
     def test_smoke_remove_failure_preserves_status_with_startup_stderr(self):
         warning = "bash.exe: warning: could not find /tmp, please create!\n"
         self._run_contract(SMOKE, 23, fault="remove", startup_stderr=warning)
+
+    def test_timeout_preserves_bounded_evidence_before_temporary_cleanup(self):
+        original_run = subprocess.run
+        for stderr in (b"x" * 70000, "诊断" * 20000, None):
+            with self.subTest(stderr_type=type(stderr).__name__):
+                timeout = subprocess.TimeoutExpired("contract", 60, stderr=stderr)
+
+                def time_out(command, **kwargs):
+                    if str(command[-1]).endswith("/contract.sh"):
+                        root = kwargs["cwd"]
+                        (root / "probes/calls.txt").write_bytes(b"control\n" * 1000 + b"delete\n")
+                        (root / "probes/last-step.txt").write_bytes(b"s" * 5000)
+                        (root / "probes/tmux-probes.txt").write_text("50\n")
+                        (root / "probes/before.env").write_text("FAKE_USER_ENV=must-not-copy\n")
+                        self.assertEqual(kwargs["timeout"], 60)
+                        raise timeout
+                    return original_run(command, **kwargs)
+
+                with patch("scripts.test_release_perf.subprocess.run", side_effect=time_out), patch(
+                    "scripts.test_release_perf._save_timeout_evidence", wraps=_save_timeout_evidence
+                ) as save:
+                    with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                        self._run_contract(CASE, 0)
+                self.assertIs(caught.exception, timeout)
+                save.assert_called_once()
+                root, diagnostics, _ = save.call_args.args
+                self.assertFalse(root.exists())
+                raw = stderr.encode("utf-8") if isinstance(stderr, str) else stderr or b""
+                self.assertEqual((diagnostics / "harness-stderr.txt").read_bytes(), raw[-65536:])
+                self.assertEqual((diagnostics / "last-step.txt").stat().st_size, 4096)
+                self.assertEqual((diagnostics / "calls.txt").stat().st_size, 4096)
+                self.assertFalse((diagnostics / "before.env").exists())
+                metadata = json.loads((diagnostics / "timeout.json").read_text())
+                self.assertEqual(metadata["status"], "timeout")
+                self.assertEqual(metadata["timeout_seconds"], 60)
+                self.assertEqual(metadata["stderr_truncated"], len(raw) > 65536)
+                self.assertTrue(metadata["calls.txt_truncated"])
+                self.assertEqual(metadata["phase_counts_in_retained_tail"]["delete"], 1)
+
+    def test_timeout_evidence_write_failure_does_not_mask_original_timeout(self):
+        original_run = subprocess.run
+        timeout = subprocess.TimeoutExpired("contract", 60, stderr=b"original stderr")
+
+        def time_out(command, **kwargs):
+            if str(command[-1]).endswith("/contract.sh"):
+                raise timeout
+            return original_run(command, **kwargs)
+
+        with patch("scripts.test_release_perf.subprocess.run", side_effect=time_out), patch(
+            "scripts.test_release_perf._save_timeout_evidence", side_effect=PermissionError("fixture failure")
+        ):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                self._run_contract(CASE, 0)
+        self.assertIs(caught.exception, timeout)
+        self.assertEqual(caught.exception.stderr, b"original stderr")
 
 
 if __name__ == "__main__":
