@@ -65,7 +65,7 @@ impl App {
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });
-        let (rows, cols) = self.state.estimate_pane_size();
+        let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
@@ -74,6 +74,7 @@ impl App {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
+        let before = self.capture_session_layout();
         let result = self
             .state
             .workspaces
@@ -117,7 +118,6 @@ impl App {
                     self.state.switch_workspace_tab(ws_idx, tab_idx);
                     self.state.mode = Mode::Terminal;
                 }
-                self.authorize_session_layout_change();
                 self.schedule_session_save();
                 self.emit_tab_created_events(ws_idx, tab_idx);
                 // APP-012：不做 expect；新建 tab 元数据缺失按创建失败返回。
@@ -128,6 +128,7 @@ impl App {
                         "created tab metadata is unavailable",
                     );
                 };
+                self.authorize_session_layout_change(before);
                 encode_success(id, result)
             }
             Err(err) => encode_error(id, "tab_create_failed", err.to_string()),
@@ -212,7 +213,6 @@ impl App {
             .is_some_and(|ws| ws.move_tab(tab_idx, insert_index));
         let tabs = self.tab_list_info(ws_idx);
         if moved {
-            self.authorize_session_layout_change();
             self.schedule_session_save();
             self.emit_event(EventEnvelope {
                 event: EventKind::TabMoved,
@@ -256,9 +256,10 @@ impl App {
                 );
             }
             let workspace = self.workspace_info(ws_idx);
+            let before = self.capture_session_layout();
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
-            self.authorize_session_layout_change();
+            self.authorize_session_layout_change(before);
             self.state.remove_plugin_pane_records(pane_ids);
             self.shutdown_detached_terminal_runtimes();
             self.emit_event(EventEnvelope {
@@ -278,6 +279,7 @@ impl App {
             return encode_success(id, ResponseResult::Ok {});
         }
 
+        let before = self.capture_session_layout();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };
@@ -291,7 +293,7 @@ impl App {
         self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
-        self.authorize_session_layout_change();
+        self.authorize_session_layout_change(before);
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
             event: EventKind::TabClosed,

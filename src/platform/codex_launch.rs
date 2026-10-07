@@ -80,6 +80,18 @@ fn install_link(target: &Path, directory: &Path) -> io::Result<()> {
 #[cfg(windows)]
 mod native_tools;
 
+pub(crate) fn dispatch_native_tool(argv: &[OsString]) -> Option<io::Result<()>> {
+    #[cfg(windows)]
+    {
+        native_tools::dispatch(argv)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = argv;
+        None
+    }
+}
+
 pub(crate) fn configure_child(command: &mut Command) -> io::Result<()> {
     #[cfg(windows)]
     {

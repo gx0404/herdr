@@ -153,7 +153,7 @@ pub struct App {
     pane_exit_cascade_until: Option<Instant>,
     /// 最近恢复或派发的快照所含 workspace/tab/pane 身份；派发不代表后台写盘成功。
     persisted_session_layout: session::SessionLayout,
-    /// 护栏窗口内经显式布局变更或受限自动补位授权的身份基线；派发后清空。
+    /// 按显式操作差量累积的保护基线，保留操作前已丢失的身份；受限自动补位可替换，派发后清空。
     authorized_session_layout: Option<session::SessionLayout>,
     /// 测试用：真正派发出去的会话写盘次数，守住「一次级联只写一次」。
     #[cfg(test)]
@@ -443,11 +443,18 @@ impl App {
                 .pane_history
                 .then(crate::persist::load_history)
                 .flatten();
+            let (cols, rows) = config.headless_size();
             let (ws, terminals, terminal_runtimes) = crate::persist::restore(
                 snap,
                 history.as_ref(),
-                24,
-                80,
+                rows,
+                cols,
+                crate::ui::PaneChrome {
+                    borders: config.ui.pane_borders,
+                    gaps: config.ui.pane_gaps,
+                    outer_borders: config.ui.pane_outer_borders,
+                    scrollbars: config.ui.pane_scrollbars,
+                },
                 config.advanced.scrollback_limit_bytes,
                 &config.terminal.default_shell,
                 config.terminal.shell_mode,
@@ -3103,6 +3110,83 @@ selection_mix_ratio = 0.5
     }
 
     #[tokio::test]
+    async fn hidden_panes_start_at_the_size_their_tab_layout_gives_them() {
+        let mut app = test_app();
+        let mut visible = Workspace::test_new("visible-with-tiny-first-pane");
+        let first = visible.tabs[0].root_pane;
+        for _ in 0..4 {
+            visible.tabs[0].layout.focus_pane(first);
+            visible.test_split(ratatui::layout::Direction::Vertical);
+        }
+        app.state.workspaces = vec![visible];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view_without_resizing_panes(
+            &mut app.state,
+            &app.terminal_runtimes,
+            area,
+        );
+        assert!(app.state.view.pane_infos[0].rect.height <= 3);
+
+        let size_of = |app: &App, ws_idx: usize, pane_id| {
+            app.state
+                .runtime_for_pane_in_workspace(&app.terminal_runtimes, ws_idx, pane_id)
+                .unwrap()
+                .current_size()
+        };
+        let relayout = |app: &App, ws_idx: usize| {
+            crate::ui::resize_tab_surface(
+                &app.state,
+                &app.terminal_runtimes,
+                ws_idx,
+                0,
+                area,
+                crate::kitty_graphics::HostCellSize::default(),
+            );
+        };
+
+        let ws_idx = app
+            .create_workspace_with_options(std::env::temp_dir(), false)
+            .unwrap();
+        assert_eq!(app.state.active, Some(0));
+        let root = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let spawned = size_of(&app, ws_idx, root);
+        relayout(&app, ws_idx);
+        assert_eq!(size_of(&app, ws_idx, root), spawned);
+        assert!(spawned.0 > 30, "hidden root spawned at {spawned:?}");
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "req_hidden_split_size".into(),
+                method: crate::api::schema::Method::PaneSplit(
+                    crate::api::schema::PaneSplitParams {
+                        workspace_id: None,
+                        target_pane_id: Some(app.pane_info(ws_idx, root).unwrap().pane_id),
+                        direction: crate::api::schema::SplitDirection::Down,
+                        ratio: Some(0.3),
+                        cwd: None,
+                        focus: false,
+                        right_click: Default::default(),
+                        env: Default::default(),
+                    },
+                ),
+            });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let (_, new_pane) = app
+            .parse_pane_id(response["result"]["pane"]["pane_id"].as_str().unwrap())
+            .unwrap();
+        let spawned = size_of(&app, ws_idx, new_pane);
+        relayout(&app, ws_idx);
+        assert_eq!(size_of(&app, ws_idx, new_pane), spawned);
+
+        for (_terminal_id, runtime) in app.terminal_runtimes.drain().collect::<Vec<_>>() {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
     async fn pane_split_request_uses_active_focused_pane_when_target_is_omitted() {
         let _guard = config_env_lock().lock().unwrap();
         let original_shell = std::env::var_os("SHELL");
@@ -3750,7 +3834,7 @@ selection_mix_ratio = 0.5
     }
 
     #[test]
-    fn session_shrink_guard_allows_explicit_api_close_without_reviving_closed_panes() {
+    fn session_shrink_guard_defers_explicit_api_close_after_prior_loss() {
         let (_env, _dirs) = isolated_session_dirs("explicit-api-close-under-guard");
         let mut workspace = Workspace::test_new("explicit-api-close");
         let automatically_exited = workspace.tabs[0].root_pane;
@@ -3778,20 +3862,32 @@ selection_mix_ratio = 0.5
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["result"]["type"], "ok");
+        app.state.assert_invariants_for_test();
+        assert_eq!(app.state.workspaces[0].tabs[0].panes.len(), 1);
 
         app.save_session_now();
-        let snapshot = crate::persist::load().expect("explicit close should be persisted");
+        assert_eq!(persisted_session_value(), baseline);
+        let until = app.pane_exit_cascade_until.expect("cascade guard");
+        app.start_background_session_save(until - Duration::from_nanos(1));
+        finish_background_session_save(&mut app);
+        assert_eq!(
+            persisted_session_value(),
+            baseline,
+            "the explicit close must not authorize an earlier automatic loss before expiry"
+        );
+        assert_eq!(app.session_save_deadline, Some(until));
+        app.start_background_session_save(until);
+        finish_background_session_save(&mut app);
+
+        let snapshot = crate::persist::load().expect("explicit close should persist after expiry");
         let tab = &snapshot.workspaces[0].tabs[0];
         assert_eq!(tab.panes.len(), 1);
         assert!(tab.panes.contains_key(&survivor.raw()));
         assert!(!tab.panes.contains_key(&automatically_exited.raw()));
         assert!(!tab.panes.contains_key(&explicitly_closed.raw()));
-
-        let restored_layout = session::SessionLayout::from_snapshot(&snapshot);
         assert_eq!(
-            restored_layout.pane_count(),
-            1,
-            "a restart must restore only the explicitly surviving pane"
+            session::SessionLayout::from_snapshot(&snapshot).pane_count(),
+            1
         );
     }
 
@@ -4087,7 +4183,7 @@ selection_mix_ratio = 0.5
     }
 
     #[test]
-    fn durable_mutation_after_pane_exit_checkpoint_wins_on_shutdown() {
+    fn unrelated_creation_after_pane_exit_checkpoint_is_deferred_until_guard_expires() {
         let (_env, _dirs) = isolated_session_dirs("pane-exit-newer-session-state");
 
         for another_interrupted_exit in [false, true] {
@@ -4103,22 +4199,44 @@ selection_mix_ratio = 0.5
                 pane_id,
                 exit_reason: crate::platform::ChildExitReason::Interrupted,
             });
-            app.state.workspaces = vec![Workspace::test_new("newer")];
+            let baseline = persisted_session_value();
+            let mut newer = Workspace::test_new("newer");
+            let newer_root = newer.tabs[0].root_pane;
+            let survivor = if another_interrupted_exit {
+                newer.test_split(ratatui::layout::Direction::Horizontal)
+            } else {
+                newer_root
+            };
+            let before = app.capture_session_layout();
+            app.state.workspaces = vec![newer];
             app.state.active = Some(0);
             app.state.ensure_test_terminals();
-            app.authorize_session_layout_change();
+            app.authorize_session_layout_change(before);
             app.state.mark_session_dirty();
             if another_interrupted_exit {
                 app.handle_internal_event(AppEvent::PaneDied {
-                    pane_id: app.state.workspaces[0].tabs[0].root_pane,
+                    pane_id: newer_root,
                     exit_reason: crate::platform::ChildExitReason::Interrupted,
                 });
             }
+            app.state.assert_invariants_for_test();
             app.save_session_on_shutdown();
+            assert_eq!(persisted_session_value(), baseline);
+            let until = app.pane_exit_cascade_until.expect("cascade guard");
+            app.start_background_session_save(until - Duration::from_nanos(1));
+            finish_background_session_save(&mut app);
+            assert_eq!(persisted_session_value(), baseline);
+            assert_eq!(app.session_save_deadline, Some(until));
+            app.start_background_session_save(until);
+            finish_background_session_save(&mut app);
 
-            let snapshot = crate::persist::load().expect("newer session should be saved");
+            let snapshot = crate::persist::load().expect("newer session should save after expiry");
             assert_eq!(snapshot.workspaces.len(), 1);
             assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("newer"));
+            assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 1);
+            assert!(snapshot.workspaces[0].tabs[0]
+                .panes
+                .contains_key(&survivor.raw()));
         }
     }
 

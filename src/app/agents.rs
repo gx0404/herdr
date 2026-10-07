@@ -400,7 +400,7 @@ impl App {
         if !terminal.is_agent_terminal() {
             return None;
         }
-        let pane = self.pane_info(ws_idx, pane_id)?;
+        let pane = self.pane_metadata(ws_idx, pane_id)?;
         // 投影路径不带活动树，连同计数一起留空（客户端快照另有自己的下发形态）。
         let activity = include_activity
             .then(|| self.state.agent_activity.activity(pane_id))

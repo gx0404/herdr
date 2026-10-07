@@ -1212,7 +1212,13 @@ from before endpoint generation 1 need one final update.
 
 The initial endpoint handshake has a four-second absolute deadline and a 2 MiB first-frame limit; sending an incomplete hello in pieces does not extend the deadline. A server admits at most 32 handshakes concurrently. These limits protect the server from clients that connect without completing setup, so reconnect rather than waiting indefinitely.
 
+During server shutdown, endpoint and direct-terminal transports share a one-second output-drain window, followed by up to one second for I/O cancellation. This includes connections whose writer has started but whose connection event has not yet entered the server queue. A client that stops reading cannot escape that shared shutdown budget; cancellation does not confirm delivery of remaining output.
+
 Generation-1 endpoint requests have a 1 MiB request-body limit and 128-byte limits for the boot and request identifiers. Responses are sent in chunks of up to 512 KiB. The client accepts at most 64 MiB or 4,096 chunks for one response; exceeding either budget fails that request with `endpoint_response_too_large` while leaving the endpoint connection available for later requests. Queued or in-flight endpoint actions expire after 60 seconds with `endpoint_timeout`.
+
+The server stages bulk responses and admits their chunks only when the bounded output queue has room, rather than disconnecting a slow reader because one valid response exceeds the queue size. It permits at most three bulk responses per connection and six server-wide, counting work still preparing a response; excess requests receive `endpoint_busy` before their operation starts. Each connection has one separate bounded control-response slot for metrics or account-usage unsubscription, so stopping a subscription does not require a free bulk slot. Small surface, view, and snapshot-release confirmations also remain available. The existing 4 MiB/4,096-message control queue is not enlarged, and ordinary control messages retain reserved capacity.
+
+The 64 MiB response bound applies to the complete JSON body after request-ID correlation, not just its result field. The server rejects an oversized body before sending a successful-response prefix; such an error does not roll back an operation that already ran. These transport limits do not increase a method's own snapshot, row, or content limits. A client-local timeout likewise does not undo an executed action: generation 1 has no per-request cancellation message, so pending delivery remains bounded until it completes or the connection is closed.
 
 The numbered binary protocol remains for same-install and internal operations,
 including direct terminal attach and live handoff. Check `ping` or `herdr status`

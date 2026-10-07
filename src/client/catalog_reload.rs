@@ -347,6 +347,7 @@ mod tests {
                     &remote,
                     2,
                     endpoint::ClientEndpointStatus::Online,
+                    None,
                     now
                 ));
             }

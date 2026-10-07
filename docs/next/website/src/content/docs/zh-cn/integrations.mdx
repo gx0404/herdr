@@ -183,6 +183,8 @@ herdr integration install kimi
 
 Herdr 默认使用 `~/.kimi-code`,设置了 `KIMI_CODE_HOME` 时使用后者。Kimi Code 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`,并在 `config.toml` 中追加 Herdr 管理的 `[[hooks]]` 条目。卸载会移除 Herdr 管理的配置块并删除钩子脚本。
 
+安装和卸载都会在修改配置或托管钩子文件前校验 TOML 与管理块标记。标记缺失、逆序、嵌套或重复时会拒绝操作,不修改这些文件。TOML 字符串中形似标记的文本不算管理块;无关注释和 LF/CRLF 换行会保留。请先修复或还原损坏的 `config.toml`,再重试。当前安装要求没有 `hooks` 字段,或使用 `[[hooks]]` 表;已有 `hooks = []` 或内联钩子数组会被拒绝,不会自动转换。原文件没有末尾换行时,会补上追加管理块所需的分隔换行,卸载后该换行仍会保留。
+
 Herdr 用 `kimi --session <id>` 恢复保存的 Kimi 会话。
 
 ## OpenCode

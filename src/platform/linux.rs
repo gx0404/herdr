@@ -15,12 +15,14 @@ use super::{
 };
 
 pub(crate) use super::unix_common::{
-    configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
-    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
-    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
-    remote_ssh_config_paths, reusable_remote_ssh_config_dir, set_default_plugin_pane_pwd,
-    shutdown_client_stream, status_commands_supported, wait_client_stream_readable,
-    write_client_stream, write_remote_ssh_config_file, ClientStreamReader, StatusCommandGuard,
+    client_stream_control, configure_status_command, create_remote_private_dir,
+    create_remote_ssh_config_dir, create_remote_ssh_config_file, finish_client_stream, hostname,
+    local_datetime, prepare_server_client_stream, read_client_handshake,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
+    remote_reattach_program, remote_ssh_config_paths, reusable_remote_ssh_config_dir,
+    set_default_plugin_pane_pwd, status_commands_supported, wait_client_stream_readable,
+    write_client_stream, write_remote_ssh_config_file, ClientStreamControl, ClientStreamReader,
+    ServerClientStream, StatusCommandGuard,
 };
 
 #[cfg(test)]
@@ -144,28 +146,35 @@ pub(crate) fn write_config_temporary(
     temporary: &std::path::Path,
     contents: &[u8],
 ) -> std::io::Result<()> {
-    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
         .open(temporary)?;
     if let Some(source) = source {
         let input = std::fs::File::open(source)?;
-        let metadata = input.metadata()?;
-        let current = output.metadata()?;
-        if (metadata.uid(), metadata.gid()) != (current.uid(), current.gid()) {
-            // Keep ownership before restoring mode/ACLs; chown can clear mode bits.
-            if unsafe { libc::fchown(output.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-        // Replace inherited ACLs before enabling the original mode. Prepare all
-        // access controls while the temporary is empty, before writing secrets.
-        copy_config_xattrs(input.as_raw_fd(), output.as_raw_fd())?;
-        output.set_permissions(metadata.permissions())?;
+        prepare_config_metadata(&input, &output)?;
     }
     output.write_all(contents)?;
     output.sync_all()
+}
+
+pub(crate) fn prepare_config_metadata(
+    input: &std::fs::File,
+    output: &std::fs::File,
+) -> std::io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+    let metadata = input.metadata()?;
+    let current = output.metadata()?;
+    if (metadata.uid(), metadata.gid()) != (current.uid(), current.gid()) {
+        // Keep ownership before restoring mode/ACLs; chown can clear mode bits.
+        if unsafe { libc::fchown(output.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    // Replace inherited ACLs before enabling the original mode. Prepare all
+    // access controls while the temporary is empty, before writing secrets.
+    copy_config_xattrs(input.as_raw_fd(), output.as_raw_fd())?;
+    output.set_permissions(metadata.permissions())
 }
 
 // Access ACLs and security labels live in xattrs on Linux. Mode bits alone can

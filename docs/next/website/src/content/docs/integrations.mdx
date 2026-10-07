@@ -183,6 +183,8 @@ Integration version `8` also reports the session directory from the hook's own a
 
 Herdr uses `~/.kimi-code` by default, or `KIMI_CODE_HOME` when set. The Kimi Code config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and appends Herdr-managed `[[hooks]]` entries to `config.toml`. Uninstall removes the Herdr-managed config block and deletes the hook script.
 
+Before changing the config or managed hook files, installation and removal validate the TOML and managed block markers. Missing, reversed, nested or repeated markers are rejected without modifying those files. Marker-shaped text inside TOML strings is not a managed block; unrelated comments and LF/CRLF line endings are preserved. Repair or restore a damaged `config.toml` before retrying. Installation currently requires `hooks` to be absent or written as `[[hooks]]` tables; an existing `hooks = []` or inline hook array is rejected rather than converted. A file without a final newline gains the separator needed for the appended block, and that newline remains after removal.
+
 Herdr resumes stored Kimi sessions with `kimi --session <id>`.
 
 ## OpenCode

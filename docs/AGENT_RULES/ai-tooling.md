@@ -35,6 +35,8 @@
 - 入库产物只有 `graphify-out/GRAPH_REPORT.md`、`.graphify_labels.json(+.sig)`、
   `source-fingerprint.json` 与 `docs/graphify/GRAPH_REPORT.md` 镜像；graph.json、
   HTML 视图、缓存在本机重建，`.graphify-memory/` 为个人经验层，不入库不入图。
+- `scripts/graphify_fingerprint.py::write_fingerprint` 在记录摘要前将报告及镜像规范为 LF，
+  与 Git 的 `eol=lf` 一致，避免 Windows 重建后检出即失效；check 模式仍只读且拒绝内容漂移。
 - 源码变动后 `just graph-check` 必须能解释指纹差异；视图导出失败不得报告
   「视图交付完成」。
 

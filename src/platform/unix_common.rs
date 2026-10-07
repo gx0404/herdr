@@ -61,6 +61,56 @@ pub(crate) fn poll_fd_readable(fd: std::os::fd::RawFd, timeout_ms: i32) -> std::
     }
 }
 
+pub(crate) type ServerClientStream = crate::ipc::LocalStream;
+
+#[derive(Debug)]
+pub(crate) struct ClientStreamControl(ServerClientStream);
+
+impl ClientStreamControl {
+    pub(crate) fn shutdown(&self) {
+        let _ = shutdown_client_stream(&self.0);
+    }
+
+    pub(crate) fn set_deadline(&self, _deadline: std::time::Instant) {}
+}
+
+pub(crate) fn prepare_server_client_stream(
+    stream: ServerClientStream,
+    write_timeout: std::time::Duration,
+) -> std::io::Result<ServerClientStream> {
+    use interprocess::local_socket::traits::Stream as _;
+    stream.set_nonblocking(false)?;
+    stream.set_send_timeout(Some(write_timeout))?;
+    Ok(stream)
+}
+
+pub(crate) fn client_stream_control(
+    stream: &ServerClientStream,
+) -> std::io::Result<std::sync::Arc<ClientStreamControl>> {
+    use interprocess::TryClone as _;
+    Ok(std::sync::Arc::new(ClientStreamControl(
+        stream.try_clone()?,
+    )))
+}
+
+pub(crate) fn read_client_handshake(
+    stream: &mut ServerClientStream,
+    data: &mut [u8],
+    deadline: std::time::Instant,
+) -> std::io::Result<usize> {
+    use interprocess::local_socket::traits::Stream as _;
+    use std::io::Read as _;
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .ok_or(std::io::ErrorKind::TimedOut)?;
+    stream.set_recv_timeout(Some(remaining))?;
+    stream.read(data)
+}
+
+pub(crate) fn finish_client_stream(stream: &mut ServerClientStream) -> std::io::Result<()> {
+    shutdown_client_stream(stream)
+}
+
 pub(crate) fn shutdown_client_stream(stream: &crate::ipc::LocalStream) -> std::io::Result<()> {
     let crate::ipc::LocalStream::UdSocket(stream) = stream;
     stream.inner().shutdown(std::net::Shutdown::Both)

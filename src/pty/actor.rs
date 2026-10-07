@@ -14,7 +14,7 @@ mod windows {
 
     use bytes::Bytes;
     use portable_pty::{MasterPty, PtySize};
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
     use tracing::{debug, warn};
 
     use super::admission::{Admission, INPUT_ITEM_LIMIT};
@@ -64,8 +64,59 @@ mod windows {
         SubmissionPart {
             bytes: Bytes,
             deadline: Option<Instant>,
-            reply: std_mpsc::Sender<std::io::Result<()>>,
+            reply: oneshot::Sender<std::io::Result<()>>,
+            enter_completion: Option<std_mpsc::Sender<()>>,
         },
+    }
+
+    const INPUT_SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
+    pub(crate) const PTY_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+
+    struct InputAcceptance {
+        accepting: bool,
+        enter_completion: Option<std_mpsc::Receiver<()>>,
+        shutdown_deadline: Option<Instant>,
+        closed_at: Option<Instant>,
+    }
+
+    impl InputAcceptance {
+        fn close(&mut self) -> (bool, Instant) {
+            self.accepting = false;
+            if let Some(deadline) = self.shutdown_deadline {
+                return (false, deadline);
+            }
+            let deadline = Instant::now() + INPUT_SHUTDOWN_GRACE;
+            self.shutdown_deadline = Some(deadline);
+            (true, deadline)
+        }
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct PtyCloseCompletion {
+        accepting: Arc<Mutex<InputAcceptance>>,
+        deadline: Instant,
+    }
+
+    impl PtyCloseCompletion {
+        pub(crate) fn deadline(&self) -> Instant {
+            self.deadline
+        }
+
+        pub(crate) fn ready_at(&self, now: Instant) -> Option<Instant> {
+            let closed_at = self
+                .accepting
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .closed_at;
+            if closed_at.is_some() {
+                return closed_at;
+            }
+            if now >= self.deadline {
+                warn!("PTY close completion timed out; starting process termination grace");
+                return Some(self.deadline);
+            }
+            None
+        }
     }
 
     enum PtyIoControlCommand {
@@ -79,7 +130,7 @@ mod windows {
         control_tx: std_mpsc::Sender<PtyIoControlCommand>,
         write_tx: std_mpsc::Sender<PtyIoWriteCommand>,
         response_order: Arc<Mutex<()>>,
-        accepting: Arc<Mutex<bool>>,
+        accepting: Arc<Mutex<InputAcceptance>>,
         input_admission: Arc<Admission>,
         response_admission: Arc<Admission>,
         pending_resize: Arc<Mutex<Option<PtyResizeRequest>>>,
@@ -94,7 +145,7 @@ mod windows {
                 .accepting
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !*accepting || self.data_tx.is_closed() {
+            if !accepting.accepting || self.data_tx.is_closed() {
                 return Err(mpsc::error::TrySendError::Closed(bytes));
             }
             let Some(permit) = self.input_admission.try_reserve(bytes.len()) else {
@@ -121,7 +172,7 @@ mod windows {
                 .accepting
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !*accepting || self.data_tx.is_closed() {
+            if !accepting.accepting || self.data_tx.is_closed() {
                 return Err(pty_actor_closed());
             }
             let permit = text
@@ -196,18 +247,25 @@ mod windows {
             }
         }
 
-        pub(crate) fn shutdown(&self) {
+        pub(crate) fn shutdown(&self) -> PtyCloseCompletion {
             self.input_admission.close();
-            *self
+            let (first_shutdown, input_deadline) = self
                 .accepting
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
-            let _ = self.data_tx.try_send(PtyIoDataCommand::Shutdown);
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .close();
             self.pending_resize
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
-            let _ = self.control_tx.send(PtyIoControlCommand::Shutdown);
+            if first_shutdown {
+                let _ = self.data_tx.try_send(PtyIoDataCommand::Shutdown);
+                let _ = self.control_tx.send(PtyIoControlCommand::Shutdown);
+            }
+            PtyCloseCompletion {
+                accepting: Arc::clone(&self.accepting),
+                deadline: input_deadline + (PTY_CLOSE_TIMEOUT - INPUT_SHUTDOWN_GRACE),
+            }
         }
     }
 
@@ -233,7 +291,12 @@ mod windows {
             let (control_tx, control_rx) = std_mpsc::channel::<PtyIoControlCommand>();
             let (write_tx, write_rx) = std_mpsc::channel::<PtyIoWriteCommand>();
             let response_order = Arc::new(Mutex::new(()));
-            let accepting = Arc::new(Mutex::new(!initially_quiesced));
+            let accepting = Arc::new(Mutex::new(InputAcceptance {
+                accepting: !initially_quiesced,
+                enter_completion: None,
+                shutdown_deadline: None,
+                closed_at: None,
+            }));
             let input_admission = Admission::input();
             let response_admission = Admission::responses();
             let pending_resize = Arc::new(Mutex::new(None::<PtyResizeRequest>));
@@ -247,9 +310,10 @@ mod windows {
                 std::thread::spawn(move || {
                     run_writer(&mut writer, write_rx);
                     input_admission.close();
-                    *accepting
+                    accepting
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .close();
                     responses.close();
                     if let Some(input) = input.upgrade() {
                         let _ = input.try_send(PtyIoDataCommand::Shutdown);
@@ -262,9 +326,9 @@ mod windows {
             {
                 let write_tx = write_tx.clone();
                 let accepting = Arc::clone(&accepting);
-                std::thread::spawn(move || {
-                    run_input_forwarder(&mut data_rx, write_tx, accepting);
-                    debug!(pane_id, "windows pty input thread exiting");
+                tokio::spawn(async move {
+                    run_input_forwarder(&mut data_rx, write_tx, accepting).await;
+                    debug!(pane_id, "windows pty input task exiting");
                 });
             }
 
@@ -304,9 +368,10 @@ mod windows {
                         }
                     }
                     input_admission.close();
-                    *accepting
+                    accepting
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .close();
                     responses.close();
                     if let Some(input) = input.upgrade() {
                         let _ = input.try_send(PtyIoDataCommand::Shutdown);
@@ -322,39 +387,25 @@ mod windows {
             {
                 let write_tx = write_tx.clone();
                 let pending_resize = Arc::clone(&pending_resize);
+                let accepting = Arc::clone(&accepting);
                 std::thread::spawn(move || {
-                    for command in control_rx {
-                        match command {
-                            PtyIoControlCommand::Resize => {
-                                let request = pending_resize
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                    .take();
-                                let Some(request) = request else {
-                                    continue;
-                                };
-                                let size = request.resize;
-                                if let Err(err) = master.resize(PtySize {
-                                    rows: size.rows,
-                                    cols: size.cols,
-                                    pixel_width: size.cell_width_px.min(u16::MAX as u32) as u16,
-                                    pixel_height: size.cell_height_px.min(u16::MAX as u32) as u16,
-                                }) {
-                                    warn!(pane_id, err = %err, "windows pty resize failed");
-                                }
-                                if request.terminal_responses.into_iter().any(|response| {
-                                    write_tx.send(PtyIoWriteCommand::Write(response)).is_err()
-                                }) {
-                                    break;
-                                }
+                    run_control(
+                        master,
+                        |master, size| {
+                            if let Err(err) = master.resize(PtySize {
+                                rows: size.rows,
+                                cols: size.cols,
+                                pixel_width: size.cell_width_px.min(u16::MAX as u32) as u16,
+                                pixel_height: size.cell_height_px.min(u16::MAX as u32) as u16,
+                            }) {
+                                warn!(pane_id, err = %err, "windows pty resize failed");
                             }
-                            PtyIoControlCommand::Shutdown => break,
-                        }
-                    }
-                    pending_resize
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .take();
+                        },
+                        control_rx,
+                        write_tx,
+                        pending_resize,
+                        accepting,
+                    );
                     debug!(pane_id, "windows pty control thread exiting");
                 });
             }
@@ -372,6 +423,51 @@ mod windows {
         }
     }
 
+    fn run_control<M>(
+        master: M,
+        resize: impl Fn(&M, PtyResize),
+        control_rx: std_mpsc::Receiver<PtyIoControlCommand>,
+        write_tx: std_mpsc::Sender<PtyIoWriteCommand>,
+        pending_resize: Arc<Mutex<Option<PtyResizeRequest>>>,
+        accepting: Arc<Mutex<InputAcceptance>>,
+    ) {
+        for command in control_rx {
+            match command {
+                PtyIoControlCommand::Resize => {
+                    let request = pending_resize
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take();
+                    let Some(request) = request else {
+                        continue;
+                    };
+                    resize(&master, request.resize);
+                    if request
+                        .terminal_responses
+                        .into_iter()
+                        .any(|response| write_tx.send(PtyIoWriteCommand::Write(response)).is_err())
+                    {
+                        break;
+                    }
+                }
+                PtyIoControlCommand::Shutdown => {
+                    wait_for_committed_submission(&accepting);
+                    break;
+                }
+            }
+        }
+        pending_resize
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        drop(master);
+        accepting
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .closed_at
+            .get_or_insert_with(Instant::now);
+    }
+
     fn run_writer(writer: &mut impl Write, write_rx: std_mpsc::Receiver<PtyIoWriteCommand>) {
         for command in write_rx {
             let result = match command {
@@ -380,6 +476,7 @@ mod windows {
                     bytes,
                     deadline,
                     reply,
+                    enter_completion,
                 } => {
                     let result = if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                         Err(input_submission_timed_out())
@@ -390,6 +487,9 @@ mod windows {
                     let failed = result
                         .as_ref()
                         .is_err_and(|err| err.kind() != std::io::ErrorKind::TimedOut);
+                    // Release the control-thread grace even if the async acknowledgement
+                    // cannot be scheduled or its receiver has been cancelled.
+                    drop(enter_completion);
                     let _ = reply.send(result);
                     if failed {
                         break;
@@ -403,6 +503,21 @@ mod windows {
         }
     }
 
+    fn wait_for_committed_submission(accepting: &Mutex<InputAcceptance>) {
+        let pending = {
+            let mut accepting = accepting
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            accepting
+                .enter_completion
+                .take()
+                .zip(accepting.shutdown_deadline)
+        };
+        if let Some((completion, deadline)) = pending {
+            let _ = completion.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+
     fn reject_queued_input(command: PtyIoDataCommand) {
         if let PtyIoDataCommand::SubmitUserInput {
             text, enter, reply, ..
@@ -413,15 +528,16 @@ mod windows {
         }
     }
 
-    fn run_input_forwarder(
+    async fn run_input_forwarder(
         data_rx: &mut mpsc::Receiver<PtyIoDataCommand>,
         write_tx: std_mpsc::Sender<PtyIoWriteCommand>,
-        accepting: Arc<Mutex<bool>>,
+        accepting: Arc<Mutex<InputAcceptance>>,
     ) {
-        while let Some(command) = data_rx.blocking_recv() {
-            if !*accepting
+        while let Some(command) = data_rx.recv().await {
+            if !accepting
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .accepting
             {
                 reject_queued_input(command);
                 break;
@@ -439,28 +555,16 @@ mod windows {
                     deadline,
                     reply,
                 } => {
-                    let result = if deadline.is_some_and(|deadline| {
-                        deadline.saturating_duration_since(Instant::now()) <= delay
-                    }) {
-                        drop((text, enter));
-                        Err(input_submission_timed_out())
-                    } else {
-                        let text_deadline =
-                            deadline.and_then(|deadline| deadline.checked_sub(delay));
-                        write_submission_part(&write_tx, text, text_deadline).and_then(|()| {
-                            // A started text write is committed even if shutdown races the delay.
-                            std::thread::sleep(delay);
-                            let completion = enqueue_submission_part(&write_tx, enter, None)?;
-                            completion
-                                .recv()
-                                .unwrap_or_else(|_| Err(pty_actor_closed()))
-                        })
-                    };
-                    let failed = result
-                        .as_ref()
-                        .is_err_and(|err| err.kind() != std::io::ErrorKind::TimedOut);
-                    let _ = reply.send(result);
-                    if failed {
+                    let submission = tokio::spawn(run_input_submission(
+                        write_tx.clone(),
+                        Arc::clone(&accepting),
+                        text,
+                        enter,
+                        delay,
+                        deadline,
+                        reply,
+                    ));
+                    if !matches!(submission.await, Ok(false)) {
                         break;
                     }
                 }
@@ -473,29 +577,80 @@ mod windows {
         }
     }
 
+    async fn run_input_submission(
+        write_tx: std_mpsc::Sender<PtyIoWriteCommand>,
+        accepting: Arc<Mutex<InputAcceptance>>,
+        text: Bytes,
+        enter: Bytes,
+        delay: Duration,
+        deadline: Option<Instant>,
+        reply: std_mpsc::Sender<std::io::Result<()>>,
+    ) -> bool {
+        let result = async move {
+            let (completion, done) = {
+                let mut accepting = accepting
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !accepting.accepting {
+                    return Err(pty_actor_closed());
+                }
+                if deadline.is_some_and(|deadline| {
+                    deadline.saturating_duration_since(Instant::now()) <= delay
+                }) {
+                    return Err(input_submission_timed_out());
+                }
+                let text_deadline = deadline.and_then(|deadline| deadline.checked_sub(delay));
+                let (done, completion) = std_mpsc::channel();
+                accepting.enter_completion = Some(completion);
+                (
+                    enqueue_submission_part(&write_tx, text, text_deadline, None)?,
+                    done,
+                )
+            };
+            completion
+                .await
+                .unwrap_or_else(|_| Err(pty_actor_closed()))?;
+            // A committed submission outlives its caller and forwarder task. The control
+            // thread waits only until the original shutdown deadline, without holding a lock.
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            write_submission_part(&write_tx, enter, None, Some(done)).await
+        }
+        .await;
+        let failed = result
+            .as_ref()
+            .is_err_and(|err| err.kind() != std::io::ErrorKind::TimedOut);
+        let _ = reply.send(result);
+        failed
+    }
+
     fn enqueue_submission_part(
         write_tx: &std_mpsc::Sender<PtyIoWriteCommand>,
         bytes: Bytes,
         deadline: Option<Instant>,
-    ) -> std::io::Result<std_mpsc::Receiver<std::io::Result<()>>> {
-        let (reply, completion) = std_mpsc::channel();
+        enter_completion: Option<std_mpsc::Sender<()>>,
+    ) -> std::io::Result<oneshot::Receiver<std::io::Result<()>>> {
+        let (reply, completion) = oneshot::channel();
         write_tx
             .send(PtyIoWriteCommand::SubmissionPart {
                 bytes,
                 deadline,
                 reply,
+                enter_completion,
             })
             .map_err(|_| pty_actor_closed())?;
         Ok(completion)
     }
 
-    fn write_submission_part(
+    async fn write_submission_part(
         write_tx: &std_mpsc::Sender<PtyIoWriteCommand>,
         bytes: Bytes,
         deadline: Option<Instant>,
+        enter_completion: Option<std_mpsc::Sender<()>>,
     ) -> std::io::Result<()> {
-        enqueue_submission_part(write_tx, bytes, deadline)?
-            .recv()
+        enqueue_submission_part(write_tx, bytes, deadline, enter_completion)?
+            .await
             .unwrap_or_else(|_| Err(pty_actor_closed()))
     }
 
@@ -516,8 +671,294 @@ mod windows {
     }
 
     #[cfg(test)]
+    pub(crate) mod shutdown_test_support {
+        use super::*;
+
+        struct ClosingMaster {
+            closed_at: Arc<Mutex<Option<Instant>>>,
+            release: std_mpsc::Sender<()>,
+        }
+
+        impl Drop for ClosingMaster {
+            fn drop(&mut self) {
+                *self.closed_at.lock().unwrap() = Some(Instant::now());
+                let _ = self.release.send(());
+            }
+        }
+
+        struct ClosingWriter {
+            entered: std_mpsc::Sender<()>,
+            release: Option<std_mpsc::Receiver<()>>,
+        }
+
+        impl Write for ClosingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes == b"\r" {
+                    if let Some(release) = self.release.take() {
+                        let _ = self.entered.send(());
+                        let _ = release.recv();
+                        return Err(pty_actor_closed());
+                    }
+                }
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        pub(crate) struct ShutdownActor {
+            pub(crate) handle: Option<PtyIoActorHandle>,
+            pub(crate) closed_at: Arc<Mutex<Option<Instant>>>,
+            entered: std_mpsc::Receiver<()>,
+            runtime: tokio::runtime::Handle,
+            input: Option<tokio::task::JoinHandle<()>>,
+            input_start: Option<oneshot::Sender<()>>,
+            writer: Option<std::thread::JoinHandle<()>>,
+            control: Option<std::thread::JoinHandle<()>>,
+            control_entered: std_mpsc::Receiver<()>,
+            control_release: Option<std_mpsc::Sender<()>>,
+            inputs: Arc<Admission>,
+            responses: Arc<Admission>,
+        }
+
+        impl ShutdownActor {
+            pub(crate) fn new(runtime: &tokio::runtime::Handle) -> Self {
+                let mut actor = Self::new_paused(runtime);
+                actor.start_input();
+                actor
+            }
+
+            pub(crate) fn new_paused(runtime: &tokio::runtime::Handle) -> Self {
+                let (data_tx, mut data_rx) = mpsc::channel(INPUT_ITEM_LIMIT);
+                let (control_tx, control_rx) = std_mpsc::channel();
+                let (write_tx, write_rx) = std_mpsc::channel();
+                let (entered_tx, entered) = std_mpsc::channel();
+                let (release_tx, release_rx) = std_mpsc::channel();
+                let (input_start, input_started) = oneshot::channel();
+                let (control_started, control_entered) = std_mpsc::channel();
+                let (control_release, control_released) = std_mpsc::channel();
+                let accepting = Arc::new(Mutex::new(InputAcceptance {
+                    accepting: true,
+                    enter_completion: None,
+                    shutdown_deadline: None,
+                    closed_at: None,
+                }));
+                let inputs = Admission::input();
+                let responses = Admission::responses();
+                let pending_resize = Arc::new(Mutex::new(None));
+                let handle = PtyIoActorHandle {
+                    data_tx,
+                    control_tx,
+                    write_tx: write_tx.clone(),
+                    response_order: Arc::new(Mutex::new(())),
+                    accepting: Arc::clone(&accepting),
+                    input_admission: Arc::clone(&inputs),
+                    response_admission: Arc::clone(&responses),
+                    pending_resize: Arc::clone(&pending_resize),
+                };
+                let input_tx = write_tx.clone();
+                let input_accepting = Arc::clone(&accepting);
+                let input = runtime.spawn(async move {
+                    let _ = input_started.await;
+                    run_input_forwarder(&mut data_rx, input_tx, input_accepting).await;
+                });
+                let writer = std::thread::spawn(move || {
+                    let mut writer = ClosingWriter {
+                        entered: entered_tx,
+                        release: Some(release_rx),
+                    };
+                    run_writer(&mut writer, write_rx);
+                });
+                let closed_at = Arc::new(Mutex::new(None));
+                let master = ClosingMaster {
+                    closed_at: Arc::clone(&closed_at),
+                    release: release_tx,
+                };
+                let control = std::thread::spawn(move || {
+                    let release = Mutex::new(Some(control_released));
+                    run_control(
+                        master,
+                        |_, _| {
+                            if let Some(release) = release.lock().unwrap().take() {
+                                let _ = control_started.send(());
+                                let _ = release.recv();
+                            }
+                        },
+                        control_rx,
+                        write_tx,
+                        pending_resize,
+                        accepting,
+                    );
+                });
+                Self {
+                    handle: Some(handle),
+                    closed_at,
+                    entered,
+                    runtime: runtime.clone(),
+                    input: Some(input),
+                    input_start: Some(input_start),
+                    writer: Some(writer),
+                    control: Some(control),
+                    control_entered,
+                    control_release: Some(control_release),
+                    inputs,
+                    responses,
+                }
+            }
+
+            pub(crate) fn start_input(&mut self) {
+                if let Some(start) = self.input_start.take() {
+                    let _ = start.send(());
+                }
+            }
+
+            pub(crate) fn cancel_input(&mut self) {
+                if let Some(input) = self.input.take() {
+                    input.abort();
+                    assert!(self.runtime.block_on(input).unwrap_err().is_cancelled());
+                }
+            }
+
+            pub(crate) fn block_control(&self) {
+                self.handle.as_ref().unwrap().resize(
+                    24,
+                    80,
+                    8,
+                    16,
+                    vec![Bytes::from_static(b"response")],
+                );
+                self.control_entered
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+            }
+
+            pub(crate) fn wait_for_enter(&self) {
+                self.entered.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+
+            pub(crate) fn wait_for_close(&self) -> Instant {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    if let Some(closed_at) = *self.closed_at.lock().unwrap() {
+                        if self
+                            .control
+                            .as_ref()
+                            .is_none_or(|control| control.is_finished())
+                        {
+                            return closed_at;
+                        }
+                    }
+                    assert!(Instant::now() < deadline, "actor must close its master");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+
+            pub(crate) fn finish(mut self) {
+                self.close_and_join();
+                assert_eq!(self.inputs.in_use(), (0, 0));
+                assert_eq!(self.responses.in_use(), (0, 0));
+            }
+
+            fn close_and_join(&mut self) {
+                if let Some(handle) = self.handle.take() {
+                    handle.shutdown();
+                }
+                self.start_input();
+                if let Some(release) = self.control_release.take() {
+                    let _ = release.send(());
+                }
+                if let Some(control) = self.control.take() {
+                    let _ = control.join();
+                }
+                if let Some(input) = self.input.take() {
+                    let _ = self.runtime.block_on(input);
+                }
+                if let Some(writer) = self.writer.take() {
+                    let _ = writer.join();
+                }
+            }
+        }
+
+        impl Drop for ShutdownActor {
+            fn drop(&mut self) {
+                self.close_and_join();
+            }
+        }
+    }
+
+    #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn input_acceptance(accepting: bool) -> Arc<Mutex<InputAcceptance>> {
+            Arc::new(Mutex::new(InputAcceptance {
+                accepting,
+                enter_completion: None,
+                shutdown_deadline: None,
+                closed_at: None,
+            }))
+        }
+
+        fn test_runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
+        }
+
+        async fn next_actor_event<T>(receiver: &std_mpsc::Receiver<T>) -> T {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match receiver.try_recv() {
+                        Ok(command) => return command,
+                        Err(std_mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+                        Err(err) => panic!("actor channel disconnected: {err}"),
+                    }
+                }
+            })
+            .await
+            .expect("actor sends event")
+        }
+
+        struct QueuedInputActor {
+            handle: PtyIoActorHandle,
+            input_task: tokio::task::JoinHandle<()>,
+            write_rx: std_mpsc::Receiver<PtyIoWriteCommand>,
+            control_rx: std_mpsc::Receiver<PtyIoControlCommand>,
+        }
+
+        impl QueuedInputActor {
+            fn new(runtime: &tokio::runtime::Handle, initially_accepting: bool) -> Self {
+                let (data_tx, mut data_rx) = mpsc::channel(INPUT_ITEM_LIMIT);
+                let (control_tx, control_rx) = std_mpsc::channel();
+                let (write_tx, write_rx) = std_mpsc::channel();
+                let accepting = input_acceptance(initially_accepting);
+                let input_write_tx = write_tx.clone();
+                let input_accepting = Arc::clone(&accepting);
+                let input_task = runtime.spawn(async move {
+                    run_input_forwarder(&mut data_rx, input_write_tx, input_accepting).await;
+                });
+                Self {
+                    handle: PtyIoActorHandle {
+                        data_tx,
+                        control_tx,
+                        write_tx,
+                        response_order: Arc::new(Mutex::new(())),
+                        accepting,
+                        input_admission: Admission::input(),
+                        response_admission: Admission::responses(),
+                        pending_resize: Arc::new(Mutex::new(None)),
+                    },
+                    input_task,
+                    write_rx,
+                    control_rx,
+                }
+            }
+        }
+
         struct RecordingWriter {
             writes: Vec<(Vec<u8>, Instant)>,
             flushes: Vec<Instant>,
@@ -572,20 +1013,21 @@ mod windows {
             entered: std_mpsc::Receiver<()>,
             control_rx: std_mpsc::Receiver<PtyIoControlCommand>,
             release: Option<std_mpsc::Sender<()>>,
-            input_thread: Option<std::thread::JoinHandle<()>>,
+            runtime: tokio::runtime::Runtime,
+            input_task: Option<tokio::task::JoinHandle<()>>,
             writer_thread: Option<std::thread::JoinHandle<RecordingWriter>>,
             callers: Vec<std::thread::JoinHandle<()>>,
         }
 
         impl GatedWriterActor {
             fn new(blocked_bytes: Bytes) -> Self {
-                let (data_tx, mut data_rx) = mpsc::channel(1024);
+                let (data_tx, mut data_rx) = mpsc::channel(INPUT_ITEM_LIMIT);
                 let (control_tx, control_rx) = std_mpsc::channel();
                 let (write_tx, write_rx) = std_mpsc::channel();
                 let (entered_tx, entered) = std_mpsc::channel();
                 let (release, release_rx) = std_mpsc::channel();
                 let (flushed, _flushed_rx) = std_mpsc::channel();
-                let accepting = Arc::new(Mutex::new(true));
+                let accepting = input_acceptance(true);
                 let input_write_tx = write_tx.clone();
                 let input_accepting = Arc::clone(&accepting);
                 let mut actor = Self {
@@ -602,7 +1044,8 @@ mod windows {
                     entered,
                     control_rx,
                     release: Some(release),
-                    input_thread: None,
+                    runtime: test_runtime(),
+                    input_task: None,
                     writer_thread: None,
                     callers: Vec::new(),
                 };
@@ -621,8 +1064,8 @@ mod windows {
                     run_writer(&mut writer, write_rx);
                     writer.recorded
                 }));
-                actor.input_thread = Some(std::thread::spawn(move || {
-                    run_input_forwarder(&mut data_rx, input_write_tx, input_accepting);
+                actor.input_task = Some(actor.runtime.spawn(async move {
+                    run_input_forwarder(&mut data_rx, input_write_tx, input_accepting).await;
                 }));
                 actor
             }
@@ -639,11 +1082,9 @@ mod windows {
                     caller.join().expect("handle caller joins");
                 }
                 drop(self.handle.take());
-                self.input_thread
-                    .take()
-                    .expect("input thread exists")
-                    .join()
-                    .expect("input thread joins");
+                self.runtime
+                    .block_on(self.input_task.take().expect("input task exists"))
+                    .expect("input task joins");
                 self.writer_thread
                     .take()
                     .expect("writer thread exists")
@@ -659,8 +1100,8 @@ mod windows {
                     let _ = caller.join();
                 }
                 drop(self.handle.take());
-                if let Some(input) = self.input_thread.take() {
-                    let _ = input.join();
+                if let Some(input) = self.input_task.take() {
+                    let _ = self.runtime.block_on(input);
                 }
                 if let Some(writer) = self.writer_thread.take() {
                     let _ = writer.join();
@@ -864,7 +1305,7 @@ mod windows {
             }
             let budget = Admission::new(2, 12);
             let (write_tx, write_rx) = std_mpsc::channel();
-            let (reply, completion) = std_mpsc::channel();
+            let (reply, mut completion) = oneshot::channel();
             let first = budget.try_reserve(6).unwrap();
             let second = budget.try_reserve(6).unwrap();
             write_tx
@@ -872,6 +1313,7 @@ mod windows {
                     bytes: first.wrap(Bytes::from_static(b"prompt")),
                     deadline: None,
                     reply,
+                    enter_completion: None,
                 })
                 .unwrap();
             write_tx
@@ -887,11 +1329,7 @@ mod windows {
             run_writer(&mut writer, write_rx);
             assert_eq!(writer.calls, 2);
             assert_eq!(
-                completion
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap()
-                    .unwrap_err()
-                    .kind(),
+                completion.try_recv().unwrap().unwrap_err().kind(),
                 std::io::ErrorKind::BrokenPipe
             );
             assert_eq!(budget.in_use(), (0, 0));
@@ -966,7 +1404,10 @@ mod windows {
             fail_after: Option<usize>,
             delay: Duration,
             deadline: Option<Instant>,
-            during_delay: impl FnOnce(&std_mpsc::Sender<PtyIoWriteCommand>, &Arc<Mutex<bool>>),
+            during_delay: impl FnOnce(
+                &std_mpsc::Sender<PtyIoWriteCommand>,
+                &Arc<Mutex<InputAcceptance>>,
+            ),
         ) -> (RecordingWriter, std::io::Result<()>) {
             let (flushed_tx, flushed_rx) = std_mpsc::channel();
             let mut writer = RecordingWriter {
@@ -978,7 +1419,7 @@ mod windows {
             let (data_tx, mut data_rx) = mpsc::channel(2);
             let (write_tx, write_rx) = std_mpsc::channel();
             let (reply_tx, reply_rx) = std_mpsc::channel();
-            let accepting = Arc::new(Mutex::new(true));
+            let accepting = input_acceptance(true);
             data_tx
                 .try_send(PtyIoDataCommand::SubmitUserInput {
                     text: Bytes::from_static(b"prompt"),
@@ -999,14 +1440,15 @@ mod windows {
             });
             let input_write_tx = write_tx.clone();
             let input_accepting = Arc::clone(&accepting);
-            let input_thread = std::thread::spawn(move || {
-                run_input_forwarder(&mut data_rx, input_write_tx, input_accepting)
+            let runtime = test_runtime();
+            let input_task = runtime.spawn(async move {
+                run_input_forwarder(&mut data_rx, input_write_tx, input_accepting).await
             });
             flushed_rx.recv().expect("prompt was flushed");
             during_delay(&write_tx, &accepting);
             let result = reply_rx.recv().expect("writer reports submission");
             drop(data_tx);
-            input_thread.join().expect("input thread joins");
+            runtime.block_on(input_task).expect("input task joins");
             drop(write_tx);
             (writer_thread.join().expect("writer thread joins"), result)
         }
@@ -1041,7 +1483,7 @@ mod windows {
         fn shutdown_during_submission_delay_still_finishes_enter() {
             let (writer, result) =
                 run_recorded_submission(None, Duration::from_millis(30), None, |_, accepting| {
-                    *accepting.lock().unwrap() = false;
+                    accepting.lock().unwrap().accepting = false;
                 });
             result.expect("started submission keeps its Enter commitment");
             assert_eq!(
@@ -1067,7 +1509,7 @@ mod windows {
             let (write_tx, write_rx) = std_mpsc::channel();
             let (first_reply_tx, first_reply_rx) = std_mpsc::channel();
             let (expired_reply_tx, expired_reply_rx) = std_mpsc::channel();
-            let accepting = Arc::new(Mutex::new(true));
+            let accepting = input_acceptance(true);
             data_tx
                 .try_send(PtyIoDataCommand::SubmitUserInput {
                     text: Bytes::from_static(b"first"),
@@ -1092,15 +1534,16 @@ mod windows {
                 writer
             });
             let input_write_tx = write_tx.clone();
-            let input_thread = std::thread::spawn(move || {
-                run_input_forwarder(&mut data_rx, input_write_tx, accepting)
+            let runtime = test_runtime();
+            let input_task = runtime.spawn(async move {
+                run_input_forwarder(&mut data_rx, input_write_tx, accepting).await
             });
             first_reply_rx.recv().unwrap().unwrap();
             let err = expired_reply_rx.recv().unwrap().unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
 
             drop(data_tx);
-            input_thread.join().unwrap();
+            runtime.block_on(input_task).unwrap();
             drop(write_tx);
             let writer = writer_thread.join().unwrap();
             assert_eq!(
@@ -1111,6 +1554,389 @@ mod windows {
                     .collect::<Vec<_>>(),
                 vec![b"first".as_slice(), b"\r".as_slice()]
             );
+        }
+
+        #[tokio::test]
+        async fn abandoned_committed_submission_finishes_without_blocking_executor() {
+            let (data_tx, mut data_rx) = mpsc::channel(2);
+            let (write_tx, write_rx) = std_mpsc::channel();
+            let (reply_tx, reply_rx) = std_mpsc::channel();
+            let deadline = Instant::now() + Duration::from_millis(50);
+            data_tx
+                .try_send(PtyIoDataCommand::SubmitUserInput {
+                    text: Bytes::from_static(b"committed"),
+                    enter: Bytes::from_static(b"\r"),
+                    delay: Duration::from_millis(20),
+                    deadline: Some(deadline),
+                    reply: reply_tx,
+                })
+                .unwrap();
+            data_tx
+                .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
+                    b"after",
+                )))
+                .unwrap();
+            drop(data_tx);
+            let forwarder = tokio::spawn(async move {
+                run_input_forwarder(&mut data_rx, write_tx, input_acceptance(true)).await
+            });
+
+            let PtyIoWriteCommand::SubmissionPart { bytes, reply, .. } =
+                next_actor_event(&write_rx).await
+            else {
+                panic!("text must be first");
+            };
+            assert_eq!(bytes, b"committed".as_slice());
+            assert!(reply_rx.try_recv().is_err(), "completion waits for flush");
+            // A text write can finish after the caller's deadline. Its acknowledgement
+            // must still be consumed, and Enter must follow even after the caller leaves.
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            drop(reply_rx);
+            reply.send(Ok(())).unwrap();
+            let PtyIoWriteCommand::SubmissionPart {
+                bytes,
+                deadline,
+                reply,
+                enter_completion,
+            } = next_actor_event(&write_rx).await
+            else {
+                panic!("queued user input cannot overtake Enter");
+            };
+            assert_eq!(bytes, b"\r".as_slice());
+            assert!(deadline.is_none(), "committed Enter cannot expire");
+            assert!(
+                write_rx.try_recv().is_err(),
+                "user input waits for Enter flush"
+            );
+            drop(enter_completion);
+            reply.send(Ok(())).unwrap();
+            forwarder.await.unwrap();
+            let PtyIoWriteCommand::Write(bytes) = write_rx.try_recv().unwrap() else {
+                panic!("ordinary user input follows Enter");
+            };
+            assert_eq!(bytes, b"after".as_slice());
+        }
+
+        #[test]
+        fn shutdown_gives_queued_enter_a_bounded_grace() {
+            for outcome in ["flushed", "failed", "disconnected", "stalled"] {
+                let runtime = test_runtime();
+                let QueuedInputActor {
+                    handle,
+                    input_task,
+                    write_rx,
+                    control_rx,
+                } = QueuedInputActor::new(runtime.handle(), true);
+                let result = handle
+                    .queue_user_input_submission(
+                        Bytes::from_static(b"prompt"),
+                        Bytes::from_static(b"\r"),
+                        Duration::ZERO,
+                        None,
+                    )
+                    .unwrap();
+                let PtyIoWriteCommand::SubmissionPart { bytes, reply, .. } =
+                    write_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+                else {
+                    panic!("text must be first")
+                };
+                drop(bytes);
+                reply.send(Ok(())).unwrap();
+                let command = write_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                let accepting = Arc::clone(&handle.accepting);
+                let control_accepting = Arc::clone(&accepting);
+                let (waiting_tx, waiting_rx) = std_mpsc::channel();
+                let (closed_tx, closed_rx) = std_mpsc::channel();
+                let control = std::thread::spawn(move || {
+                    assert!(matches!(
+                        control_rx.recv_timeout(Duration::from_secs(2)),
+                        Ok(PtyIoControlCommand::Shutdown)
+                    ));
+                    waiting_tx.send(()).unwrap();
+                    wait_for_committed_submission(&control_accepting);
+                    closed_tx.send(Instant::now()).unwrap();
+                });
+                let started = Instant::now();
+                handle.shutdown();
+                assert!(started.elapsed() < INPUT_SHUTDOWN_GRACE);
+                waiting_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                let deadline = {
+                    let started = Instant::now();
+                    let state = accepting.lock().unwrap();
+                    assert!(
+                        started.elapsed() < Duration::from_millis(100),
+                        "control wait releases acceptance lock"
+                    );
+                    assert!(!state.accepting);
+                    state.shutdown_deadline.unwrap()
+                };
+                handle.shutdown();
+                assert_eq!(accepting.lock().unwrap().shutdown_deadline, Some(deadline));
+                assert!(
+                    closed_rx.try_recv().is_err(),
+                    "master waits for committed Enter"
+                );
+
+                let (flushed, _flushed_rx) = std_mpsc::channel();
+                let mut writer = RecordingWriter {
+                    writes: vec![],
+                    flushes: vec![],
+                    fail_after: (outcome == "failed").then_some(0),
+                    flushed,
+                };
+                if outcome == "stalled" {
+                    let closed_at = closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    assert!(closed_at >= deadline);
+                    assert!(closed_at.duration_since(deadline) < Duration::from_secs(1));
+                    drop(command);
+                } else {
+                    if outcome == "disconnected" {
+                        drop(command);
+                    } else {
+                        let (writer_tx, writer_rx) = std_mpsc::channel();
+                        writer_tx.send(command).unwrap();
+                        drop(writer_tx);
+                        run_writer(&mut writer, writer_rx);
+                    }
+                    closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                control.join().unwrap();
+                assert_eq!(
+                    result
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap()
+                        .is_err(),
+                    outcome != "flushed"
+                );
+                runtime.block_on(input_task).unwrap();
+                assert_eq!(writer.flushes.len(), usize::from(outcome == "flushed"));
+                assert_eq!(handle.input_admission.in_use(), (0, 0));
+            }
+        }
+
+        #[tokio::test]
+        async fn submission_rejects_quiesced_actor_and_failed_enqueue_releases_shutdown_wait() {
+            for initially_accepting in [false, true] {
+                let (write_tx, write_rx) = std_mpsc::channel();
+                let (reply, result) = std_mpsc::channel();
+                let accepting = input_acceptance(initially_accepting);
+                let budget = Admission::input();
+                let permit = budget.try_reserve(7).unwrap();
+                let text = permit.wrap(Bytes::from_static(b"prompt"));
+                let enter = permit.wrap(Bytes::from_static(b"\r"));
+                drop(permit);
+                drop(write_rx);
+                assert!(
+                    run_input_submission(
+                        write_tx,
+                        Arc::clone(&accepting),
+                        text,
+                        enter,
+                        Duration::ZERO,
+                        None,
+                        reply,
+                    )
+                    .await
+                );
+                assert_eq!(
+                    result.try_recv().unwrap().unwrap_err().kind(),
+                    std::io::ErrorKind::BrokenPipe
+                );
+                assert_eq!(budget.in_use(), (0, 0));
+                let completion = accepting.lock().unwrap().enter_completion.take();
+                if initially_accepting {
+                    assert!(matches!(
+                        completion.unwrap().try_recv(),
+                        Err(std_mpsc::TryRecvError::Disconnected)
+                    ));
+                } else {
+                    assert!(completion.is_none());
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn shutdown_rejects_unstarted_submission_and_releases_permits() {
+            let actor = QueuedInputActor::new(&tokio::runtime::Handle::current(), true);
+            let result = actor
+                .handle
+                .queue_user_input_submission(
+                    Bytes::from_static(b"prompt"),
+                    Bytes::from_static(b"\r"),
+                    Duration::ZERO,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(actor.handle.input_admission.in_use(), (1, 7));
+            actor
+                .handle
+                .resize(24, 80, 8, 16, vec![Bytes::from_static(b"size")]);
+            assert_eq!(actor.handle.response_admission.in_use(), (1, 4));
+            actor.handle.shutdown();
+            actor.input_task.await.unwrap();
+            assert_eq!(
+                result.try_recv().unwrap().unwrap_err().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            assert!(actor.write_rx.try_recv().is_err());
+            assert_eq!(actor.handle.input_admission.in_use(), (0, 0));
+            assert_eq!(actor.handle.response_admission.in_use(), (0, 0));
+        }
+
+        #[tokio::test]
+        async fn cancelled_forwarder_preserves_committed_submission_and_releases_permits() {
+            for phase in ["text", "delay", "enter"] {
+                let actor = QueuedInputActor::new(&tokio::runtime::Handle::current(), true);
+                let result = actor
+                    .handle
+                    .queue_user_input_submission(
+                        Bytes::from_static(b"prompt"),
+                        Bytes::from_static(b"\r"),
+                        Duration::from_millis(20),
+                        None,
+                    )
+                    .unwrap();
+                let queued = actor
+                    .handle
+                    .queue_user_input_submission(
+                        Bytes::from_static(b"queued"),
+                        Bytes::from_static(b"\r"),
+                        Duration::ZERO,
+                        None,
+                    )
+                    .unwrap();
+                let text = next_actor_event(&actor.write_rx).await;
+                let mut text = Some(text);
+                let mut enter = None;
+                if phase != "text" {
+                    let PtyIoWriteCommand::SubmissionPart { bytes, reply, .. } =
+                        text.take().unwrap()
+                    else {
+                        panic!("text must be first")
+                    };
+                    assert_eq!(bytes.as_ref(), b"prompt");
+                    drop(bytes);
+                    reply.send(Ok(())).unwrap();
+                    if phase == "enter" {
+                        enter = Some(next_actor_event(&actor.write_rx).await);
+                    } else {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                actor.input_task.abort();
+                assert!(actor.input_task.await.unwrap_err().is_cancelled());
+                actor.handle.shutdown();
+                assert!(matches!(
+                    queued.try_recv(),
+                    Err(std_mpsc::TryRecvError::Disconnected)
+                ));
+                assert_eq!(actor.handle.input_admission.in_use(), (1, 7));
+                if let Some(PtyIoWriteCommand::SubmissionPart { bytes, reply, .. }) = text {
+                    drop(bytes);
+                    reply.send(Ok(())).unwrap();
+                }
+                let enter = match enter {
+                    Some(enter) => enter,
+                    None => next_actor_event(&actor.write_rx).await,
+                };
+                let PtyIoWriteCommand::SubmissionPart {
+                    bytes,
+                    reply,
+                    enter_completion,
+                    ..
+                } = enter
+                else {
+                    panic!("committed Enter survives forwarder cancellation")
+                };
+                assert_eq!(bytes.as_ref(), b"\r");
+                drop((bytes, enter_completion));
+                reply.send(Ok(())).unwrap();
+                next_actor_event(&result).await.unwrap();
+                assert!(actor.write_rx.try_recv().is_err());
+                assert_eq!(actor.handle.input_admission.in_use(), (0, 0));
+            }
+        }
+
+        #[tokio::test]
+        async fn multi_pane_shutdown_does_not_block_executor_or_restart_grace() {
+            let mut actors = Vec::new();
+            let mut results = Vec::new();
+            let mut enters = Vec::new();
+            let mut controls = Vec::new();
+            for _ in 0..15 {
+                let QueuedInputActor {
+                    handle,
+                    input_task,
+                    write_rx,
+                    control_rx,
+                } = QueuedInputActor::new(&tokio::runtime::Handle::current(), true);
+                results.push(
+                    handle
+                        .queue_user_input_submission(
+                            Bytes::from_static(b"prompt"),
+                            Bytes::from_static(b"\r"),
+                            Duration::ZERO,
+                            None,
+                        )
+                        .unwrap(),
+                );
+                let PtyIoWriteCommand::SubmissionPart { bytes, reply, .. } =
+                    next_actor_event(&write_rx).await
+                else {
+                    panic!("text must be first")
+                };
+                drop(bytes);
+                reply.send(Ok(())).unwrap();
+                enters.push(next_actor_event(&write_rx).await);
+                let accepting = Arc::clone(&handle.accepting);
+                controls.push(std::thread::spawn(move || {
+                    assert!(matches!(
+                        control_rx.recv_timeout(Duration::from_secs(2)),
+                        Ok(PtyIoControlCommand::Shutdown)
+                    ));
+                    wait_for_committed_submission(&accepting);
+                    Instant::now()
+                }));
+                actors.push((handle, input_task, write_rx));
+            }
+            let started = Instant::now();
+            for (handle, _, _) in &actors {
+                handle.shutdown();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "15 blocked Enter writes must not serialize shutdown grace"
+            );
+            let deadlines: Vec<_> = actors
+                .iter()
+                .map(|(handle, _, _)| handle.accepting.lock().unwrap().shutdown_deadline.unwrap())
+                .collect();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            for ((handle, _, _), deadline) in actors.iter().zip(&deadlines) {
+                handle.shutdown();
+                let started = Instant::now();
+                let state = handle.accepting.lock().unwrap();
+                assert!(
+                    started.elapsed() < Duration::from_millis(100),
+                    "control wait never holds shared lock"
+                );
+                assert_eq!(state.shutdown_deadline, Some(*deadline));
+            }
+            tokio::time::sleep(INPUT_SHUTDOWN_GRACE).await;
+            for (control, deadline) in controls.into_iter().zip(deadlines) {
+                let closed_at = control.join().unwrap();
+                assert!(closed_at >= deadline);
+                assert!(closed_at.duration_since(deadline) < Duration::from_secs(1));
+            }
+            drop(enters);
+            for ((handle, input_task, _), result) in actors.into_iter().zip(results) {
+                assert_eq!(
+                    next_actor_event(&result).await.unwrap_err().kind(),
+                    std::io::ErrorKind::BrokenPipe
+                );
+                input_task.await.unwrap();
+                assert_eq!(handle.input_admission.in_use(), (0, 0));
+            }
         }
     }
 }

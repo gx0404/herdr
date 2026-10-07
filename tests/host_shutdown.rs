@@ -299,6 +299,10 @@ fn orphan_reaper_reclaims_sigkilled_driver() {
 }
 
 #[test]
+#[allow(
+    clippy::zombie_processes,
+    reason = "The owner deliberately exits via SIGKILL with live children to test external reaper cleanup"
+)]
 fn orphan_reaper_sigkill_driver() {
     let Some(root) = std::env::var_os(REAPER_DRIVER_ROOT_ENV).map(PathBuf::from) else {
         return;

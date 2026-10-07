@@ -54,7 +54,7 @@ use crate::server::client_shell::{
     render_pane_surface as render_client_shell_pane_surface,
     snapshot_with_completions as client_shell_snapshot,
 };
-use crate::server::client_transport::{ClientHandshakeLimiter, ServerEvent};
+use crate::server::client_transport::{ClientHandshakeLimiter, ClientWriter, ServerEvent};
 use crate::server::clients::{
     latest_shell_client, render_targets, terminal_stream_client_ids, ClientConnection,
     ClientConnectionMode, ClientShellInputTarget, DeferredRender, RenderTargetMode,
@@ -89,6 +89,19 @@ mod surface_interest;
 // immediately wakes for any messages left in either external queue.
 const EXTERNAL_EVENT_DRAIN_LIMIT: usize = 64;
 
+#[derive(Default)]
+struct TransportNotificationSchedule {
+    cursor: Option<u64>,
+    round_end: u64,
+    more_pending: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HANDLED_SERVER_EVENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_SCANNED_NOTIFICATION_CLIENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub use bootstrap::run_server;
 use lifecycle::wait_for_live_handoff_response_write;
 #[cfg(unix)]
@@ -98,8 +111,6 @@ use crate::protocol::MAX_GRAPHICS_FRAME_SIZE;
 
 #[cfg(test)]
 use crate::protocol::RenderEncoding;
-#[cfg(test)]
-use crate::server::client_transport::ClientWriter;
 #[cfg(test)]
 use std::fs;
 
@@ -202,11 +213,18 @@ pub struct HeadlessServer {
     api_server: Option<api::ServerHandle>,
     #[cfg(unix)]
     client_listener: LocalListener,
-    #[cfg(unix)]
     client_handshake_limiter: Arc<ClientHandshakeLimiter>,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
+    closing_clients: Vec<ClientWriter>,
+    shutdown_transports: Vec<crate::server::client_transport::ClientTransportHandle>,
+    transport_notifications: TransportNotificationSchedule,
+    endpoint_response_budget: Arc<tokio::sync::Semaphore>,
+    endpoint_pump_remaining: usize,
+    endpoint_notification_cursor: Option<(u64, u64)>,
+    endpoint_response_owners:
+        Vec<std::sync::Weak<crate::server::client_commands::EndpointResponseIdentity>>,
     native_graphics: native_graphics::NativeGraphics,
     #[cfg(unix)]
     next_client_id: u64,
@@ -324,11 +342,19 @@ impl HeadlessServer {
             api_server,
             #[cfg(unix)]
             client_listener: listener,
-            #[cfg(unix)]
             client_handshake_limiter,
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
+            closing_clients: Vec::new(),
+            shutdown_transports: Vec::new(),
+            transport_notifications: TransportNotificationSchedule::default(),
+            endpoint_response_budget: Arc::new(tokio::sync::Semaphore::new(
+                crate::server::client_commands::MAX_SERVER_RESPONSES,
+            )),
+            endpoint_pump_remaining: crate::server::client_commands::ENDPOINT_BLOCKS_PER_TURN,
+            endpoint_notification_cursor: None,
+            endpoint_response_owners: Vec::new(),
             native_graphics: Default::default(),
             #[cfg(unix)]
             next_client_id: 1,
@@ -397,6 +423,7 @@ impl HeadlessServer {
         let mut needs_graphics_render = false;
 
         loop {
+            self.endpoint_pump_remaining = crate::server::client_commands::ENDPOINT_BLOCKS_PER_TURN;
             crate::render_prof::event("loop.tick");
             crate::render_prof::flush_if_due();
             self.app.reap_finished_detached_processes();
@@ -619,6 +646,7 @@ impl HeadlessServer {
                         None => LoopEvent::Timer,
                     },
                     _ = sleep_until_or_pending(next_deadline) => LoopEvent::Timer,
+                    _ = std::future::ready(()), if self.transport_notifications.more_pending => LoopEvent::Timer,
                     _ = self.app.render_notify.notified() => LoopEvent::RenderRequested,
                 }
             };
@@ -626,24 +654,7 @@ impl HeadlessServer {
             if self.should_quit.load(Ordering::Acquire)
                 || self.host_shutdown_requested.load(Ordering::Acquire)
             {
-                match event {
-                    LoopEvent::Internal(ev) => {
-                        self.handle_internal_event_with_forwarding(ev);
-                    }
-                    LoopEvent::ServerEvent(
-                        ServerEvent::ClientConnected { writer, .. }
-                        | ServerEvent::ClientShellConnected { writer, .. },
-                    ) => {
-                        if let Ok(message) =
-                            Self::frame_server_message(&ServerMessage::ServerShutdown {
-                                reason: Some("server is shutting down".to_owned()),
-                            })
-                        {
-                            let _ = writer.control.send(message);
-                        }
-                    }
-                    _ => {}
-                }
+                self.handle_selected_shutdown_event(event);
                 continue;
             }
 
@@ -905,6 +916,17 @@ impl HeadlessServer {
     }
 
     fn remove_client(&mut self, client_id: u64) -> bool {
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.cancel_endpoint_responses();
+        }
+        if self
+            .clients
+            .get(&client_id)
+            .and_then(|client| client.writer.as_ref())
+            .is_some_and(ClientWriter::defer_removal_for_accepted_events)
+        {
+            return false;
+        }
         self.text_snapshots.release_owner(client_id);
         if let Some(active) = self.observation_liveness.remove(&client_id) {
             active.store(false, Ordering::Release);
@@ -934,16 +956,22 @@ impl HeadlessServer {
         self.tab_geometry_controllers
             .retain(|_, controller_id| *controller_id != client_id);
         if let Some(mut removed) = removed {
+            if let Some(writer) = removed.writer.take() {
+                writer.seal();
+                self.closing_clients.push(writer);
+            }
             let held_inputs = removed.drain_shell_held_inputs();
             self.release_client_shell_inputs(client_id, held_inputs);
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
             if let ClientConnectionMode::TerminalAttach { terminal_id } = removed.mode {
-                self.terminal_attach_owners.remove(&terminal_id);
-                if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
-                    self.app
-                        .state
-                        .direct_attach_resize_locks
-                        .remove(&terminal_id);
+                if self.terminal_attach_owners.get(&terminal_id) == Some(&client_id) {
+                    self.terminal_attach_owners.remove(&terminal_id);
+                    if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+                        self.app
+                            .state
+                            .direct_attach_resize_locks
+                            .remove(&terminal_id);
+                    }
                 }
             }
         }
@@ -1094,19 +1122,141 @@ impl HeadlessServer {
         Ok(())
     }
 
-    /// Drains server events from the dedicated channel.
+    /// Channel events and coalesced transport notifications share one bounded batch.
     fn drain_server_events(&mut self) -> bool {
-        let mut changed = false;
-        for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
+        if self.should_quit.load(Ordering::Acquire) {
+            return false;
+        }
+        let fallback_limit = if self.server_event_rx.is_empty() {
+            EXTERNAL_EVENT_DRAIN_LIMIT
+        } else {
+            EXTERNAL_EVENT_DRAIN_LIMIT / 2
+        };
+        let mut candidates = std::collections::BinaryHeap::new();
+        let mut pending = 0;
+        let mut newest_client = 0;
+        let cursor = self.transport_notifications.cursor;
+        let round_end = self.transport_notifications.round_end;
+        let endpoint_cursor = self.endpoint_notification_cursor;
+        let mut newest_response = 0;
+        // One scan, at most 64 candidates. Idle writers require only an atomic read. At most
+        // six permit-backed response clients get a separate rotation for the four-block budget.
+        for (&client_id, client) in &self.clients {
             if self.should_quit.load(Ordering::Acquire) {
-                break;
+                return false;
             }
-            let Ok(ev) = self.server_event_rx.try_recv() else {
+            #[cfg(test)]
+            TEST_SCANNED_NOTIFICATION_CLIENTS.with(|count| count.set(count.get() + 1));
+            newest_client = newest_client.max(client_id);
+            if !client
+                .writer
+                .as_ref()
+                .is_some_and(ClientWriter::has_transport_notifications)
+            {
+                continue;
+            }
+            pending += 1;
+            let rank = match cursor {
+                Some(_) if client_id > round_end => 2,
+                Some(cursor) if client_id <= cursor => 1,
+                _ => 0,
+            };
+            let endpoint_order = client.endpoint_responses.ready_order().filter(|_| {
+                client
+                    .writer
+                    .as_ref()
+                    .is_some_and(ClientWriter::has_endpoint_credit)
+            });
+            let candidate = if let Some(order) = endpoint_order {
+                newest_response = newest_response.max(order);
+                let endpoint_rank = match endpoint_cursor {
+                    Some((_, end)) if order > end => 2,
+                    Some((last, _)) if order <= last => 1,
+                    _ => 0,
+                };
+                (0, endpoint_rank, order, client_id, rank)
+            } else {
+                (1, rank, client_id, client_id, rank)
+            };
+            if candidates.len() < fallback_limit {
+                candidates.push(candidate);
+            } else if let Some(mut last) = candidates.peek_mut() {
+                if candidate < *last {
+                    *last = candidate;
+                }
+            }
+        }
+        self.transport_notifications.more_pending = pending > candidates.len();
+        let mut changed = false;
+        let mut handled = 0;
+        for (group, endpoint_rank, order, client_id, rank) in candidates.into_sorted_vec() {
+            if self.should_quit.load(Ordering::Acquire) {
+                self.transport_notifications.more_pending = true;
+                return changed;
+            }
+            let Some(writer) = self
+                .clients
+                .get(&client_id)
+                .and_then(|client| client.writer.as_ref())
+            else {
+                continue;
+            };
+            let (disconnected, drained) = writer.take_transport_notifications();
+            let event = match disconnected {
+                Some(true) => Some(ServerEvent::ClientDetach { client_id }),
+                Some(false) => Some(ServerEvent::ClientDisconnected { client_id }),
+                None if drained => Some(ServerEvent::ClientWriterDrained { client_id }),
+                None => None,
+            };
+            if let Some(event) = event {
+                self.transport_notifications.cursor = Some(client_id);
+                self.transport_notifications.round_end = if rank == 0 && cursor.is_some() {
+                    round_end
+                } else {
+                    newest_client
+                };
+                let before = self.endpoint_pump_remaining;
+                handled += 1;
+                changed |= self.handle_server_event_with_render_impact(event) == RenderImpact::Full;
+                if group == 0 && self.endpoint_pump_remaining < before {
+                    let end = if endpoint_rank == 0 {
+                        endpoint_cursor.map_or(newest_response, |(_, end)| end)
+                    } else {
+                        newest_response
+                    };
+                    self.endpoint_notification_cursor = Some((order, end));
+                }
+            }
+        }
+        for _ in handled..EXTERNAL_EVENT_DRAIN_LIMIT {
+            if self.should_quit.load(Ordering::Acquire) {
+                return changed;
+            }
+            let Ok(event) = self.server_event_rx.try_recv() else {
                 break;
             };
-            changed |= self.handle_server_event_with_render_impact(ev) == RenderImpact::Full;
+            changed |= self.handle_server_event_with_render_impact(event) == RenderImpact::Full;
         }
+        self.closing_clients.retain(|writer| !writer.is_complete());
         changed
+    }
+
+    fn retire_unregistered_client(&mut self, writer: ClientWriter, reason: &str) {
+        writer.transport().shutdown(reason, None);
+        self.closing_clients.push(writer);
+    }
+
+    fn handle_selected_shutdown_event(&mut self, event: LoopEvent) {
+        match event {
+            LoopEvent::Internal(event) => {
+                self.handle_internal_event_with_forwarding(event);
+            }
+            LoopEvent::ServerEvent(
+                ServerEvent::ClientConnected { writer, .. }
+                | ServerEvent::ClientShellConnected { writer, .. },
+            ) => self.retire_unregistered_client(writer, "server is shutting down"),
+            _ => {}
+        }
     }
 
     async fn reject_late_client_connections(&mut self) {
@@ -1115,11 +1265,7 @@ impl HeadlessServer {
             if let ServerEvent::ClientConnected { writer, .. }
             | ServerEvent::ClientShellConnected { writer, .. } = event
             {
-                if let Ok(message) = Self::frame_server_message(&ServerMessage::ServerShutdown {
-                    reason: Some("server is shutting down".to_owned()),
-                }) {
-                    let _ = writer.control.send(message);
-                }
+                self.retire_unregistered_client(writer, "server is shutting down");
             }
         }
     }
@@ -1829,9 +1975,6 @@ impl HeadlessServer {
                     ),
                 },
             );
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.writer = None;
-            }
             let _ = self.remove_client(client_id);
         }
         self.foreground_client_id = None;
@@ -1952,6 +2095,8 @@ impl HeadlessServer {
 
     /// Handles a server event. Returns true if the event requires a re-render.
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
+        #[cfg(test)]
+        TEST_HANDLED_SERVER_EVENTS.with(|count| count.set(count.get() + 1));
         if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
             return false;
         }
@@ -1967,16 +2112,10 @@ impl HeadlessServer {
                 writer,
             } => {
                 if self.handoff_in_progress {
-                    if let Ok(message) =
-                        Self::frame_server_message(&ServerMessage::ServerShutdown {
-                            reason: Some(
-                                "live update in progress; reconnect after handoff completes"
-                                    .to_owned(),
-                            ),
-                        })
-                    {
-                        let _ = writer.control.send(message);
-                    }
+                    self.retire_unregistered_client(
+                        writer,
+                        "live update in progress; reconnect after handoff completes",
+                    );
                     return false;
                 }
                 info!(
@@ -2019,16 +2158,10 @@ impl HeadlessServer {
                 writer,
             } => {
                 if self.handoff_in_progress {
-                    if let Ok(message) =
-                        Self::frame_server_message(&ServerMessage::ServerShutdown {
-                            reason: Some(
-                                "live update in progress; reconnect after handoff completes"
-                                    .to_owned(),
-                            ),
-                        })
-                    {
-                        let _ = writer.control.send(message);
-                    }
+                    self.retire_unregistered_client(
+                        writer,
+                        "live update in progress; reconnect after handoff completes",
+                    );
                     return false;
                 }
                 info!(
@@ -2681,6 +2814,9 @@ impl HeadlessServer {
                     self.remove_client_and_resize_if_needed(client_id);
                     return true;
                 }
+                if client.endpoint_responses.contains(&boot_id, &request_id) {
+                    return false;
+                }
                 let message = crate::server::client_commands::error_message(
                     boot_id, request_id, code, message,
                 );
@@ -2692,73 +2828,8 @@ impl HeadlessServer {
                 boot_id,
                 request,
             } => self.handle_client_shell_endpoint_request(client_id, boot_id, request),
-            ServerEvent::ClientShellEndpointResponseChunkReady {
-                client_id,
-                boot_id,
-                request_id,
-                final_chunk,
-                data,
-            } => {
-                let command_surface_revision = self.clients.get(&client_id).and_then(|client| {
-                    (matches!(client.mode, ClientConnectionMode::ClientShell)
-                        && client.shell_endpoint_command_in_flight
-                        && boot_id == self.client_shell_boot_id)
-                        .then_some(client.shell_endpoint_command_surface_revision)
-                        .flatten()
-                });
-                let Some(command_surface_revision) = command_surface_revision else {
-                    return false;
-                };
-                let completed_deferred_response =
-                    self.clients.get_mut(&client_id).and_then(|client| {
-                        let response = client.shell_deferred_navigation_response.as_mut()?;
-                        response.extend_from_slice(&data);
-                        final_chunk
-                            .then(|| client.shell_deferred_navigation_response.take())
-                            .flatten()
-                    });
-                if final_chunk {
-                    if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.shell_endpoint_command_in_flight = false;
-                        client.shell_endpoint_command_surface_revision = None;
-                        client.shell_deferred_navigation_request_id = None;
-                    }
-                }
-                let deferred_tab_id = completed_deferred_response
-                    .as_deref()
-                    .and_then(Self::deferred_endpoint_navigation_tab_id);
-                let focus_before = self.shell_focus_target(client_id);
-                let focused_tabs_before = self.focused_shell_tabs();
-                let navigation_changed = self.clients.get(&client_id).is_some_and(|client| {
-                    client.is_active_shell_client()
-                        && client.shell_projection_revision == command_surface_revision
-                }) && deferred_tab_id
-                    .as_deref()
-                    .is_some_and(|tab_id| self.focus_shell_client_on_tab(client_id, tab_id));
-                let geometry_changed =
-                    navigation_changed && self.claim_shell_tab_geometry(client_id, false);
-                if navigation_changed {
-                    self.reconcile_client_shell_locations();
-                    let focus_after = self.shell_focus_target(client_id);
-                    let focused_tabs_after = self.focused_shell_tabs();
-                    self.app.accept_current_focus_without_events();
-                    self.send_shell_navigation_focus_events(
-                        focus_before.as_ref(),
-                        focus_after.as_ref(),
-                        &focused_tabs_before,
-                        &focused_tabs_after,
-                    );
-                }
-                self.send_to_client(
-                    client_id,
-                    ServerMessage::ClientShellEndpointResponseChunk {
-                        boot_id,
-                        request_id,
-                        final_chunk,
-                        data,
-                    },
-                );
-                navigation_changed | geometry_changed
+            ServerEvent::EndpointResponseReady { response } => {
+                self.accept_endpoint_response(response)
             }
             ServerEvent::ObservationResponse {
                 client_id,
@@ -2791,7 +2862,15 @@ impl HeadlessServer {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     return false;
                 };
-                client.take_deferred_render() != DeferredRender::None
+                let credits = client
+                    .writer
+                    .as_ref()
+                    .map(ClientWriter::acknowledge_transport_drain)
+                    .unwrap_or_default();
+                let render =
+                    credits.render && client.take_deferred_render() != DeferredRender::None;
+                let endpoint = credits.endpoint && self.pump_endpoint_response(client_id);
+                render | endpoint
             }
             ServerEvent::QuitSignal => {
                 // The quit check at the top of the loop handles this.
@@ -2802,11 +2881,26 @@ impl HeadlessServer {
     }
 
     fn handle_server_event_with_render_impact(&mut self, ev: ServerEvent) -> RenderImpact {
-        if self.handle_server_event(ev) {
+        let writer = match &ev {
+            ServerEvent::ClientConnected { writer, .. }
+            | ServerEvent::ClientShellConnected { writer, .. } => Some(writer),
+            _ => ev
+                .transport_client_id()
+                .and_then(|id| self.clients.get(&id))
+                .and_then(|client| client.writer.as_ref()),
+        };
+        let acknowledgement = writer.map(ClientWriter::acknowledge_event_after_dispatch);
+        // Only the channel/fallback entry point acknowledges. Nested view-input dispatch uses
+        // handle_server_event directly and must not consume a second transport event credit.
+        let impact = if self.handle_server_event(ev) {
             RenderImpact::Full
         } else {
             RenderImpact::None
+        };
+        if let Some(acknowledgement) = acknowledgement {
+            self.transport_notifications.more_pending |= acknowledgement.complete();
         }
+        impact
     }
 
     fn ignore_client_event_during_handoff(ev: &ServerEvent) -> bool {
@@ -2814,7 +2908,7 @@ impl HeadlessServer {
             ev,
             ServerEvent::ClientConnected { .. }
                 | ServerEvent::ClientShellConnected { .. }
-                | ServerEvent::ClientShellEndpointResponseChunkReady { .. }
+                | ServerEvent::EndpointResponseReady { .. }
                 | ServerEvent::ClientDisconnected { .. }
                 | ServerEvent::ClientWriterDrained { .. }
                 | ServerEvent::QuitSignal
@@ -3637,6 +3731,28 @@ fn client_pane_input_has_interaction(events: &[protocol::ClientPaneInputEvent]) 
 
 impl Drop for HeadlessServer {
     fn drop(&mut self) {
+        self.should_quit.store(true, Ordering::Release);
+        self.shutdown_transports
+            .extend(self.client_handshake_limiter.close_transports());
+        for transport in &self.shutdown_transports {
+            transport.abort();
+        }
+        self.server_event_rx.close();
+        while let Ok(event) = self.server_event_rx.try_recv() {
+            if let ServerEvent::ClientConnected { writer, .. }
+            | ServerEvent::ClientShellConnected { writer, .. } = event
+            {
+                writer.abort();
+            }
+        }
+        for writer in self
+            .clients
+            .values()
+            .filter_map(|client| client.writer.as_ref())
+            .chain(self.closing_clients.iter())
+        {
+            writer.abort();
+        }
         let staged_files = self
             .clients
             .drain()

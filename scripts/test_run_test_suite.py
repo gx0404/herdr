@@ -4,7 +4,6 @@ import json
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -40,11 +39,15 @@ class PhaseDefinitionTests(unittest.TestCase):
     def test_maintenance_manifest_registers_orchestrator_tests(self) -> None:
         justfile = JUSTFILE.read_text(encoding="utf-8")
         self.assertIn("scripts.test_run_test_suite", justfile)
+        self.assertIn("scripts.test_run_nextest", justfile)
 
     def test_nextest_recipes_have_an_explicit_overridable_thread_limit(self) -> None:
         justfile = JUSTFILE.read_text(encoding="utf-8")
         self.assertIn('env_var_or_default("HERDR_NEXTEST_JOBS", "4")', justfile)
         self.assertEqual(justfile.count("--test-threads {{nextest_jobs}}"), 3)
+        self.assertIn("nextest-all:\n    {{python}} scripts/run_nextest.py --test-threads {{nextest_jobs}}", justfile)
+        self.assertIn('test-one filter:\n    cargo nextest run --locked --test-threads {{nextest_jobs}} "{{filter}}" --status-level leak --final-status-level fail --failure-output final --success-output never', justfile)
+        self.assertIn('ci-tests filter=\'all()\':\n    cargo nextest run --locked --test-threads {{nextest_jobs}} -E "{{filter}}" --status-level leak --final-status-level slow --failure-output final --success-output never', justfile)
 
     def test_default_log_root_is_explicit_and_each_run_uses_a_child_directory(self) -> None:
         self.assertEqual(PROJECT_ROOT / "target" / "test-suite-logs", run_test_suite.LOG_DIR)
@@ -145,18 +148,25 @@ class PhaseConfigurationTests(unittest.TestCase):
     def test_phase_limit_bounds_active_workers(self) -> None:
         active = 0
         maximum = 0
+        entered = 0
         lock = threading.Lock()
+        first_workers = threading.Barrier(2, timeout=30)
 
         def runner(name: str, recipe: str, log_path: Path) -> tuple[int, float]:
-            nonlocal active, maximum
+            nonlocal active, maximum, entered
             log_path.write_text("ok\n", encoding="utf-8")
             with lock:
                 active += 1
                 maximum = max(maximum, active)
-            time.sleep(0.02)
-            with lock:
-                active -= 1
-            return 0, 0.02
+                entered += 1
+                synchronize = entered <= 2
+            try:
+                if synchronize:
+                    first_workers.wait()
+                return 0, 0.02
+            finally:
+                with lock:
+                    active -= 1
 
         with tempfile.TemporaryDirectory() as temporary:
             results = run_test_suite.run_all(
@@ -166,6 +176,9 @@ class PhaseConfigurationTests(unittest.TestCase):
                 phase_runner=runner,
             )
         self.assertEqual(len(results), len(run_test_suite.PHASES))
+        self.assertEqual(active, 0)
+        for name, (code, _) in results.items():
+            self.assertEqual(code, 0, name)
         self.assertEqual(maximum, 2)
 
 
@@ -292,6 +305,103 @@ class RunPhaseTests(unittest.TestCase):
                 command=["definitely-missing-program-xyz"],
             )
         self.assertIsNone(code)
+
+
+class BudgetAndProgressTests(unittest.TestCase):
+    def test_small_budgets_reserve_capacity_for_concurrent_phases(self) -> None:
+        for budget in range(1, 9):
+            with self.subTest(budget=budget):
+                environment = {run_test_suite.TEST_BUDGET_ENV: str(budget)}
+                phases = run_test_suite.resolve_phase_jobs(environ=environment)
+                maintenance = run_test_suite.resolve_maintenance_jobs(environ=environment)
+                nextest = run_test_suite.resolve_nextest_jobs(
+                    environ=environment, maintenance_jobs=maintenance
+                )
+                self.assertEqual(phases, min(2, budget))
+                self.assertEqual(maintenance, min(4, max(1, budget - 1)))
+                self.assertEqual(nextest, max(1, budget - maintenance))
+                workers = max(maintenance, nextest) if phases == 1 else maintenance + nextest
+                self.assertLessEqual(workers, budget)
+
+    def test_serial_phases_can_each_use_the_selected_budget(self) -> None:
+        environment = {
+            run_test_suite.TEST_BUDGET_ENV: "8",
+            run_test_suite.PHASE_JOBS_ENV: "1",
+        }
+        self.assertEqual(run_test_suite.resolve_maintenance_jobs(environ=environment), 4)
+        self.assertEqual(run_test_suite.resolve_nextest_jobs(environ=environment), 8)
+
+    def test_explicit_worker_overrides_are_not_capped_by_the_budget(self) -> None:
+        environment = {
+            run_test_suite.TEST_BUDGET_ENV: "1",
+            run_test_suite.PHASE_JOBS_ENV: "3",
+            run_test_suite.MAINTENANCE_JOBS_ENV: "8",
+            run_test_suite.NEXTEST_JOBS_ENV: "10",
+        }
+        self.assertEqual(run_test_suite.resolve_phase_jobs(environ=environment), 3)
+        self.assertEqual(run_test_suite.resolve_maintenance_jobs(environ=environment), 8)
+        self.assertEqual(run_test_suite.resolve_nextest_jobs(environ=environment), 10)
+
+    def test_cli_budget_drives_default_phase_and_worker_limits(self) -> None:
+        results = {name: (0, 0.01) for name in run_test_suite.phase_names()}
+        environment = {run_test_suite.TEST_BUDGET_ENV: "12"}
+        with mock.patch.dict(run_test_suite.os.environ, environment, clear=True):
+            with mock.patch.object(run_test_suite, "run_all", return_value=results) as runner:
+                self.assertEqual(run_test_suite.main(["--test-budget", "1"]), 0)
+        self.assertEqual(
+            runner.call_args.kwargs,
+            {"phase_jobs": 1, "test_budget": 1, "maintenance_jobs": 1, "nextest_jobs": 1},
+        )
+
+    def test_running_phase_is_distinct_from_pending_and_finished_phases(self) -> None:
+        observations: list[tuple[str, dict[str, object]]] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def runner(name: str, recipe: str, log_path: Path) -> tuple[int, float]:
+                manifest = json.loads((log_path.parent / "manifest.json").read_text(encoding="utf-8"))
+                observations.append((name, manifest))
+                log_path.write_text("ok\n", encoding="utf-8")
+                return 0, 0.01
+
+            with mock.patch.dict(run_test_suite.os.environ, {}, clear=True):
+                run_test_suite.run_all(
+                    test_budget=1,
+                    log_root=root,
+                    run_id="live-status",
+                    phase_runner=runner,
+                )
+            final = json.loads((root / "live-status" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(final["phase_jobs"], 1)
+        self.assertEqual(final["status"], "passed")
+        names = run_test_suite.phase_names()
+        self.assertEqual([name for name, _ in observations], names)
+        for index, (name, manifest) in enumerate(observations):
+            self.assertEqual(manifest["status"], "running")
+            self.assertEqual(manifest["phases"][name]["status"], "running")
+            self.assertIsNone(manifest["phases"][name]["exit_code"])
+            for previous in names[:index]:
+                self.assertEqual(manifest["phases"][previous]["status"], "passed")
+            for pending in names[index + 1 :]:
+                self.assertEqual(manifest["phases"][pending]["status"], "pending")
+
+    def test_phase_log_is_visible_before_the_process_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "phase.log"
+            observed: list[str] = []
+
+            def lines():
+                yield "suite-live-probe\n"
+                observed.append(log_path.read_text(encoding="utf-8"))
+
+            stream = mock.Mock(wraps=lines())
+            stream.__iter__ = lambda self: self._mock_wraps
+            process = mock.Mock(stdout=stream)
+            process.wait.return_value = 0
+            with mock.patch.object(run_test_suite.subprocess, "Popen", return_value=process):
+                code, _ = run_test_suite.run_phase("probe", "probe", log_path)
+            self.assertEqual(code, 0)
+            self.assertEqual(observed, ["suite-live-probe\n"])
 
 
 if __name__ == "__main__":

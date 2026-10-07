@@ -2,6 +2,53 @@ use super::*;
 
 const LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(6);
 
+async fn finish_client_transports(
+    writers: &[crate::server::client_transport::ClientTransportHandle],
+    deadline: Instant,
+) -> io::Result<()> {
+    for writer in writers {
+        writer.seal_until(deadline);
+    }
+    let wait = async {
+        for writer in writers {
+            writer.wait_complete().await;
+        }
+    };
+    if tokio::time::timeout_at(deadline.into(), wait).await.is_ok() {
+        let aborted = writers.iter().filter(|writer| writer.was_aborted()).count();
+        if aborted != 0 {
+            warn!(
+                aborted,
+                "client transports completed by abort rather than graceful drain"
+            );
+        }
+        return Ok(());
+    }
+    let mut aborted = 0;
+    for writer in writers {
+        if !writer.is_complete() {
+            writer.abort();
+            aborted += 1;
+        }
+    }
+    warn!(
+        aborted,
+        "client shutdown drain deadline reached; transports aborted"
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        for writer in writers {
+            writer.wait_complete().await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "client I/O cancellation did not complete",
+        )
+    })
+}
+
 pub(super) fn wait_for_live_handoff_response_write(
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
 ) {
@@ -306,6 +353,9 @@ impl HeadlessServer {
         }
         info!("server shutdown initiated");
         self.shutting_down = true;
+        for client in self.clients.values_mut() {
+            client.cancel_endpoint_responses();
+        }
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.
         let shutdown_msg = ServerMessage::ServerShutdown {
@@ -313,10 +363,11 @@ impl HeadlessServer {
         };
         self.send_to_all_clients(shutdown_msg);
 
-        // Give client writer threads a moment to flush the shutdown message.
-        // A short sleep ensures the message is written to the socket before
-        // we close the connections.
-        std::thread::sleep(Duration::from_millis(50));
+        for client in self.clients.values() {
+            if let Some(writer) = &client.writer {
+                writer.seal();
+            }
+        }
 
         // Signal the main loop to exit.
         self.should_quit.store(true, Ordering::Release);
@@ -327,34 +378,37 @@ impl HeadlessServer {
     /// close client connections, remove socket files, and clean up.
     pub(super) async fn complete_shutdown(&mut self) -> io::Result<()> {
         info!("completing server shutdown");
-        self.reject_late_client_connections().await;
-
-        // Send ServerShutdown to all remaining clients.
-        if !self.clients.is_empty() {
-            let shutdown_msg = ServerMessage::ServerShutdown {
-                reason: Some("server is shutting down".to_owned()),
-            };
-            self.send_to_all_clients(shutdown_msg);
-
-            // Give writer threads a moment to flush before closing.
-            std::thread::sleep(Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        if !self.shutting_down {
+            self.initiate_shutdown();
         }
-
-        // Reject only the requests already queued when shutdown reached cleanup.
+        self.should_quit.store(true, Ordering::Release);
+        self.shutdown_transports
+            .extend(self.client_handshake_limiter.close_transports());
+        for transport in &self.shutdown_transports {
+            transport.shutdown("server is shutting down", Some(deadline));
+        }
+        self.reject_late_client_connections().await;
         self.reject_queued_api_requests_for_shutdown();
 
-        // Close all client connections.
-        let staged_files = self
-            .clients
-            .drain()
-            .flat_map(|(_, client)| client.staged_clipboard_files)
-            .collect::<Vec<_>>();
-        crate::server::clipboard_image::remove_files(staged_files);
-
-        // Remove socket files.
+        for (_, mut client) in self.clients.drain() {
+            if let Some(writer) = client.writer.take() {
+                self.closing_clients.push(writer);
+            }
+            crate::server::clipboard_image::remove_files(client.staged_clipboard_files);
+        }
+        self.shutdown_transports
+            .extend(self.closing_clients.iter().map(ClientWriter::transport));
+        self.shutdown_transports
+            .sort_unstable_by_key(|transport| transport.identity());
+        self.shutdown_transports
+            .dedup_by_key(|transport| transport.identity());
+        let result = finish_client_transports(&self.shutdown_transports, deadline).await;
+        self.shutdown_transports
+            .retain(|transport| !transport.is_complete());
+        self.closing_clients.clear();
         self.cleanup_sockets()?;
-
-        Ok(())
+        result
     }
 
     /// Removes socket files created by the server.

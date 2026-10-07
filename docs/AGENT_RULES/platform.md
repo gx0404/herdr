@@ -24,12 +24,33 @@
   （pane 终止阶梯用 `ProcessSessionId` / `ProcessSessionMember`，成员按父子关系与创建
   时间验证）。pane 关闭会终止整棵 pane 进程树（含从 pane 启动的 GUI 程序），herdr 自己的
   后台 server 守护进程以 `Local\herdr-server-daemon-<pid>-<创建时间>` 标记豁免，连同其子树。
-- Windows named-pipe 客户端握手使用轮询读取并受 4 秒绝对 deadline 约束；空握手和只发出
-  部分帧都必须在 deadline 内关闭，不能用持续到达的碎片续期。平台层只提供等待/可读性
-  适配，握手协议与 2 MiB 帧界限仍由 `protocol-api.md` 的共享传输层决定。
+- Windows 观测快照的 Toolhelp 父 PID/名字仅为候选索引。前台选择、分类与 lineage 必须把
+  父 PID、创建时间、映像及命令绑定到同一被句柄固定的实例；后读 command 不得改写身份。
+  父 pin 在子关系核验期间保持存活，未知关系不作肯定证据；不改变 `Unverifiable` 的既有策略。
+  按 entry 惰性读取并在快照/选择缓存中共享 pin，保留快照/分类/选择缓存的容量与时效边界，
+  不在每个 pane 里重扫全表；新增查询需同时核对次数、1/至少15 pane 开销及句柄释放。
+- Windows 本地管道名称由 `windows/local_socket.rs` 统一规范化：打开/创建用 canonical
+  `\\?\pipe\`，`WaitNamedPipeW` 用同对象的 canonical `\\.\pipe\`，不可盲目统一前缀。
+  不迁移逻辑 socket 路径或 marker，不以 hash 分裂旧端点；保留短名及路径别名兼容、创建时
+  DACL/first-instance/缓冲与 marker 内容身份。普通连接与有界 probe 共用命名，probe 的500ms
+  绝对期限不得因 busy 重试续期；缺 marker 的活管道仍须阻止会话误删。
+- Windows 服务端客户端管道由 `windows/client_stream.rs` 持有原生句柄，使用独立事件的
+  OVERLAPPED 读写，空闲读不轮询。握手受 4 秒绝对 deadline 约束，碎片不能续期；握手协议
+  与 2 MiB 首帧界限仍在共享传输层。取消请求不是完成，缓冲和状态块须存活至 I/O 真正结束。
+  正常收尾以 `NtFsControlFile(FSCTL_PIPE_FLUSH)` 的独立事件及 IOSB 成功为依据，不以
+  quota 满额推断送达；Abort 可丢尾帧但必须释放两方向，不能落入无限 flush/linger。
 - Windows 配置原子替换使用 `std::fs::rename` 的替换语义并在返回前刷新父目录；不得退回
   会在并发写入时产生暂时 `ERROR_ACCESS_DENIED` 的裸 `MoveFileExW` 路径。临时文件仍由
   `project-infra.md` 规定的同目录流程创建。
+- 持久化专用原语在 `platform/persist_files.rs` 与 `windows/persist_files.rs`。Windows
+  owner/group/DACL/完整性 label 通过同句柄准备并语义读回，不复制旧时间戳；普通 hidden/
+  system/not-content-indexed 属性保留。额外 resource/CAP/trust/filter 授权 ACE、EFS、命名
+  ADS、多硬链接及未支持复杂属性明确拒绝，查询失败不视作不存在，不启用额外特权。
+  legacy/继承权限无法精确保留时提交前失败；readonly 可恢复备份但不可更新。
+  新临时文件私有且预留权限设置/自有删除访问，发布后不能调用临时删除接口。
+- Recovery 新文件发布与覆盖主文件区分：前者使用单步不覆盖 rename，后者使用已有
+  `std::fs::rename`；目录同步是独立真实操作。既有 client-state 空包装不能充当 recovery
+  的 Windows 同步证明。Unix保留 ownership/ACL/xattr/mode；原生资格与软件故障注入分开报告。
 
 ## Windows 交叉编译（上游 Testing 节语义）
 

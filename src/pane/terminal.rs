@@ -263,6 +263,8 @@ impl std::error::Error for PaneResizeError {}
 
 pub(crate) struct GhosttyPaneTerminal {
     pub core: Mutex<GhosttyPaneCore>,
+    #[cfg(test)]
+    pub(super) scroll_metrics_reads: std::sync::atomic::AtomicUsize,
     key_encoder: Mutex<crate::ghostty::KeyEncoder>,
     pending_pty_responses: Arc<Mutex<Vec<Bytes>>>,
 }
@@ -1567,24 +1569,23 @@ impl GhosttyPaneTerminal {
         // 还未知，先按 Dark 兜底；`apply_host_terminal_appearance` 会在外观到
         // 达时重写。
         let color_scheme = terminal.color_scheme();
-        apply_default_terminal_colors(
+        let (foreground, background) = apply_default_terminal_colors(
             &mut terminal,
             crate::terminal_theme::TerminalTheme::default(),
             color_scheme,
         );
 
-        let mut render_state =
+        let render_state =
             crate::ghostty::RenderState::new().map_err(|e| std::io::Error::other(e.to_string()))?;
-        let initial_colors = render_state
-            .update(&terminal)
-            .ok()
-            .and_then(|_| render_state.colors().ok());
-        let initial_default_foreground = initial_colors.map(|colors| colors.foreground);
-        let initial_default_background = initial_colors.map(|colors| colors.background);
+        // 直接沿用 default 层基线，不为隐藏 pane 物化出生尺寸的 cell 快照。
+        let initial_default_foreground = Some(foreground);
+        let initial_default_background = Some(background);
         let mut key_encoder =
             crate::ghostty::KeyEncoder::new().map_err(|e| std::io::Error::other(e.to_string()))?;
         key_encoder.set_from_terminal(&terminal);
         Ok(Self {
+            #[cfg(test)]
+            scroll_metrics_reads: std::sync::atomic::AtomicUsize::new(0),
             core: Mutex::new(GhosttyPaneCore {
                 #[cfg(test)]
                 dirty_collection_hook: None,
@@ -2301,6 +2302,9 @@ impl GhosttyPaneTerminal {
     }
 
     pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        #[cfg(test)]
+        self.scroll_metrics_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let core = self.core.lock().ok()?;
         scroll_metrics_of(&core.terminal)
     }
@@ -3737,27 +3741,23 @@ fn ghostty_screen_row(
     y: u32,
 ) -> Result<String, crate::ghostty::Error> {
     let mut line = String::new();
-    // Resolve the scrollback page once per row rather than once per column.
-    for crate::ghostty::ScreenTextCell { wide, graphemes } in terminal
-        .screen_text_rows_range(y as usize, y as usize + 1)?
-        .into_iter()
-        .flat_map(|row| row.cells)
-    {
+    // Keep one page lookup per row and reuse grapheme storage across its cells.
+    terminal.for_each_screen_row_cell(y, |wide, graphemes| {
         if wide == crate::ghostty::CellWide::SpacerTail {
-            continue;
+            return;
         }
         if graphemes.is_empty()
             || graphemes.first().copied() == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER)
         {
             line.push(' ');
         } else {
-            for codepoint in graphemes {
+            for &codepoint in graphemes {
                 if let Some(ch) = char::from_u32(codepoint) {
                     line.push(ch);
                 }
             }
         }
-    }
+    })?;
     Ok(line.trim_end().to_string())
 }
 
@@ -7242,6 +7242,223 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let row = (0..16).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
         assert_eq!(row, "restored history");
+    }
+
+    #[test]
+    fn new_pane_terminal_defers_render_snapshot_and_keeps_baseline_colors() {
+        for (scheme, foreground, background) in [
+            (
+                None,
+                crate::ghostty::DEFAULT_TERMINAL_FOREGROUND,
+                crate::ghostty::DEFAULT_TERMINAL_BACKGROUND,
+            ),
+            (
+                Some(crate::ghostty::ColorScheme::Dark),
+                crate::ghostty::DEFAULT_TERMINAL_FOREGROUND,
+                crate::ghostty::DEFAULT_TERMINAL_BACKGROUND,
+            ),
+            (
+                Some(crate::ghostty::ColorScheme::Light),
+                crate::ghostty::DEFAULT_TERMINAL_FOREGROUND_LIGHT,
+                crate::ghostty::DEFAULT_TERMINAL_BACKGROUND_LIGHT,
+            ),
+        ] {
+            let (tx, _rx) = mpsc::channel(4);
+            let mut terminal = crate::ghostty::Terminal::new(200, 60, 0).unwrap();
+            terminal.set_color_scheme(scheme);
+            let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+            let core = pane.core.lock().unwrap();
+            assert_eq!(core.render_state.rows().unwrap(), 0);
+            assert_eq!(core.render_state.cols().unwrap(), 0);
+            assert_eq!(core.initial_default_foreground, Some(foreground));
+            assert_eq!(core.initial_default_background, Some(background));
+            assert_eq!(
+                core.terminal.default_foreground_color().unwrap(),
+                Some(foreground)
+            );
+            assert_eq!(
+                core.terminal.default_background_color().unwrap(),
+                Some(background)
+            );
+        }
+    }
+
+    #[test]
+    fn pane_created_large_renders_correctly_after_shrinking_before_first_draw() {
+        let (tx, _rx) = mpsc::channel(4);
+        let new_pane = || {
+            let terminal = crate::ghostty::Terminal::new(200, 60, 100).unwrap();
+            GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap()
+        };
+        let pane = new_pane();
+        let incremental = new_pane();
+        for pane in [&pane, &incremental] {
+            pane.seed_history_ansi("restored\r\n");
+            pane.resize(5, 20, 0, 0).unwrap();
+            let mut core = pane.core.lock().unwrap();
+            core.terminal
+                .write(b"\x1b]10;#abcdef\x07\x1b]11;#123456\x07hi");
+        }
+
+        let TerminalDirtyPatchOutcome::Patch(patch) = incremental.collect_dirty_patch(20, 5) else {
+            panic!("expected first viewport patch");
+        };
+        assert_eq!(
+            patch.rows.iter().map(|(y, _)| *y).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert!(patch.rows.iter().all(|(_, cells)| cells.len() == 20));
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), true))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            patch
+                .rows
+                .into_iter()
+                .flat_map(|(_, cells)| cells)
+                .collect::<Vec<_>>(),
+            buffer
+                .content
+                .iter()
+                .map(CellData::from_ratatui_cell)
+                .collect::<Vec<_>>()
+        );
+        let row = |y| (0..20).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert_eq!(row(0).trim_end(), "restored");
+        assert_eq!(row(1).trim_end(), "hi");
+        assert_eq!(
+            buffer[(0, 1)].style().fg,
+            Some(Color::Rgb(0xab, 0xcd, 0xef))
+        );
+        assert_eq!(
+            buffer[(0, 1)].style().bg,
+            Some(Color::Rgb(0x12, 0x34, 0x56))
+        );
+        assert_eq!(
+            buffer[(19, 4)].style().bg,
+            Some(Color::Rgb(0x12, 0x34, 0x56))
+        );
+        let cursor = pane.cursor_state().unwrap();
+        assert_eq!((cursor.x, cursor.y), (2, 1));
+        assert_eq!(incremental.cursor_state(), Some(cursor));
+        assert!(matches!(
+            incremental.collect_dirty_patch(20, 5),
+            TerminalDirtyPatchOutcome::Clean
+        ));
+    }
+
+    #[test]
+    fn custom_default_colors_and_osc_reset_match_first_dirty_patch() {
+        let custom_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0x33,
+                g: 0x44,
+                b: 0x55,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0xfd,
+                g: 0xf6,
+                b: 0xe3,
+            }),
+            ..Default::default()
+        };
+        for theme in [
+            crate::terminal_theme::TerminalTheme::default(),
+            custom_theme,
+        ] {
+            for reset in [false, true] {
+                let (tx, _rx) = mpsc::channel(4);
+                let new_pane = || {
+                    let terminal = crate::ghostty::Terminal::new(12, 3, 0).unwrap();
+                    new_pane_like_production(
+                        terminal,
+                        &tx,
+                        theme,
+                        Some(crate::terminal_theme::HostAppearance::Light),
+                    )
+                };
+                let pane = new_pane();
+                let incremental = new_pane();
+                for pane in [&pane, &incremental] {
+                    {
+                        let core = pane.core.lock().unwrap();
+                        assert_eq!(core.render_state.rows().unwrap(), 0);
+                        assert_eq!(core.render_state.cols().unwrap(), 0);
+                        assert_eq!(
+                            core.initial_default_foreground,
+                            core.terminal.default_foreground_color().unwrap()
+                        );
+                        assert_eq!(
+                            core.initial_default_background,
+                            core.terminal.default_background_color().unwrap()
+                        );
+                    }
+                    pane.process_pty_bytes(
+                        PaneId::from_raw(1),
+                        0,
+                        b"\x1b]10;#abcdef\x07\x1b]11;#123456\x07hi",
+                        &tx,
+                    );
+                    if reset {
+                        pane.process_pty_bytes(
+                            PaneId::from_raw(1),
+                            0,
+                            b"\x1b]110\x07\x1b]111\x07",
+                            &tx,
+                        );
+                    }
+                }
+
+                let TerminalDirtyPatchOutcome::Patch(patch) =
+                    incremental.collect_dirty_patch(12, 3)
+                else {
+                    panic!("expected first viewport patch");
+                };
+                assert_eq!(
+                    patch.rows.iter().map(|(y, _)| *y).collect::<Vec<_>>(),
+                    vec![0, 1, 2]
+                );
+                assert!(patch.rows.iter().all(|(_, cells)| cells.len() == 12));
+                let backend = ratatui::backend::TestBackend::new(12, 3);
+                let mut terminal = ratatui::Terminal::new(backend).unwrap();
+                terminal
+                    .draw(|frame| pane.render(frame, Rect::new(0, 0, 12, 3), false))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                assert_eq!(
+                    patch
+                        .rows
+                        .into_iter()
+                        .flat_map(|(_, cells)| cells)
+                        .collect::<Vec<_>>(),
+                    buffer
+                        .content
+                        .iter()
+                        .map(CellData::from_ratatui_cell)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(buffer[(0, 0)].symbol(), "h");
+                assert_eq!(buffer[(1, 0)].symbol(), "i");
+                let (foreground, background) = if reset {
+                    (Color::Reset, Color::Reset)
+                } else {
+                    (Color::Rgb(0xab, 0xcd, 0xef), Color::Rgb(0x12, 0x34, 0x56))
+                };
+                for cell in &buffer.content {
+                    assert_eq!(cell.style().fg, Some(foreground));
+                    assert_eq!(cell.style().bg, Some(background));
+                }
+                assert!(matches!(
+                    incremental.collect_dirty_patch(12, 3),
+                    TerminalDirtyPatchOutcome::Clean
+                ));
+            }
+        }
     }
 
     #[test]

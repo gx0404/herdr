@@ -2,26 +2,27 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $ExePath,
 
-    [string] $Session = "ci-windows-$([guid]::NewGuid().ToString('N'))"
+    [string] $Session = 'ci-windows',
+    [ValidateSet('auto', 'system')][string]$ConptyMode = 'auto',
+    [switch]$PassThru
 )
 
-$ErrorActionPreference = "Stop"
-
-function Invoke-Checked {
-    param([string] $Command, [string[]] $Arguments)
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "command failed with exit code $LASTEXITCODE`: $Command $($Arguments -join ' ')"
-    }
-}
-
-$exe = (Resolve-Path $ExePath).Path
-$fakeDir = Join-Path ([System.IO.Path]::GetTempPath()) "herdr-fake-conpty-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Force $fakeDir | Out-Null
-
-$fakeSource = Join-Path $fakeDir "fake_conpty.rs"
-$fakeDll = Join-Path $fakeDir "conpty.dll"
-@'
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows_input/windows_smoke_helpers.ps1')
+$exe = (Resolve-Path -LiteralPath $ExePath).Path
+$shellPath = (Get-Command powershell -ErrorAction Stop).Source
+$context = New-WindowsSmokeContext -Name $Session
+$context.Exe = $exe
+$result = [ordered]@{ runtime = 'PENDING'; runtime_stage = 'preflight'; cleanup = 'PENDING' }
+$runtimeError = $null
+try {
+    Set-SmokeConptyMode -Context $context -Mode $ConptyMode
+    Set-SmokeConfig $context $shellPath
+    $fakeDir = Join-Path $context.Root 'fake-conpty'
+    [IO.Directory]::CreateDirectory($fakeDir) | Out-Null
+    $fakeSource = Join-Path $fakeDir 'fake_conpty.rs'
+    $fakeDll = Join-Path $fakeDir 'conpty.dll'
+    @'
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
@@ -54,117 +55,44 @@ pub extern "system" fn ResizePseudoConsole(_hpc: HANDLE, _size: COORD) -> HRESUL
 #[no_mangle]
 pub extern "system" fn ClosePseudoConsole(_hpc: HANDLE) {}
 '@ | Set-Content -NoNewline -Encoding utf8 $fakeSource
-
-Invoke-Checked rustc @("--crate-type", "cdylib", "--edition", "2021", $fakeSource, "-o", $fakeDll)
-
-$oldPath = $env:PATH
-$oldSession = $env:HERDR_SESSION
-$oldSocket = $env:HERDR_SOCKET_PATH
-$oldClientSocket = $env:HERDR_CLIENT_SOCKET_PATH
-$oldLang = $env:HERDR_LANG
-$env:PATH = "$fakeDir;$oldPath"
-$env:HERDR_SESSION = $Session
-# The readiness check matches the localized human status output; pin English.
-$env:HERDR_LANG = "en"
-Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
-
-$server = $null
-try {
-    Invoke-Checked $exe @("--version")
-    & $exe --default-config | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "command failed with exit code $LASTEXITCODE`: $exe --default-config"
-    }
-
-    $server = Start-Process -FilePath $exe -ArgumentList "server" -PassThru -WindowStyle Hidden
-    $deadline = (Get-Date).AddSeconds(10)
+    Invoke-SmokeRustc -Context $context -Source $fakeSource -Output $fakeDll -CrateType cdylib
+    $env:PATH = "$fakeDir;$env:PATH"
+    Invoke-SmokeHerdr -Context $context -Arguments @('--version') | Out-Null
+    Invoke-SmokeHerdr -Context $context -Arguments @('--default-config') | Out-Null
+    Invoke-SmokeHerdr -Context $context -Arguments @('config', 'check') | Out-Null
+    $context.Server = Start-SmokeProcess -Context $context -Command $exe -Arguments @('--session', $context.Session, 'server')
+    $context.ServerStarted = $true
+    $ready = $false
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
+        $status = Invoke-SmokeHerdr -Context $context -Arguments @('pane', 'list') -AllowFailure -TimeoutMilliseconds 5000
+        if ($status.ExitCode -eq 0) { $ready = $true; break }
+        if ($context.Server.Wait(0)) { throw "test server exited ($($context.Server.ExitCode))" }
         Start-Sleep -Milliseconds 250
-        $status = & $exe status server 2>&1
-        if ($LASTEXITCODE -eq 0 -and (($status -join "`n") -match "status: running")) {
-            break
-        }
-    } while ((Get-Date) -lt $deadline)
-
-    if ((Get-Date) -ge $deadline) {
-        throw "server did not become ready"
-    }
-
-    $savedErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $created = & $exe workspace create --cwd $PWD.Path 2>&1
-        $createdExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $savedErrorActionPreference
-    }
-    if ($createdExitCode -ne 0) {
-        throw "workspace create failed with exit code $createdExitCode`: $($created -join "`n")"
-    }
-    $paneId = (($created -join "`n") | ConvertFrom-Json).result.root_pane.pane_id
-    if ([string]::IsNullOrWhiteSpace($paneId)) {
-        throw "workspace create did not return a root pane id: $($created -join "`n")"
-    }
-    $marker = "HERDR_CONPTY_SMOKE_OK"
-    Invoke-Checked $exe @("pane", "run", $paneId, "echo $marker")
-
-    $text = ""
-    $deadline = (Get-Date).AddSeconds(15)
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (-not $ready) { throw 'server did not become ready' }
+    $created = Invoke-SmokeHerdr -Context $context -Arguments @('workspace', 'create', '--cwd', $context.Root) | ConvertFrom-Json
+    $paneId = $created.result.root_pane.pane_id
+    if ([string]::IsNullOrWhiteSpace($paneId)) { throw 'workspace create did not return a root pane id' }
+    $marker = 'HERDR_CONPTY_' + [guid]::NewGuid().ToString('N')
+    $first = $marker.Substring(0, 13)
+    $last = $marker.Substring(13)
+    Invoke-SmokeHerdr -Context $context -Arguments @('pane', 'run', $paneId, "[Console]::WriteLine(('{0}{1}' -f '$first','$last'))") | Out-Null
+    $matched = $false
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
-        Start-Sleep -Milliseconds 500
-        try {
-            $read = & $exe pane read $paneId --source recent-unwrapped --lines 40 --format text 2>&1
-            $readExitCode = $LASTEXITCODE
-        } catch {
-            $read = @($_.Exception.Message)
-            $readExitCode = 1
-        }
-        $text = $read -join "`n"
-        if ($readExitCode -eq 0 -and (($text -replace "\s", "") -match $marker)) {
-            break
-        }
-    } while ((Get-Date) -lt $deadline)
-
-    if (($text -replace "\s", "") -notmatch $marker) {
-        throw "pane read did not include the smoke marker: $text"
-    }
+        $text = Invoke-SmokeHerdr -Context $context -Arguments @('pane', 'read', $paneId, '--source', 'recent-unwrapped', '--lines', '40', '--format', 'text')
+        $lines = $text -split "`r?`n" | ForEach-Object { $_.Trim() }
+        if ($lines -contains $marker) { $matched = $true; break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (-not $matched) { throw "pane read did not include the smoke marker: $text" }
+    [IO.File]::WriteAllText((Join-Path $context.Root 'pane.txt'), $text)
+    $result.runtime = 'PASS'
+} catch {
+    $runtimeError = $_
 } finally {
-    if ($null -ne $server) {
-        try {
-            $stopOutput = & $exe server stop 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "server stop during cleanup exited with $LASTEXITCODE`: $($stopOutput -join "`n")"
-            }
-        } catch {
-            Write-Host "server stop during cleanup failed: $($_.Exception.Message)"
-        }
-        $null = $server.WaitForExit(10000)
-        $server.Refresh()
-        if (-not $server.HasExited) {
-            & taskkill.exe /PID $server.Id /T /F 2>&1 | Out-Null
-        }
-    }
-    $global:LASTEXITCODE = 0
-    $env:PATH = $oldPath
-    if ($null -eq $oldSession) {
-        Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue
-    } else {
-        $env:HERDR_SESSION = $oldSession
-    }
-    if ($null -eq $oldSocket) {
-        Remove-Item Env:HERDR_SOCKET_PATH -ErrorAction SilentlyContinue
-    } else {
-        $env:HERDR_SOCKET_PATH = $oldSocket
-    }
-    if ($null -eq $oldClientSocket) {
-        Remove-Item Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
-    } else {
-        $env:HERDR_CLIENT_SOCKET_PATH = $oldClientSocket
-    }
-    if ($null -eq $oldLang) {
-        Remove-Item Env:HERDR_LANG -ErrorAction SilentlyContinue
-    } else {
-        $env:HERDR_LANG = $oldLang
-    }
-    Remove-Item -Recurse -Force $fakeDir -ErrorAction SilentlyContinue
+    $exitCode = Complete-WindowsSmoke -Context $context -Result $result -RuntimeError $runtimeError
 }
+if ($PassThru) { [pscustomobject]$result }
+exit $exitCode

@@ -52,7 +52,18 @@ impl App {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
-        let (rows, cols) = self.state.estimate_pane_size();
+        let direction = match params.direction {
+            crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
+            crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
+        };
+        let (rows, cols) = self
+            .state
+            .new_pane_size(crate::ui::NewPanePlacement::Split {
+                ws_idx,
+                target: target_pane_id,
+                direction,
+                ratio: params.ratio.unwrap_or(0.5),
+            });
         let split_cwd = params.cwd.map(std::path::PathBuf::from).or_else(|| {
             let follow_cwd = self.launch_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
             Some(self.resolve_new_terminal_cwd(follow_cwd))
@@ -62,12 +73,9 @@ impl App {
         let host_terminal_theme = self.state.host_terminal_theme;
         let host_terminal_appearance = self.state.host_terminal_appearance;
         let previous_focus = self.state.current_pane_focus_target();
+        let before = self.capture_session_layout();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "pane_not_found", "pane not found");
-        };
-        let direction = match params.direction {
-            crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
-            crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
         };
         let shell_config = crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode);
         let split_result = match params.ratio {
@@ -123,7 +131,6 @@ impl App {
         self.state
             .terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
-        self.authorize_session_layout_change();
         self.schedule_session_save();
         // APP-012：不做 unwrap；新建 pane 元数据缺失按创建失败返回。
         let Some(pane) = self.pane_info(ws_idx, new_pane.pane_id) else {
@@ -133,6 +140,7 @@ impl App {
                 "created pane metadata is unavailable",
             );
         };
+        self.authorize_session_layout_change(before);
         self.emit_event(EventEnvelope {
             event: EventKind::PaneCreated,
             data: EventData::PaneCreated { pane: pane.clone() },
@@ -1162,6 +1170,7 @@ impl App {
         };
 
         let previous_focus = self.state.current_pane_focus_target();
+        let before = self.capture_session_layout();
         let taken = match self
             .state
             .workspaces
@@ -1313,7 +1322,6 @@ impl App {
 
         self.state.remove_alias_shadowed_by_new_pane(moved_pane_id);
         self.state.mark_session_dirty();
-        self.authorize_session_layout_change();
         self.schedule_session_save();
         let Some(pane) = self.pane_info(target_ws_idx, moved_pane_id) else {
             return encode_error(id, "pane_move_failed", "moved pane is unavailable");
@@ -1327,6 +1335,7 @@ impl App {
         let Some(target_layout) = self.pane_layout_snapshot(target_ws_idx, target_tab_idx) else {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
         };
+        self.authorize_session_layout_change(before);
         let focused_pane_id = target_layout.focused_pane_id.clone();
         let move_result = PaneMoveResult {
             changed: true,
@@ -2053,6 +2062,7 @@ impl App {
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        let before = self.capture_session_layout();
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err(pane_not_found(id, &target.pane_id));
@@ -2093,7 +2103,7 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
-        self.authorize_session_layout_change();
+        self.authorize_session_layout_change(before);
 
         Ok(())
     }

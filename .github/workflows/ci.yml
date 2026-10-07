@@ -69,7 +69,11 @@ jobs:
             kind: windows
             timeout_minutes: 25
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
+    # Qualification adds up to 30m native release, 8 x 60s sampling plus 12m
+    # startup/download/handoff headroom to the existing 15/25m check budget.
+    timeout-minutes: ${{ github.repository == 'gx0404/herdr' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'gx0404/herdr' && github.head_ref == 'verify/runtime-sync-p11-20261006' && 75 || matrix.timeout_minutes }}
+    env:
+      RELEASE_QUALIFICATION: ${{ github.repository == 'gx0404/herdr' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'gx0404/herdr' && github.head_ref == 'verify/runtime-sync-p11-20261006' }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -207,13 +211,172 @@ jobs:
           $ErrorActionPreference = "Stop"
           $exe = Join-Path $PWD "target\debug\herdr.exe"
           .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if ($LASTEXITCODE -ne 0) { throw "ConPTY smoke failed ($LASTEXITCODE)" }
 
       - name: Replay PowerShell terminal compatibility
         if: matrix.kind == 'windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           .\scripts\windows_tui_compat.ps1 -ExePath .\target\debug\herdr.exe -Shell powershell
+          if ($LASTEXITCODE -ne 0) { throw "PowerShell 5.1 smoke failed ($LASTEXITCODE)" }
           .\scripts\windows_tui_compat.ps1 -ExePath .\target\debug\herdr.exe -Shell pwsh
+          if ($LASTEXITCODE -ne 0) { throw "PowerShell 7 smoke failed ($LASTEXITCODE)" }
+
+      - name: Qualify clean native release
+        if: env.RELEASE_QUALIFICATION == 'true'
+        shell: pwsh
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = 'target/ci-release-evidence'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $checkout = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $receipt = [ordered]@{ checkout_sha = $checkout; head_sha = $env:PR_HEAD_SHA; merge_sha = $env:PR_MERGE_SHA; github_sha = $env:GITHUB_SHA; runner_os = $env:RUNNER_OS; runner_arch = $env:RUNNER_ARCH; build_exit_code = $null; status = 'running' }
+          $receipt.cargo_incremental = $env:CARGO_INCREMENTAL
+          $receipt.cargo_incremental_source = if (Test-Path Env:CARGO_INCREMENTAL) { 'environment (pinned dtolnay/rust-toolchain sets 0)' } else { 'unset (Cargo release default)' }
+          $receipt | ConvertTo-Json | Set-Content "$out/receipt.json"
+          if ($checkout -ne $env:GITHUB_SHA) { throw 'Checkout does not match the workflow SHA' }
+          if (Test-Path '.cargo/config.local.toml') { throw 'Local Cargo configuration is forbidden' }
+          $overrides = Get-ChildItem Env: | Where-Object { $_.Name -match '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTC_BOOTSTRAP|CARGO_TARGET_DIR|CARGO_BUILD_.*|CARGO_PROFILE_RELEASE_.*|CARGO_TARGET_.*_(RUSTFLAGS|LINKER|RUNNER))$' }
+          if ($overrides) { throw "Build overrides are forbidden: $($overrides.Name -join ', ')" }
+          if ((Test-Path Env:CARGO_INCREMENTAL) -and $env:CARGO_INCREMENTAL -cne '0') { throw 'CARGO_INCREMENTAL must be unset or exactly 0' }
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
+          $configRoots = @($cargoHome)
+          $parent = (Get-Item .).Parent
+          while ($parent) { $configRoots += Join-Path $parent.FullName '.cargo'; $parent = $parent.Parent }
+          foreach ($root in $configRoots) {
+            foreach ($name in @('config', 'config.toml')) {
+              if (Test-Path (Join-Path $root $name)) { throw 'Non-repository Cargo configuration is forbidden' }
+            }
+          }
+          if (Test-Path '.cargo/config') { throw 'Legacy Cargo configuration is forbidden' }
+          Copy-Item .cargo/config.toml "$out/cargo-config.toml"
+          Copy-Item rust-toolchain.toml "$out/rust-toolchain.toml"
+          foreach ($spec in @(@('rustc', '-vV'), @('cargo', '-V'), @('just', '--version'), @('bun', '--version'), @('zig', 'version'), @('cargo', 'nextest', '--version'))) {
+            $command = $spec[0]
+            [string[]]$arguments = @($spec | Select-Object -Skip 1)
+            & $command @arguments 2>&1 | Tee-Object -FilePath "$out/toolchains.log" -Append
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $env:CARGO_TERM_VERBOSE = 'true'
+          just build 2>&1 | Tee-Object -FilePath "$out/build.log"
+          $buildExit = $LASTEXITCODE
+          $receipt.build_exit_code = $buildExit
+          $receipt.status = if ($buildExit -eq 0) { 'build-complete' } else { 'build-failed' }
+          $receipt | ConvertTo-Json | Set-Content "$out/receipt.json"
+          if ($buildExit -ne 0) { exit $buildExit }
+          New-Item -ItemType Directory -Force -Path "$out/native" | Out-Null
+          if ($IsWindows) {
+            Copy-Item target/release/herdr.exe "$out/native/"
+            Copy-Item target/release/conpty "$out/native/conpty" -Recurse
+            Copy-Item target/release/THIRD-PARTY-NOTICES "$out/native/THIRD-PARTY-NOTICES" -Recurse
+          } else {
+            Copy-Item target/release/herdr "$out/native/"
+          }
+          Get-ChildItem "$out/native" -File -Recurse | ForEach-Object {
+            [ordered]@{ path = [IO.Path]::GetRelativePath((Resolve-Path $out).Path, $_.FullName); bytes = $_.Length; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          } | ConvertTo-Json -AsArray | Set-Content "$out/artifacts.json"
+
+      - name: Qualify macOS live handoff
+        if: env.RELEASE_QUALIFICATION == 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -uo pipefail
+          set +e
+          cargo nextest run --locked --no-fail-fast -E 'binary(live_handoff)' --status-level leak --final-status-level slow --failure-output final --success-output never 2>&1 | tee target/ci-release-evidence/live-handoff.log
+          codes=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${codes[0]}" > target/ci-release-evidence/live-handoff-exit-code.txt
+          if (( codes[0] != 0 )); then exit "${codes[0]}"; fi
+          exit "${codes[1]}"
+
+      - name: Prepare Unix release smoke tools
+        if: env.RELEASE_QUALIFICATION == 'true' && matrix.kind == 'unix'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted ]] || { echo 'Disposable GitHub runner required' >&2; exit 1; }
+          packages=()
+          for tool in jq lsof perl tee tmux curl; do
+            if ! command -v "$tool" >/dev/null; then
+              if [[ "$tool" == tee ]]; then packages+=(coreutils); else packages+=("$tool"); fi
+            fi
+          done
+          if [[ "$RUNNER_OS" == Linux ]] && ! command -v pidstat >/dev/null; then packages+=(sysstat); fi
+          if (( ${#packages[@]} )); then
+            if [[ "$RUNNER_OS" == Linux ]]; then
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends "${packages[@]}"
+            else
+              brew install "${packages[@]}"
+            fi
+          fi
+          for tool in jq lsof perl tee tmux curl; do command -v "$tool"; done
+          if [[ "$RUNNER_OS" == Linux ]]; then command -v pidstat; fi
+
+      - name: Qualify Unix release performance
+        id: release-perf
+        if: env.RELEASE_QUALIFICATION == 'true' && matrix.kind == 'unix'
+        shell: bash
+        env:
+          HERDR_PERF_SAMPLE_SECONDS: '60'
+        run: |
+          set -euo pipefail
+          [[ -z "${HERDR_PERF_BASELINE_BIN+x}" ]] || { echo 'Baseline override is forbidden' >&2; exit 1; }
+          shopt -s nullglob
+          previous=(.local/perf-baseline/run-*)
+          (( ${#previous[@]} == 0 )) || { echo 'Unexpected previous smoke evidence' >&2; exit 1; }
+          set +e
+          just bench-release-smoke 2>&1 | tee target/ci-release-evidence/perf.log
+          codes=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${codes[0]}" > target/ci-release-evidence/perf-exit-code.txt
+          runs=(.local/perf-baseline/run-*)
+          if (( ${#runs[@]} == 1 )); then
+            printf 'run_dir=%s\n' "${runs[0]}" >> "$GITHUB_OUTPUT"
+            python3 - "${runs[0]}" <<'PY'
+          import hashlib, json, pathlib, platform, sys
+          run = pathlib.Path(sys.argv[1])
+          manifest = pathlib.Path('distribution/latest.json')
+          version = json.loads(manifest.read_text())['version']
+          os_name = {'Linux': 'linux', 'Darwin': 'macos'}[platform.system()]
+          arch = {'x86_64': 'x86_64', 'amd64': 'x86_64', 'arm64': 'aarch64', 'aarch64': 'aarch64'}[platform.machine().lower()]
+          baseline = run / 'baseline/herdr-baseline'
+          receipt = {'version': version, 'url': f'https://github.com/herdrdev/herdr/releases/download/v{version}/herdr-{os_name}-{arch}', 'manifest_sha256': hashlib.sha256(manifest.read_bytes()).hexdigest(), 'bytes': baseline.stat().st_size if baseline.exists() else None, 'sha256': hashlib.sha256(baseline.read_bytes()).hexdigest() if baseline.exists() else None}
+          (run / 'baseline-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          PY
+          fi
+          if (( codes[0] != 0 )); then exit "${codes[0]}"; fi
+          (( ${#runs[@]} == 1 )) || { echo 'Expected exactly one smoke evidence directory' >&2; exit 1; }
+          exit "${codes[1]}"
+
+      - name: Upload native release evidence
+        if: always() && env.RELEASE_QUALIFICATION == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-release-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: target/ci-release-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Unix raw performance evidence
+        if: always() && env.RELEASE_QUALIFICATION == 'true' && matrix.kind == 'unix' && steps.release-perf.outputs.run_dir != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-perf-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.release-perf.outputs.run_dir }}/*.txt
+            ${{ steps.release-perf.outputs.run_dir }}/run.log
+            ${{ steps.release-perf.outputs.run_dir }}/baseline-receipt.json
+            ${{ steps.release-perf.outputs.run_dir }}/results/**/*.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
 
       # Save before rust-cache's post-step removes incremental state.
       - name: Save incremental compiler state
@@ -301,37 +464,34 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
-          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
-          $bundle = Join-Path (Split-Path -Parent $exe) "conpty"
+          $sourceExe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
+          $probeRoot = Join-Path $PWD "target\tmp\invalid-conpty-$([guid]::NewGuid().ToString('N'))"
+          $bundle = Join-Path $probeRoot "conpty"
           New-Item -ItemType Directory -Force -Path (Join-Path $bundle "x64"), (Join-Path $bundle "arm64") | Out-Null
+          $exe = Join-Path $probeRoot "herdr.exe"
+          Copy-Item -LiteralPath $sourceExe -Destination $exe
           Set-Content -LiteralPath (Join-Path $bundle "herdr-conpty.json") -Value "{}" -Encoding ascii
           [System.IO.File]::WriteAllBytes((Join-Path $bundle "conpty.dll"), [byte[]](0x48, 0x45, 0x52, 0x44, 0x52))
           [System.IO.File]::WriteAllBytes((Join-Path $bundle "x64\OpenConsole.exe"), [byte[]](0x48, 0x45, 0x52, 0x44, 0x52))
           [System.IO.File]::WriteAllBytes((Join-Path $bundle "arm64\OpenConsole.exe"), [byte[]](0x48, 0x45, 0x52, 0x44, 0x52))
           try {
-            $rejected = $false
-            try {
-              .\scripts\windows_smoke_conpty_path.ps1 `
-                -ExePath $exe `
-                -Session "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-            } catch {
-              if ($_.Exception.Message -notlike "workspace create failed with exit code*") {
-                throw
-              }
-              $rejected = $true
+            $invalid = .\scripts\windows_smoke_conpty_path.ps1 `
+              -ExePath $exe -PassThru `
+              -Session "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            $invalidExit = $LASTEXITCODE
+            $reason = "$($invalid.runtime_error)`n$($invalid.server_stderr)"
+            if ($invalidExit -eq 0 -or $invalid.exit_code -ne $invalidExit -or
+                $invalid.runtime -ne 'FAIL' -or $invalid.runtime_stage -ne 'workspace_create' -or
+                $reason -notmatch "Herdr's app-local ConPTY bundle is invalid:" -or
+                $invalid.cleanup -ne 'PASS' -or $invalid.active_processes -ne 0) {
+              throw "Invalid-bundle probe did not prove the expected runtime rejection: $reason"
             }
-            if (-not $rejected) {
-              throw "Herdr accepted a tampered app-local ConPTY bundle"
-            }
-
-            $env:HERDR_WINDOWS_CONPTY = "system"
             .\scripts\windows_smoke_conpty_path.ps1 `
-              -ExePath $exe `
+              -ExePath $exe -ConptyMode system `
               -Session "ci-conpty-system-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            if ($LASTEXITCODE -ne 0) { throw "Explicit system ConPTY recovery failed ($LASTEXITCODE)" }
           } finally {
-            Remove-Item Env:HERDR_WINDOWS_CONPTY -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $bundle -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $probeRoot -Recurse -Force
           }
 
       - name: Build and verify official ConPTY package

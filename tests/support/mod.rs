@@ -893,6 +893,7 @@ fn kill_sandbox_processes(root: &Path, spare: &[u32]) -> usize {
         .count()
 }
 
+#[cfg(target_os = "linux")]
 fn iter_worktree_server_pids() -> std::io::Result<Vec<u32>> {
     let own_pid = std::process::id();
     let mut pids = Vec::new();
@@ -922,6 +923,7 @@ fn iter_worktree_server_pids() -> std::io::Result<Vec<u32>> {
     Ok(pids)
 }
 
+#[cfg(target_os = "linux")]
 fn is_test_herdr_server_process(pid: u32) -> bool {
     let Some(exe_path) = proc_link_target(pid, "exe") else {
         return false;
@@ -938,10 +940,12 @@ fn is_test_herdr_server_process(pid: u32) -> bool {
     cmdline.iter().any(|arg| arg == "server")
 }
 
+#[cfg(target_os = "linux")]
 fn proc_link_target(pid: u32, link: &str) -> Option<PathBuf> {
     fs::read_link(format!("/proc/{pid}/{link}")).ok()
 }
 
+#[cfg(target_os = "linux")]
 fn read_cmdline(pid: u32) -> std::io::Result<Vec<String>> {
     let cmdline = fs::read(format!("/proc/{pid}/cmdline"))?;
     Ok(cmdline
@@ -951,6 +955,7 @@ fn read_cmdline(pid: u32) -> std::io::Result<Vec<String>> {
         .collect())
 }
 
+#[cfg(target_os = "linux")]
 fn process_runtime_dir(pid: u32) -> std::io::Result<Option<PathBuf>> {
     let environ = fs::read(format!("/proc/{pid}/environ"))?;
 
@@ -1019,6 +1024,10 @@ fn process_exists(pid: libc::pid_t) -> bool {
 
 #[cfg(all(test, unix))]
 #[test]
+#[allow(
+    clippy::zombie_processes,
+    reason = "The owner deliberately exits via SIGKILL with a live child to test external reaper cleanup"
+)]
 fn sandbox_reaper_sigkill_driver() {
     let Ok(root) = std::env::var(REAPER_DRIVER_ROOT_ENV) else {
         return;
@@ -1053,7 +1062,7 @@ fn sandbox_reaper_sigkill_driver() {
 #[cfg(test)]
 #[test]
 fn sandbox_reaper_entrypoint() {
-    let (Ok(owner), Ok(root)) = (
+    let (Ok(owner), Some(root)) = (
         std::env::var(REAPER_OWNER_ENV),
         std::env::var_os(REAPER_ROOT_ENV),
     ) else {

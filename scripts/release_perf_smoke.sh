@@ -12,7 +12,11 @@ result_root="$repo_root/.local/perf-baseline"
 mkdir -p "$result_root"
 run_dir=$(mktemp -d "$result_root/run-$(date -u +%Y%m%dT%H%M%S)-XXXXXX")
 run_id=$(basename "$run_dir")
-temporary_root="$run_dir/tmp"
+umask 077
+temporary_root=$(mktemp -d "$repo_root/.local/p-XXXXXX")
+owner_receipt=$(printf 'run_id=%s\nuid=%s\npid=%s\nruntime=%s\nevidence=%s' "$run_id" "$(id -u)" "$$" "$temporary_root" "$run_dir")
+printf '%s\n' "$owner_receipt" > "$temporary_root/owner.txt"
+printf '%s\n' "$owner_receipt" > "$run_dir/runtime-owner.txt"
 results="$run_dir/results"
 summary="$run_dir/summary.txt"
 metadata="$run_dir/metadata.txt"
@@ -49,6 +53,7 @@ export HERDR_HOME="$isolated_herdr_home"
 export CODEX_HOME="$isolated_codex_home"
 export KIMI_CODE_HOME="$isolated_kimi_home"
 export TMPDIR="$isolated_tmp"
+unset HERDR_CONFIG_PATH
 printf '%s\n' "$run_id" > "$run_dir/run-id.txt"
 printf 'run_id=%s\nstarted_at=%s\nrepository=%s\nisolation_root=%s\n' \
   "$run_id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo_root" "$temporary_root" > "$metadata"
@@ -59,10 +64,24 @@ printf 'source=%s\n' "${HERDR_PERF_BASELINE_BIN:-downloaded stable binary}" > "$
 cleanup() {
   local status=$?
   set +e
+  if [[ -d "$temporary_root" && ! -L "$temporary_root" && -O "$temporary_root" &&
+        ! -L "$temporary_root/owner.txt" && ! -e "$temporary_root/retain" ]] &&
+      cmp -s "$temporary_root/owner.txt" <(printf '%s\n' "$owner_receipt") &&
+      cmp -s "$temporary_root/owner.txt" "$run_dir/runtime-owner.txt" &&
+      ! compgen -G "$temporary_root/c-*" >/dev/null; then
+    if rm -rf "$temporary_root"; then
+      printf 'runtime=removed\n' > "$run_dir/cleanup.txt"
+    else
+      printf 'runtime=remove-failed\n' > "$run_dir/cleanup.txt"
+      [[ $status -ne 0 ]] || status=1
+    fi
+  else
+    printf 'runtime=retained-ownership-or-cleanup-unknown\n' > "$run_dir/cleanup.txt"
+    [[ $status -ne 0 ]] || status=1
+  fi
   printf '%s\n' "$status" > "$run_dir/exit-code.txt"
   printf 'result=%s\nexit_code=%s\nfinished_at=%s\n' \
     "$([[ $status -eq 0 ]] && echo passed || echo failed)" "$status" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$summary"
-  rm -rf "$temporary_root"
   trap - EXIT
   exit "$status"
 }

@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -103,6 +105,98 @@ class WindowsCrossTests(unittest.TestCase):
                     self.assertEqual("--accept-license" in command, accepted)
                     self.assertEqual(command[0], "xwin")
                     self.assertIn("--copy", command)
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class WindowsCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.shell = shutil.which("pwsh") or shutil.which("powershell")
+        if not self.shell and os.name != "nt":
+            self.skipTest("PowerShell harness is exercised by the Windows job")
+        self.assertIsNotNone(self.shell, "PowerShell is required on Windows")
+        temporary_root = ROOT / "target" / "tmp"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        directory = tempfile.TemporaryDirectory(prefix="windows-check-", dir=temporary_root)
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.sentinels = []
+        for cache in (".zig-cache", "vendor/libghostty-vt/.zig-cache", "vendor/libghostty-vt/zig-out",
+                      ".local/zig-cache/global", ".local/zig-cache/local"):
+            sentinel = self.root / cache / "sentinel"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_bytes(b"must remain unchanged\x00\xff")
+            self.sentinels.append(sentinel)
+        self.log = self.root / "commands.log"
+        self.harness = self.root / "harness.ps1"
+        self.harness.write_text(
+            'function cargo {\n'
+            '    [System.IO.File]::AppendAllText($env:FIXTURE_LOG, "cargo $($args -join \' \')`n")\n'
+            '    if ($args[0] -eq $env:FIXTURE_FAIL) {\n'
+            '        [Console]::Error.WriteLine($env:FIXTURE_DIAGNOSTIC)\n'
+            '        $global:LASTEXITCODE = [int]$env:FIXTURE_CODE\n'
+            '    } else { $global:LASTEXITCODE = 0 }\n'
+            '}\n'
+            'function just {\n'
+            '    [System.IO.File]::AppendAllText($env:FIXTURE_LOG, "just $($args -join \' \')`n")\n'
+            '    $global:LASTEXITCODE = 0\n'
+            '}\n'
+            '& $env:FIXTURE_SCRIPT -Mode $env:FIXTURE_MODE\n',
+            encoding="utf-8",
+        )
+
+    def run_check(self, mode="check", failure="", code=0):
+        parent = dict(os.environ)
+        env = {**parent, "FIXTURE_LOG": str(self.log), "FIXTURE_FAIL": failure,
+               "FIXTURE_CODE": str(code), "FIXTURE_DIAGNOSTIC": "HERDR_UNIQUE_CARGO_DIAGNOSTIC",
+               "FIXTURE_SCRIPT": str(ROOT / "scripts/windows_check.ps1"), "FIXTURE_MODE": mode}
+        result = subprocess.run([self.shell, "-NoProfile", "-NonInteractive", "-File", str(self.harness)],
+                                cwd=self.root, env=env, capture_output=True, timeout=30)
+        self.assertEqual(dict(os.environ), parent)
+        commands = self.log.read_text(encoding="utf-8").splitlines()
+        output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+        return result, commands, output
+
+    def assert_caches_unchanged(self):
+        for sentinel in self.sentinels:
+            with self.subTest(cache=sentinel.parent.relative_to(self.root)):
+                self.assertTrue(sentinel.is_file())
+                self.assertEqual(sentinel.read_bytes(), b"must remain unchanged\x00\xff")
+
+    def test_clippy_failure_is_not_retried_and_preserves_diagnostic(self):
+        result, commands, output = self.run_check(failure="clippy", code=101)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("command failed with exit code 101", output)
+        self.assertEqual(output.count("HERDR_UNIQUE_CARGO_DIAGNOSTIC"), 1, output)
+        self.assertEqual(commands, ["cargo fmt --check", "cargo clippy --all-targets --locked -- -D warnings"])
+        self.assert_caches_unchanged()
+
+    def test_clippy_failure_does_not_remove_any_cache(self):
+        result, _, output = self.run_check(failure="clippy", code=101)
+        self.assertEqual(result.returncode, 1, output)
+        self.assert_caches_unchanged()
+
+    def test_fmt_failure_stops_before_clippy(self):
+        result, commands, output = self.run_check(failure="fmt", code=2)
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("command failed with exit code 2", output)
+        self.assertEqual(output.count("HERDR_UNIQUE_CARGO_DIAGNOSTIC"), 1, output)
+        self.assertEqual(commands, ["cargo fmt --check"])
+        self.assert_caches_unchanged()
+
+    def test_lint_success_stops_after_clippy(self):
+        result, commands, output = self.run_check(mode="lint")
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(commands, ["cargo fmt --check", "cargo clippy --all-targets --locked -- -D warnings"])
+        self.assert_caches_unchanged()
+
+    def test_check_success_runs_all_steps_in_order(self):
+        result, commands, output = self.run_check()
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(commands, ["cargo fmt --check", "cargo clippy --all-targets --locked -- -D warnings",
+                                    "just test", "cargo build --locked"])
+        self.assert_caches_unchanged()
 
 
 if __name__ == "__main__":

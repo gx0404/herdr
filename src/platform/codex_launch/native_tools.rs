@@ -6,7 +6,30 @@ use std::process::Command;
 const DIRECTORY: &str = "native-tools";
 // A .cmd is visible to PowerShell, but not bare tar lookup in MSYS Bash/Zsh.
 // This forwards the installer's file-path arguments, not arbitrary cmd syntax.
-const TAR: &[u8] = b"@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\nset \"ERRORLEVEL=\"\r\n\"%SystemRoot%\\System32\\tar.exe\" %*\r\nexit /b %errorlevel%\r\n";
+const TAR: &[u8] = b"@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\nset \"ERRORLEVEL=\"\r\n\"%~dp0..\\codex.exe\" --internal-native-tar %*\r\nexit /b %errorlevel%\r\n";
+
+pub(super) fn dispatch(argv: &[OsString]) -> Option<io::Result<()>> {
+    argv.get(1)
+        .is_some_and(|arg| arg == "--internal-native-tar")
+        .then(|| extraction_command(&argv[2..]).and_then(super::run))
+}
+
+fn extraction_command(args: &[OsString]) -> io::Result<Command> {
+    let mut command = Command::new(system_tar(&Command::new("codex"))?);
+    if let [mode, archive, change_directory, output] = args {
+        if mode == "-xzf" && change_directory == "-C" {
+            // Open before changing cwd: both operands are relative to the caller.
+            if archive != "-" {
+                command.stdin(std::fs::File::open(archive)?);
+            }
+            command.current_dir(output).args(["-xzf", "-"]);
+            return Ok(command);
+        }
+    }
+    // Preserve all options and operands outside the exact installer contract.
+    command.args(args);
+    Ok(command)
+}
 
 pub(super) fn install(shim: &Path) -> io::Result<()> {
     let directory = shim.join(DIRECTORY);

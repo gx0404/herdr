@@ -5,13 +5,17 @@
 //! `HeadlessServer`.
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Write;
+use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SendError, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
+#[cfg(unix)]
 use interprocess::TryClone as _;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -48,10 +52,68 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 /// as the welcome has been queued, before the normal client read loop begins.
 pub(crate) const MAX_CONCURRENT_CLIENT_HANDSHAKES: usize = 32;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HandshakeTestStage {
+    BeforeRegister,
+    BeforeSpawn,
+    AfterSpawn,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct HandshakeTestHook {
+    stage: HandshakeTestStage,
+    arrived: std::sync::mpsc::Sender<Arc<ClientWriterQueue>>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct ClientHandshakeTestPause {
+    arrived: std::sync::mpsc::Receiver<Arc<ClientWriterQueue>>,
+    resume: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+impl ClientHandshakeTestPause {
+    pub(crate) fn wait(&self) -> ClientTransportTestHandle {
+        ClientTransportTestHandle(self.arrived.recv_timeout(Duration::from_secs(30)).unwrap())
+    }
+}
+
+#[cfg(test)]
+impl Drop for ClientHandshakeTestPause {
+    fn drop(&mut self) {
+        let _ = self.resume.send(());
+    }
+}
+
+type ClientTransportRegistry =
+    Option<std::collections::HashMap<usize, std::sync::Weak<ClientWriterQueue>>>;
+
+#[derive(Debug)]
+struct ClientTransportRegistration {
+    owner: std::sync::Weak<ClientHandshakeLimiter>,
+    identity: usize,
+}
+
+impl Drop for ClientTransportRegistration {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.upgrade() {
+            if let Some(transports) = owner.lock_transports().as_mut() {
+                transports.remove(&self.identity);
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ClientHandshakeLimiter {
     active: AtomicUsize,
     limit: usize,
+    transports: Mutex<ClientTransportRegistry>,
+    #[cfg(test)]
+    checkpoint: Mutex<Option<HandshakeTestHook>>,
 }
 
 impl ClientHandshakeLimiter {
@@ -59,6 +121,9 @@ impl ClientHandshakeLimiter {
         Arc::new(Self {
             active: AtomicUsize::new(0),
             limit: MAX_CONCURRENT_CLIENT_HANDSHAKES,
+            transports: Mutex::new(Some(std::collections::HashMap::new())),
+            #[cfg(test)]
+            checkpoint: Mutex::new(None),
         })
     }
 
@@ -67,7 +132,74 @@ impl ClientHandshakeLimiter {
         Arc::new(Self {
             active: AtomicUsize::new(0),
             limit,
+            transports: Mutex::new(Some(std::collections::HashMap::new())),
+            checkpoint: Mutex::new(None),
         })
+    }
+
+    fn lock_transports(&self) -> std::sync::MutexGuard<'_, ClientTransportRegistry> {
+        self.transports
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn register(self: &Arc<Self>, queue: &Arc<ClientWriterQueue>) -> bool {
+        let mut state = queue.lock_state();
+        let mut transports = self.lock_transports();
+        let Some(transports) = transports.as_mut() else {
+            return false;
+        };
+        let identity = Arc::as_ptr(queue) as usize;
+        transports.insert(identity, Arc::downgrade(queue));
+        state.registration = Some(ClientTransportRegistration {
+            owner: Arc::downgrade(self),
+            identity,
+        });
+        true
+    }
+
+    pub(crate) fn close_transports(&self) -> Vec<ClientTransportHandle> {
+        self.lock_transports()
+            .take()
+            .into_iter()
+            .flat_map(|transports| transports.into_values())
+            .filter_map(|queue| queue.upgrade().map(ClientTransportHandle))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_transport_count(&self) -> usize {
+        self.lock_transports()
+            .as_ref()
+            .map_or(0, |entries| entries.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pause_at(&self, stage: HandshakeTestStage) -> ClientHandshakeTestPause {
+        let (arrived_tx, arrived) = std::sync::mpsc::channel();
+        let (resume, resume_rx) = std::sync::mpsc::channel();
+        *self.checkpoint.lock().unwrap() = Some(HandshakeTestHook {
+            stage,
+            arrived: arrived_tx,
+            resume: resume_rx,
+        });
+        ClientHandshakeTestPause { arrived, resume }
+    }
+
+    #[cfg(test)]
+    fn test_checkpoint(&self, queue: &Arc<ClientWriterQueue>, stage: HandshakeTestStage) {
+        let hook = {
+            let mut hook = self.checkpoint.lock().unwrap();
+            if hook.as_ref().is_some_and(|hook| hook.stage == stage) {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some(hook) = hook {
+            let _ = hook.arrived.send(queue.clone());
+            let _ = hook.resume.recv_timeout(Duration::from_secs(30));
+        }
     }
 
     pub(crate) fn try_acquire(self: &Arc<Self>) -> Option<ClientHandshakePermit> {
@@ -123,6 +255,14 @@ const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIENT_CONTROL_BACKLOG_BYTES: usize = 4 * 1024 * 1024;
 /// 同一 backlog 的消息条数上限（防止大量小消息只吃字节计数）。
 const MAX_CLIENT_CONTROL_BACKLOG_MESSAGES: usize = 4096;
+const ENDPOINT_RESERVED_CONTROL_BYTES: usize = MAX_FRAME_SIZE + 4;
+const ENDPOINT_RESERVED_CONTROL_MESSAGES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClientWriterCredits {
+    pub(crate) render: bool,
+    pub(crate) endpoint: bool,
+}
 
 /// Maximum input payload size (bytes) for a single `ClientMessage::Input`.
 const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
@@ -180,13 +320,29 @@ enum DecodedEndpointRequest {
     },
 }
 
-fn write_endpoint_rejection(stream: &mut LocalStream, code: &str, message: impl Into<String>) {
+fn write_rejection(stream: &mut crate::platform::ServerClientStream, message: &ServerMessage) {
+    if let Ok(control) = crate::platform::client_stream_control(stream) {
+        control.set_deadline(Instant::now() + HANDSHAKE_TIMEOUT);
+        if protocol::write_message(stream, message).is_ok() {
+            if let Err(error) = crate::platform::finish_client_stream(stream) {
+                debug!(%error, "client rejection drain aborted");
+            }
+        }
+        control.shutdown();
+    }
+}
+
+fn write_endpoint_rejection(
+    stream: &mut crate::platform::ServerClientStream,
+    code: &str,
+    message: impl Into<String>,
+) {
     let welcome = EndpointServerWelcome::incompatible(code, message);
     let response = ServerMessage::EndpointControl {
         kind: ENDPOINT_WELCOME_KIND.into(),
         data: serde_json::to_string(&welcome).unwrap_or_else(|_| "{}".into()),
     };
-    let _ = protocol::write_message(stream, &response);
+    write_rejection(stream, &response);
 }
 
 fn decode_endpoint_request(request: &str) -> serde_json::Result<DecodedEndpointRequest> {
@@ -221,13 +377,266 @@ pub(crate) struct ClientWriter {
     pub(crate) render: ClientRenderWriter,
 }
 
+#[derive(Debug)]
+pub(crate) struct ClientTransportHandle(Arc<ClientWriterQueue>);
+
+impl ClientTransportHandle {
+    pub(crate) fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
+    pub(crate) fn shutdown(&self, reason: &str, deadline: Option<Instant>) {
+        self.0.shutdown(reason, deadline);
+    }
+
+    pub(crate) fn seal_until(&self, deadline: Instant) {
+        self.0.seal(Some(deadline));
+    }
+
+    pub(crate) fn abort(&self) {
+        self.0.close_writer();
+    }
+
+    pub(crate) fn was_aborted(&self) -> bool {
+        self.0.lock_state().phase == ClientCloseState::Aborted
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        let state = self.0.lock_state();
+        !state.reader_running && !state.writer_running
+    }
+
+    pub(crate) async fn wait_complete(&self) {
+        loop {
+            let notified = self.0.completed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_complete() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+pub(crate) struct ClientEventAcknowledgement(Arc<ClientWriterQueue>);
+
+impl ClientEventAcknowledgement {
+    pub(crate) fn complete(self) -> bool {
+        let mut state = self.0.lock_state();
+        state.pending_events = state.pending_events.saturating_sub(1);
+        self.0.publish_notifications(&state)
+    }
+}
+
+#[cfg(test)]
+pub(crate) use tests::endpoint_hello as test_endpoint_hello;
+
+#[cfg(test)]
+pub(crate) struct ClientTransportTestHandle(Arc<ClientWriterQueue>);
+
+#[cfg(test)]
+impl ClientTransportTestHandle {
+    pub(crate) fn send_control(&self, message: &ServerMessage) {
+        let mut frame = Vec::new();
+        protocol::write_message(&mut frame, message).unwrap();
+        self.0.send_control(frame).unwrap();
+    }
+
+    pub(crate) fn was_aborted(&self) -> bool {
+        self.0.lock_state().phase == ClientCloseState::Aborted
+    }
+
+    pub(crate) fn writer_started(&self) -> bool {
+        self.0.lock_state().writer_started
+    }
+
+    pub(crate) fn wait_writer_started(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut state = self.0.lock_state();
+        while !state.writer_started {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("writer starts");
+            state = self.0.ready.wait_timeout(state, remaining).unwrap().0;
+        }
+    }
+
+    pub(crate) fn abort(&self) {
+        self.0.close_writer();
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        let state = self.0.lock_state();
+        !state.reader_running && !state.writer_running
+    }
+
+    pub(crate) fn wait_reader_started(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut state = self.0.lock_state();
+        while !state.reader_waiting {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("reader starts");
+            state = self.0.ready.wait_timeout(state, remaining).unwrap().0;
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_NOTIFICATION_TAKES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl ClientWriter {
+    #[cfg(test)]
+    pub(crate) fn test_transport_handle(&self) -> ClientTransportTestHandle {
+        ClientTransportTestHandle(self.control.queue.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_notification_take_count() -> usize {
+        TEST_NOTIFICATION_TAKES.with(std::cell::Cell::get)
+    }
+
+    pub(crate) fn acknowledge_event_after_dispatch(&self) -> ClientEventAcknowledgement {
+        ClientEventAcknowledgement(self.control.queue.clone())
+    }
+
+    pub(crate) fn defer_removal_for_accepted_events(&self) -> bool {
+        {
+            let mut state = self.control.queue.lock_state();
+            if state.pending_events == 0 {
+                state.disconnect_notified = true;
+                return false;
+            }
+            if !state.disconnect_notified {
+                state.disconnect_notified = true;
+                state.disconnect_pending = Some(false);
+                self.control.queue.publish_notifications(&state);
+            }
+        }
+        self.seal();
+        true
+    }
+
+    pub(crate) fn seal(&self) {
+        self.control.queue.seal(None);
+    }
+
+    pub(crate) fn transport(&self) -> ClientTransportHandle {
+        ClientTransportHandle(self.control.queue.clone())
+    }
+
+    #[cfg(all(test, windows))]
+    pub(crate) fn seal_until(&self, deadline: Instant) {
+        self.control.queue.seal(Some(deadline));
+    }
+
+    pub(crate) fn abort(&self) {
+        self.control.queue.close_writer();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn was_aborted(&self) -> bool {
+        self.transport().was_aborted()
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        let state = self.control.queue.lock_state();
+        !state.reader_running && !state.writer_running
+    }
+
+    #[cfg(all(test, windows))]
+    pub(crate) async fn wait_complete(&self) {
+        self.transport().wait_complete().await;
+    }
+
+    pub(crate) fn has_transport_notifications(&self) -> bool {
+        self.control
+            .queue
+            .notification_pending
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_transport_notifications(&self) -> (Option<bool>, bool) {
+        if !self.has_transport_notifications() {
+            return (None, false);
+        }
+        #[cfg(test)]
+        TEST_NOTIFICATION_TAKES.with(|count| count.set(count.get() + 1));
+        let mut state = self.control.queue.lock_state();
+        let disconnected = if state.pending_events == 0 {
+            state.disconnect_pending.take()
+        } else {
+            None
+        };
+        let drained = std::mem::take(&mut state.drained_pending);
+        self.control.queue.publish_notifications(&state);
+        (disconnected, drained)
+    }
+
+    pub(crate) fn acknowledge_transport_drain(&self) -> ClientWriterCredits {
+        let mut state = self.control.queue.lock_state();
+        state.drained_notified = false;
+        std::mem::take(&mut state.credits)
+    }
+
+    pub(crate) fn has_endpoint_credit(&self) -> bool {
+        self.control.queue.lock_state().credits.endpoint
+    }
+
+    pub(crate) fn defer_endpoint_credit(&self) {
+        let mut state = self.control.queue.lock_state();
+        if state.phase != ClientCloseState::Open || state.disconnect_notified {
+            return;
+        }
+        state.credits.endpoint = true;
+        if !state.drained_notified {
+            state.drained_notified = true;
+            state.drained_pending = true;
+            self.control.queue.publish_notifications(&state);
+        }
+    }
+
     /// Drops render-lane work that has not yet been claimed by the writer.
     pub(crate) fn discard_pending_render(&self) {
         self.render.queue.discard_pending_render();
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
+    pub(crate) fn test_accept_event(
+        &self,
+        event: ServerEvent,
+        events: &mpsc::Sender<ServerEvent>,
+    ) -> bool {
+        send_client_event(
+            &self.control.queue,
+            events,
+            event,
+            &AtomicBool::new(false),
+            Some(Instant::now() + Duration::from_secs(30)),
+        )
+        .is_ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_notify_disconnect(
+        &self,
+        client_id: u64,
+        events: &mpsc::Sender<ServerEvent>,
+    ) {
+        self.control
+            .queue
+            .notify_disconnect(client_id, false, events);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_notify_drained(&self, client_id: u64, events: &mpsc::Sender<ServerEvent>) {
+        self.control.queue.notify_drained(client_id, events);
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_paused() -> Self {
         let queue = ClientWriterQueue::new();
         Self {
@@ -236,10 +645,39 @@ impl ClientWriter {
         }
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
+    pub(crate) fn test_endpoint_frames_sent(&self) -> usize {
+        self.control
+            .queue
+            .endpoint_frames_sent
+            .load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_control_backlog(&self) -> (usize, usize) {
+        let state = self.control.queue.lock_state();
+        (state.control_bytes, state.control.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_dequeue_control(
+        &self,
+        client_id: u64,
+        events: &mpsc::Sender<ServerEvent>,
+    ) -> Vec<u8> {
+        assert!(!self.control.queue.lock_state().control.is_empty());
+        let Some(ClientWriteItem::Control(data)) = self.control.queue.recv() else {
+            panic!("paused writer must dequeue a control frame");
+        };
+        self.control.queue.notify_endpoint_credit(client_id, events);
+        data
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_drain(&self) -> Vec<Vec<u8>> {
         let mut state = self.render.queue.lock_state();
         let mut frames = state.control.drain(..).collect::<Vec<_>>();
+        state.control_bytes = 0;
         frames.extend(state.ordered.drain(..));
         frames.extend(state.render.take());
         frames
@@ -334,6 +772,32 @@ impl ClientControlWriter {
     pub(crate) fn send(&self, data: Vec<u8>) -> Result<(), SendError<Vec<u8>>> {
         self.queue.send_control(data)
     }
+
+    pub(crate) fn try_send_endpoint_frame(
+        &self,
+        data: Vec<u8>,
+    ) -> Result<(), TrySendError<Vec<u8>>> {
+        let mut state = self.queue.lock_state();
+        if state.phase != ClientCloseState::Open || state.disconnect_notified {
+            return Err(TrySendError::Disconnected(data));
+        }
+        if state.control_bytes.saturating_add(data.len())
+            > MAX_CLIENT_CONTROL_BACKLOG_BYTES - ENDPOINT_RESERVED_CONTROL_BYTES
+            || state.control.len()
+                >= MAX_CLIENT_CONTROL_BACKLOG_MESSAGES - ENDPOINT_RESERVED_CONTROL_MESSAGES
+        {
+            self.queue.endpoint_waiting.store(true, Ordering::Release);
+            return Err(TrySendError::Full(data));
+        }
+        state.control_bytes += data.len();
+        state.control.push_back(data);
+        #[cfg(test)]
+        self.queue
+            .endpoint_frames_sent
+            .fetch_add(1, Ordering::Release);
+        self.queue.ready.notify_all();
+        Ok(())
+    }
 }
 
 impl ClientRenderWriter {
@@ -363,18 +827,46 @@ impl ClientRenderWriter {
 struct ClientWriterQueue {
     state: Mutex<ClientWriterQueueState>,
     ready: Condvar,
+    completed: tokio::sync::Notify,
+    notification_pending: AtomicBool,
+    endpoint_waiting: AtomicBool,
+    #[cfg(test)]
+    endpoint_frames_sent: AtomicUsize,
+    write_timeout: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ClientCloseState {
+    #[default]
+    Open,
+    Sealed,
+    Draining,
+    Closed,
+    Aborted,
 }
 
 #[derive(Debug, Default)]
 struct ClientWriterQueueState {
     control: VecDeque<Vec<u8>>,
-    /// HSR-06/RS-16：control 车道的已排队字节数（上限见
-    /// `MAX_CLIENT_CONTROL_BACKLOG_BYTES`）。
     control_bytes: usize,
     ordered: VecDeque<Vec<u8>>,
     render: Option<Vec<u8>>,
     senders: usize,
-    writer_alive: bool,
+    phase: ClientCloseState,
+    registration: Option<ClientTransportRegistration>,
+    io: Option<Arc<crate::platform::ClientStreamControl>>,
+    reader_running: bool,
+    #[cfg(test)]
+    reader_waiting: bool,
+    #[cfg(test)]
+    writer_started: bool,
+    writer_running: bool,
+    pending_events: usize,
+    disconnect_pending: Option<bool>,
+    disconnect_notified: bool,
+    drained_pending: bool,
+    drained_notified: bool,
+    credits: ClientWriterCredits,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -384,14 +876,40 @@ enum ClientWriteItem {
 }
 
 impl ClientWriterQueue {
+    fn publish_notifications(&self, state: &ClientWriterQueueState) -> bool {
+        let ready = state.drained_pending
+            || (state.disconnect_pending.is_some() && state.pending_events == 0);
+        self.notification_pending.store(ready, Ordering::Release);
+        ready
+    }
+
     fn new() -> Arc<Self> {
+        Self::with_timeout(CLIENT_WRITE_TIMEOUT)
+    }
+
+    fn with_timeout(write_timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(ClientWriterQueueState {
-                writer_alive: true,
-                ..ClientWriterQueueState::default()
-            }),
+            state: Mutex::new(ClientWriterQueueState::default()),
             ready: Condvar::new(),
+            completed: tokio::sync::Notify::new(),
+            notification_pending: AtomicBool::new(false),
+            endpoint_waiting: AtomicBool::new(false),
+            #[cfg(test)]
+            endpoint_frames_sent: AtomicUsize::new(0),
+            write_timeout,
         })
+    }
+
+    fn attach(&self, stream: &crate::platform::ServerClientStream, reader: bool) -> io::Result<()> {
+        let io = crate::platform::client_stream_control(stream)?;
+        let mut state = self.lock_state();
+        if state.phase == ClientCloseState::Aborted {
+            io.shutdown();
+        }
+        state.io = Some(io);
+        state.reader_running = reader;
+        state.writer_running = true;
+        Ok(())
     }
 
     fn add_sender(&self) {
@@ -402,43 +920,36 @@ impl ClientWriterQueue {
     fn remove_sender(&self) {
         let mut state = self.lock_state();
         state.senders = state.senders.saturating_sub(1);
-        self.ready.notify_one();
+        self.ready.notify_all();
     }
 
     fn send_control(&self, data: Vec<u8>) -> Result<(), SendError<Vec<u8>>> {
         let mut state = self.lock_state();
-        if !state.writer_alive {
+        if state.phase != ClientCloseState::Open {
             return Err(SendError(data));
         }
         if state.control_bytes.saturating_add(data.len()) > MAX_CLIENT_CONTROL_BACKLOG_BYTES
             || state.control.len() >= MAX_CLIENT_CONTROL_BACKLOG_MESSAGES
         {
-            // HSR-06/RS-16：客户端已经不读了（socket 写超时也会在同一状态兜底）。
-            // 丢弃排队内容并让 writer 收尾；调用方按 SendError 走断开路径。
-            state.writer_alive = false;
-            state.control.clear();
-            state.control_bytes = 0;
-            state.ordered.clear();
-            state.render = None;
-            self.ready.notify_all();
+            self.abort_locked(&mut state);
             return Err(SendError(data));
         }
         state.control_bytes = state.control_bytes.saturating_add(data.len());
         state.control.push_back(data);
-        self.ready.notify_one();
+        self.ready.notify_all();
         Ok(())
     }
 
     fn try_send_render(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
         let mut state = self.lock_state();
-        if !state.writer_alive {
+        if state.phase != ClientCloseState::Open {
             return Err(TrySendError::Disconnected(data));
         }
         if state.render.is_some() {
             return Err(TrySendError::Full(data));
         }
         state.render = Some(data);
-        self.ready.notify_one();
+        self.ready.notify_all();
         Ok(())
     }
 
@@ -451,7 +962,7 @@ impl ClientWriterQueue {
 
     fn send_ordered(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
         let mut state = self.lock_state();
-        if !state.writer_alive {
+        if state.phase != ClientCloseState::Open {
             return Err(TrySendError::Disconnected(data));
         }
         if !state.ordered.is_empty() {
@@ -461,47 +972,201 @@ impl ClientWriterQueue {
             state.ordered.push_back(older);
         }
         state.ordered.push_back(data);
-        self.ready.notify_one();
+        self.ready.notify_all();
         Ok(())
     }
 
     fn recv(&self) -> Option<ClientWriteItem> {
         let mut state = self.lock_state();
         loop {
+            if matches!(
+                state.phase,
+                ClientCloseState::Closed | ClientCloseState::Aborted
+            ) {
+                return None;
+            }
             if let Some(data) = state.control.pop_front() {
                 state.control_bytes = state.control_bytes.saturating_sub(data.len());
                 return Some(ClientWriteItem::Control(data));
             }
             if let Some(data) = state.ordered.pop_front() {
-                self.ready.notify_one();
+                self.ready.notify_all();
                 return Some(ClientWriteItem::Render(data));
             }
             if let Some(data) = state.render.take() {
                 return Some(ClientWriteItem::Render(data));
             }
-            if state.senders == 0 || !state.writer_alive {
+            if state.senders == 0 || state.phase != ClientCloseState::Open {
+                state.phase = ClientCloseState::Draining;
                 return None;
             }
-            state = self
-                .ready
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = self.ready.wait(state).unwrap_or_else(|e| e.into_inner());
         }
     }
 
-    fn close_writer(&self) {
+    fn shutdown(&self, reason: &str, deadline: Option<Instant>) {
+        let mut framed = Vec::new();
+        let encoded = protocol::write_message(
+            &mut framed,
+            &ServerMessage::ServerShutdown {
+                reason: Some(reason.to_owned()),
+            },
+        );
         let mut state = self.lock_state();
-        state.writer_alive = false;
+        if state.phase == ClientCloseState::Open {
+            if encoded.is_err()
+                || state.control_bytes.saturating_add(framed.len())
+                    > MAX_CLIENT_CONTROL_BACKLOG_BYTES
+                || state.control.len() >= MAX_CLIENT_CONTROL_BACKLOG_MESSAGES
+            {
+                self.abort_locked(&mut state);
+                return;
+            }
+            state.control_bytes += framed.len();
+            state.control.push_back(framed);
+        }
+        self.seal_locked(&mut state, deadline);
+    }
+
+    fn seal(&self, deadline: Option<Instant>) {
+        self.seal_locked(&mut self.lock_state(), deadline);
+    }
+
+    fn seal_locked(&self, state: &mut ClientWriterQueueState, deadline: Option<Instant>) {
+        if state.phase == ClientCloseState::Open {
+            state.phase = ClientCloseState::Sealed;
+            state.render = None;
+            state.ordered.clear();
+        }
+        if let (Some(io), Some(deadline)) = (&state.io, deadline) {
+            io.set_deadline(deadline);
+        }
+        self.ready.notify_all();
+    }
+
+    fn abort_locked(&self, state: &mut ClientWriterQueueState) {
+        if state.phase == ClientCloseState::Closed {
+            return;
+        }
+        state.phase = ClientCloseState::Aborted;
+        state.control.clear();
         state.control_bytes = 0;
         state.render = None;
         state.ordered.clear();
+        if let Some(io) = &state.io {
+            io.shutdown();
+        }
         self.ready.notify_all();
+    }
+
+    fn close_writer(&self) {
+        self.abort_locked(&mut self.lock_state());
+    }
+
+    fn notify_disconnect(
+        &self,
+        client_id: u64,
+        detached: bool,
+        events: &mpsc::Sender<ServerEvent>,
+    ) {
+        let mut state = self.lock_state();
+        if state.disconnect_notified {
+            return;
+        }
+        state.disconnect_notified = true;
+        let event = if detached {
+            ServerEvent::ClientDetach { client_id }
+        } else {
+            ServerEvent::ClientDisconnected { client_id }
+        };
+        if events.try_send(event).is_err() {
+            state.disconnect_pending = Some(detached);
+            self.publish_notifications(&state);
+        }
+    }
+
+    fn notify_drained(&self, client_id: u64, events: &mpsc::Sender<ServerEvent>) {
+        self.notify_credit(client_id, events, true);
+    }
+
+    fn notify_endpoint_credit(&self, client_id: u64, events: &mpsc::Sender<ServerEvent>) {
+        if self.endpoint_waiting.swap(false, Ordering::AcqRel) {
+            self.notify_credit(client_id, events, false);
+        }
+    }
+
+    fn notify_credit(&self, client_id: u64, events: &mpsc::Sender<ServerEvent>, render: bool) {
+        let mut state = self.lock_state();
+        if state.disconnect_notified {
+            return;
+        }
+        state.credits.render |= render;
+        state.credits.endpoint |= !render;
+        if state.drained_notified {
+            return;
+        }
+        state.drained_notified = true;
+        if events
+            .try_send(ServerEvent::ClientWriterDrained { client_id })
+            .is_err()
+        {
+            state.drained_pending = true;
+            self.publish_notifications(&state);
+        }
+    }
+
+    fn worker_done(&self, reader: bool) {
+        let mut state = self.lock_state();
+        if reader {
+            state.reader_running = false;
+        } else {
+            state.writer_running = false;
+        }
+        let registration = if !state.reader_running && !state.writer_running {
+            state.io = None;
+            state.registration.take()
+        } else {
+            None
+        };
+        drop(state);
+        drop(registration);
+        self.completed.notify_waiters();
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, ClientWriterQueueState> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn send_client_event(
+    queue: &ClientWriterQueue,
+    events: &mpsc::Sender<ServerEvent>,
+    mut event: ServerEvent,
+    should_quit: &AtomicBool,
+    deadline: Option<Instant>,
+) -> Result<(), Box<ServerEvent>> {
+    loop {
+        let mut state = queue.lock_state();
+        if should_quit.load(Ordering::Acquire)
+            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            || state.phase != ClientCloseState::Open
+            || state.disconnect_notified
+        {
+            return Err(Box::new(event));
+        }
+        // Acceptance and disconnect publication share this lock. A failed try_send adds no
+        // credit, and a consumer cannot acknowledge a successful send before its credit exists.
+        match events.try_send(event) {
+            Ok(()) => {
+                state.pending_events += 1;
+                return Ok(());
+            }
+            Err(mpsc::error::TrySendError::Closed(event)) => return Err(Box::new(event)),
+            Err(mpsc::error::TrySendError::Full(pending)) => event = pending,
+        }
+        let _ = queue.ready.wait_timeout(state, Duration::from_millis(10));
     }
 }
 
@@ -656,13 +1321,8 @@ pub(crate) enum ServerEvent {
         code: &'static str,
         message: String,
     },
-    /// One chunk of a deferred endpoint operation's final response is ready.
-    ClientShellEndpointResponseChunkReady {
-        client_id: u64,
-        boot_id: String,
-        request_id: String,
-        final_chunk: bool,
-        data: Vec<u8>,
+    EndpointResponseReady {
+        response: super::client_commands::EndpointResponseReady,
     },
     /// 后台观测结果不参与终端命令的焦点和 in-flight 状态。
     ObservationResponse {
@@ -678,6 +1338,42 @@ pub(crate) enum ServerEvent {
     ClientWriterDrained { client_id: u64 },
     /// Ctrl+C or external shutdown signal received.
     QuitSignal,
+}
+
+impl ServerEvent {
+    pub(crate) fn transport_client_id(&self) -> Option<u64> {
+        match self {
+            Self::ClientConnected { client_id, .. }
+            | Self::ClientShellConnected { client_id, .. }
+            | Self::ClientViewInput { client_id, .. }
+            | Self::ClientInput { client_id, .. }
+            | Self::GraphicsTransmissionResult { client_id, .. }
+            | Self::GraphicsTransmissionStarted { client_id, .. }
+            | Self::ClientPasteRejected { client_id, .. }
+            | Self::ClientClipboardImage { client_id, .. }
+            | Self::ClientAttachTerminal { client_id, .. }
+            | Self::ClientObserveTerminal { client_id, .. }
+            | Self::ClientControlTerminal { client_id, .. }
+            | Self::ClientAttachScroll { client_id, .. }
+            | Self::ClientAttachMouse { client_id, .. }
+            | Self::ClientResize { client_id, .. }
+            | Self::ClientShellResize { client_id, .. }
+            | Self::ClientShellPaneInput { client_id, .. }
+            | Self::ClientShellPopupInput { client_id, .. }
+            | Self::ClientShellHostTheme { client_id, .. }
+            | Self::ClientShellFocus { client_id, .. }
+            | Self::ClientShellMouseCapture { client_id, .. }
+            | Self::ClientShellPresentationSync { client_id, .. }
+            | Self::ClientShellEndpointRequest { client_id, .. }
+            | Self::ClientShellEndpointRequestError { client_id, .. } => Some(*client_id),
+            Self::EndpointResponseReady { .. }
+            | Self::ObservationResponse { .. }
+            | Self::ClientDetach { .. }
+            | Self::ClientDisconnected { .. }
+            | Self::ClientWriterDrained { .. }
+            | Self::QuitSignal => None,
+        }
+    }
 }
 
 /// Clamp client-reported terminal dimensions to a minimum viable size.
@@ -765,104 +1461,24 @@ fn classify_input_event_size(
 /// Reads one framed hello against one absolute deadline.
 ///
 /// On Unix each partial read receives only the remaining timeout; on Windows
-/// named-pipe polling checks the same deadline between peeks. Thus a client
+/// both readiness waits and overlapped reads use the same absolute deadline. Thus a client
 /// cannot keep the handshake alive by sending an incomplete frame in pieces.
 /// `read_message` separately rejects a declared first frame over `MAX_FRAME_SIZE`
 /// (2 MiB), before deserializing it.
 struct HandshakeReader<'a> {
-    stream: &'a mut LocalStream,
+    stream: &'a mut crate::platform::ServerClientStream,
     deadline: Instant,
 }
 
 impl<'a> HandshakeReader<'a> {
-    fn new(stream: &'a mut LocalStream, deadline: Instant) -> Self {
+    fn new(stream: &'a mut crate::platform::ServerClientStream, deadline: Instant) -> Self {
         Self { stream, deadline }
-    }
-
-    fn remaining(&self) -> io::Result<Duration> {
-        let now = Instant::now();
-        if now >= self.deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "client handshake deadline exceeded",
-            ));
-        }
-        Ok(self.deadline.duration_since(now))
     }
 }
 
 impl Read for HandshakeReader<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-
-        #[cfg(not(windows))]
-        {
-            let remaining = self.remaining()?;
-            self.stream.set_recv_timeout(Some(remaining))?;
-            return self.stream.read(buffer);
-        }
-
-        #[cfg(windows)]
-        loop {
-            let _ = self.remaining()?;
-            match crate::ipc::poll_local_stream_read_count(self.stream, buffer)? {
-                crate::ipc::LocalStreamReadCount::Data(read) => return Ok(read),
-                crate::ipc::LocalStreamReadCount::Closed => return Ok(0),
-                crate::ipc::LocalStreamReadCount::Pending => {
-                    crate::platform::wait_client_stream_readable(self.stream)?;
-                }
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-fn set_client_recv_timeout(
-    stream: &LocalStream,
-    timeout: Option<Duration>,
-    context: &'static str,
-    client_id: u64,
-) -> io::Result<()> {
-    match stream.set_recv_timeout(timeout) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-            debug!(client_id, err = %err, context, "client socket receive timeout unavailable");
-            Ok(())
-        }
-        Err(err) => Err(err),
-    }
-}
-
-#[cfg(not(windows))]
-fn set_client_recv_timeout(
-    stream: &LocalStream,
-    timeout: Option<Duration>,
-    _context: &'static str,
-    _client_id: u64,
-) -> io::Result<()> {
-    stream.set_recv_timeout(timeout)
-}
-
-/// HSR-06/RS-16：给客户端读写流设置发送超时。Windows 管道/命名管道不支持时
-/// 记一条 debug 并继续（该平台由 writer 线程的写失败兜底）。
-fn set_client_write_timeout(
-    stream: &LocalStream,
-    timeout: Option<Duration>,
-    client_id: u64,
-) -> io::Result<()> {
-    match stream.set_send_timeout(timeout) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-            debug!(
-                client_id,
-                err = %err,
-                "client socket write timeout unavailable"
-            );
-            Ok(())
-        }
-        Err(err) => Err(err),
+        crate::platform::read_client_handshake(self.stream, buffer, self.deadline)
     }
 }
 
@@ -881,31 +1497,20 @@ pub(crate) fn handle_client_handshake(
 }
 
 pub(crate) fn handle_client_handshake_with_permit(
-    mut stream: LocalStream,
+    stream: LocalStream,
     client_id: u64,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
     handshake_permit: Option<ClientHandshakePermit>,
 ) -> io::Result<()> {
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let writer_queue = ClientWriterQueue::new();
+    let mut stream =
+        crate::platform::prepare_server_client_stream(stream, writer_queue.write_timeout)?;
     if should_quit.load(Ordering::Acquire) {
         return Ok(());
     }
 
-    // The accept loop uses nonblocking mode. Restore the stream mode needed by
-    // the handshake write path; HandshakeReader applies the absolute deadline
-    // itself (receive timeouts on Unix, readiness polling on Windows).
-    stream.set_nonblocking(false)?;
-
-    set_client_recv_timeout(
-        &stream,
-        Some(HANDSHAKE_TIMEOUT),
-        "client handshake read timeout unavailable",
-        client_id,
-    )?;
-
-    // Read the handshake message. The reader updates the OS timeout on Unix and
-    // polls named pipes on Windows, so partial frames cannot extend the deadline.
     let hello: ClientMessage = match protocol::read_message(
         &mut HandshakeReader::new(&mut stream, handshake_deadline),
         MAX_FRAME_SIZE,
@@ -949,7 +1554,7 @@ pub(crate) fn handle_client_handshake_with_permit(
                     encoding: RenderEncoding::TerminalAnsi,
                     error: Some(reason),
                 };
-                let _ = protocol::write_message(&mut stream, &welcome);
+                write_rejection(&mut stream, &welcome);
                 return Ok(());
             }
             let (cols, rows) = clamp_terminal_size(cols, rows);
@@ -1020,7 +1625,7 @@ pub(crate) fn handle_client_handshake_with_permit(
                         .to_owned(),
                 ),
             };
-            let _ = protocol::write_message(&mut stream, &welcome);
+            write_rejection(&mut stream, &welcome);
             return Ok(());
         }
         _ => {
@@ -1032,7 +1637,7 @@ pub(crate) fn handle_client_handshake_with_permit(
                     "expected TerminalHello or ClientShellHello as first message".to_owned(),
                 ),
             };
-            let _ = protocol::write_message(&mut stream, &welcome);
+            write_rejection(&mut stream, &welcome);
             return Ok(());
         }
     };
@@ -1068,33 +1673,60 @@ pub(crate) fn handle_client_handshake_with_permit(
     };
     protocol::write_message(&mut stream, &welcome).map_err(|e| io::Error::other(e.to_string()))?;
 
-    set_client_recv_timeout(
-        &stream,
-        None,
-        "failed to clear client handshake read timeout",
-        client_id,
-    )?;
-    // HSR-06/RS-16：客户端 socket 也要有发送超时。每条消息的写入按「有进展就
-    // 续期、完全停滞就超时」判定（见 `write_client_stream`），所以慢但活着的
-    // 客户端不受影响；假死客户端不再让 writer 线程永久阻塞。
-    set_client_write_timeout(&stream, Some(CLIENT_WRITE_TIMEOUT), client_id)?;
+    #[cfg(unix)]
+    stream.set_recv_timeout(None)?;
 
-    // Create separate channels for reliable control messages and droppable renders.
-    let writer_queue = ClientWriterQueue::new();
     let writer = ClientWriter {
         control: ClientControlWriter::queue(writer_queue.clone()),
         render: ClientRenderWriter::queue(writer_queue.clone()),
     };
-
-    // Spawn a writer thread that forwards messages from the channels to the stream.
     let write_stream = stream.try_clone()?;
+    writer_queue.attach(&stream, true)?;
+    #[cfg(test)]
+    if let Some(permit) = &handshake_permit {
+        permit
+            .limiter
+            .test_checkpoint(&writer_queue, HandshakeTestStage::BeforeRegister);
+    }
+    if handshake_permit
+        .as_ref()
+        .is_some_and(|permit| !permit.limiter.register(&writer_queue))
+    {
+        writer_queue.close_writer();
+        drop(write_stream);
+        drop(stream);
+        writer_queue.worker_done(false);
+        writer_queue.worker_done(true);
+        return Ok(());
+    }
+    #[cfg(test)]
+    if let Some(permit) = &handshake_permit {
+        permit
+            .limiter
+            .test_checkpoint(&writer_queue, HandshakeTestStage::BeforeSpawn);
+    }
     let writer_event_tx = server_event_tx.clone();
-    std::thread::spawn(move || {
-        client_writer_loop(write_stream, client_id, writer_queue, writer_event_tx);
-    });
+    let worker_queue = writer_queue.clone();
+    if let Err(error) = std::thread::Builder::new().spawn(move || {
+        run_client_writer(write_stream, client_id, worker_queue, writer_event_tx);
+    }) {
+        writer_queue.close_writer();
+        drop(stream);
+        writer_queue.worker_done(false);
+        writer_queue.worker_done(true);
+        return Err(error);
+    }
+    #[cfg(test)]
+    if let Some(permit) = &handshake_permit {
+        permit
+            .limiter
+            .test_checkpoint(&writer_queue, HandshakeTestStage::AfterSpawn);
+    }
 
     if should_quit.load(Ordering::Acquire) {
         send_shutdown_to_unregistered_client(&writer);
+        drop(stream);
+        writer_queue.worker_done(true);
         return Ok(());
     }
 
@@ -1129,77 +1761,99 @@ pub(crate) fn handle_client_handshake_with_permit(
             writer,
         }
     };
-    if let Err(err) = server_event_tx.blocking_send(connected) {
-        match err.0 {
-            ServerEvent::ClientConnected { writer, .. }
-            | ServerEvent::ClientShellConnected { writer, .. } => {
-                send_shutdown_to_unregistered_client(&writer);
-            }
-            _ => {}
+    if let Err(event) = send_client_event(
+        &writer_queue,
+        server_event_tx,
+        connected,
+        should_quit,
+        Some(handshake_deadline),
+    ) {
+        if let ServerEvent::ClientConnected { writer, .. }
+        | ServerEvent::ClientShellConnected { writer, .. } = *event
+        {
+            send_shutdown_to_unregistered_client(&writer);
         }
+        drop(stream);
+        writer_queue.worker_done(true);
+        return Ok(());
     }
     drop(handshake_permit);
 
-    // Enter read loop — read client messages and forward to main loop.
     client_read_loop_with_endpoint_controls(
         stream,
         client_id,
         server_event_tx,
         should_quit,
         endpoint_control_writer.as_ref(),
+        &writer_queue,
     )
 }
 
 fn send_shutdown_to_unregistered_client(writer: &ClientWriter) {
-    let mut framed = Vec::new();
-    if protocol::write_message(
-        &mut framed,
-        &ServerMessage::ServerShutdown {
-            reason: Some("server is shutting down".to_owned()),
-        },
-    )
-    .is_ok()
-    {
-        let _ = writer.control.send(framed);
-    }
+    writer.transport().shutdown("server is shutting down", None);
 }
 
-/// The client writer loop — prioritizes control messages over render frames.
+#[cfg(test)]
 fn client_writer_loop(
-    mut stream: LocalStream,
+    stream: LocalStream,
     client_id: u64,
-    writer_queue: Arc<ClientWriterQueue>,
-    server_event_tx: mpsc::Sender<ServerEvent>,
+    queue: Arc<ClientWriterQueue>,
+    events: mpsc::Sender<ServerEvent>,
 ) {
-    while let Some(item) = writer_queue.recv() {
+    #[cfg(windows)]
+    let stream =
+        crate::platform::prepare_server_client_stream(stream, queue.write_timeout).unwrap();
+    queue.attach(&stream, false).unwrap();
+    run_client_writer(stream, client_id, queue, events);
+}
+
+fn run_client_writer(
+    mut stream: crate::platform::ServerClientStream,
+    client_id: u64,
+    queue: Arc<ClientWriterQueue>,
+    events: mpsc::Sender<ServerEvent>,
+) {
+    #[cfg(test)]
+    {
+        queue.lock_state().writer_started = true;
+        queue.ready.notify_all();
+    }
+    while let Some(item) = queue.recv() {
         let written = match item {
-            ClientWriteItem::Control(data) => write_framed_bytes(&mut stream, &data),
+            ClientWriteItem::Control(data) => {
+                queue.notify_endpoint_credit(client_id, &events);
+                write_framed_bytes(&mut stream, &data)
+            }
             ClientWriteItem::Render(data) => {
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientWriterDrained { client_id });
+                queue.notify_drained(client_id, &events);
                 write_framed_bytes(&mut stream, &data)
             }
         };
         if !written {
-            let _ = server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
+            queue.close_writer();
             break;
         }
     }
-    writer_queue.close_writer();
-    debug!("client writer thread exiting");
+    if queue.lock_state().phase != ClientCloseState::Aborted {
+        if let Err(err) = crate::platform::finish_client_stream(&mut stream) {
+            debug!(client_id, %err, "client drain aborted");
+            queue.close_writer();
+        } else {
+            let mut state = queue.lock_state();
+            if state.phase != ClientCloseState::Aborted {
+                state.phase = ClientCloseState::Closed;
+            }
+        }
+    }
+    queue.notify_disconnect(client_id, false, &events);
+    drop(stream);
+    queue.worker_done(false);
+    debug!(client_id, "client writer thread exiting");
 }
 
-fn write_framed_bytes(stream: &mut LocalStream, data: &[u8]) -> bool {
-    #[cfg(unix)]
-    let result = crate::platform::write_client_stream(stream, data);
-    #[cfg(windows)]
-    let result = stream.write_all(data);
-    if let Err(err) = result {
+fn write_framed_bytes(stream: &mut crate::platform::ServerClientStream, data: &[u8]) -> bool {
+    if let Err(err) = crate::platform::write_client_stream(stream, data) {
         debug!(err = %err, "client write failed, closing writer");
-        return false;
-    }
-    if let Err(err) = stream.flush() {
-        debug!(err = %err, "client flush failed, closing writer");
         return false;
     }
     true
@@ -1213,17 +1867,61 @@ fn client_read_loop(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
 ) -> io::Result<()> {
-    client_read_loop_with_endpoint_controls(stream, client_id, server_event_tx, should_quit, None)
+    let stream = crate::platform::prepare_server_client_stream(stream, CLIENT_WRITE_TIMEOUT)?;
+    let queue = ClientWriterQueue::new();
+    queue.attach(&stream, true)?;
+    queue.lock_state().writer_running = false;
+    client_read_loop_with_endpoint_controls(
+        stream,
+        client_id,
+        server_event_tx,
+        should_quit,
+        None,
+        &queue,
+    )
+}
+
+struct ClientEventSender<'a> {
+    queue: &'a ClientWriterQueue,
+    events: &'a mpsc::Sender<ServerEvent>,
+    should_quit: &'a AtomicBool,
+    detached: std::cell::Cell<bool>,
+}
+
+impl ClientEventSender<'_> {
+    fn send(&self, event: ServerEvent) -> Result<(), Box<ServerEvent>> {
+        match event {
+            ServerEvent::ClientDisconnected { .. } => Ok(()),
+            ServerEvent::ClientDetach { .. } => {
+                self.detached.set(true);
+                Ok(())
+            }
+            event => send_client_event(self.queue, self.events, event, self.should_quit, None),
+        }
+    }
 }
 
 fn client_read_loop_with_endpoint_controls(
-    mut stream: LocalStream,
+    mut stream: crate::platform::ServerClientStream,
     client_id: u64,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
     endpoint_control_writer: Option<&ClientControlWriter>,
+    queue: &ClientWriterQueue,
 ) -> io::Result<()> {
-    while !should_quit.load(Ordering::Acquire) {
+    let server_event_tx = ClientEventSender {
+        queue,
+        events: server_event_tx,
+        should_quit,
+        detached: std::cell::Cell::new(false),
+    };
+    while !should_quit.load(Ordering::Acquire) && queue.lock_state().phase == ClientCloseState::Open
+    {
+        #[cfg(test)]
+        {
+            queue.lock_state().reader_waiting = true;
+            queue.ready.notify_all();
+        }
         #[cfg(unix)]
         let message = protocol::read_message(
             &mut crate::platform::ClientStreamReader(&mut stream),
@@ -1235,8 +1933,7 @@ fn client_read_loop_with_endpoint_controls(
             Ok(msg) => msg,
             Err(protocol::FramingError::UnexpectedEof) => {
                 // Client disconnected.
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
+                let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                 break;
             }
             Err(protocol::FramingError::Oversized { claimed, max }) => {
@@ -1244,14 +1941,12 @@ fn client_read_loop_with_endpoint_controls(
                     client_id,
                     claimed, max, "oversized message from client, closing"
                 );
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
+                let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                 break;
             }
             Err(err) => {
                 debug!(client_id, err = %err, "client read error, closing");
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
+                let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                 break;
             }
         };
@@ -1278,8 +1973,7 @@ fn client_read_loop_with_endpoint_controls(
                             size = data.len(),
                             "oversized input from client, closing"
                         );
-                        let _ = server_event_tx
-                            .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                        let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                         break;
                     }
                 } else {
@@ -1295,9 +1989,10 @@ fn client_read_loop_with_endpoint_controls(
                         .set_send_timeout(Some(OBSERVER_WRITE_TIMEOUT))
                         .and_then(|()| stream.set_nonblocking(true));
                     if let Err(err) = configured {
-                        let _ = crate::platform::shutdown_client_stream(&stream);
-                        let _ = server_event_tx
-                            .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                        queue.close_writer();
+                        queue.notify_disconnect(client_id, false, server_event_tx.events);
+                        drop(stream);
+                        queue.worker_done(true);
                         return Err(err);
                     }
                 }
@@ -1339,8 +2034,7 @@ fn client_read_loop_with_endpoint_controls(
                         size = data.len(),
                         "oversized clipboard image from client, closing"
                     );
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                     break;
                 } else {
                     ServerEvent::ClientClipboardImage {
@@ -1378,8 +2072,7 @@ fn client_read_loop_with_endpoint_controls(
                     client_shell_geometry_error(surface_size, cell_width_px, cell_height_px)
                 {
                     warn!(client_id, %reason, "invalid client shell resize, closing");
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                     break;
                 }
                 ServerEvent::ClientShellResize {
@@ -1398,8 +2091,7 @@ fn client_read_loop_with_endpoint_controls(
                         if colors.len() > 256
                 ) {
                     warn!(client_id, "invalid client shell host theme update, closing");
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                     break;
                 }
                 ServerEvent::ClientShellHostTheme { client_id, update }
@@ -1423,8 +2115,7 @@ fn client_read_loop_with_endpoint_controls(
                             count = events.len(),
                             "oversized targeted pane input batch, closing"
                         );
-                        let _ = server_event_tx
-                            .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                        let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                         break;
                     }
                     InputEventLimit::PasteTooLarge { size } => {
@@ -1447,8 +2138,7 @@ fn client_read_loop_with_endpoint_controls(
                             max = MAX_INPUT_PAYLOAD,
                             "oversized targeted pane input, closing"
                         );
-                        let _ = server_event_tx
-                            .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                        let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                         break;
                     }
                 }
@@ -1468,8 +2158,7 @@ fn client_read_loop_with_endpoint_controls(
                         count = events.len(),
                         "oversized popup input batch, closing"
                     );
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                     break;
                 }
                 InputEventLimit::PasteTooLarge { size } => {
@@ -1492,8 +2181,7 @@ fn client_read_loop_with_endpoint_controls(
                         max = MAX_INPUT_PAYLOAD,
                         "oversized popup input, closing"
                     );
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                     break;
                 }
             },
@@ -1507,16 +2195,14 @@ fn client_read_loop_with_endpoint_controls(
                         request_size = request.len(),
                         "oversized client shell endpoint command, closing"
                     );
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                     break;
                 }
                 let decoded = match decode_endpoint_request(&request) {
                     Ok(decoded) => decoded,
                     Err(error) => {
                         warn!(client_id, %error, "invalid endpoint request envelope, closing");
-                        let _ = server_event_tx
-                            .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                        let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                         break;
                     }
                 };
@@ -1530,8 +2216,7 @@ fn client_read_loop_with_endpoint_controls(
                         client_id,
                         "oversized client shell endpoint request id, closing"
                     );
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                    let _ = server_event_tx.send(ServerEvent::ClientDisconnected { client_id });
                     break;
                 }
                 match decoded {
@@ -1598,7 +2283,7 @@ fn client_read_loop_with_endpoint_controls(
                 continue;
             }
             ClientMessage::Detach => {
-                let _ = server_event_tx.blocking_send(ServerEvent::ClientDetach { client_id });
+                let _ = server_event_tx.send(ServerEvent::ClientDetach { client_id });
                 break;
             }
             ClientMessage::AttachTerminal {
@@ -1645,11 +2330,24 @@ fn client_read_loop_with_endpoint_controls(
             }
         };
 
-        if server_event_tx.blocking_send(event).is_err() {
+        if server_event_tx.send(event).is_err() {
             break; // Main loop gone.
         }
     }
 
+    let detached = server_event_tx.detached.get();
+    {
+        let mut state = queue.lock_state();
+        if state.phase == ClientCloseState::Open
+            && !detached
+            && !should_quit.load(Ordering::Acquire)
+        {
+            queue.abort_locked(&mut state);
+        }
+    }
+    queue.notify_disconnect(client_id, detached, server_event_tx.events);
+    drop(stream);
+    queue.worker_done(true);
     debug!(client_id, "client read thread exiting");
     Ok(())
 }
@@ -1659,6 +2357,163 @@ mod tests {
     use super::*;
     use interprocess::local_socket::traits::Listener as _;
     use std::path::PathBuf;
+
+    #[test]
+    fn transport_registry_close_and_register_are_atomic_in_both_orders() {
+        for register_first in [false, true] {
+            let limiter = ClientHandshakeLimiter::new();
+            let writer = ClientWriter::test_paused();
+            let queue = &writer.control.queue;
+            queue.lock_state().writer_running = true;
+            let senders = queue.lock_state().senders;
+            let snapshot = if register_first {
+                assert!(limiter.register(queue));
+                limiter.close_transports()
+            } else {
+                let snapshot = limiter.close_transports();
+                assert!(!limiter.register(queue));
+                snapshot
+            };
+            assert_eq!(snapshot.len(), usize::from(register_first));
+            assert_eq!(queue.lock_state().senders, senders);
+            assert!(snapshot.iter().all(|transport| !transport.is_complete()));
+            assert!(limiter.close_transports().is_empty());
+            assert!(!limiter.register(&ClientWriterQueue::new()));
+            queue.close_writer();
+            queue.worker_done(false);
+            assert!(snapshot.iter().all(ClientTransportHandle::is_complete));
+        }
+    }
+
+    #[test]
+    fn transport_registry_simultaneous_register_close_never_loses_an_owner() {
+        for _ in 0..128 {
+            let limiter = ClientHandshakeLimiter::new();
+            let queue = ClientWriterQueue::new();
+            queue.lock_state().writer_running = true;
+            let barrier = std::sync::Barrier::new(2);
+            let (registered, snapshot) = std::thread::scope(|scope| {
+                let close = scope.spawn(|| {
+                    barrier.wait();
+                    limiter.close_transports()
+                });
+                barrier.wait();
+                (limiter.register(&queue), close.join().unwrap())
+            });
+            assert_eq!(snapshot.len(), usize::from(registered));
+            assert!(snapshot
+                .iter()
+                .all(|handle| handle.identity() == Arc::as_ptr(&queue) as usize));
+            queue.close_writer();
+            queue.worker_done(false);
+        }
+    }
+
+    #[test]
+    fn transport_registry_completion_and_queue_drop_remove_receipts_without_producers() {
+        let limiter = ClientHandshakeLimiter::new();
+        for reader_first in [false, true] {
+            let writer = ClientWriter::test_paused();
+            let queue = writer.control.queue.clone();
+            {
+                let mut state = queue.lock_state();
+                state.reader_running = true;
+                state.writer_running = true;
+            }
+            assert!(limiter.register(&queue));
+            assert_eq!(queue.lock_state().senders, 2);
+            drop(writer);
+            assert_eq!(queue.lock_state().senders, 0);
+            assert_eq!(
+                queue.recv(),
+                None,
+                "registry cannot keep producer admission alive"
+            );
+            queue.worker_done(reader_first);
+            assert_eq!(limiter.test_transport_count(), 1);
+            queue.worker_done(!reader_first);
+            assert_eq!(
+                limiter.test_transport_count(),
+                0,
+                "a retained observer must not retain registry history"
+            );
+            assert!(queue.lock_state().registration.is_none());
+        }
+        for _ in 0..128 {
+            let queue = ClientWriterQueue::new();
+            assert!(limiter.register(&queue));
+            assert_eq!(limiter.test_transport_count(), 1);
+            drop(queue);
+            assert_eq!(
+                limiter.test_transport_count(),
+                0,
+                "queue destruction unregisters as a fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_shutdown_tail_is_atomic_under_competing_owners() {
+        for _ in 0..64 {
+            let writer = ClientWriter::test_paused();
+            writer.control.send(vec![1, 2, 3]).unwrap();
+            writer.render.try_send(vec![4, 5]).unwrap();
+            let handle = writer.transport();
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    send_shutdown_to_unregistered_client(&writer);
+                });
+                barrier.wait();
+                handle.shutdown("server is shutting down", None);
+            });
+            let frames = writer.test_drain();
+            assert_eq!(frames.len(), 2);
+            assert_eq!(frames[0], vec![1, 2, 3]);
+            let tail: ServerMessage =
+                protocol::read_message(&mut frames[1].as_slice(), MAX_FRAME_SIZE).unwrap();
+            assert!(matches!(tail, ServerMessage::ServerShutdown { .. }));
+            assert_eq!(
+                writer.control.queue.lock_state().phase,
+                ClientCloseState::Sealed
+            );
+            assert!(writer.control.send(vec![9]).is_err());
+        }
+    }
+
+    #[test]
+    fn transport_shutdown_tail_never_revives_closed_phases_or_exceeds_control_limits() {
+        for phase in [
+            ClientCloseState::Sealed,
+            ClientCloseState::Draining,
+            ClientCloseState::Closed,
+            ClientCloseState::Aborted,
+        ] {
+            let writer = ClientWriter::test_paused();
+            writer.control.queue.lock_state().phase = phase;
+            writer.transport().shutdown("late", None);
+            writer.transport().shutdown("again", None);
+            assert_eq!(writer.control.queue.lock_state().phase, phase);
+            assert!(writer.test_drain().is_empty());
+        }
+        for bytes_limit in [false, true] {
+            let writer = ClientWriter::test_paused();
+            if bytes_limit {
+                writer
+                    .control
+                    .send(vec![0; MAX_CLIENT_CONTROL_BACKLOG_BYTES])
+                    .unwrap();
+            } else {
+                for _ in 0..MAX_CLIENT_CONTROL_BACKLOG_MESSAGES {
+                    writer.control.send(vec![]).unwrap();
+                }
+            }
+            writer.transport().shutdown("no capacity", None);
+            assert!(writer.was_aborted());
+            assert!(writer.test_drain().is_empty());
+        }
+    }
 
     struct TestSocketPath(PathBuf);
 
@@ -1698,7 +2553,7 @@ mod tests {
         (client, server, TestSocketPath(path))
     }
 
-    fn endpoint_hello(surface_cols: u16, surface_rows: u16) -> ClientMessage {
+    pub(crate) fn endpoint_hello(surface_cols: u16, surface_rows: u16) -> ClientMessage {
         let hello = EndpointClientHello {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             cell_width_px: 8,
@@ -1735,8 +2590,510 @@ mod tests {
         serde_json::from_str(&data).unwrap()
     }
 
+    const LOADED_WAIT: Duration = Duration::from_secs(30);
+
+    #[cfg(windows)]
+    struct LiveTransport {
+        peer: crate::platform::ServerClientStream,
+        writer: ClientWriter,
+        queue: Arc<ClientWriterQueue>,
+        events: mpsc::Receiver<ServerEvent>,
+        threads: Vec<std::thread::JoinHandle<()>>,
+        _path: TestSocketPath,
+    }
+
+    #[cfg(windows)]
+    impl LiveTransport {
+        fn new(timeout: Duration, full_events: bool) -> Self {
+            let (peer, stream, path) = local_stream_pair("bounded-transport");
+            let peer = crate::platform::prepare_server_client_stream(peer, LOADED_WAIT).unwrap();
+            let stream = crate::platform::prepare_server_client_stream(stream, timeout).unwrap();
+            let write_stream = stream.try_clone().unwrap();
+            let queue = ClientWriterQueue::with_timeout(timeout);
+            queue.attach(&stream, true).unwrap();
+            let writer = ClientWriter {
+                control: ClientControlWriter::queue(queue.clone()),
+                render: ClientRenderWriter::queue(queue.clone()),
+            };
+            let (events, receiver) = mpsc::channel(1);
+            if full_events {
+                events.try_send(ServerEvent::QuitSignal).unwrap();
+            }
+            let writer_events = events.clone();
+            let writer_queue = queue.clone();
+            let writer_thread = std::thread::spawn(move || {
+                run_client_writer(write_stream, 96, writer_queue, writer_events);
+            });
+            let reader_queue = queue.clone();
+            let controls = writer.control.clone();
+            let reader_thread = std::thread::spawn(move || {
+                client_read_loop_with_endpoint_controls(
+                    stream,
+                    96,
+                    &events,
+                    &Arc::new(AtomicBool::new(false)),
+                    Some(&controls),
+                    &reader_queue,
+                )
+                .unwrap();
+            });
+            Self {
+                peer,
+                writer,
+                queue,
+                events: receiver,
+                threads: vec![writer_thread, reader_thread],
+                _path: path,
+            }
+        }
+
+        fn read_exact(&mut self, bytes: &mut [u8]) {
+            HandshakeReader::new(&mut self.peer, Instant::now() + LOADED_WAIT)
+                .read_exact(bytes)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "read {} bytes: {error}; {:?}",
+                        bytes.len(),
+                        self.queue.lock_state()
+                    )
+                });
+        }
+
+        fn join(&mut self) {
+            let deadline = Instant::now() + LOADED_WAIT;
+            while !self.threads.iter().all(|thread| thread.is_finished()) {
+                assert!(Instant::now() < deadline, "transport worker did not exit");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            for thread in self.threads.drain(..) {
+                thread.join().unwrap();
+            }
+            assert!(self.writer.is_complete());
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for LiveTransport {
+        fn drop(&mut self) {
+            self.writer.abort();
+            for thread in self.threads.drain(..) {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stalled_transport_aborts_both_workers_with_full_event_channel() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("stalled-transport");
+        let mut connection = LiveTransport::new(Duration::from_millis(150), true);
+        connection
+            .writer
+            .render
+            .try_send(vec![b'x'; 3 * 1024 * 1024])
+            .unwrap();
+        connection.peer.write_all(&[2, 0]).unwrap();
+        connection.join();
+        assert_eq!(
+            connection.queue.lock_state().phase,
+            ClientCloseState::Aborted
+        );
+        assert_eq!(
+            connection.writer.take_transport_notifications().0,
+            Some(false)
+        );
+        assert!(matches!(
+            connection.events.try_recv(),
+            Ok(ServerEvent::QuitSignal)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_overflow_and_repeated_abort_release_both_workers() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("overflow-transport");
+        let mut connection = LiveTransport::new(LOADED_WAIT, true);
+        connection
+            .writer
+            .render
+            .try_send(vec![0; 3 * 1024 * 1024])
+            .unwrap();
+        assert!(connection
+            .writer
+            .control
+            .send(vec![0; MAX_CLIENT_CONTROL_BACKLOG_BYTES + 1])
+            .is_err());
+        connection.writer.abort();
+        connection.writer.abort();
+        connection.join();
+        assert_eq!(
+            connection.queue.lock_state().phase,
+            ClientCloseState::Aborted
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_slow_progress_outlives_write_timeout_and_shutdown_tail_is_drained() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("slow-transport");
+        let mut connection = LiveTransport::new(Duration::from_millis(250), true);
+        let bytes = vec![b'x'; 3 * 1024 * 1024];
+        connection.writer.control.send(bytes.clone()).unwrap();
+        let start = Instant::now();
+        let mut received = vec![0; bytes.len()];
+        for chunk in received.chunks_mut(64 * 1024) {
+            connection.read_exact(chunk);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert_eq!(received, bytes);
+        assert!(start.elapsed() > Duration::from_millis(500));
+        assert_eq!(connection.queue.lock_state().phase, ClientCloseState::Open);
+        let tail = frame_server_message(&ServerMessage::ServerShutdown {
+            reason: Some("done".repeat(32)),
+        });
+        connection.writer.control.send(tail.clone()).unwrap();
+        connection.writer.seal();
+        assert!(connection.writer.control.send(vec![1]).is_err());
+        std::thread::sleep(Duration::from_millis(60));
+        let mut actual = vec![0; tail.len()];
+        for chunk in actual.chunks_mut(2) {
+            connection.read_exact(chunk);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert_eq!(actual, tail);
+        connection.join();
+        assert_eq!(
+            connection.queue.lock_state().phase,
+            ClientCloseState::Closed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_seal_keeps_inflight_frame_before_shutdown_tail() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("inflight-drain");
+        let mut connection = LiveTransport::new(LOADED_WAIT, true);
+        let bytes = vec![b'x'; 3 * 1024 * 1024];
+        let mut received = vec![0; bytes.len()];
+        connection.writer.render.try_send(bytes.clone()).unwrap();
+        connection.read_exact(&mut received[..4096]);
+        let tail = frame_server_message(&ServerMessage::ServerShutdown { reason: None });
+        connection.writer.control.send(tail.clone()).unwrap();
+        connection.writer.seal();
+        connection.read_exact(&mut received[4096..]);
+        assert_eq!(received, bytes);
+        let mut received_tail = vec![0; tail.len()];
+        connection.read_exact(&mut received_tail);
+        assert_eq!(received_tail, tail);
+        connection.join();
+        assert_eq!(
+            connection.queue.lock_state().phase,
+            ClientCloseState::Closed
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_full_pipe_renews_timeout_for_single_byte_progress() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("byte-progress");
+        let mut connection = LiveTransport::new(Duration::from_millis(200), true);
+        connection
+            .writer
+            .render
+            .try_send(vec![0; 3 * 1024 * 1024])
+            .unwrap();
+        let started = Instant::now();
+        for _ in 0..30 {
+            connection.read_exact(&mut [0]);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(started.elapsed() > Duration::from_millis(500));
+        assert_eq!(connection.queue.lock_state().phase, ClientCloseState::Open);
+        connection.writer.abort();
+        connection.join();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_blocking_interprocess_peer_receives_large_frame_and_tail() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("blocking-peer");
+        let (mut peer, stream, _path) = local_stream_pair("blocking-peer");
+        let (events, mut receiver) = mpsc::channel(4);
+        let reader = std::thread::spawn(move || {
+            handle_client_handshake(stream, 101, &events, &Arc::new(AtomicBool::new(false)))
+                .unwrap();
+        });
+        protocol::write_message(&mut peer, &endpoint_hello(80, 24)).unwrap();
+        let _: ServerMessage = protocol::read_message(&mut peer, MAX_FRAME_SIZE).unwrap();
+        let ServerEvent::ClientShellConnected { writer, .. } =
+            recv_server_event(&mut receiver, "blocking peer")
+        else {
+            panic!("missing connection")
+        };
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let peer_reader = std::thread::spawn(move || {
+            let message: ServerMessage =
+                protocol::read_message(&mut peer, MAX_GRAPHICS_FRAME_SIZE).unwrap();
+            assert!(
+                matches!(message, ServerMessage::WindowTitle { title: Some(title) } if title.len() == 3 * 1024 * 1024)
+            );
+            let message: ServerMessage = protocol::read_message(&mut peer, MAX_FRAME_SIZE).unwrap();
+            assert!(matches!(message, ServerMessage::ServerShutdown { .. }));
+            let _ = peer.read(&mut [0]);
+            done_tx.send(()).unwrap();
+        });
+        writer
+            .control
+            .send(frame_server_message(&ServerMessage::WindowTitle {
+                title: Some("x".repeat(3 * 1024 * 1024)),
+            }))
+            .unwrap();
+        writer
+            .control
+            .send(frame_server_message(&ServerMessage::ServerShutdown {
+                reason: None,
+            }))
+            .unwrap();
+        writer.seal();
+        let completed = done.recv_timeout(LOADED_WAIT).is_ok();
+        if !completed {
+            writer.abort();
+        }
+        peer_reader.join().unwrap();
+        reader.join().unwrap();
+        assert!(
+            completed,
+            "blocking peer must receive the entire frame and tail"
+        );
+        assert!(!writer.was_aborted());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_endpoint_final_chunk_does_not_close_the_connection() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("endpoint-final-chunk");
+        let mut connection = LiveTransport::new(LOADED_WAIT, false);
+        for request_id in ["first", "second"] {
+            let message = ServerMessage::ClientShellEndpointResponseChunk {
+                boot_id: "boot".into(),
+                request_id: request_id.into(),
+                final_chunk: true,
+                data: b"{}".to_vec(),
+            };
+            let frame = frame_server_message(&message);
+            connection.writer.control.send(frame.clone()).unwrap();
+            let mut received = vec![0; frame.len()];
+            connection.read_exact(&mut received);
+            assert_eq!(received, frame);
+            assert_eq!(connection.queue.lock_state().phase, ClientCloseState::Open);
+        }
+        connection.writer.seal();
+        connection.join();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_full_input_event_channel_is_cancellable() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("full-input-events");
+        let mut connection = LiveTransport::new(LOADED_WAIT, true);
+        protocol::write_message(
+            &mut connection.peer,
+            &ClientMessage::Input { data: vec![1] },
+        )
+        .unwrap();
+        connection.writer.abort();
+        connection.join();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejection_survives_delayed_fragmented_reads() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("rejection-tail");
+        let (peer, server, _path) = local_stream_pair("rejection-tail");
+        let mut peer = crate::platform::prepare_server_client_stream(peer, LOADED_WAIT).unwrap();
+        let (events, _receiver) = mpsc::channel(1);
+        let thread = std::thread::spawn(move || {
+            handle_client_handshake(server, 97, &events, &Arc::new(AtomicBool::new(false)))
+                .unwrap();
+        });
+        protocol::write_message(&mut peer, &ClientMessage::Input { data: vec![] }).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let mut reader = HandshakeReader::new(&mut peer, Instant::now() + LOADED_WAIT);
+        let mut prefix = [0; 4];
+        for byte in &mut prefix {
+            reader.read_exact(std::slice::from_mut(byte)).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut frame = prefix.to_vec();
+        for _ in 0..u32::from_le_bytes(prefix) {
+            let mut byte = [0];
+            reader.read_exact(&mut byte).unwrap();
+            frame.push(byte[0]);
+        }
+        let message: ServerMessage =
+            protocol::read_message(&mut frame.as_slice(), MAX_FRAME_SIZE).unwrap();
+        assert!(matches!(
+            message,
+            ServerMessage::Welcome { error: Some(_), .. }
+        ));
+        thread.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_transport_handles_threads_and_idle_cpu_remain_bounded() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("transport-resources");
+        let cycle = |index: usize| {
+            let mut connection = LiveTransport::new(Duration::from_millis(100), true);
+            if index.is_multiple_of(3) {
+                connection.writer.control.send(vec![1, 2, 3, 4]).unwrap();
+                connection.writer.seal_until(Instant::now() + LOADED_WAIT);
+                connection.read_exact(&mut [0; 4]);
+            } else if index % 3 == 1 {
+                connection
+                    .writer
+                    .render
+                    .try_send(vec![0; 2 * 1024 * 1024])
+                    .unwrap();
+                connection.writer.abort();
+            } else {
+                connection
+                    .writer
+                    .control
+                    .send(vec![0; MAX_CLIENT_CONTROL_BACKLOG_BYTES + 1])
+                    .unwrap_err();
+            }
+            connection.join();
+        };
+        for index in 0..10 {
+            cycle(index);
+        }
+        let before = crate::platform::client_transport_process_sample();
+        for index in 0..100 {
+            cycle(index);
+        }
+        let after = crate::platform::client_transport_process_sample();
+        assert!(
+            after.0 <= before.0 + 2,
+            "handles accumulated: {before:?} -> {after:?}"
+        );
+        assert!(
+            after.1 <= before.1 + 1,
+            "threads accumulated: {before:?} -> {after:?}"
+        );
+        let mut idle = (0..16)
+            .map(|_| LiveTransport::new(LOADED_WAIT, false))
+            .collect::<Vec<_>>();
+        let cpu_before = crate::platform::client_transport_process_sample().2;
+        std::thread::sleep(Duration::from_millis(400));
+        let cpu = crate::platform::client_transport_process_sample().2 - cpu_before;
+        assert!(
+            cpu < Duration::from_millis(100),
+            "idle transports used {cpu:?} CPU"
+        );
+        let started = Instant::now();
+        protocol::write_message(&mut idle[0].peer, &ClientMessage::Input { data: vec![7] })
+            .unwrap();
+        assert!(matches!(
+            recv_server_event(&mut idle[0].events, "idle wake"),
+            ServerEvent::ClientInput { .. }
+        ));
+        let wake = started.elapsed();
+        assert!(
+            wake < Duration::from_secs(1),
+            "event-driven reader wake is delayed"
+        );
+        println!("transport resources: before={before:?} after_100={after:?}; idle_16_cpu_400ms={cpu:?}; reader_wake={wake:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fragmented_handshake_does_not_extend_absolute_deadline() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("fragmented-handshake");
+        let (peer, server, _path) = local_stream_pair("drip-handshake");
+        let mut peer = crate::platform::prepare_server_client_stream(peer, LOADED_WAIT).unwrap();
+        let (events, _receiver) = mpsc::channel(1);
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let result =
+                handle_client_handshake(server, 98, &events, &Arc::new(AtomicBool::new(false)));
+            done_tx.send(result).unwrap();
+        });
+        let started = Instant::now();
+        let mut frame = Vec::new();
+        protocol::write_message(&mut frame, &endpoint_hello(80, 24)).unwrap();
+        for byte in &frame[..8] {
+            if peer.write_all(std::slice::from_ref(byte)).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        done.recv_timeout(Duration::from_secs(1))
+            .expect("absolute handshake deadline")
+            .unwrap();
+        assert!(started.elapsed() < HANDSHAKE_TIMEOUT + Duration::from_secs(1));
+        thread.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_partial_input_and_second_client_work_during_stalled_output() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("parallel-clients");
+        let stalled = LiveTransport::new(LOADED_WAIT, true);
+        stalled
+            .writer
+            .render
+            .try_send(vec![0; 3 * 1024 * 1024])
+            .unwrap();
+        let (peer, server, _path) = local_stream_pair("second-client");
+        let mut peer = crate::platform::prepare_server_client_stream(peer, LOADED_WAIT).unwrap();
+        let (events, mut receiver) = mpsc::channel(4);
+        let thread = std::thread::spawn(move || {
+            handle_client_handshake(server, 99, &events, &Arc::new(AtomicBool::new(false)))
+                .unwrap();
+        });
+        let started = Instant::now();
+        protocol::write_message(&mut peer, &endpoint_hello(80, 24)).unwrap();
+        let _: ServerMessage = protocol::read_message(
+            &mut HandshakeReader::new(&mut peer, Instant::now() + LOADED_WAIT),
+            MAX_FRAME_SIZE,
+        )
+        .unwrap();
+        let ServerEvent::ClientShellConnected { writer, .. } =
+            recv_server_event(&mut receiver, "second connected")
+        else {
+            panic!("missing connection")
+        };
+        let mut input = Vec::new();
+        protocol::write_message(&mut input, &ClientMessage::Input { data: vec![1, 2] }).unwrap();
+        peer.write_all(&input[..2]).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        peer.write_all(&input[2..]).unwrap();
+        assert!(
+            matches!(recv_server_event(&mut receiver, "partial input"), ServerEvent::ClientInput { data, .. } if data == [1, 2])
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        writer.abort();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn sealed_queue_keeps_control_and_rejects_all_new_producers() {
+        let (writer, queue) = test_queue_writer();
+        writer.control.send(vec![1, 2]).unwrap();
+        writer.render.try_send(vec![3]).unwrap();
+        writer.seal();
+        writer.seal();
+        assert!(writer.control.send(vec![4]).is_err());
+        assert!(writer.render.try_send(vec![5]).is_err());
+        assert!(writer.render.send_ordered(vec![6]).is_err());
+        assert_eq!(queue.recv(), Some(ClientWriteItem::Control(vec![1, 2])));
+        assert_eq!(queue.recv(), None);
+        assert_eq!(queue.lock_state().phase, ClientCloseState::Draining);
+    }
+
     fn recv_server_event(receiver: &mut mpsc::Receiver<ServerEvent>, context: &str) -> ServerEvent {
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + LOADED_WAIT;
         loop {
             match receiver.try_recv() {
                 Ok(event) => return event,
@@ -1767,6 +3124,54 @@ mod tests {
             },
             queue,
         )
+    }
+
+    #[test]
+    fn response_fairness_credit_reasons_merge_without_duplicate_acknowledgement() {
+        for full_channel in [false, true] {
+            for render_first in [false, true] {
+                let (writer, queue) = test_queue_writer();
+                let (events, mut receiver) = mpsc::channel(1);
+                if full_channel {
+                    events.try_send(ServerEvent::QuitSignal).unwrap();
+                }
+                let chunk = vec![0; super::super::client_commands::ENDPOINT_RESPONSE_CHUNK_BYTES];
+                while writer
+                    .control
+                    .try_send_endpoint_frame(chunk.clone())
+                    .is_ok()
+                {}
+                assert!(!writer.was_aborted());
+                assert!(queue.endpoint_waiting.load(Ordering::Acquire));
+                if render_first {
+                    queue.notify_drained(1, &events);
+                }
+                assert_eq!(writer.test_dequeue_control(1, &events), chunk);
+                queue.notify_drained(1, &events);
+                queue.notify_drained(1, &events);
+                queue.notify_endpoint_credit(1, &events);
+                assert_eq!(receiver.len(), 1);
+                assert_eq!(writer.take_transport_notifications(), (None, full_channel));
+                assert_eq!(writer.take_transport_notifications(), (None, false));
+                let token = receiver.try_recv().unwrap();
+                if full_channel {
+                    assert!(matches!(token, ServerEvent::QuitSignal));
+                } else {
+                    assert!(matches!(
+                        token,
+                        ServerEvent::ClientWriterDrained { client_id: 1 }
+                    ));
+                }
+                let credits = writer.acknowledge_transport_drain();
+                assert!(credits.render && credits.endpoint);
+                let duplicate = writer.acknowledge_transport_drain();
+                assert!(!duplicate.render && !duplicate.endpoint);
+                queue.notify_endpoint_credit(1, &events);
+                assert!(receiver.is_empty());
+                assert_eq!(writer.take_transport_notifications(), (None, false));
+                println!("response-fairness credit_merge full_channel={full_channel} render_first={render_first} render={} endpoint={} duplicate_render={} duplicate_endpoint={}", credits.render, credits.endpoint, duplicate.render, duplicate.endpoint);
+            }
+        }
     }
 
     fn frame_server_message(message: &ServerMessage) -> Vec<u8> {
@@ -1924,6 +3329,43 @@ mod tests {
             .expect("normal handshake thread join")
             .unwrap();
         assert_eq!(limiter.active(), 0, "all handshake slots must be released");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_close_writer_cancels_established_reader() {
+        let _dirs = crate::config::test_dirs::isolate_dirs("transport-close-reader");
+        let (mut client, server, _path) = local_stream_pair("close-reader");
+        let (events, mut receiver) = mpsc::channel(4);
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result =
+                handle_client_handshake(server, 95, &events, &Arc::new(AtomicBool::new(false)));
+            let _ = done_tx.send(result);
+        });
+        protocol::write_message(&mut client, &endpoint_hello(80, 24)).unwrap();
+        let _: ServerMessage = protocol::read_message(&mut client, MAX_FRAME_SIZE).unwrap();
+        let ServerEvent::ClientShellConnected { writer, .. } = receiver.blocking_recv().unwrap()
+        else {
+            panic!("expected shell connection");
+        };
+        writer.test_close();
+        writer.test_close();
+        let closed = done.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(client);
+        reader.join().unwrap();
+        assert!(closed, "closing the writer must release the paired reader");
+    }
+
+    #[test]
+    fn client_close_discards_accepted_control_on_abort() {
+        let (writer, queue) = test_queue_writer();
+        writer.control.send(vec![1]).unwrap();
+        writer.test_close();
+        assert!(
+            queue.recv().is_none(),
+            "aborted control must not be replayed"
+        );
     }
 
     /// HSR-06/RS-16：control 车道字节或条数越界说明客户端已经不读——丢队列、

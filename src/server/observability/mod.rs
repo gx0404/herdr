@@ -38,6 +38,7 @@ pub(crate) enum Reply {
     Endpoint {
         client_id: u64,
         boot_id: String,
+        response: super::client_commands::EndpointResponseSender,
         events: tokio::sync::mpsc::Sender<ServerEvent>,
         active: Arc<AtomicBool>,
     },
@@ -56,6 +57,13 @@ impl Reply {
     }
 
     pub(super) fn response(&self, id: &str, result: Result<ResponseResult, (&str, String)>) {
+        let target = match self {
+            Self::Endpoint { response, .. } => match response.take() {
+                Some(target) => Some(target),
+                None => return,
+            },
+            Self::Api { .. } => None,
+        };
         if !self.alive() {
             return;
         }
@@ -72,40 +80,22 @@ impl Reply {
                 },
             }),
         };
-        let Ok(text) = text else {
-            return;
-        };
         match self {
             Self::Api { sender, .. } => {
-                let _ = sender.send(text);
+                if let Ok(text) = text {
+                    let _ = sender.send(text);
+                }
             }
-            Self::Endpoint {
-                client_id,
-                boot_id,
-                events,
-                ..
-            } => {
-                let event = ServerEvent::ObservationResponse {
-                    client_id: *client_id,
-                    boot_id: boot_id.clone(),
-                    message: crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
-                        boot_id: boot_id.clone(),
-                        request_id: id.into(),
-                        final_chunk: true,
-                        data: text.into_bytes(),
-                    },
-                };
-                if let Err(tokio::sync::mpsc::error::TrySendError::Full(event)) =
-                    events.try_send(event)
-                {
-                    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                        let events = events.clone();
-                        runtime.spawn(async move {
-                            let _ = events.send(event).await;
-                        });
-                    } else {
-                        let _ = events.blocking_send(event);
-                    }
+            Self::Endpoint { events, .. } => {
+                if let Some(target) = target {
+                    let text = text.unwrap_or_else(|error| {
+                        super::client_commands::error_response(
+                            id.into(),
+                            "serialization_error",
+                            error.to_string(),
+                        )
+                    });
+                    target.send(text, events);
                 }
             }
         }
@@ -572,6 +562,7 @@ mod tests {
         let reply = Reply::Endpoint {
             client_id: 7,
             boot_id: "boot".into(),
+            response: crate::server::client_commands::EndpointResponseSender::test_empty(),
             events,
             active: Arc::new(AtomicBool::new(true)),
         };
@@ -607,6 +598,7 @@ mod tests {
         let reply = Reply::Endpoint {
             client_id: 7,
             boot_id: "boot".into(),
+            response: crate::server::client_commands::EndpointResponseSender::test_empty(),
             events,
             active: Arc::new(AtomicBool::new(true)),
         };
@@ -664,14 +656,40 @@ mod tests {
 
     #[tokio::test]
     async fn endpoint_queue_pressure_never_panics_in_async_server() {
-        let (events, _receiver) = tokio::sync::mpsc::channel(1);
+        use crate::server::client_commands::{
+            test_response_ticket, EndpointResponseSender, EndpointResponseTarget,
+        };
+        let (events, mut receiver) = tokio::sync::mpsc::channel(1);
+        events.try_send(ServerEvent::QuitSignal).unwrap();
         let reply = Reply::Endpoint {
             client_id: 1,
             boot_id: "boot".into(),
+            response: EndpointResponseSender::new(EndpointResponseTarget::Bulk(
+                test_response_ticket(1, "boot", "one"),
+            )),
             events,
             active: Arc::new(AtomicBool::new(true)),
         };
+        let subscription = reply.clone();
         reply.response("one", Ok(ResponseResult::Ok {}));
-        reply.response("two", Err(("server_busy", "busy".into())));
+        subscription.response("one", Err(("server_busy", "duplicate".into())));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ServerEvent::QuitSignal)
+        ));
+        let event = tokio::time::timeout(Duration::from_secs(30), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ServerEvent::EndpointResponseReady { response } = event else {
+            panic!("complete response");
+        };
+        assert_eq!(response.ticket.identity.request_id, "one");
+        assert!(serde_json::from_slice::<serde_json::Value>(&response.body)
+            .unwrap()
+            .get("result")
+            .is_some());
+        assert!(receiver.try_recv().is_err());
+        assert!(subscription.event(&metrics_event(1)));
     }
 }

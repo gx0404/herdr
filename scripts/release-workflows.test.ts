@@ -44,6 +44,161 @@ describe("fork workflow layout", () => {
   });
 });
 
+describe("scoped native release qualification", () => {
+  const ci = load("ci");
+  const job = ci.jobs.check;
+  const step = (name: string): any => job.steps.find((entry: any) => entry.name === name);
+  const build = step("Qualify clean native release");
+  const handoff = step("Qualify macOS live handoff");
+  const tools = step("Prepare Unix release smoke tools");
+  const perf = step("Qualify Unix release performance");
+  const upload = step("Upload native release evidence");
+  const raw = step("Upload Unix raw performance evidence");
+
+  test("qualification is same-fork validation PR only, without extra permissions or ordinary PR cost", () => {
+    const gate = "github.repository == 'gx0404/herdr' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'gx0404/herdr' && github.head_ref == 'verify/runtime-sync-p11-20261006'";
+    expect(job.env.RELEASE_QUALIFICATION).toBe(`\${{ ${gate} }}`);
+    expect(job["timeout-minutes"]).toBe(`\${{ ${gate} && 75 || matrix.timeout_minutes }}`);
+    expect(ci.permissions).toEqual({ contents: "read" });
+    expect(ci.on.pull_request_target).toBeUndefined();
+    expect(job.permissions).toBeUndefined();
+    expect(build.if).toBe("env.RELEASE_QUALIFICATION == 'true'");
+    for (const entry of [handoff, tools, perf, upload, raw]) {
+      expect(entry.if).toContain("env.RELEASE_QUALIFICATION == 'true'");
+      expect(entry["continue-on-error"]).toBeUndefined();
+    }
+    expect(job.steps.indexOf(build)).toBeGreaterThan(job.steps.indexOf(step("Replay PowerShell terminal compatibility")));
+  });
+
+  test("native standard build rejects local overrides and records separate checkout/head/merge identities", () => {
+    expect(build.shell).toBe("pwsh");
+    expect(build.env.PR_HEAD_SHA).toBe("${{ github.event.pull_request.head.sha }}");
+    expect(build.env.PR_MERGE_SHA).toBe("${{ github.event.pull_request.merge_commit_sha }}");
+    for (const token of ["git rev-parse HEAD", "checkout_sha = $checkout", "head_sha = $env:PR_HEAD_SHA", "merge_sha = $env:PR_MERGE_SHA", ".cargo/config.local.toml", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "CARGO_PROFILE_RELEASE_.*", "Non-repository Cargo configuration is forbidden", "$env:CARGO_TERM_VERBOSE = 'true'", "just build 2>&1 | Tee-Object", "$buildExit = $LASTEXITCODE", "exit $buildExit", "target/release/herdr.exe", "target/release/conpty", "target/release/THIRD-PARTY-NOTICES", "target/release/herdr", "Get-FileHash", "artifacts.json"]) {
+      expect(build.run).toContain(token);
+    }
+    expect(build.run).not.toContain("cargo build");
+    expect(build.run).not.toContain("${{");
+  });
+
+  test.skipIf(process.platform !== "win32")("PowerShell build guard accepts controlled incremental zero or unset and rejects other overrides", () => {
+    const guard = build.run.slice(build.run.indexOf("$overrides ="), build.run.indexOf("$cargoHome ="));
+    expect(guard).toContain("CARGO_INCREMENTAL must be unset or exactly 0");
+    expect(build.run).toContain("$receipt.cargo_incremental = $env:CARGO_INCREMENTAL");
+    expect(build.run).toContain("environment (pinned dtolnay/rust-toolchain sets 0)");
+    const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(RUST|CARGO_)/i.test(key)));
+    for (const [incremental, rustflags, error] of [
+      [undefined, undefined, undefined],
+      ["0", undefined, undefined],
+      ["1", undefined, "CARGO_INCREMENTAL must be unset or exactly 0"],
+      ["false", undefined, "CARGO_INCREMENTAL must be unset or exactly 0"],
+      ["00", undefined, "CARGO_INCREMENTAL must be unset or exactly 0"],
+      [" 0", undefined, "CARGO_INCREMENTAL must be unset or exactly 0"],
+      ["0", "-C opt-level=0", "Build overrides are forbidden: RUSTFLAGS"],
+    ] as const) {
+      const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference = 'Stop'\n${guard}\nWrite-Output 'guard accepted'`], {
+        env: { ...cleanEnv, ...(incremental === undefined ? {} : { CARGO_INCREMENTAL: incremental }), ...(rustflags === undefined ? {} : { RUSTFLAGS: rustflags }) },
+        encoding: "utf8",
+      });
+      expect({ incremental, rustflags, status: result.status }).toEqual({ incremental, rustflags, status: error ? 1 : 0 });
+      if (error) {
+        expect(result.stderr).toContain(error);
+        expect(result.stdout).not.toContain("guard accepted");
+      } else {
+        expect(result.stderr).toBe("");
+        expect(result.stdout.trim()).toBe("guard accepted");
+      }
+    }
+  }, 30000);
+
+  test.skipIf(process.platform !== "win32")("PowerShell toolchain loop preserves complete arguments for every command", () => {
+    const loop = build.run.slice(build.run.indexOf("foreach ($spec in"), build.run.indexOf("$env:CARGO_TERM_VERBOSE ="));
+    const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", `
+$ErrorActionPreference = 'Stop'
+$out = 'unused-stub-output'
+foreach ($name in @('rustc', 'cargo', 'just', 'bun', 'zig')) {
+  Set-Item "Function:$name" {
+    [ordered]@{ command = $MyInvocation.MyCommand.Name; arguments = @($args) } | ConvertTo-Json -Compress
+    $global:LASTEXITCODE = 0
+  }
+}
+function Tee-Object {
+  param([Parameter(ValueFromPipeline)]$InputObject, [string]$FilePath, [switch]$Append)
+  process { $InputObject }
+}
+${loop}
+`], { encoding: "utf8" });
+    expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+    expect(result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line))).toEqual([
+      { command: "rustc", arguments: ["-vV"] },
+      { command: "cargo", arguments: ["-V"] },
+      { command: "just", arguments: ["--version"] },
+      { command: "bun", arguments: ["--version"] },
+      { command: "zig", arguments: ["version"] },
+      { command: "cargo", arguments: ["nextest", "--version"] },
+    ]);
+  }, 30000);
+
+  test("macOS missing tests run explicitly before unchanged serial 60s smoke", () => {
+    expect(handoff.if).toContain("runner.os == 'macOS'");
+    expect(handoff.run).toContain("cargo nextest run --locked --no-fail-fast -E 'binary(live_handoff)'");
+    expect(handoff["continue-on-error"]).toBeUndefined();
+    expect(handoff.run).toContain('if (( codes[0] != 0 )); then exit "${codes[0]}"; fi');
+    expect(job.steps.indexOf(handoff)).toBeLessThan(job.steps.indexOf(perf));
+    expect(perf.if).toContain("matrix.kind == 'unix'");
+    expect(perf.env).toEqual({ HERDR_PERF_SAMPLE_SECONDS: "60" });
+    expect(perf.run).toContain("just bench-release-smoke 2>&1 | tee");
+    expect(perf.run).toContain("Baseline override is forbidden");
+    expect(perf.run).toContain("distribution/latest.json");
+    expect(perf.run).toContain("manifest_sha256");
+    expect(perf.run).toContain("baseline.stat().st_size");
+    expect(perf.run).toContain("hashlib.sha256(baseline.read_bytes())");
+    for (const entry of [handoff, perf]) {
+      expect(entry.run).toContain("set +e\n");
+      expect(entry.run).toContain('codes=("${PIPESTATUS[@]}")');
+      expect(entry.run).toContain('exit "${codes[0]}"');
+      expect(entry.run).toContain('exit "${codes[1]}"');
+    }
+    expect(tools.run).toContain('"$RUNNER_ENVIRONMENT" == github-hosted');
+    expect(tools.run).toContain("jq lsof perl tee tmux curl");
+    expect(tools.run).toContain("command -v pidstat");
+    expect(tools.run).toContain('sudo apt-get install -y --no-install-recommends "${packages[@]}"');
+    expect(tools.run).toContain('brew install "${packages[@]}"');
+  });
+
+  test("failure artifacts use the existing pin and bounded paths, never private runtime or baseline executables", () => {
+    for (const entry of [upload, raw]) {
+      expect(entry.if).toStartWith("always() && env.RELEASE_QUALIFICATION == 'true'");
+      expect(entry.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
+      expect(entry.with["retention-days"]).toBe(14);
+    }
+    expect(upload.with.path).toBe("target/ci-release-evidence/");
+    expect(upload.with["include-hidden-files"]).toBeUndefined();
+    expect(raw.if).toContain("steps.release-perf.outputs.run_dir != ''");
+    expect(raw.with["include-hidden-files"]).toBe(true);
+    expect(raw.with.path.trim().split("\n")).toEqual([
+      "${{ steps.release-perf.outputs.run_dir }}/*.txt",
+      "${{ steps.release-perf.outputs.run_dir }}/run.log",
+      "${{ steps.release-perf.outputs.run_dir }}/baseline-receipt.json",
+      "${{ steps.release-perf.outputs.run_dir }}/results/**/*.txt",
+    ]);
+  });
+
+  test("qualification bash steps parse without running tools, builds or performance probes", () => {
+    for (const entry of [handoff, tools, perf]) {
+      const result = spawnSync("bash", ["-n"], { input: entry.run, encoding: "utf8" });
+      expect({ name: entry.name, status: result.status, stderr: result.stderr }).toEqual({ name: entry.name, status: 0, stderr: "" });
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")("native release PowerShell parses without running a build", () => {
+    const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command",
+      "$tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($env:GX_SCRIPT, [ref]$tokens, [ref]$errors); if ($errors.Count) { $errors | Out-String | Write-Error; exit 1 }",
+    ], { env: { ...process.env, GX_SCRIPT: build.run }, encoding: "utf8" });
+    expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+  }, 30000);
+});
+
 describe("archived official publishing workflow boundaries", () => {
   test("publishing is tag-only while normal PR CI remains enabled", () => {
     expect(preview.on).toEqual({ push: { tags: ["preview-*"] } });

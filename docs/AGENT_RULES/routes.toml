@@ -298,6 +298,7 @@ id = "testing"
 doc = "docs/AGENT_RULES/testing.md"
 paths = [
   ".config/nextest.toml",
+  "scripts/run_nextest.py",
   "scripts/run_parallel_unittest.py",
   "scripts/run_test_suite.py",
   "scripts/smoke_live_handoff_sessions.sh",

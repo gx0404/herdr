@@ -716,6 +716,11 @@ pub(crate) fn ssh_auth_sock_path_is_live(_path: &std::path::Path) -> bool {
 
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
+mod persist_files;
+pub(crate) use persist_files::{
+    check_persist_source, create_persist_temporary, discard_persist_temporary,
+    prepare_persist_metadata, publish_persist_recovery, same_persist_file, sync_directory,
+};
 
 mod process_lineage;
 pub(crate) use process_lineage::{

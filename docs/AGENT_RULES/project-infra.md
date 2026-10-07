@@ -66,6 +66,10 @@ update/release_notes/product_announcements/plugins/render_prof 等）、采集�
   （`scripts/windows_cross.py::SDK_ROOT`）；跨 worktree/机器共享时设
   `HERDR_WINDOWS_CROSS_ROOT` 显式指向项目外路径；`LIBGHOSTTY_VT_WINDOWS_LIBC`
   覆盖语义不变。
+- Cargo 驱动的 Zig 构建及 `build_vendored_libghostty_vt.sh` 默认把全局/本地缓存分别放在
+  `<repo>/.local/zig-cache/global`、`<repo>/.local/zig-cache/local`；只对子进程补默认值。
+  `ZIG_GLOBAL_CACHE_DIR` / `ZIG_LOCAL_CACHE_DIR` 独立显式覆盖，原样传递（包括空值和相对
+  路径）；相对路径仍由 Zig 的 vendored 工作目录解释，Cargo 追踪两变量变化以重跑 build.rs。
 - 用户级运行时（如 Node.js 用户目录安装、uv tool）属例外；本机 shim 只进
   `.local/tool-shims/`（如 graphify 钉版经 uvx 运行 0.9.20 的转发脚本），
   用 `PATH="$PWD/.local/tool-shims:$PATH"` 前缀注入，不污染用户级目录。

@@ -610,7 +610,15 @@ impl HeadlessServer {
                         self.clients.values().any(|client| {
                             client.shell_deferred_navigation_request_id.as_deref()
                                 == Some(request_id)
-                        })
+                                || client.endpoint_responses.owns_deferred_request(request_id)
+                        }) || self
+                            .endpoint_response_owners
+                            .iter()
+                            .filter_map(std::sync::Weak::upgrade)
+                            .any(|identity| {
+                                identity.deferred_request_id.get().map(String::as_str)
+                                    == Some(request_id)
+                            })
                     });
                 let changed = self.app.handle_internal_event_with_render_impact(ev);
                 let api_focus_succeeded = super::client_views::forward_proxied_api_response(

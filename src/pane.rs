@@ -56,8 +56,8 @@ pub use self::{
     terminal::{ScrollMetrics, TerminalCursorState},
 };
 
-/// 单个 pane 终止阶梯的最坏耗时（SIGHUP/SIGTERM/SIGKILL 三级宽限之和）。等待阶梯收尾的
-/// 调用方按它推导超时，不各自写死毫秒数。
+/// 单个 pane 的 PTY 关闭门限与 SIGHUP/SIGTERM/SIGKILL 三级宽限之和。
+/// 等待收尾的调用方按它推导超时，不各自写死毫秒数。
 pub const PANE_SHUTDOWN_LADDER_WORST_CASE: std::time::Duration = shutdown::LADDER_WORST_CASE;
 
 /// 等待后台 reaper 把已投递的 pane 进程终止阶梯执行完，最多等 `timeout`；返回是否等到。
@@ -99,6 +99,9 @@ const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::
 const TERMINAL_COMPRESSION_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
 const TERMINAL_COMPRESSION_STEP: std::time::Duration = std::time::Duration::from_millis(1);
 pub(crate) const PANE_TERM: &str = crate::ghostty::TERM;
+/// Smallest terminal grid a pane is resized to.
+pub(crate) const MIN_PANE_ROWS: u16 = 2;
+pub(crate) const MIN_PANE_COLS: u16 = 4;
 const PANE_COLORTERM: &str = "truecolor";
 /// pane 对外宣称的终端程序身份：pane 由 herdr 自己的终端层渲染，不是启动 server
 /// 的宿主终端（WEZ-INT-01）。版本取 Cargo.toml 版本（`build_info::BASE_VERSION`）。
@@ -224,6 +227,27 @@ pub(crate) fn pane_env_test_lock() -> crate::config::TestEnvGuard {
     crate::config::test_config_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static INITIAL_SPAWN_CAPTURE: std::cell::RefCell<Option<Vec<(PaneId, u16, u16)>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn capture_initial_spawns<T>(run: impl FnOnce() -> T) -> (T, Vec<(PaneId, u16, u16)>) {
+    struct Reset(Option<Vec<(PaneId, u16, u16)>>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            INITIAL_SPAWN_CAPTURE.with(|capture| *capture.borrow_mut() = self.0.take());
+        }
+    }
+    let _reset = Reset(INITIAL_SPAWN_CAPTURE.with(|capture| capture.replace(Some(Vec::new()))));
+    let result = run();
+    let attempts = INITIAL_SPAWN_CAPTURE.with(|capture| capture.borrow_mut().take().unwrap());
+    (result, attempts)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1611,11 +1635,21 @@ struct CwdCache {
 const CWD_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl PaneRuntimeIo {
+    #[cfg(unix)]
     fn shutdown(&self) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.shutdown(),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
+        }
+    }
+
+    #[cfg(windows)]
+    fn shutdown(&self) -> Option<crate::pty::actor::PtyCloseCompletion> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => Some(actor.shutdown()),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => None,
         }
     }
 
@@ -1781,16 +1815,19 @@ pub enum WheelRouting {
 
 impl Drop for PaneRuntime {
     fn drop(&mut self) {
-        // Abort detection task immediately and terminate the owned session.
-        // The PTY actor shuts down before the process/session policy runs.
         // 会话锚点在关掉 PTY 之前快照，理由见 `PaneRuntime::shutdown`。
         let request = (!self.preserve_processes_on_drop).then(|| self.process_shutdown_request());
         if let Some(handle) = &self.detect_handle {
             handle.abort();
         }
         self.compression.abort();
+        #[cfg(windows)]
+        let closed = self.io.shutdown();
+        #[cfg(unix)]
         self.io.shutdown();
         if let Some(request) = request {
+            #[cfg(windows)]
+            let request = request.after_pty_close(closed);
             shutdown::submit(request);
         }
     }
@@ -2252,7 +2289,7 @@ fn publish_reported_cwd(
 }
 
 impl PaneRuntime {
-    /// 关闭 pane：同步摘除 I/O 与后台任务，进程终止阶梯交给 reaper 线程。
+    /// 关闭输入入口与后台任务，PTY 关闭及进程终止阶梯在后台协调。
     ///
     /// 调用方是事件循环，必须立刻返回：信号阶梯最坏要等 [`PANE_SHUTDOWN_LADDER_WORST_CASE`]，
     /// 同步执行会把 PTY 输出、输入、渲染与其它 API 一起冻住（HSR-01）。
@@ -2265,6 +2302,9 @@ impl PaneRuntime {
             handle.abort();
         }
         self.compression.abort();
+        #[cfg(windows)]
+        let request = request.after_pty_close(self.io.shutdown());
+        #[cfg(unix)]
         self.io.shutdown();
         shutdown::submit(request);
         self.preserve_processes_on_drop = true;
@@ -2743,6 +2783,18 @@ impl PaneRuntime {
         initial_state: SpawnInitialState<'_>,
         agent_detection: AgentDetection,
     ) -> std::io::Result<Self> {
+        #[cfg(test)]
+        if INITIAL_SPAWN_CAPTURE.with(|capture| {
+            let mut capture = capture.borrow_mut();
+            if let Some(attempts) = capture.as_mut() {
+                attempts.push((pane_id, rows, cols));
+                true
+            } else {
+                false
+            }
+        }) {
+            return Err(std::io::Error::other("captured initial pane spawn"));
+        }
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
@@ -3386,8 +3438,8 @@ impl PaneRuntime {
     /// 失败时两者都保持旧几何（pts 与网格一致），并记一条 warn。下一次同几何
     /// resize 因此不会被「尺寸未变」短路，而是再次真正执行。
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
-        let rows = rows.max(2);
-        let cols = cols.max(4);
+        let rows = rows.max(MIN_PANE_ROWS);
+        let cols = cols.max(MIN_PANE_COLS);
         let size = (rows, cols, cell_width_px, cell_height_px);
         if self.current_size.get() == size {
             return;
@@ -4104,6 +4156,13 @@ impl PaneRuntime {
     /// 测试用：给测试运行时装上一个窗格根进程 pid（真实运行时在 spawn 后写入）。
     pub(crate) fn test_set_child_pid(&self, pid: u32) {
         self.child_pid.store(pid, Ordering::Release);
+    }
+
+    pub(crate) fn test_scroll_metrics_reads(&self) -> usize {
+        self.terminal
+            .ghostty
+            .scroll_metrics_reads
+            .load(Ordering::Relaxed)
     }
 
     pub(crate) fn test_contend_during_dirty_collection(

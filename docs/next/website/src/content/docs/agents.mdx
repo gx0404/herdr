@@ -29,6 +29,8 @@ These five are the only agents this fork detects and ships integrations for; see
 
 ZCode appears as a read-only external source only while a recent root session is running. When no session is running, its External group disappears. A session that has ended can still be read by its external ID while it remains unarchived and within the 72-hour recent window.
 
+Activity-tree discovery uses a bounded background queue. A refresh rejected by a full queue remains eligible for retry under the normal throttle, including an idle pane's first discovery. ZCode transcript reads scan at most 8 MiB per call, skipping oversized lines in bounded pieces without interpreting their suffix as a new record. Pass returned cursors back unchanged to continue reading; a short unfinished transcript line waits for its terminating newline.
+
 These agents report their own state to Herdr. There is nothing to install; run them in a Herdr pane.
 
 <ul class="agent-logos">

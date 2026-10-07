@@ -204,19 +204,24 @@ pub(crate) fn install_kimi() -> io::Result<KimiInstallPaths> {
     }
 
     let hooks_dir = dir.join("hooks");
-    fs::create_dir_all(&hooks_dir)?;
-
     let hook_path = hooks_dir.join(KIMI_HOOK_INSTALL_NAME);
+    let config_path = dir.join("config.toml");
+    let existing_config = match fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let new_config =
+        build_kimi_config_with_hooks(&existing_config, &hook_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot update {}: {error}", config_path.display()),
+            )
+        })?;
+
+    fs::create_dir_all(&hooks_dir)?;
     fs::write(&hook_path, KIMI_HOOK_ASSET)?;
     make_executable(&hook_path)?;
-
-    let config_path = dir.join("config.toml");
-    let existing_config = if config_path.is_file() {
-        fs::read_to_string(&config_path)?
-    } else {
-        String::new()
-    };
-    let new_config = build_kimi_config_with_hooks(&existing_config, &hook_path);
     if new_config != existing_config {
         write_config(&config_path, new_config)?;
     }
@@ -363,9 +368,18 @@ pub(crate) fn uninstall_kimi() -> io::Result<KimiUninstallResult> {
     let config_path = kimi_dir.join("config.toml");
     let mut updated_config = false;
 
-    if config_path.is_file() {
-        let existing_config = fs::read_to_string(&config_path)?;
-        let new_config = remove_kimi_config_block(&existing_config);
+    let existing_config = match fs::read_to_string(&config_path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(existing_config) = existing_config {
+        let new_config = remove_kimi_config_block(&existing_config).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot update {}: {error}", config_path.display()),
+            )
+        })?;
         if new_config != existing_config {
             write_config(&config_path, new_config)?;
             updated_config = true;

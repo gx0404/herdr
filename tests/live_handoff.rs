@@ -602,25 +602,966 @@ fn unused_local_port() -> u16 {
         .port()
 }
 
-fn wait_for_http_contains(port: u16, needle: &str, timeout: Duration) -> String {
-    let deadline = Instant::now() + timeout;
-    let mut last_response = String::new();
-    while Instant::now() < deadline {
-        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
-            let _ =
-                stream.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-            let mut response = String::new();
-            let _ = stream.read_to_string(&mut response);
-            last_response = response;
-            if last_response.contains(needle) {
-                return last_response;
+const HTTP_RESPONSE_LIMIT: usize = 64 * 1024;
+const DIAGNOSTIC_LIMIT: usize = 128 * 1024;
+
+#[derive(Debug)]
+struct HttpFailure {
+    operation: &'static str,
+    kind: std::io::ErrorKind,
+    message: String,
+    response: String,
+}
+
+#[derive(Debug)]
+struct HttpWaitFailure {
+    attempts: usize,
+    errors: std::collections::BTreeMap<String, usize>,
+    last: HttpFailure,
+}
+
+fn remaining(deadline: Instant) -> std::io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "absolute deadline elapsed")
+        })
+}
+
+fn http_response(port: u16, deadline: Instant) -> Result<String, HttpFailure> {
+    let mut bytes = Vec::new();
+    let mut operation = "connect";
+    let result = (|| -> std::io::Result<()> {
+        let address = ([127, 0, 0, 1], port).into();
+        let mut stream = TcpStream::connect_timeout(&address, remaining(deadline)?)?;
+        operation = "write";
+        let mut request = &b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"[..];
+        while !request.is_empty() {
+            stream.set_write_timeout(Some(remaining(deadline)?))?;
+            match stream.write(request) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(count) => request = &request[count..],
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        operation = "read";
+        loop {
+            stream.set_read_timeout(Some(remaining(deadline)?))?;
+            let mut buffer = [0; 4096];
+            let available = (HTTP_RESPONSE_LIMIT + 1 - bytes.len()).min(buffer.len());
+            match stream.read(&mut buffer[..available]) {
+                Ok(0) => break,
+                Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+            if bytes.len() > HTTP_RESPONSE_LIMIT {
+                operation = "response-limit";
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "HTTP response exceeded 64 KiB",
+                ));
+            }
+        }
+        remaining(deadline)?;
+        operation = "decode";
+        std::str::from_utf8(&bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(())
+    })();
+    let response =
+        String::from_utf8_lossy(&bytes[..bytes.len().min(HTTP_RESPONSE_LIMIT)]).into_owned();
+    result
+        .map(|()| response.clone())
+        .map_err(|error| HttpFailure {
+            operation,
+            kind: error.kind(),
+            message: error.to_string(),
+            response,
+        })
+}
+
+fn poll_http_contains(
+    port: u16,
+    needle: &str,
+    timeout: Duration,
+) -> Result<String, HttpWaitFailure> {
+    let deadline = Instant::now() + timeout;
+    let mut failure = HttpWaitFailure {
+        attempts: 0,
+        errors: std::collections::BTreeMap::new(),
+        last: HttpFailure {
+            operation: "deadline",
+            kind: std::io::ErrorKind::TimedOut,
+            message: "no attempt within budget".into(),
+            response: String::new(),
+        },
+    };
+    while remaining(deadline).is_ok() {
+        failure.attempts += 1;
+        failure.last = match http_response(port, deadline) {
+            Ok(response) if response.contains(needle) => return Ok(response),
+            Ok(response) => HttpFailure {
+                operation: "match",
+                kind: std::io::ErrorKind::InvalidData,
+                message: "response did not contain expected payload".into(),
+                response,
+            },
+            Err(error) => error,
+        };
+        *failure
+            .errors
+            .entry(format!(
+                "{}:{:?}",
+                failure.last.operation, failure.last.kind
+            ))
+            .or_default() += 1;
+        if let Ok(budget) = remaining(deadline) {
+            thread::sleep(budget.min(Duration::from_millis(50)));
+        }
     }
-    panic!(
-        "http server on port {port} did not return {needle:?}; last response was {last_response:?}"
+    Err(failure)
+}
+
+fn posix_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\"'\"'"))
+}
+
+const PYTHON_HTTP_FIXTURE: &str = r#"import http.server
+import socketserver
+import sys
+
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
+
+if __name__ == "__main__":
+    with LoopbackHTTPServer(("127.0.0.1", int(sys.argv[1])), http.server.SimpleHTTPRequestHandler) as server:
+        print(f"Serving HTTP on 127.0.0.1 port {server.server_port}", flush=True)
+        server.serve_forever()
+"#;
+
+fn python_http_command(web_root: &Path, port: u16) -> String {
+    let script = web_root.join("handoff_http.py");
+    fs::write(&script, PYTHON_HTTP_FIXTURE).unwrap();
+    let script = posix_quote(&script.canonicalize().unwrap().to_string_lossy());
+    let log = posix_quote(&web_root.join("startup.stdout").to_string_lossy());
+    let err = posix_quote(&web_root.join("startup.stderr").to_string_lossy());
+    let probe = posix_quote("import os, sys; print('sys.executable=' + sys.executable); print('sys.version=' + sys.version); print('cwd=' + os.getcwd()); print('probe_pid=' + str(os.getpid())); print('import http.server: starting', flush=True); import http.server; print('import http.server: ok', flush=True)");
+    let launch = posix_quote(&format!(
+        "printf 'server_pid=%s\\n' \"$$\" >> {log}; exec python3 {script} {port}"
+    ));
+    format!(
+        "{{ pwd; command -v python3; python3 -c {probe}; printf 'probe_exit=%s\\n' \"$?\"; }} > {log} 2> {err}; sh -c {launch}; printf 'server_exit=%s\\n' \"$?\" >> {log}"
+    )
+}
+
+struct HttpContext<'a> {
+    test: &'a str,
+    phase: &'a str,
+    session: &'a str,
+    socket: &'a Path,
+    pane: &'a str,
+    web_root: &'a Path,
+    config_home: &'a Path,
+}
+
+fn diagnostic_pane_read(socket: &Path, pane: &str) -> std::io::Result<Vec<u8>> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = std::mem::size_of_val(&address) as u8;
+    }
+    let path = socket.as_os_str().as_bytes();
+    if path.len() >= address.sun_path.len() || path.contains(&0) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    for (destination, source) in address.sun_path.iter_mut().zip(path) {
+        *destination = *source as libc::c_char;
+    }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    stream.set_nonblocking(true)?;
+    let connected = unsafe {
+        libc::connect(
+            fd,
+            (&address as *const libc::sockaddr_un).cast(),
+            std::mem::size_of_val(&address) as libc::socklen_t,
+        )
+    };
+    if connected < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(error);
+        }
+    }
+    let wait = |events| -> std::io::Result<()> {
+        loop {
+            let mut descriptor = libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events,
+                revents: 0,
+            };
+            let milliseconds = remaining(deadline)?
+                .as_millis()
+                .max(1)
+                .min(i32::MAX as u128) as i32;
+            let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+            if ready > 0 {
+                return remaining(deadline).map(|_| ());
+            }
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    };
+    wait(libc::POLLOUT)?;
+    if let Some(error) = stream.take_error()? {
+        return Err(error);
+    }
+    let request = format!(
+        "{}\n",
+        serde_json::json!({
+            "id": "test:http:diagnostic", "method": "pane.read",
+            "params": {"pane_id": pane, "source": "visible", "lines": 40, "format": "text", "strip_ansi": true}
+        })
     );
+    let mut pending = request.as_bytes();
+    while !pending.is_empty() {
+        wait(libc::POLLOUT)?;
+        match (&stream).write(pending) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(count) => pending = &pending[count..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let mut response = Vec::new();
+    loop {
+        wait(libc::POLLIN)?;
+        let mut buffer = [0; 4096];
+        match (&stream).read(&mut buffer) {
+            Ok(0) => return Ok(response),
+            Ok(count) => {
+                let count = count.min(DIAGNOSTIC_LIMIT - response.len());
+                response.extend_from_slice(&buffer[..count]);
+                if response.contains(&b'\n') || response.len() == DIAGNOSTIC_LIMIT {
+                    return Ok(response);
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn diagnostic_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    file.seek(SeekFrom::Start(
+        metadata.len().saturating_sub(DIAGNOSTIC_LIMIT as u64),
+    ))?;
+    let mut bytes = Vec::new();
+    file.take(DIAGNOSTIC_LIMIT as u64).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn diagnostic_command(
+    command: &mut std::process::Command,
+    deadline: Instant,
+) -> std::io::Result<(Option<std::process::ExitStatus>, Vec<u8>)> {
+    use std::os::fd::OwnedFd;
+    use std::process::Stdio;
+    remaining(deadline)?;
+    let (mut reader, writer) = UnixStream::pair()?;
+    reader.set_nonblocking(true)?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(OwnedFd::from(writer.try_clone()?)))
+        .stderr(Stdio::from(OwnedFd::from(writer)))
+        .spawn()?;
+    let mut output = Vec::new();
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                thread::Builder::new()
+                    .spawn(move || {
+                        let _ = child.wait();
+                    })
+                    .map_err(|reap_error| {
+                        std::io::Error::other(format!("{error}; reaper unavailable: {reap_error}"))
+                    })?;
+                return Err(error);
+            }
+        };
+        for _ in 0..32 {
+            let mut buffer = [0; 4096];
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    output.extend_from_slice(&buffer[..count.min(DIAGNOSTIC_LIMIT - output.len())])
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        if status.is_some() {
+            return Ok((status, output));
+        }
+        let Ok(budget) = remaining(deadline) else {
+            let _ = child.kill();
+            // Reaping must not renew the expired evidence deadline.
+            thread::Builder::new()
+                .spawn(move || {
+                    let _ = child.wait();
+                })
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "deadline exhausted; reaper unavailable: {error}"
+                    ))
+                })?;
+            return Ok((None, output));
+        };
+        thread::sleep(budget.min(Duration::from_millis(10)));
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn python_process_identity(ps: &str, cwd: &str, pid: u32, port: u16, web_root: &Path) -> bool {
+    let fields: Vec<_> = ps.split_whitespace().collect();
+    let executable = fields
+        .get(7)
+        .and_then(|name| Path::new(name).file_name())
+        .and_then(|name| name.to_str());
+    let python = matches!(executable, Some("Python" | "python3"));
+    fields.len() == 10
+        && fields[0] == pid.to_string()
+        && python
+        && Path::new(fields[8]) == web_root.join("handoff_http.py")
+        && fields[9] == port.to_string()
+        && cwd.lines().any(|line| line == format!("p{pid}"))
+        && cwd
+            .lines()
+            .any(|line| line == format!("n{}", web_root.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn capture_python_process(
+    context: &HttpContext<'_>,
+    port: u16,
+    directory: &Path,
+) -> std::io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let startup = diagnostic_file(&context.web_root.join("startup.stdout"))?;
+    let startup = String::from_utf8_lossy(&startup);
+    let pids: Vec<_> = startup
+        .lines()
+        .filter_map(|line| line.strip_prefix("server_pid="))
+        .collect();
+    let pid = pids
+        .first()
+        .filter(|_| {
+            pids.len() == 1 && !startup.lines().any(|line| line.starts_with("server_exit="))
+        })
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unavailable: missing/ambiguous/or exited PID marker",
+            )
+        })?;
+    let pid_text = pid.to_string();
+    let web_root = context.web_root.canonicalize()?;
+    let mut captures = Vec::new();
+    let mut run = |name: &str, executable: &str, args: &[&str]| -> std::io::Result<String> {
+        let (status, output) = diagnostic_command(
+            std::process::Command::new(executable)
+                .env("LC_ALL", "C")
+                .args(args),
+            deadline,
+        )
+        .map_err(|error| std::io::Error::other(format!("unavailable: {name}: {error}")))?;
+        let text = String::from_utf8_lossy(&output).into_owned();
+        captures.push((
+            name.to_string(),
+            output,
+            format!("exit={status:?}; deadline_exhausted={}\n", status.is_none()),
+        ));
+        if !status.is_some_and(|status| status.success()) {
+            return Err(std::io::Error::other(format!(
+                "unavailable: {name} exit={status:?}"
+            )));
+        }
+        Ok(text)
+    };
+    let ps_args = ["-ww", "-p", &pid_text, "-o", "pid=,stat=,lstart=,command="];
+    let cwd_args = ["-nP", "-a", "-p", &pid_text, "-d", "cwd", "-Fpn"];
+    let ps = run("python-ps.txt", "/bin/ps", &ps_args)?;
+    let cwd = run("python-cwd.txt", "/usr/sbin/lsof", &cwd_args)?;
+    if !python_process_identity(&ps, &cwd, pid, port, &web_root) {
+        return Err(std::io::Error::other(
+            "unavailable: Python command/port/private cwd identity not confirmed",
+        ));
+    }
+    let _ = run(
+        "python-tcp.txt",
+        "/usr/sbin/lsof",
+        &["-nP", "-a", "-p", &pid_text, "-i", &format!("TCP:{port}")],
+    );
+    let current_ps = run("python-ps-recheck.txt", "/bin/ps", &ps_args)?;
+    let current_cwd = run("python-cwd-recheck.txt", "/usr/sbin/lsof", &cwd_args)?;
+    if ps
+        .split_whitespace()
+        .skip(2)
+        .ne(current_ps.split_whitespace().skip(2))
+        || !python_process_identity(&current_ps, &current_cwd, pid, port, &web_root)
+    {
+        return Err(std::io::Error::other(
+            "unavailable: process identity changed before sampling",
+        ));
+    }
+    let raw_sample = context.web_root.join("python-native-sample.raw");
+    let result = run(
+        "python-sample-command.txt",
+        "/usr/bin/sample",
+        &[&pid_text, "1", "10", "-file", &raw_sample.to_string_lossy()],
+    );
+    for (name, output, status) in captures {
+        fs::write(directory.join(&name), output)?;
+        fs::write(directory.join(format!("{name}.status")), status)?;
+    }
+    let bytes = diagnostic_file(&raw_sample)
+        .unwrap_or_else(|error| format!("capture unavailable: {error}\n").into_bytes());
+    fs::write(directory.join("python-native-sample.txt"), bytes)?;
+    result.map(|_| ())
+}
+
+fn preserve_http_failure(
+    context: &HttpContext<'_>,
+    port: u16,
+    needle: &str,
+    failure: &HttpWaitFailure,
+) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize()?;
+    let mut parent = root.clone();
+    for component in ["target", "ci-release-evidence", "handoff-diagnostics"] {
+        parent.push(component);
+        match fs::create_dir(&parent) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        if !parent.canonicalize()?.starts_with(&root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "diagnostic directory escaped source root",
+            ));
+        }
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let directory = parent.join(format!(
+        "{}-{timestamp}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::DirBuilder::new().mode(0o700).create(&directory)?;
+    let sha = std::env::var("GITHUB_SHA")
+        .unwrap_or_else(|_| "not provided (see CI checkout receipt)".into());
+    let summary = format!("test={}\nphase={}\nsession={}\nsocket={}\npane={}\nport={port}\nneedle={needle:?}\nsource_root={}\nGITHUB_SHA={sha}\nattempts={}\nerrors={:?}\nlast_operation={}\nlast_kind={:?}\nlast_message={}\nlast_response={:?}\n", context.test, context.phase, context.session, context.socket.display(), context.pane, root.display(), failure.attempts, failure.errors, failure.last.operation, failure.last.kind, failure.last.message, failure.last.response);
+    fs::write(directory.join("http-failure.txt"), summary)?;
+    let capture = |name: &str, result: std::io::Result<Vec<u8>>| -> std::io::Result<()> {
+        let bytes =
+            result.unwrap_or_else(|error| format!("capture unavailable: {error}\n").into_bytes());
+        fs::write(directory.join(name), bytes)
+    };
+    capture(
+        "python-stdout-stderr-pane.json",
+        diagnostic_pane_read(context.socket, context.pane),
+    )?;
+    for name in ["startup.stdout", "startup.stderr"] {
+        capture(name, diagnostic_file(&context.web_root.join(name)))?;
+    }
+    for (label, data_dir) in [
+        ("default", context.config_home.join(app_dir_name())),
+        (
+            "work",
+            context
+                .config_home
+                .join(app_dir_name())
+                .join("sessions/work"),
+        ),
+    ] {
+        for suffix in ["", ".1", ".2"] {
+            capture(
+                &format!("{label}-herdr-server.log{suffix}"),
+                diagnostic_file(&data_dir.join(format!("herdr-server.log{suffix}"))),
+            )?;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    capture(
+        "python-process-capture.txt",
+        capture_python_process(context, port, &directory).map(|()| b"capture completed\n".to_vec()),
+    )?;
+    Ok(directory)
+}
+
+fn wait_for_http_contains(
+    port: u16,
+    needle: &str,
+    timeout: Duration,
+    context: &HttpContext<'_>,
+) -> String {
+    match poll_http_contains(port, needle, timeout) {
+        Ok(response) => response,
+        Err(failure) => {
+            let evidence = preserve_http_failure(context, port, needle, &failure);
+            panic!("http server on port {port} did not return {needle:?}; test={} phase={} session={}; attempts={} errors={:?}; last operation={} kind={:?} message={}; last response was {:?}; evidence={evidence:?}", context.test, context.phase, context.session, failure.attempts, failure.errors, failure.last.operation, failure.last.kind, failure.last.message, failure.last.response);
+        }
+    }
+}
+
+mod http_helper_tests {
+    use super::*;
+
+    #[test]
+    fn process_identity_requires_exact_command_port_and_private_cwd() {
+        let ps = "123 S Tue Oct 6 19:17:38 2026 /usr/local/bin/python3 /private/tmp/hlh-1/web/handoff_http.py 49421\n";
+        let cwd = "p123\nn/private/tmp/hlh-1/web\n";
+        let root = Path::new("/private/tmp/hlh-1/web");
+        assert!(python_process_identity(ps, cwd, 123, 49421, root));
+        for wrong in [
+            ps.replace("123 S", "124 S"),
+            ps.replace("49421", "49422"),
+            ps.replace("python3", "not-python3"),
+            ps.replace("handoff_http.py", "different.py"),
+            ps.replace("hlh-1", "hlh-2"),
+            format!("{ps} extra"),
+        ] {
+            assert!(!python_process_identity(&wrong, cwd, 123, 49421, root));
+        }
+        assert!(!python_process_identity(
+            ps,
+            "p123\nn/private/tmp/another/web\n",
+            123,
+            49421,
+            root
+        ));
+        assert!(!python_process_identity(
+            ps,
+            "p124\nn/private/tmp/hlh-1/web\n",
+            123,
+            49421,
+            root
+        ));
+    }
+
+    #[test]
+    fn diagnostic_subprocess_has_bounded_output_and_shared_deadline() {
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(150);
+        let (status, output) = diagnostic_command(
+            std::process::Command::new("/bin/sh").args([
+                "-c",
+                "printf start; printf error >&2; while :; do printf 0123456789; done",
+            ]),
+            deadline,
+        )
+        .unwrap();
+        assert!(status.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(output.starts_with(b"starterror"));
+        assert!(output.len() <= DIAGNOSTIC_LIMIT);
+        assert_eq!(
+            diagnostic_command(&mut std::process::Command::new("/does-not-exist"), deadline)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        let (status, output) = diagnostic_command(
+            std::process::Command::new("/bin/sh").args(["-c", "printf done; exit 7"]),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(status.and_then(|status| status.code()), Some(7));
+        assert_eq!(output, b"done");
+    }
+
+    fn mock_http(reply: impl FnOnce(TcpStream) + Send + 'static) -> (u16, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let worker = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let request_deadline = Instant::now() + Duration::from_secs(1);
+                        let mut request = [0; 128];
+                        let mut received = 0;
+                        while !request[..received].ends_with(b"\r\n\r\n") {
+                            assert!(received < request.len(), "mock request header too large");
+                            stream
+                                .set_read_timeout(Some(remaining(request_deadline).unwrap()))
+                                .unwrap();
+                            let count = match stream.read(&mut request[received..]) {
+                                Ok(count) => count,
+                                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                    continue
+                                }
+                                Err(error) => panic!("mock request read: {error}"),
+                            };
+                            assert!(count > 0, "mock request closed before complete headers");
+                            received += count;
+                        }
+                        reply(stream);
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "mock received no request");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("mock accept: {error}"),
+                }
+            }
+        });
+        (port, worker)
+    }
+
+    #[test]
+    fn mock_waits_for_fragmented_headers_before_reply_and_close() {
+        let (port, worker) = mock_http(|mut stream| stream.write_all(&[0xff]).unwrap());
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        stream.write_all(b"G").unwrap();
+        let error = stream
+            .read(&mut [0; 1])
+            .expect_err("mock replied before headers completed");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        stream
+            .write_all(b"ET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        worker.join().unwrap();
+        assert_eq!(response, [0xff]);
+    }
+
+    #[test]
+    fn successful_response_keeps_payload_gate() {
+        let (port, worker) = mock_http(|mut stream| {
+            stream
+                .write_all(b"HTTP/1.0 200 OK\r\n\r\nexpected-payload")
+                .unwrap();
+        });
+        assert!(
+            poll_http_contains(port, "expected-payload", Duration::from_secs(1))
+                .unwrap()
+                .contains("expected-payload")
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn refused_connection_records_attempts_and_operation() {
+        let failure =
+            poll_http_contains(unused_local_port(), "expected", Duration::from_millis(100))
+                .unwrap_err();
+        assert!(failure.attempts > 0);
+        assert_eq!(failure.errors.values().sum::<usize>(), failure.attempts);
+        assert_eq!(failure.last.operation, "connect");
+        assert_eq!(failure.last.kind, std::io::ErrorKind::ConnectionRefused);
+        assert!(!failure.last.message.is_empty());
+    }
+
+    #[test]
+    fn zero_budget_never_connects() {
+        let failure = poll_http_contains(0, "expected", Duration::ZERO).unwrap_err();
+        assert_eq!(failure.attempts, 0);
+        assert_eq!(failure.last.operation, "deadline");
+    }
+
+    #[test]
+    fn stalled_and_dribbling_response_share_absolute_deadline() {
+        for dribble in [false, true] {
+            let (port, worker) = mock_http(move |mut stream| {
+                if dribble {
+                    for _ in 0..60 {
+                        if stream.write_all(b"x").is_err() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                } else {
+                    thread::sleep(Duration::from_millis(600));
+                }
+            });
+            let started = Instant::now();
+            let failure =
+                poll_http_contains(port, "expected", Duration::from_millis(150)).unwrap_err();
+            let elapsed = started.elapsed();
+            worker.join().unwrap();
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "renewed deadline: {elapsed:?}"
+            );
+            assert_eq!(failure.last.operation, "read");
+            assert!(matches!(
+                failure.last.kind,
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ));
+            assert_eq!(failure.attempts, 1);
+        }
+    }
+
+    #[test]
+    fn oversized_response_is_bounded_and_invalid_utf8_is_reported() {
+        for (bytes, operation) in [
+            (vec![b'x'; HTTP_RESPONSE_LIMIT + 4096], "response-limit"),
+            (vec![0xff], "decode"),
+        ] {
+            let (port, worker) = mock_http(move |mut stream| {
+                let _ = stream.write_all(&bytes);
+            });
+            let failure = http_response(port, Instant::now() + Duration::from_secs(1)).unwrap_err();
+            worker.join().unwrap();
+            assert_eq!(failure.operation, operation);
+            assert_eq!(failure.kind, std::io::ErrorKind::InvalidData);
+            assert!(failure.response.len() <= HTTP_RESPONSE_LIMIT);
+        }
+    }
+
+    #[test]
+    fn wrong_payload_is_not_success() {
+        let (port, worker) = mock_http(|mut stream| {
+            stream.write_all(b"HTTP/1.0 200 OK\r\n\r\nwrong").unwrap();
+        });
+        let failure = poll_http_contains(port, "expected", Duration::from_millis(150)).unwrap_err();
+        worker.join().unwrap();
+        assert_eq!(failure.errors.get("match:InvalidData"), Some(&1));
+    }
+
+    #[test]
+    fn posix_quote_preserves_special_characters() {
+        for value in ["", "plain", "a'b c/$HOME;$(false)\nend"] {
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf '%s' {}", posix_quote(value)))
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, value.as_bytes());
+        }
+    }
+
+    #[test]
+    fn python_fixture_serves_payload_without_reverse_dns() {
+        let base = unique_test_dir();
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("handoff_http.py"), PYTHON_HTTP_FIXTURE).unwrap();
+        fs::write(
+            base.join("index.html"),
+            "hello-from-python-before-and-after",
+        )
+        .unwrap();
+        let check = r#"import http.client, runpy, socket, sys, threading
+module = runpy.run_path("handoff_http.py")
+def reject_fqdn(frame, event, arg):
+    if event == "call" and frame.f_code is socket.getfqdn.__code__:
+        raise AssertionError("unexpected getfqdn call")
+sys.setprofile(reject_fqdn)
+try:
+    socket.getfqdn("127.0.0.1")
+except AssertionError:
+    pass
+else:
+    raise AssertionError("getfqdn guard did not fire")
+sys.setprofile(reject_fqdn)
+threading.setprofile(reject_fqdn)
+with module["LoopbackHTTPServer"](("127.0.0.1", 0), module["http"].server.SimpleHTTPRequestHandler) as server:
+    assert server.server_name == "127.0.0.1"
+    assert server.server_port == server.socket.getsockname()[1] != 0
+    server.timeout = 1
+    worker = threading.Thread(target=server.handle_request)
+    worker.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=1)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.read() == b"hello-from-python-before-and-after"
+    finally:
+        connection.close()
+    worker.join(1)
+    assert not worker.is_alive()
+print("fixture-no-reverse-dns-ok")
+"#;
+        let (status, output) = diagnostic_command(
+            std::process::Command::new("python3")
+                .args(["-c", check])
+                .current_dir(&base),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        fs::remove_dir_all(&base).unwrap();
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
+        assert!(String::from_utf8_lossy(&output).contains("fixture-no-reverse-dns-ok"));
+    }
+
+    #[test]
+    fn startup_logs_quote_paths_and_leave_http_output_in_pane() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = unique_test_dir();
+        let web_root = base.join("web' $HOME; quoted");
+        let bin = base.join("bin");
+        fs::create_dir_all(&web_root).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let python = bin.join("python3");
+        fs::write(&python, "#!/bin/sh\nif [ \"$1\" = -c ]; then printf 'mock-probe\\n'; exit 0; fi\nprintf 'http-stdout:%s\\n' \"$*\"\nprintf 'http-stderr\\n' >&2\nexit 7\n").unwrap();
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &python_http_command(&web_root, 12345)])
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .current_dir(&web_root)
+            .output()
+            .unwrap();
+        let startup = fs::read_to_string(web_root.join("startup.stdout")).unwrap();
+        let stderr = fs::read(web_root.join("startup.stderr")).unwrap();
+        let script = web_root.join("handoff_http.py").canonicalize().unwrap();
+        fs::remove_dir_all(&base).unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout,
+            format!("http-stdout:{} 12345\n", script.display()).as_bytes()
+        );
+        assert_eq!(output.stderr, b"http-stderr\n");
+        assert!(stderr.is_empty());
+        assert!(startup.contains(&web_root.to_string_lossy().to_string()));
+        assert!(startup.contains(&python.to_string_lossy().to_string()));
+        assert!(startup.contains("probe_exit=0\n"));
+        assert!(startup.contains("server_pid="));
+        assert!(startup.contains("server_exit=7\n"));
+    }
+
+    #[test]
+    fn pane_capture_stall_is_bounded() {
+        use std::os::unix::net::UnixListener;
+        let base = unique_test_dir();
+        fs::create_dir_all(&base).unwrap();
+        let socket = base.join("diagnostic.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let started = Instant::now();
+        let result = diagnostic_pane_read(&socket, "pane:1");
+        let elapsed = started.elapsed();
+        drop(listener);
+        fs::remove_dir_all(&base).unwrap();
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "pane capture exceeded deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn evidence_survives_sandbox_cleanup_and_log_reads_are_bounded() {
+        let base = unique_test_dir();
+        let web_root = base.join("web' quoted");
+        fs::create_dir_all(&web_root).unwrap();
+        fs::write(web_root.join("startup.stdout"), "synthetic startup\n").unwrap();
+        fs::write(
+            web_root.join("startup.stderr"),
+            vec![b'e'; DIAGNOSTIC_LIMIT + 100],
+        )
+        .unwrap();
+        let failure = poll_http_contains(0, "expected", Duration::ZERO).unwrap_err();
+        let directory = preserve_http_failure(
+            &HttpContext {
+                test: "synthetic-http-diagnostics",
+                phase: "post-handoff",
+                session: "work",
+                socket: &base.join("missing.sock"),
+                pane: "pane:1",
+                web_root: &web_root,
+                config_home: &base.join("config"),
+            },
+            0,
+            "expected",
+            &failure,
+        )
+        .unwrap();
+        fs::remove_dir_all(&base).unwrap();
+        let summary = fs::read_to_string(directory.join("http-failure.txt")).unwrap();
+        let stdout = fs::read_to_string(directory.join("startup.stdout")).unwrap();
+        let stderr = fs::read(directory.join("startup.stderr")).unwrap();
+        let pane = fs::read_to_string(directory.join("python-stdout-stderr-pane.json")).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        assert!(summary.contains("phase=post-handoff\nsession=work"));
+        assert!(summary.contains("last_operation=deadline"));
+        assert_eq!(stdout, "synthetic startup\n");
+        assert_eq!(stderr.len(), DIAGNOSTIC_LIMIT);
+        assert!(pane.contains("capture unavailable"));
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1874,6 +2815,15 @@ fn live_handoff_preserves_python_http_server() {
         .as_str()
         .unwrap()
         .to_string();
+    let mut context = HttpContext {
+        test: "live_handoff_preserves_python_http_server",
+        phase: "pre-handoff",
+        session: "default",
+        socket: &api_socket,
+        pane: &pane_id,
+        web_root: &web_root,
+        config_home: &config_home,
+    };
 
     assert_ok(request(
         &api_socket,
@@ -1882,7 +2832,7 @@ fn live_handoff_preserves_python_http_server() {
             "method": "pane.send_input",
             "params": {
                 "pane_id": pane_id,
-                "text": format!("python3 -m http.server {port} --bind 127.0.0.1"),
+                "text": python_http_command(&web_root, port),
                 "keys": ["Enter"]
             }
         }),
@@ -1891,6 +2841,7 @@ fn live_handoff_preserves_python_http_server() {
         port,
         "hello-from-python-before-and-after",
         Duration::from_secs(10),
+        &context,
     );
 
     assert_ok(request(
@@ -1899,10 +2850,12 @@ fn live_handoff_preserves_python_http_server() {
     ));
     drop(spawned);
     wait_for_api(&api_socket, Duration::from_secs(10));
+    context.phase = "post-handoff";
     wait_for_http_contains(
         port,
         "hello-from-python-before-and-after",
         Duration::from_secs(10),
+        &context,
     );
 
     let _ = request(
@@ -1932,13 +2885,10 @@ fn live_handoff_preserves_http_servers_across_multiple_sessions() {
     let mut ports = Vec::new();
 
     for (session_name, api_socket) in &sessions {
-        let web_root = base.join(format!("web-{}", session_name.unwrap_or("default")));
+        let label = session_name.unwrap_or("default");
+        let web_root = base.join(format!("web-{label}"));
         fs::create_dir_all(&web_root).unwrap();
-        fs::write(
-            web_root.join("index.html"),
-            format!("hello-from-{}", session_name.unwrap_or("default")),
-        )
-        .unwrap();
+        fs::write(web_root.join("index.html"), format!("hello-from-{label}")).unwrap();
         let port = unused_local_port();
         let server = if let Some(session_name) = session_name {
             spawn_named_session_server(&config_home, &runtime_dir, session_name)
@@ -1965,18 +2915,27 @@ fn live_handoff_preserves_http_servers_across_multiple_sessions() {
                 "method": "pane.send_input",
                 "params": {
                     "pane_id": pane_id,
-                    "text": format!("python3 -m http.server {port} --bind 127.0.0.1"),
+                    "text": python_http_command(&web_root, port),
                     "keys": ["Enter"]
                 }
             }),
         ));
         wait_for_http_contains(
             port,
-            &format!("hello-from-{}", session_name.unwrap_or("default")),
+            &format!("hello-from-{label}"),
             Duration::from_secs(10),
+            &HttpContext {
+                test: "live_handoff_preserves_http_servers_across_multiple_sessions",
+                phase: "pre-handoff",
+                session: label,
+                socket: api_socket,
+                pane: &pane_id,
+                web_root: &web_root,
+                config_home: &config_home,
+            },
         );
         spawned.push(server);
-        ports.push((port, session_name.unwrap_or("default").to_string()));
+        ports.push((port, label, api_socket, pane_id, web_root));
     }
     register_runtime_dir(&runtime_dir);
 
@@ -1991,11 +2950,20 @@ fn live_handoff_preserves_http_servers_across_multiple_sessions() {
     for (_session_name, api_socket) in &sessions {
         wait_for_api(api_socket, Duration::from_secs(10));
     }
-    for (port, label) in ports {
+    for (port, label, api_socket, pane_id, web_root) in ports {
         wait_for_http_contains(
             port,
             &format!("hello-from-{label}"),
             Duration::from_secs(10),
+            &HttpContext {
+                test: "live_handoff_preserves_http_servers_across_multiple_sessions",
+                phase: "post-handoff",
+                session: label,
+                socket: api_socket,
+                pane: &pane_id,
+                web_root: &web_root,
+                config_home: &config_home,
+            },
         );
     }
 

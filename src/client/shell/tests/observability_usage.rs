@@ -633,6 +633,182 @@ fn tick(state: &mut ClientShellState, now: Instant) -> ClientShellInput {
     outcome
 }
 
+#[test]
+fn audit_p1_monitor_samples_only_visible_system_page_or_enabled_alerts() {
+    for (page, alerts, expected) in [
+        (Page::Accounts, false, 0),
+        (Page::Settings, false, 0),
+        (Page::Monitor, false, 1),
+        (Page::Accounts, true, 1),
+        (Page::Settings, true, 1),
+    ] {
+        let mut state = usage_ready();
+        state.set_endpoint_methods(Some(vec![
+            "client.views.set".into(),
+            "system.metrics.get".into(),
+        ]));
+        state.workbench_open(PanelId::Monitor);
+        state.observability.monitor_tab = page;
+        state.observability.page = None;
+        state.observability.monitor.alerts_enabled = alerts;
+        state.workbench.dock.focused = PanelId::Terminal(1);
+        state.compose(120, 40).expect("docked monitor page");
+        assert!(state.workbench.visible(&PanelId::Monitor));
+        let outcome = tick(&mut state, Instant::now() + Duration::from_secs(1));
+        let metrics = outcome
+            .actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    ClientShellAction::Endpoint { request, .. }
+                        if matches!(request.method, Method::SystemMetricsGet(_))
+                )
+            })
+            .count();
+
+        assert_eq!(metrics, expected, "page={page:?}, alerts={alerts}");
+    }
+}
+
+#[test]
+fn audit_p1_monitor_alert_demand_tracks_rules_instead_of_hidden_cards() {
+    for (page, visible, rules, expected) in [
+        (
+            Page::Accounts,
+            vec!["processes", "network"],
+            vec!["memory", "disk"],
+            vec!["memory", "disks"],
+        ),
+        (Page::Monitor, vec!["cpu"], vec!["gpu"], vec!["cpu", "gpu"]),
+        (Page::Accounts, vec!["cpu"], Vec::new(), Vec::new()),
+    ] {
+        let mut state = usage_ready();
+        state.set_endpoint_methods(Some(vec![
+            "client.views.set".into(),
+            "system.metrics.get".into(),
+        ]));
+        state.workbench_open(PanelId::Monitor);
+        state.observability.monitor_tab = page;
+        state.observability.page = None;
+        state.observability.monitor.alerts_enabled = true;
+        state.observability.monitor.visible = visible.into_iter().map(str::to_owned).collect();
+        state
+            .observability
+            .monitor
+            .alerts
+            .retain(|rule| rules.contains(&rule.metric.as_str()));
+        assert_eq!(state.observability.monitor.alerts.len(), rules.len());
+        state.workbench.dock.focused = PanelId::Terminal(1);
+        state.compose(120, 40).expect("docked monitor page");
+        let outcome = tick(&mut state, Instant::now() + Duration::from_secs(1));
+        let requests: Vec<_> = outcome
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                ClientShellAction::Endpoint { request, .. } => match &request.method {
+                    Method::SystemMetricsGet(params) => Some(params),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+
+        if expected.is_empty() {
+            assert!(requests.is_empty(), "no system page and no alert rules");
+        } else {
+            assert_eq!(requests.len(), 1);
+            assert!(!requests[0].include_processes);
+            let mut groups = requests[0].groups.clone();
+            let mut expected: Vec<_> = expected.into_iter().map(str::to_owned).collect();
+            groups.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(groups, expected);
+        }
+    }
+}
+
+fn system_metric_calls(
+    outcome: &ClientShellInput,
+) -> Vec<(String, crate::api::schema::SystemMetricsParams)> {
+    outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                Method::SystemMetricsGet(params) => Some((request.id.clone(), params.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn classic_metric_client() -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_endpoint_methods(Some(vec!["system.metrics.get".into()]));
+    assert!(!state.workbench.enabled);
+    state
+}
+
+#[test]
+fn audit_p1_monitor_classic_pause_keeps_sampling_and_inflight_dedup() {
+    for paused in [false, true] {
+        let mut state = classic_metric_client();
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        state.observability.paused = paused;
+        state.observability.monitor.interval_ms = 500;
+        let t0 = Instant::now() + Duration::from_secs(1);
+        let first = system_metric_calls(&tick(&mut state, t0));
+        assert_eq!(first.len(), 1);
+        assert!(system_metric_calls(&tick(&mut state, t0 + Duration::from_secs(2))).is_empty());
+        let boot_id = state.snapshot.as_ref().unwrap().boot_id.clone();
+        let mut sample = smoke_system_sample();
+        sample.boot_id = boot_id.clone();
+        sample.sampled_at_ms = state.observability.now_ms;
+        state.handle_endpoint_result(
+            &boot_id,
+            &first[0].0,
+            Ok(ResponseResult::SystemMetrics { snapshot: sample }),
+        );
+        assert_eq!(
+            state.observability.metrics.as_ref().unwrap().cpu_percent,
+            Some(42.0)
+        );
+        assert_eq!(state.observability.history.len(), usize::from(!paused));
+        let next = system_metric_calls(&tick(&mut state, t0 + Duration::from_secs(4)));
+        assert_eq!(next.len(), 1);
+        assert_ne!(first[0].0, next[0].0);
+    }
+}
+
+#[test]
+fn audit_p1_monitor_hidden_alerts_ignore_unknown_rules() {
+    for recognized in [true, false] {
+        let mut state = classic_metric_client();
+        state.observability.monitor.alerts_enabled = true;
+        state
+            .observability
+            .monitor
+            .alerts
+            .retain(|rule| rule.metric == "memory");
+        assert_eq!(state.observability.monitor.alerts.len(), 1);
+        if !recognized {
+            state.observability.monitor.alerts[0].metric = "unknown-metric".into();
+        }
+        assert_eq!(state.observability.page, None);
+        let requests = system_metric_calls(&tick(&mut state, Instant::now()));
+        if recognized {
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].1.groups, ["memory"]);
+            assert!(!requests[0].1.include_processes);
+        } else {
+            assert!(requests.is_empty());
+        }
+    }
+}
+
 /// 本次 tick 发出的用量请求：`(manual, params)`。
 fn usage_calls(outcome: &ClientShellInput) -> Vec<(bool, UsageParams)> {
     outcome

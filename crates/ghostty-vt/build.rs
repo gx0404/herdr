@@ -84,6 +84,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SIMD");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_ZIG_SYSTEM_DIR");
     println!("cargo:rerun-if-env-changed=ZIG");
+    println!("cargo:rerun-if-env-changed=ZIG_GLOBAL_CACHE_DIR");
+    println!("cargo:rerun-if-env-changed=ZIG_LOCAL_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_WINDOWS_LIBC");
 
     let optimize = env::var("LIBGHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
@@ -102,6 +104,19 @@ fn main() {
 
     let zig = resolve_zig(&manifest_dir);
     let mut command = Command::new(&zig);
+    let cache_dir = manifest_dir
+        .parent()
+        .and_then(|dir| dir.parent())
+        .expect("repository root above CARGO_MANIFEST_DIR")
+        .join(".local/zig-cache");
+    for (name, directory) in [
+        ("ZIG_GLOBAL_CACHE_DIR", "global"),
+        ("ZIG_LOCAL_CACHE_DIR", "local"),
+    ] {
+        if env::var_os(name).is_none() {
+            command.env(name, cache_dir.join(directory));
+        }
+    }
     command
         .arg("build")
         .arg("--prefix")

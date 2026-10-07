@@ -21,6 +21,8 @@ impl HeadlessServer {
             if !client.is_shell_client() {
                 return None;
             }
+            // Cancel delivery for the old surface lease, not the already-started operation.
+            client.cancel_endpoint_command();
             let changed = client.shell_surface_active != active;
             if active {
                 // 重连/端点激活沿用 v1 的首帧握手；前端提交布局后再启用多视图。
