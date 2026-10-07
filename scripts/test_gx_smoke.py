@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, ExitStack, nullcontext
+import io
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 from scripts import gx_smoke_runtime as smoke
 
@@ -22,6 +23,20 @@ ROOT = Path(__file__).resolve().parent.parent
 # GX 只为这两类主机出包（release-channels.md），其他主机（macOS）跳过依赖它的用例。
 SMOKE_HOST = os.name == "nt" or sys.platform.startswith("linux")
 SMOKE_HOST_REASON = "GX smoke runtime supports only Linux and Windows hosts"
+
+
+def watchdog_diagnostics(logs: Path) -> str:
+    tails = []
+    for name in ("stdout", "stderr"):
+        try:
+            with (logs / f"{name}.txt").open("rb") as stream:
+                size = stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, size - 8192))
+                tail = stream.read(8192).decode("utf-8", errors="replace")
+            tails.append(f"{name} tail (up to 8192 bytes):\n{tail}")
+        except OSError as error:
+            tails.append(f"{name} unavailable: {type(error).__name__} errno={error.errno}")
+    return "\n".join(tails)
 
 
 class IsolationTests(unittest.TestCase):
@@ -283,8 +298,15 @@ class WatchdogTests(unittest.TestCase):
 
     def test_owner_killed_mid_probe_leaves_no_owned_processes(self):
         options = {} if os.name == "nt" else {"start_new_session": True}
+        log_base = ROOT / "target/tmp/gx-watchdog-tests"
+        log_base.mkdir(parents=True, exist_ok=True)
+        logs = tempfile.TemporaryDirectory(prefix="probe-", dir=log_base)
+        self.addCleanup(logs.cleanup)
+        stdout = self.enterContext((Path(logs.name) / "stdout.txt").open("w+b"))
+        stderr = self.enterContext((Path(logs.name) / "stderr.txt").open("w+b"))
+
         parent = subprocess.Popen([sys.executable, str(ROOT / "scripts/gx_smoke_runtime.py"), "--reaper-probe"],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **options)
+                                  stdout=stdout, stderr=stderr, **options)
         owner = smoke.process_identity(parent.pid)
         root = None
         identities = []
@@ -303,8 +325,10 @@ class WatchdogTests(unittest.TestCase):
                 if root or parent.poll() is not None:
                     break
                 time.sleep(0.05)
-            self.assertIsNotNone(root, f"probe not ready, parent exit={parent.poll()}")
-            self.assertTrue(all(smoke.same_process(item) for item in identities))
+            if root is None:
+                self.fail(f"probe not ready, parent exit={parent.poll()}\n{watchdog_diagnostics(Path(logs.name))}")
+            if not all(smoke.same_process(item) for item in identities):
+                self.fail(f"probe processes not alive\n{watchdog_diagnostics(Path(logs.name))}")
             if os.name == "nt":
                 parent.kill()
             else:
@@ -313,12 +337,71 @@ class WatchdogTests(unittest.TestCase):
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline and (root.exists() or any(smoke.same_process(item) for item in identities)):
                 time.sleep(0.1)
-            self.assertFalse(root.exists(), f"watchdog left sandbox {root}")
-            self.assertFalse(any(smoke.same_process(item) for item in identities), "watchdog left owned Python processes")
+            if root.exists():
+                self.fail(f"watchdog left sandbox {root}\n{watchdog_diagnostics(Path(logs.name))}")
+            if any(smoke.same_process(item) for item in identities):
+                self.fail(f"watchdog left owned Python processes\n{watchdog_diagnostics(Path(logs.name))}")
         finally:
             if parent.poll() is None:
                 parent.kill()
             parent.wait(timeout=5)
+
+
+class WatchdogDiagnosticTests(unittest.TestCase):
+    def test_tail_reads_only_last_8192_bytes_per_stream(self):
+        stdout = MagicMock(wraps=io.BytesIO(b"discard" * 2000 + b"a" * 8192))
+        stderr = MagicMock(wraps=io.BytesIO(b"b" * 8191 + b"\xff"))
+        for stream in (stdout, stderr):
+            stream.__enter__.return_value = stream
+        with patch.object(Path, "open", side_effect=[stdout, stderr]):
+            result = watchdog_diagnostics(Path("unused"))
+        self.assertEqual(result, "stdout tail (up to 8192 bytes):\n" + "a" * 8192
+                         + "\nstderr tail (up to 8192 bytes):\n" + "b" * 8191 + "\ufffd")
+        for stream in (stdout, stderr):
+            stream.read.assert_called_once_with(8192)
+
+    def test_io_errors_are_reported_without_paths_and_other_stream_is_read(self):
+        for operation in ("open", "seek", "read"):
+            with self.subTest(operation=operation):
+                error = PermissionError(13, "private message", "/private/path")
+                broken = MagicMock()
+                broken.__enter__.return_value = broken
+                broken.seek.return_value = 0
+                if operation != "open":
+                    getattr(broken, operation).side_effect = error
+                with patch.object(Path, "open", side_effect=[
+                    error if operation == "open" else broken, io.BytesIO(b"worker error")
+                ]):
+                    result = watchdog_diagnostics(Path("unused"))
+                self.assertEqual(result, "stdout unavailable: PermissionError errno=13\n"
+                                 "stderr tail (up to 8192 bytes):\nworker error")
+
+    def test_unreadable_logs_do_not_mask_probe_not_ready_failure(self):
+        original_open = Path.open
+
+        def open_log(path, mode="r", *args, **kwargs):
+            if mode == "rb":
+                raise PermissionError(13, "private message", "/private/path")
+            return original_open(path, mode, *args, **kwargs)
+
+        parent = MagicMock(pid=12345)
+        parent.poll.return_value = 1
+        base = MagicMock()
+        base.glob.return_value = []
+        probe = WatchdogTests("test_owner_killed_mid_probe_leaves_no_owned_processes")
+        try:
+            with patch.object(Path, "open", open_log), patch.object(subprocess, "Popen", return_value=parent), \
+                 patch.object(smoke, "process_identity", return_value="12345:birth"), \
+                 patch.object(smoke, "sandbox_base", return_value=base):
+                with self.assertRaisesRegex(AssertionError, "probe not ready, parent exit=1") as caught:
+                    probe.test_owner_killed_mid_probe_leaves_no_owned_processes()
+            self.assertIn("stdout unavailable: PermissionError errno=13", str(caught.exception))
+            self.assertIn("stderr unavailable: PermissionError errno=13", str(caught.exception))
+            self.assertNotIn("private", str(caught.exception))
+            parent.kill.assert_not_called()
+            parent.wait.assert_called_once_with(timeout=5)
+        finally:
+            probe.doCleanups()
 
 
 if __name__ == "__main__":
