@@ -120,8 +120,9 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 - **生成物纪律**：受控产物默认只检查，有意变更才重建并审 diff
   （`docs/README.md` 的生成物登记）。
 - **构建本地性**：编译/构建产物、项目拉取的工具链与 SDK、本机 shim 一律落在
-  项目文件夹内（`target/`、gitignored 的 `.local/`），不写项目外；例外与覆盖
-  方式见 `project-infra.md`。
+  项目文件夹内（`target/`、gitignored 的 `.local/`），不写项目外。`just setup-env`
+  准备本地工具；`python -B scripts/setup_env.py --run just check` 同时隔离缓存、临时
+  文件与测试状态，拒绝外部可写缓存覆盖；真源与边界见 `project-infra.md`。
 - **测试与性能状态隔离**：测试编排 manifest 记录 `run_id`、`status`、`manifest`、
   `test_budget`、`phase_jobs`、`maintenance_jobs`、`nextest_jobs`、每个 phase 的
   `recipe`/`status`/`exit_code`/`seconds`/`log` 以及 `failures`。`bench-release-smoke`

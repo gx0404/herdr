@@ -3,14 +3,14 @@
 
 安装位置在**仓库内部**：`<repo>/.local/toolchains/zig/zig-0.16.0/`（gitignored），
 不写任何用户全局状态；build.rs 会自动探测该目录（优先级：$ZIG > 项目内钉版 >
-PATH）。多 worktree 想共享一份时设 HERDR_ZIG_HOME 指向公共目录。
+PATH）。HERDR_ZIG_HOME 只改变安装根；自定义安装需要显式设置 ZIG 才能被构建使用。
 
 模式：
-  默认/--check : 只读诊断，报告钉版安装状态与 PATH 中可见的 zig。
-  --install    : 下载 sha256 钉死的官方 tarball，校验后原子落位。
-  --force      : 允许覆盖已存在的钉版目录。
+  默认/--check : 只读诊断实际生效的 Zig；缺失、失败或版本不匹配均非零退出。
+  --install    : 下载 sha256 钉死的归档，暂存验证后落位；替换失败时恢复旧安装。
+  --force      : 与 --install 同用，允许替换已存在的钉版目录。
 
-HERDR_ZIG_HOME 可覆盖安装根（测试与 worktree 共享用）。
+临时下载、解压与备份均放在安装根内；版本探测缓存固定在仓库内。
 """
 
 from __future__ import annotations
@@ -20,12 +20,14 @@ import hashlib
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import urllib.request
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 # Windows cp1252 控制台打印中文状态会 UnicodeEncodeError；check/install 输出
@@ -119,44 +121,63 @@ def install_dir() -> Path:
     return install_root() / INSTALL_DIR_NAME
 
 
-def zig_binary() -> Path:
-    # Windows 官方包里是 zig.exe；兼容手工布局里无后缀的 zig。
-    names = ("zig.exe", "zig") if os.name == "nt" else ("zig",)
-    for name in names:
-        candidate = install_dir() / name
+def build_auto_root() -> Path:
+    return REPO_ROOT / ".local" / "toolchains" / "zig"
+
+
+def zig_binary(directory: Path | None = None) -> Path:
+    directory = install_dir() if directory is None else directory
+    for name in ("zig.exe", "zig"):
+        candidate = directory / name
         if candidate.is_file():
             return candidate
-    return install_dir() / names[0]
+    return directory / ("zig.exe" if os.name == "nt" else "zig")
+
+
+def resolve_effective_zig() -> tuple[str, str]:
+    """Return (command, source) using build.rs precedence, without running or writing."""
+    if "ZIG" in os.environ:
+        explicit = os.environ["ZIG"]
+        if not explicit.strip():
+            raise SetupZigError("ZIG 显式设置为空；不会回退到项目内安装或 PATH")
+        return explicit, "ZIG"
+    pinned = zig_binary(build_auto_root() / INSTALL_DIR_NAME)
+    if pinned.is_file():
+        return str(pinned), "project"
+    on_path = shutil.which("zig")
+    if on_path:
+        return on_path, "PATH"
+    raise SetupZigError("MISSING effective Zig；运行 just setup-zig --install 或显式设置 ZIG")
 
 
 def _run_zig_version(binary: Path | str) -> str | None:
+    env = dict(os.environ)
+    for name, suffix in (("ZIG_GLOBAL_CACHE_DIR", "global"), ("ZIG_LOCAL_CACHE_DIR", "local")):
+        env[name] = str(REPO_ROOT / ".local" / "zig-cache" / suffix)
     try:
         result = subprocess.run(
-            [str(binary), "version"], capture_output=True, text=True, check=False, timeout=30
+            [str(binary), "version"], capture_output=True, text=True, check=False,
+            timeout=30, env=env,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
         return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 
 def check() -> int:
-    key = platform_key()
+    print(f"[setup-zig] install_root: {install_root()}")
+    print(f"[setup-zig] build auto root: {build_auto_root()}（HERDR_ZIG_HOME 不改变 build.rs 解析）")
     pinned = zig_binary()
-    if pinned.is_file():
-        version = _run_zig_version(pinned)
-        status = f"INSTALLED {pinned} (zig version: {version})"
+    print(f"[setup-zig] local install: {'PRESENT' if pinned.is_file() else 'MISSING'} {pinned}")
+    try:
+        binary, source = resolve_effective_zig()
+        version = _run_zig_version(binary)
+        print(f"[setup-zig] effective Zig ({source}): {binary} (zig version: {version!r})")
         if version != ZIG_VERSION:
-            status += f"  [警告: 期望 {ZIG_VERSION}]"
-        else:
-            status += "；build.rs 将自动使用（$ZIG 仍可覆盖）"
-    else:
-        status = f"MISSING {pinned}；运行 just setup-zig --install（或 scripts/setup_env.sh）"
-    print(f"[setup-zig] {status}")
-    on_path = shutil.which("zig")
-    if on_path:
-        print(f"[setup-zig] PATH zig: {on_path} (zig version: {_run_zig_version(on_path)})")
-    else:
-        print("[setup-zig] PATH zig: 无；未安装钉版时 cargo build 会失败")
+            raise SetupZigError(f"有效 Zig 必须为 {ZIG_VERSION}；当前版本不匹配或 version 命令失败")
+    except SetupZigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -224,88 +245,160 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _archive_path(dest: Path, name: str) -> Path:
+    parts = PurePosixPath(name)
+    if (
+        not name or parts.is_absolute() or PureWindowsPath(name).drive
+        or ".." in parts.parts or "\\" in name or ":" in name or "\0" in name
+        or any(part.endswith((" ", ".")) or PureWindowsPath(part).is_reserved() for part in parts.parts)
+    ):
+        raise SetupZigError(f"归档路径不安全：{name!r}")
+    target = dest.joinpath(*parts.parts)
+    if not target.resolve().is_relative_to(dest.resolve()):
+        raise SetupZigError(f"归档路径越界：{name!r}")
+    current = dest
+    for part in parts.parts:
+        current /= part
+        if current.is_symlink():
+            raise SetupZigError(f"归档路径包含符号链接：{name!r}")
+    return target
+
+
 def _extract(archive: Path, dest: Path) -> None:
-    tar = shutil.which("tar")
-    if tar:
-        result = subprocess.run(
-            [tar, "-xJf", str(archive), "-C", str(dest)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise SetupZigError(f"tar 解压失败：{result.stderr.strip()}")
-        return
-    if archive.suffix == ".zip":
-        # Windows 官方包是 zip：优先系统 tar（bsdtar 可解 zip），后备 python zipfile。
-        import zipfile
+    try:
+        if archive.suffix == ".zip":
+            with zipfile.ZipFile(archive) as zf:
+                members = zf.infolist()
+                for member in members:
+                    _archive_path(dest, member.filename)
+                    kind = stat.S_IFMT(member.external_attr >> 16)
+                    if kind not in (0, stat.S_IFREG, stat.S_IFDIR):
+                        raise SetupZigError(f"归档包含链接或特殊文件：{member.filename}")
+                for member in members:
+                    target = _archive_path(dest, member.filename)
+                    if member.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as source, target.open("xb") as output:
+                            shutil.copyfileobj(source, output)
+            return
+        with tarfile.open(archive, "r:xz") as tf:
+            members = tf.getmembers()
+            for member in members:
+                _archive_path(dest, member.name)
+                if not (member.isdir() or member.isreg()):
+                    raise SetupZigError(f"归档包含链接或特殊文件：{member.name}")
+            for member in members:
+                target = _archive_path(dest, member.name)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source = tf.extractfile(member)
+                    if source is None:
+                        raise SetupZigError(f"归档文件无法读取：{member.name}")
+                    with source, target.open("xb") as output:
+                        shutil.copyfileobj(source, output)
+                    target.chmod(member.mode & 0o777)
+    except (OSError, tarfile.TarError, zipfile.BadZipFile, EOFError) as exc:
+        raise SetupZigError(f"归档解压失败：{exc}") from exc
 
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(dest)  # 内容已由 sha256 钉版校验
-        return
-    # 后备：部分 python 构建缺少 lzma 模块或 filter 参数（3.10 无 filter=）。
-    with tarfile.open(archive, "r:xz") as tf:
+
+def _replace_install(staged: Path, target: Path, backup: Path) -> None:
+    if target.is_symlink() or (hasattr(target, "is_junction") and target.is_junction()):
+        raise SetupZigError(f"拒绝替换链接目录：{target}")
+    had_old = target.exists()
+    if had_old:
+        target.rename(backup)
+    try:
+        staged.rename(target)
+    except OSError as exc:
+        if had_old:
+            try:
+                backup.rename(target)
+            except OSError as restore_error:
+                raise SetupZigError(
+                    f"安装替换失败：{exc}；恢复失败：{restore_error}；旧安装保留在 {backup}"
+                ) from exc
+        raise SetupZigError(f"安装替换失败，旧安装未改变：{exc}") from exc
+    if had_old:
         try:
-            tf.extractall(dest, filter="data")
-        except TypeError:
-            tf.extractall(dest)  # 内容已由 sha256 钉版校验
+            if backup.is_dir():
+                shutil.rmtree(backup)
+            else:
+                backup.unlink()
+        except OSError as exc:
+            raise SetupZigError(f"新安装已落位，但旧备份清理失败：{backup}：{exc}") from exc
 
 
-def install(force: bool) -> int:
-    key = platform_key()
-    pin = PINS[key]
-    target_dir = install_dir()
+def _install_locked(target_dir: Path, pin: dict[str, str], force: bool) -> int:
+    if target_dir.is_symlink() or (hasattr(target_dir, "is_junction") and target_dir.is_junction()):
+        raise SetupZigError(f"拒绝替换链接目录：{target_dir}")
     if target_dir.exists() and not force:
-        # 幂等：已装且 zig version 匹配则跳过；只有损坏的安装才要求 --force。
-        if zig_binary().is_file():
-            version = _run_zig_version(zig_binary())
-            if version == ZIG_VERSION:
-                print(f"[setup-zig] 已安装且有效，跳过：{zig_binary()} (zig version: {version})；覆盖请加 --force")
-                return 0
-            raise SetupZigError(
-                f"已存在 {target_dir} 但无效（zig version: {version!r}）；覆盖请加 --force"
-            )
-        raise SetupZigError(f"已存在 {target_dir} 但缺少 zig 可执行文件；覆盖请加 --force")
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=str(target_dir.parent)) as tmp_name:
+        version = _run_zig_version(zig_binary()) if zig_binary().is_file() else None
+        if version == ZIG_VERSION:
+            print(f"[setup-zig] 已安装且有效，跳过：{zig_binary()}；覆盖请加 --force")
+            return 0
+        raise SetupZigError(f"已存在 {target_dir} 但无效（zig version: {version!r}）；覆盖请加 --force")
+    with tempfile.TemporaryDirectory(prefix=".zig-stage-", dir=str(target_dir.parent)) as tmp_name:
         tmp_root = Path(tmp_name)
         archive = tmp_root / pin["tarball"]
         _download(pin["tarball"], archive)
         digest = _sha256(archive)
         if digest != pin["sha256"]:
             raise SetupZigError(f"sha256 校验失败：{digest} != {pin['sha256']}")
-        # 解压优先走系统 tar（部分 python 构建缺 lzma）；sha256 已校验完整性。
-        _extract(archive, tmp_root)
+        payload = tmp_root / "payload"
+        payload.mkdir()
+        _extract(archive, payload)
         tarball = pin["tarball"]
         stem = tarball.removesuffix(".tar.xz") if tarball.endswith(".tar.xz") else tarball.removesuffix(".zip")
-        extracted = tmp_root / stem
-        zig = extracted / ("zig.exe" if os.name == "nt" else "zig")
+        staged = payload / stem
+        zig = staged / ("zig.exe" if os.name == "nt" else "zig")
         if not zig.is_file():
             raise SetupZigError(f"tarball 结构异常：缺少 {zig}")
-        staged = tmp_root / INSTALL_DIR_NAME
-        extracted.rename(staged)
-        if target_dir.exists():
-            shutil.rmtree(target_dir)
-        staged.rename(target_dir)
-    version = _run_zig_version(zig_binary())
-    if version != ZIG_VERSION:
-        raise SetupZigError(f"安装后 zig version 输出异常：{version!r}")
+        version = _run_zig_version(zig)
+        if version != ZIG_VERSION:
+            raise SetupZigError(f"暂存 Zig version 输出异常：{version!r}；旧安装未改变")
+        backup = target_dir.parent / f".zig-backup-{tmp_root.name}"
+        _replace_install(staged, target_dir, backup)
     print(f"[setup-zig] 已安装 {zig_binary()} (zig version: {version})")
-    print("[setup-zig] 位于仓库内的 gitignored 目录；cargo build / just 直接可用（无需 source）")
+    if install_root().resolve() == build_auto_root().resolve():
+        print("[setup-zig] cargo build / just 将自动使用项目内安装（ZIG 仍可覆盖）")
+    else:
+        print(f"[setup-zig] 自定义安装根不被 build.rs 自动探测；请显式设置 ZIG={zig_binary()}")
     return 0
+
+
+def install(force: bool) -> int:
+    pin = PINS[platform_key()]
+    target_dir = install_dir()
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock = target_dir.parent / ".install-lock"
+    try:
+        lock.mkdir()
+    except FileExistsError as exc:
+        raise SetupZigError(f"安装锁已存在：{lock}；确认无安装进程后再手动移除") from exc
+    try:
+        return _install_locked(target_dir, pin, force)
+    finally:
+        lock.rmdir()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--install", action="store_true", help="下载并安装钉版工具链（默认只检查）")
-    parser.add_argument("--check", action="store_true", help="只读诊断（默认行为，显式给出亦可）")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--install", action="store_true", help="下载并安装钉版工具链（默认只检查）")
+    mode.add_argument("--check", action="store_true", help="只读诊断（默认行为，显式给出亦可）")
     parser.add_argument("--force", action="store_true", help="覆盖已存在的钉版目录")
     args = parser.parse_args(argv)
+    if args.force and not args.install:
+        parser.error("--force requires --install")
     try:
         if args.install:
             return install(args.force)
         return check()
-    except SetupZigError as exc:
+    except (SetupZigError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

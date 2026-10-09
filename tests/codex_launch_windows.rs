@@ -54,11 +54,25 @@ impl Sandbox {
             "temp",
             "config",
             "state",
+            "appdata",
+            "localappdata",
+            "data",
+            "cache",
+            "runtime",
             "source 中文",
             "output 中文",
         ] {
             fs::create_dir(sandbox.0.join(directory)).unwrap();
         }
+        fs::write(
+            sandbox.0.join("bash-env.sh"),
+            concat!(
+                "export TEMP=\"$HERDR_TEST_TEMP\" TMP=\"$HERDR_TEST_TEMP\"\n",
+                "TMPDIR=$(cygpath -u -- \"$HERDR_TEST_TEMP\") || exit 1\n",
+                "export TMPDIR\n",
+            ),
+        )
+        .unwrap();
         fs::write(
             sandbox.0.join("source 中文/payload.txt"),
             b"launcher extraction\n",
@@ -66,7 +80,8 @@ impl Sandbox {
         .unwrap();
         let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
         let source = sandbox.0.join("source 中文");
-        let archive = Command::new(system.join("System32/tar.exe"))
+        let archive = sandbox
+            .command(&system.join("System32/tar.exe"))
             .current_dir(&source)
             .args(["-czf", "fixture.tar.gz", "payload.txt"])
             .output()
@@ -103,10 +118,19 @@ impl Sandbox {
             .env("HOME", self.0.join("home"))
             .env("USERPROFILE", self.0.join("home"))
             .env("ZDOTDIR", self.0.join("home"))
+            .env("APPDATA", self.0.join("appdata"))
+            .env("LOCALAPPDATA", self.0.join("localappdata"))
             .env("TEMP", self.0.join("temp"))
             .env("TMP", self.0.join("temp"))
+            .env("TMPDIR", self.0.join("temp"))
+            .env("HERDR_TEST_TEMP", self.0.join("temp"))
+            .env("BASH_ENV", self.0.join("bash-env.sh"))
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("XDG_STATE_HOME", self.0.join("state"))
+            .env("XDG_DATA_HOME", self.0.join("data"))
+            .env("XDG_CACHE_HOME", self.0.join("cache"))
+            .env("XDG_RUNTIME_DIR", self.0.join("runtime"))
+            .env("PSModuleAnalysisCachePath", self.0.join("cache/powershell"))
             .env(
                 "HERDR_TEST_POWERSHELL",
                 system.join("System32/WindowsPowerShell/v1.0/powershell.exe"),
@@ -196,6 +220,94 @@ impl Drop for Sandbox {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+}
+
+fn check_runtime_environment(git_bash: bool) {
+    let sandbox = Sandbox::new();
+    let probe = sandbox.0.join("environment.ps1");
+    fs::write(
+        &probe,
+        r#"
+$ErrorActionPreference = 'Stop'
+$report = @{}
+foreach ($name in @('HOME', 'USERPROFILE', 'ZDOTDIR', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'PSModuleAnalysisCachePath', 'BASH_ENV')) {
+    $report[$name] = [Environment]::GetEnvironmentVariable($name)
+}
+$report.native_temp = [IO.Path]::GetTempPath()
+$report.native_temp_file = [IO.Path]::GetTempFileName()
+$report.bash_temp_file = $env:HERDR_TEST_BASH_TEMP
+[IO.File]::WriteAllText($env:HERDR_TEST_REPORT, ($report | ConvertTo-Json))
+"#,
+    )
+    .unwrap();
+    let mut command = if git_bash {
+        let mut command = sandbox.command(&git_bin().join("bash.exe"));
+        command.args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"set -eu
+file=$(mktemp)
+export HERDR_TEST_BASH_TEMP="$(cygpath -w -- "$file")"
+"$HERDR_TEST_POWERSHELL" -NoLogo -NoProfile -NonInteractive -File "$HERDR_TEST_ENV_PROBE"
+"#,
+        ]);
+        command
+    } else {
+        sandbox.powershell("& $env:HERDR_TEST_ENV_PROBE")
+    };
+    success(
+        &command
+            .env("HERDR_TEST_ENV_PROBE", &probe)
+            .output()
+            .unwrap(),
+    );
+    let report = sandbox.report();
+    for (name, relative) in [
+        ("HOME", "home"),
+        ("USERPROFILE", "home"),
+        ("ZDOTDIR", "home"),
+        ("APPDATA", "appdata"),
+        ("LOCALAPPDATA", "localappdata"),
+        ("TEMP", "temp"),
+        ("TMP", "temp"),
+        ("TMPDIR", "temp"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_RUNTIME_DIR", "runtime"),
+        ("native_temp", "temp"),
+        ("BASH_ENV", "bash-env.sh"),
+    ] {
+        let actual = Path::new(report[name].as_str().unwrap());
+        assert_eq!(
+            actual.canonicalize().unwrap(),
+            sandbox.0.join(relative).canonicalize().unwrap(),
+            "{name}: {report}"
+        );
+    }
+    let cache = Path::new(report["PSModuleAnalysisCachePath"].as_str().unwrap());
+    assert_eq!(cache, sandbox.0.join("cache/powershell"));
+    for name in std::iter::once("native_temp_file").chain(git_bash.then_some("bash_temp_file")) {
+        let file = Path::new(report[name].as_str().unwrap());
+        assert!(file.is_file(), "{name}: {report}");
+        assert_eq!(
+            file.parent().unwrap().canonicalize().unwrap(),
+            sandbox.0.join("temp").canonicalize().unwrap(),
+            "{name}: {report}"
+        );
+    }
+}
+
+#[test]
+fn windows_codex_sandbox_confines_powershell_runtime_environment() {
+    check_runtime_environment(false);
+}
+
+#[test]
+fn windows_codex_sandbox_confines_git_bash_runtime_environment() {
+    check_runtime_environment(true);
 }
 
 #[test]

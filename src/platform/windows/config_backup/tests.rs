@@ -17,15 +17,87 @@ use windows_sys::Win32::{
 struct Directory(PathBuf);
 impl Directory {
     fn new(case: &str) -> Self {
-        let path =
-            std::env::temp_dir().join(format!("herdr-config-backup-{case}-{}", std::process::id()));
-        fs::create_dir(&path).unwrap();
-        Self(path)
+        use interprocess::os::windows::security_descriptor::AsSecurityDescriptorExt as _;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::ptr::null_mut;
+        use windows_sys::Win32::Security::{
+            Authorization::{SetSecurityInfo, SE_FILE_OBJECT},
+            GetAce, GetSecurityDescriptorDacl, ACE_HEADER, CONTAINER_INHERIT_ACE,
+            OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL, WRITE_DAC,
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-backup-{case}-{}-{}",
+            std::process::id(),
+            crate::config::test_dirs::unique_id()
+        ));
+        let descriptor = super::super::user_security_descriptor("GA", "").unwrap();
+        let mut attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: null_mut(),
+            bInheritHandle: 0,
+        };
+        descriptor.write_to_security_attributes(&mut attributes);
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = null_mut();
+        assert_ne!(
+            unsafe {
+                GetSecurityDescriptorDacl(
+                    attributes.lpSecurityDescriptor,
+                    &mut present,
+                    &mut dacl,
+                    &mut defaulted,
+                )
+            },
+            0
+        );
+        assert!(!dacl.is_null());
+        for index in 0..unsafe { (*dacl).AceCount } {
+            let mut ace = null_mut();
+            assert_ne!(unsafe { GetAce(dacl, u32::from(index), &mut ace) }, 0);
+            unsafe {
+                (*ace.cast::<ACE_HEADER>()).AceFlags |=
+                    (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) as u8;
+            }
+        }
+        let wide = super::super::extended_length_path(&path).unwrap();
+        assert_ne!(
+            unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        let fixture = Self(path);
+        let directory = OpenOptions::new()
+            .access_mode(WRITE_DAC | READ_CONTROL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&fixture.0)
+            .unwrap();
+        assert_eq!(
+            unsafe {
+                SetSecurityInfo(
+                    directory.as_raw_handle(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    dacl,
+                    null_mut(),
+                )
+            },
+            0
+        );
+        assert!(String::from_utf16_lossy(&security(&fixture.0)).contains("D:PAI"));
+        fixture
     }
 }
 impl Drop for Directory {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        crate::config::test_dirs::remove_dir_eventually(&self.0);
     }
 }
 fn powershell(script: &str, path: &Path) {

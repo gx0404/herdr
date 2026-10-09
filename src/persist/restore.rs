@@ -1542,6 +1542,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let ancestor = crate::workspace::git_space_metadata(&root).unwrap();
         let checkout = root.join("checkout");

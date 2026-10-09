@@ -4,23 +4,61 @@
 
 - Rust：`rust-toolchain.toml` 锁定（当前 1.96.1，含 clippy/rustfmt）。
 - `just`：命令入口（全表见 `MAKE_COMMANDS.md`）。
-- Python 3：维护脚本与其 unittest（建议 ≥3.11；3.10 需 `tomli`，仓库脚本已带
-  回退）。
-- Bun：docs 契约与集成资产测试（`just docs-contract-test`、`integration-assets-test`）。
-- Node.js（LTS，`node` 须在 PATH）：`scripts/docs/*.mjs` 的运行时。docs 契约的集成
-  用例以 `node` 子进程执行这些脚本（与发布链同一运行时，不改用 bun），因此
-  `just docs-contract-test`（及包含它的 `just test`、`just check`）和
-  `just release-docs-check` 都需要。CI 用 GitHub-hosted runner 自带的 Node；Windows
-  无管理员权限时可将官方 win-x64 zip 解压到用户目录并追加进用户 PATH。
-- 一键环境：`scripts/setup_env.sh`（`just setup-env`）——检查 cargo/just/python3/bun，
-  并把 sha256 钉版 Zig 0.16.0 安装到**仓库内** `.local/toolchains/zig/`
-  （gitignored，不写用户全局状态）。安装后裸 `cargo build` 与 `just` 直接可用：
-  build.rs 自动探测项目内钉版（优先级 `$ZIG` > 项目内钉版 > PATH）；CI 由
-  workflow 的 setup-zig 步骤提供。`--check` 为只读诊断。
-  Cargo 与 `just build-libghostty-vt` 的 Zig 子进程默认使用仓库内
-  `.local/zig-cache/global`、`.local/zig-cache/local`；可分别显式设置
-  `ZIG_GLOBAL_CACHE_DIR`、`ZIG_LOCAL_CACHE_DIR`，不会修改用户或父进程环境。
-  显式值原样保留；相对路径由 vendored 源码工作目录解释，空值不被静默替换。
+- Python ≥3.11：环境入口 `scripts/setup_env.py` 使用标准库 `tomllib`；已有维护脚本中
+  对 Python 3.10 的兼容不代表新环境入口也支持该版本。
+- cargo-nextest：标准 Rust 测试运行器；Bun 和 Node 都是 `just check` 的必需项，
+  分别运行资产/文档契约和其中的 Node 子进程，不用 `cargo test` 或 Bun 代替缺失的入口。
+- 环境入口：`bash scripts/setup_env.sh`、`powershell -NoProfile -File scripts/setup_env.ps1`
+  或 `just setup-env`。Windows 的 just recipe 使用原生 PowerShell 引导，不通过 WSL Bash；
+  两个引导脚本都先避开 WindowsApps 安装管理器别名，只执行已存在的 Python。
+  可用 `HERDR_SETUP_PYTHON` 指定原生解释器完整路径；确认解释器可用后也能直接运行
+  `python -B scripts/setup_env.py`。
+  已有有效工具只读复用；新下载的工具、缓存和 staging 位于项目 `.local/`。
+  自动补装 just、nextest、Node、Bun 当前支持 Windows x64，固定版本与官方归档摘要见
+  `scripts/setup_env.py::PINS`；其他宿主需预装这些工具。Zig 沿用 `setup_zig.py` 的平台表。
+- `--check` 只读运行工具/版本探针，不创建目录、不联网安装、不触发 Rustup 自动安装；
+  必需项缺失或探针失败返回非零。有效 Zig 按显式 `ZIG`、项目钉版、PATH 解析；
+  setup 的自定义 `HERDR_ZIG_HOME` 会显式传递 Zig 路径，单独修改该变量不改变 build.rs 的搜索。
+  `--force` 只用于安装模式下重装项目管理的工具，暂存校验失败保留旧安装。
+- 安装完成生成 `.local/activate.sh` / `.local/activate.ps1`，只作用于当前 shell。
+  不修改用户/系统 PATH、profile、默认 Rust 工具链或注册表；Rust/Python/Git/系统 SDK
+  缺失时报告前置条件，不静默运行系统安装器或接受许可。
+
+### 项目内编译与测试环境
+
+```bash
+bash scripts/setup_env.sh                  # 补齐工具并生成激活入口，再运行一次应幂等
+bash scripts/setup_env.sh --check          # 检查 setup 所构造的项目环境
+source .local/activate.sh                  # Git Bash / Bash 当前 shell
+python -B scripts/setup_env.py --run just build
+python -B scripts/setup_env.py --run just check
+```
+
+PowerShell 使用 `. .\.local\activate.ps1`，或直接调用相同的 Python `--run` 命令。
+`--run` 不安装工具，以仓库为工作目录、按参数数组启动命令并返回子命令退出码；
+`--env bash|powershell` 输出激活赋值，会准备目录但不安装工具，不是只读模式。
+
+| 数据 | 项目内位置 |
+|---|---|
+| 工具与 Zig | `.local/tools/`、`.local/toolchains/zig/` |
+| 可移植工具归档 | `.local/downloads/`（既有 nextest 归档可在 `.local/tools/downloads/` 校验） |
+| Cargo 依赖下载/Git 依赖缓存 | `.local/cargo-home/`，不迁移用户配置或凭据 |
+| 编译、增量产物 | `target/`；显式 target/build 目录必须仍在仓库内 |
+| Zig 缓存 | `.local/zig-cache/global`、`.local/zig-cache/local` |
+| pip/npm/Bun/uv/Python 等缓存 | `.local/cache/` 下各自目录；Python bootstrap 禁写字节码 |
+| 临时文件 | 激活环境为 `target/tmp/`；`--run` 使用其中独立运行子目录 |
+| 测试配置/运行状态 | `--run` 独立沙箱内的 HOME、AppData、XDG 等目录 |
+| 测试记录 | `target/test-suite-logs/` 和各验证入口的项目内记录目录 |
+
+显式外部可写缓存/产物路径会被拒绝；已有外部可执行文件与只读 Rustup 工具链可复用。
+普通激活不替换 HOME；测试请用 `--run` 隔离配置、会话覆盖和运行状态。
+运行沙箱设有 Git 向上发现边界，临时“非仓库”用例不会误认外层 herdr 仓库；
+沙箱内显式初始化的 Git 仓库和主项目的 Git 操作仍正常。
+项目入口不是操作系统沙箱，不能拦截任意命令硬编码的外部写入；验收同时检查真实临时文件落点，
+不能把环境变量已设置等同于全系统文件写入审计。绕开这些入口的命令仍遵从自身环境。
+
+Cargo 或 Zig 在未激活环境下保留原有行为：build.rs 的 `ZIG` 优先级不变，
+Zig 默认缓存仍在本仓库，显式 Zig 缓存覆盖原样传递；严格的项目内路径检查由 setup 入口负责。
 - Windows 交叉验证：`cargo install xwin --locked` + `just setup-windows-cross`
   （一次性，详见 `AGENT_RULES/platform.md`）。
 - `just install-hooks` 安装 conventional-commit 守门钩子。

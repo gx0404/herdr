@@ -17,11 +17,12 @@ update/release_notes/product_announcements/plugins/render_prof 等）、采集�
   修改 recipe 后必须同步该文档与 CI 调用面（`.github/workflows/ci.yml` 等，
   归 `governance.md`/`release-channels.md`）。
 - **Zig 工具链是钉版受控的**：vendored libghostty-vt 需要 Zig 0.16.0。仓库自包含
-  方案：`scripts/setup_env.sh`（总入口）与 `scripts/setup_zig.py` 把官方归档（Linux /
-  macOS 为 tarball、Windows 为 zip，sha256 钉死）装进 `<repo>/.local/toolchains/zig/`；
-  `crates/ghostty-vt/build.rs::resolve_zig` 按 `$ZIG` > 项目内钉版 > PATH 解析，装完
-  即可裸 `cargo build`。CI 由 workflow 的 setup-zig 步骤提供。多 worktree 共享一份时设
-  `HERDR_ZIG_HOME`。升级 Zig = 同步 `setup_zig.py` 钉版表、
+  方案：`scripts/setup_env.py`（`setup_env.sh` 为兼容入口）与 `scripts/setup_zig.py`
+  把固定摘要归档装进 `<repo>/.local/toolchains/zig/`，新工具验证后才替换旧安装。
+  `crates/ghostty-vt/build.rs::resolve_zig` 按 `$ZIG` > 项目内钉版 > PATH 解析；检查必须
+  验证实际选中的二进制，错误覆盖不能回退或假绿。CI 由 workflow 的 setup-zig 步骤提供。
+  `HERDR_ZIG_HOME` 只改变安装根，build.rs 不自动搜索它；共享安装需要显式 `ZIG`，
+  项目 setup 则将解析结果传给子进程。升级 Zig = 同步 `setup_zig.py` 钉版表、
   `crates/ghostty-vt/build.rs::resolve_zig` 目录名与
   `vendored-libghostty-vt.md` 版本要求，重跑 `just setup-zig --install --force`。
 - `Cargo.toml` 是版本唯一真源（当前语义见 `release-channels.md`）；`Cargo.lock`
@@ -58,10 +59,14 @@ update/release_notes/product_announcements/plugins/render_prof 等）、采集�
   `.local/windows-cross/`、本机工具 shim `.local/tool-shims/`、性能基线
   `.local/perf-baseline/`、临时 worktree 放 `target/tmp/`。
 - 禁止：把构建产物、下载的工具链/SDK、测试沙箱、打包产物写到 `%USERPROFILE%`、
-  `%TEMP%` 根、其他磁盘目录等项目外位置（测试运行期的系统临时目录除外，且必须
-  自清，见 `testing.md`）。
-- 例外（用户级包管理器缓存，只读复用、项目脚本不主动写入）：cargo registry
-  （`~/.cargo/registry`）、rustup 工具链、uv/bun 全局缓存。
+  `%TEMP%` 根等项目外位置。项目 setup 环境不使用系统临时目录例外，也不为权限测试移盘；
+  按 `testing.md` 验证测试自有目录权限与实际落点。
+- `scripts/setup_env.py::environment` 统一控制 Cargo home/target、Zig 与包管理缓存，
+  拒绝指向仓库外的可写覆盖。`::run_command` 另外隔离 HOME/AppData/XDG/temp 等运行根；
+  普通激活不更改 HOME。工具只读检查不得安装、更新或创建目录；子命令失败必须传播。
+- 已安装的 Rust/Python/Git、系统 SDK 可只读复用；新 Cargo 下载写 `.local/cargo-home/`，
+  不复制用户凭据或配置。不更改系统 PATH/profile/default toolchain；bootstrap 与工具安装
+  也须遵守本地缓存边界。这是受控入口的约束，不是任意命令的文件系统沙箱。
 - Windows 交叉 SDK 默认根为 `<repo>/.local/windows-cross/`
   （`scripts/windows_cross.py::SDK_ROOT`）；跨 worktree/机器共享时设
   `HERDR_WINDOWS_CROSS_ROOT` 显式指向项目外路径；`LIBGHOSTTY_VT_WINDOWS_LIBC`

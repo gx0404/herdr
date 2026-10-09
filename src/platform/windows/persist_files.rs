@@ -1349,6 +1349,18 @@ if ($LASTEXITCODE -ne 0) { throw 'could not install low integrity label' }
     #[test]
     fn persist_review_basic_attributes_roundtrip() {
         let dir = Directory::new("basic-attributes");
+        let wide = super::super::extended_length_path(&dir.0).unwrap();
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::Storage::FileSystem::SetFileAttributesW(
+                    wide.as_ptr(),
+                    FILE_ATTRIBUTE_NORMAL,
+                )
+            },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
         for private in [false, true] {
             for combination in 0..8u32 {
                 let flags = [

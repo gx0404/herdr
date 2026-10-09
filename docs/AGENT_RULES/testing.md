@@ -143,7 +143,11 @@ ID、workspace/tab/pane 身份、restore/handoff、agent 检测权威或 UI/输�
   设在测试根下，配置写进 `<XDG_CONFIG_HOME>/<app 目录>`（debug 为 `herdr-dev`，用
   `support::app_dir_name()`）；拉起辅助函数清掉 `support::INHERITED_DIR_OVERRIDES`；可能写
   agent/ssh 目录的命令用隔离的 HOME（cli harness 的 `herdr_command`）。
-- 泄漏审计：先照常构建，再把 `TEMP`/`TMP` 指向真实临时目录下的空私有目录（Windows 须在
-  C: 上，ACL 敏感的 `platform::windows::config_backup` 用例放到 D: 会失败）、
-  `APPDATA`/`LOCALAPPDATA` 指向临时目录外的空目录跑全量；跑完私有临时目录里只应剩测试构建
-  的 codex shim（`herdr-unit-codex-shim`），资料目录保持为空。
+- 泄漏审计：把 `TEMP`/`TMP`/`TMPDIR` 指向项目 `target/tmp/` 下独立私有目录，
+  `APPDATA`/`LOCALAPPDATA` 与 HOME/XDG 根指向同一运行沙箱的独立子目录，再运行全量测试。
+  Windows 配置备份测试由 `platform::windows::config_backup::tests::Directory::new`
+  创建明确的可继承用户权限，不依赖盘符或宿主继承 ACL；文件系统不支持所需能力时如实报告，
+  不移回 C: 或放宽断言。用 `env_clear()` 的子进程必须重建隔离变量；
+  `tests/codex_launch_windows.rs::Sandbox::command` 同时固定 PowerShell 模块缓存，
+  sandbox 自有 `BASH_ENV` 在 Git Bash 启动后恢复临时目录。检查实际临时文件落点及残留，
+  不把环境变量已设置等同于全部子进程已隔离。
