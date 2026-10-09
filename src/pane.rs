@@ -140,9 +140,9 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     // when the remote side lacks matching terminfo entries.
     cmd.env("TERM", PANE_TERM);
     cmd.env("COLORTERM", PANE_COLORTERM);
-    // 宿主终端的身份变量描述的是启动 server 的终端，而不是 pane 真正的渲染层；
-    // 继承它们会让 pane 内进程把 herdr 误判成宿主终端
-    // （HOST-INT-01；清单并入上游 8ac95427）。
+    // 宿主终端的身份与 shell 集成变量描述的是启动 server 的终端，而不是 pane 真正的
+    // 渲染层；继承它们会让 pane 内进程把 herdr 误判成宿主终端，Ghostty 的 shell 集成
+    // 也会在 pane 里再加载一次（HOST-INT-01；清单并入上游 8ac95427）。
     for key in [
         "ITERM_SESSION_ID",
         "LC_TERMINAL",
@@ -153,6 +153,9 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
         "WEZTERM_EXECUTABLE_DIR",
         "WEZTERM_CONFIG_FILE",
         "WEZTERM_CONFIG_DIR",
+        "GHOSTTY_RESOURCES_DIR",
+        "GHOSTTY_BIN_DIR",
+        "GHOSTTY_SHELL_FEATURES",
         "KITTY_WINDOW_ID",
         "WT_SESSION",
         "TMUX",
@@ -4994,6 +4997,40 @@ mod tests {
             "WEZTERM_CONFIG_FILE",
             "WEZTERM_CONFIG_DIR",
             "KITTY_WINDOW_ID",
+        ] {
+            assert!(cmd.get_env(key).is_none(), "{key} must not leak into panes");
+        }
+    }
+
+    #[test]
+    fn pane_terminal_identity_drops_ghostty_shell_integration_env() {
+        let _guard = pane_env_test_lock();
+        clear_client_reported_ssh_auth_sock();
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env("TERM_PROGRAM", "ghostty");
+        cmd.env("TERM_PROGRAM_VERSION", "1.3.0");
+        cmd.env("TERM", "xterm-ghostty");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("GHOSTTY_RESOURCES_DIR", "/usr/share/ghostty");
+        cmd.env("GHOSTTY_BIN_DIR", "/usr/bin");
+        cmd.env(
+            "GHOSTTY_SHELL_FEATURES",
+            "cursor:blink,path,ssh-env,sudo,title",
+        );
+
+        apply_pane_terminal_env(&mut cmd);
+
+        assert_eq!(cmd.get_env("TERM_PROGRAM"), Some(OsStr::new("herdr")));
+        assert_eq!(
+            cmd.get_env("TERM_PROGRAM_VERSION"),
+            Some(OsStr::new(crate::build_info::BASE_VERSION))
+        );
+        assert_eq!(cmd.get_env("TERM"), Some(OsStr::new(PANE_TERM)));
+        assert_eq!(cmd.get_env("COLORTERM"), Some(OsStr::new(PANE_COLORTERM)));
+        for key in [
+            "GHOSTTY_RESOURCES_DIR",
+            "GHOSTTY_BIN_DIR",
+            "GHOSTTY_SHELL_FEATURES",
         ] {
             assert!(cmd.get_env(key).is_none(), "{key} must not leak into panes");
         }

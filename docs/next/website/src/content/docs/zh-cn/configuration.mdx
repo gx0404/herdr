@@ -112,7 +112,7 @@ new_cwd = "follow"
 
 ### 窗格环境变量与 cwd 上报
 
-窗格由 Herdr 自己的终端层渲染，因此它们对外宣称 Herdr 身份，而不是启动 server 的终端：`TERM_PROGRAM=herdr`、`TERM_PROGRAM_VERSION` 为 Herdr 版本号、`TERM=xterm-256color`、`COLORTERM=truecolor`。宿主终端的身份变量（`WEZTERM_PANE`、`WEZTERM_UNIX_SOCKET`、`WEZTERM_EXECUTABLE`、`WEZTERM_EXECUTABLE_DIR`、`WEZTERM_CONFIG_FILE`、`WEZTERM_CONFIG_DIR`、`KITTY_WINDOW_ID`、`WT_SESSION`）会被移除，避免窗格内程序把 Herdr 误判成宿主终端。`HERDR_ENV=1` 始终注入，用于标记运行在 Herdr 窗格内的进程。
+窗格由 Herdr 自己的终端层渲染，因此它们对外宣称 Herdr 身份，而不是启动 server 的终端：`TERM_PROGRAM=herdr`、`TERM_PROGRAM_VERSION` 为 Herdr 版本号、`TERM=xterm-256color`、`COLORTERM=truecolor`。描述宿主终端的变量会被移除，避免窗格内程序把 Herdr 误判成宿主终端：包括 Ghostty 的 `GHOSTTY_RESOURCES_DIR`、`GHOSTTY_BIN_DIR` 与 `GHOSTTY_SHELL_FEATURES`，从 Ghostty GX 启动 Herdr 时，窗格内的 shell 因此不会加载 Ghostty 的 shell 集成；以及其它终端的会话句柄，如 `KITTY_WINDOW_ID`、`WT_SESSION` 和 WezTerm 的 `WEZTERM_*` 窗格、socket、可执行文件与配置变量。`HERDR_ENV=1` 始终注入，用于标记运行在 Herdr 窗格内的进程。
 
 在 Unix 上，每次创建窗格前都会校验 `SSH_AUTH_SOCK`：路径必须存在、是 socket 且属主为当前用户。当 server 继承的 agent socket 已失效（例如宿主终端重启后），Herdr 回退到最近一次前台 client attach 时上报的值；两者都不可用时则不注入该变量，让窗格内的 `ssh` 明确报「无 agent」，而不是连上一个死 socket 卡死。
 

@@ -112,7 +112,7 @@ new_cwd = "follow"
 
 ### ペイン環境変数と cwd レポート
 
-ペインは Herdr 自身の端末レイヤーで描画されるため、サーバーを起動した端末ではなく Herdr として名乗ります: `TERM_PROGRAM=herdr`、`TERM_PROGRAM_VERSION` は Herdr のバージョン、`TERM=xterm-256color`、`COLORTERM=truecolor`。ホスト端末の識別変数（`WEZTERM_PANE`、`WEZTERM_UNIX_SOCKET`、`WEZTERM_EXECUTABLE`、`WEZTERM_EXECUTABLE_DIR`、`WEZTERM_CONFIG_FILE`、`WEZTERM_CONFIG_DIR`、`KITTY_WINDOW_ID`、`WT_SESSION`）は取り除かれるため、ペイン内のプログラムが Herdr をホスト端末と誤認しません。`HERDR_ENV=1` は常に設定され、Herdr ペイン内で動くプロセスの目印になります。
+ペインは Herdr 自身の端末レイヤーで描画されるため、サーバーを起動した端末ではなく Herdr として名乗ります: `TERM_PROGRAM=herdr`、`TERM_PROGRAM_VERSION` は Herdr のバージョン、`TERM=xterm-256color`、`COLORTERM=truecolor`。ホスト端末を表す変数は取り除かれるため、ペイン内のプログラムが Herdr をホスト端末と誤認しません。対象は Ghostty の `GHOSTTY_RESOURCES_DIR`、`GHOSTTY_BIN_DIR`、`GHOSTTY_SHELL_FEATURES`（Ghostty GX から Herdr を起動したとき、ペイン内のシェルが Ghostty のシェル統合を読み込まないようにするため）と、`KITTY_WINDOW_ID`、`WT_SESSION`、WezTerm の `WEZTERM_*`（ペイン、ソケット、実行ファイル、設定の各変数）など、ほかの端末のセッションハンドルです。`HERDR_ENV=1` は常に設定され、Herdr ペイン内で動くプロセスの目印になります。
 
 Unix では、ペインを生成するたびに `SSH_AUTH_SOCK` が検証されます: パスが存在し、socket で、現在のユーザーが所有している必要があります。サーバーが継承した agent socket が無効になっている場合（ホスト端末の再起動後など）、Herdr は直近にアタッチされたフォアグラウンドクライアントがレポートした値にフォールバックし、どちらも使えないときは変数自体を設定しません。これにより、ペイン内の `ssh` は死んだ socket に張り付く代わりに「agent なし」の明確なエラーで失敗します。
 

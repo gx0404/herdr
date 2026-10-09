@@ -3012,6 +3012,7 @@ mod tests {
             (Some("wezterm"), Some("xterm-256color"), false),
             (Some("kitty"), None, false),
             (Some("ghostty"), None, false),
+            (Some("ghostty"), Some("xterm-256color"), false),
             (Some("contour"), None, false),
             (Some("foot"), None, false),
             (Some("iTerm.app"), Some("xterm-256color"), false),
