@@ -99,7 +99,7 @@ fn direct_graphics_profile_allowed() -> bool {
     false
 }
 
-/// 把宿主环境的 SSH agent socket 带给 server（WEZ-INT-01 自愈链）：server 是 detached
+/// 把宿主环境的 SSH agent socket 带给 server（HOST-INT-01 自愈链）：server 是 detached
 /// 进程，它继承的 `SSH_AUTH_SOCK` 可能已随宿主终端重启失效；server 只在上报值通过属主
 /// 与 socket 类型校验后才用它做 pane 环境兜底。
 fn client_ssh_auth_sock_env() -> Option<String> {

@@ -725,9 +725,10 @@ fn parse_file_uri_cwd(uri: &str) -> Option<PathBuf> {
     parse_file_uri_cwd_with_hostname(uri, crate::platform::hostname().as_deref())
 }
 
-/// pane cwd 上送宿主终端（WEZ-INT-02）的 URI 构造：`file://<本机 hostname><percent-编码路径>`。
+/// pane cwd 上送宿主终端（HOST-INT-02）的 URI 构造：`file://<本机 hostname><percent-编码路径>`。
 /// 与 [`parse_file_uri_cwd`] 互为对偶；hostname 拿不到时退化为空 host（`file:///...`），
-/// 解析侧与 wezterm 都接受。路径经 percent 编码，输出恒为可安全写入 OSC 的 ASCII。
+/// 解析侧接受，但要求 host 为本机名或 `localhost` 的宿主（如 Ghostty）会忽略这次上送。
+/// 路径经 percent 编码，输出恒为可安全写入 OSC 的 ASCII。
 pub(crate) fn file_uri_for_cwd(cwd: &Path) -> Option<String> {
     #[cfg(not(windows))]
     let path = cwd.to_str()?;
@@ -784,9 +785,9 @@ fn percent_encode_file_uri_path(path: impl AsRef<str>) -> String {
     out
 }
 
-/// `file://` URI 的 host 段判定：空、`localhost`、或等于本机 hostname（大小写无关，
-/// GX-03——gx terminal.zsh 上报 `${HOST}` 原样大小写）都视为本机；其余 host 指向
-/// 远程机器，pane 不能拿来当本地 cwd。
+/// `file://` URI 的 host 段判定：空、`localhost`（GX Zsh 上报 `file://localhost/...`）、
+/// 或等于本机 hostname（大小写无关，shell 常按 `$HOST`/`$HOSTNAME` 原样大小写上报）都
+/// 视为本机；其余 host 指向远程机器，pane 不能拿来当本地 cwd。
 fn parse_file_uri_cwd_with_hostname(uri: &str, hostname: Option<&str>) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     let path = if rest.starts_with('/') {
@@ -1140,7 +1141,7 @@ mod tests {
             parse_file_uri_cwd_with_hostname("file://myhost/tmp/herdr%20repo", Some("myhost")),
             Some(std::path::PathBuf::from("/tmp/herdr repo"))
         );
-        // 主机名比较大小写无关（gx terminal.zsh 上报的是 `${HOST}` 原样大小写）。
+        // 主机名比较大小写无关（shell 常按 `$HOST`/`$HOSTNAME` 原样大小写上报）。
         assert_eq!(
             parse_file_uri_cwd_with_hostname("file://MYHOST/tmp", Some("myhost")),
             Some(std::path::PathBuf::from("/tmp"))

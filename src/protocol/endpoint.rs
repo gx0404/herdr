@@ -31,7 +31,7 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 /// 后台观测事件（账号用量 / 系统指标订阅推送）的可选控制帧；客户端不认识时忽略。
 pub const OBSERVATION_EVENT_KIND: &str = "endpoint.observation.v1";
-/// 前台焦点 pane 的 cwd 上送（WEZ-INT-02）：server 只在焦点或 cwd 变化时推送，
+/// 前台焦点 pane 的 cwd 上送（HOST-INT-02）：server 只在焦点或 cwd 变化时推送，
 /// 客户端据此向宿主终端写 OSC 7。可选控制帧，旧客户端忽略。
 pub const TERMINAL_CWD_KIND: &str = "endpoint.terminal-cwd.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";

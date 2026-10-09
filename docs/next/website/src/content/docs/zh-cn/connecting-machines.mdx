@@ -266,4 +266,4 @@ SSH 端点继续支持兼容的上游官方 Herdr 服务器。超链接使用双
 
 取消测试连接、认证或文件页会结束该任务的本地 SSH/SCP/SFTP 进程；已经完成的远端写入不会回滚。文件列表忽略过期读取，但会结算每个请求，重复响应不会让加载状态卡住。
 
-Windows 原生回放：`powershell -File scripts/windows_tui_compat.ps1 -ExePath target/debug/herdr.exe -Shell powershell`；PowerShell 7 使用 `-Shell pwsh`。加 `-Interactive` 在 WezTerm 内检查拖选、中文输入和 60×16、80×24、120×40、160×50 布局。WSL 在发行版内部构建并运行 Linux Herdr，使用发行版默认用户和登录 shell。CI 的 PowerShell 回放验证 ConPTY，不替代桌面输入法和鼠标验收。
+Windows 原生回放：`powershell -File scripts/windows_tui_compat.ps1 -ExePath target/debug/herdr.exe -Shell powershell`；PowerShell 7 使用 `-Shell pwsh`。加 `-Interactive` 在 Ghostty GX 内检查拖选、中文输入和 60×16、80×24、120×40、160×50 布局。WSL 在发行版内部构建并运行 Linux Herdr，使用发行版默认用户和登录 shell。CI 的 PowerShell 回放验证 ConPTY，不替代桌面输入法和鼠标验收。

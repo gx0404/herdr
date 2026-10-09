@@ -2,8 +2,8 @@
   "artifacts": {
     ".graphify_labels.json": "24aa107caf906ab0f77814f28a6746a2fc2eb0e89ebbb55b27bc191ece28b8b4",
     ".graphify_labels.json.sig": "7102ea323dba27fd1bc49ad23e5a9832a13d016cfcec0ccbc99b1ea6e4bcf67a",
-    "GRAPH_REPORT.md": "4c25ce1415d736f10ea4f318e9be66821ac71d8391db5f98a364935ee03c1fd1",
-    "graph.json": "90a70db4049e75cd4117748f90b25420f2472518ebe9f7938b661c205dfafdf6"
+    "GRAPH_REPORT.md": "b58d91c7ab318b17581bb7944eeaaf177eaf285ac6c62e2dc289c500d9dc9d31",
+    "graph.json": "3905383e8e0cc63bdd3943ddc027c3f079e145a171e518e3b1d57edc5be6e3ca"
   },
   "index_root": "src",
   "pipeline": {
@@ -17,6 +17,6 @@
       "src/ghostty/bindings.rs"
     ],
     "file_count": 531,
-    "sha256": "897f9dfc50c089b9b7e9afa264b40e3688c4efc3c4b35816a8bd78947d82a337"
+    "sha256": "2286c655b87711af2f9798ef1b9f65127186970077c3ccad2e0bdff46e5c933a"
   }
 }

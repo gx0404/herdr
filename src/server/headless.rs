@@ -243,7 +243,7 @@ pub struct HeadlessServer {
     /// changes the foreground client having to remember to invalidate this.
     sent_window_title: Option<(u64, Option<String>)>,
     /// 上送给前台 client 的焦点 pane cwd，与接收 client 配对；语义与
-    /// `sent_window_title` 相同（WEZ-INT-02）。存路径而非编码后的 URI，渲染循环里的
+    /// `sent_window_title` 相同（HOST-INT-02）。存路径而非编码后的 URI，渲染循环里的
     /// 稳态比较不需要分配。
     sent_terminal_cwd: Option<(u64, Option<std::path::PathBuf>)>,
     /// Window title set through `client.window_title.set`. While present it wins
@@ -1745,7 +1745,7 @@ impl HeadlessServer {
         Some(terminal.cwd.as_path())
     }
 
-    /// 焦点 pane 的 cwd 上送给前台 client（WEZ-INT-02）。只在焦点或 cwd 变化时推送
+    /// 焦点 pane 的 cwd 上送给前台 client（HOST-INT-02）。只在焦点或 cwd 变化时推送
     /// （按 `(client_id, path)` 去重），渲染循环里的稳态调用只做几次 map 查找与一次
     /// 路径比较；URI 的 hostname 查询与 percent 编码只在真实变化时发生，不进每帧路径。
     fn sync_terminal_cwd(&mut self) {
@@ -2207,7 +2207,7 @@ impl HeadlessServer {
                     render_encoding = ?protocol::RenderEncoding::SemanticFrame,
                     "client connected"
                 );
-                // WEZ-INT-01 自愈链：前台 client attach 时上报的 SSH agent socket 登记为
+                // HOST-INT-01 自愈链：前台 client attach 时上报的 SSH agent socket 登记为
                 // pane spawn 的兜底源（spawn 前仍会逐次校验活性）。
                 crate::pane::note_client_reported_ssh_auth_sock(ssh_auth_sock);
                 self.app.ensure_default_workspace();

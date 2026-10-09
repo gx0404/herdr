@@ -108,7 +108,7 @@ pub(crate) const MIN_PANE_ROWS: u16 = 2;
 pub(crate) const MIN_PANE_COLS: u16 = 4;
 const PANE_COLORTERM: &str = "truecolor";
 /// pane 对外宣称的终端程序身份：pane 由 herdr 自己的终端层渲染，不是启动 server
-/// 的宿主终端（WEZ-INT-01）。版本取 Cargo.toml 版本（`build_info::BASE_VERSION`）。
+/// 的宿主终端（HOST-INT-01）。版本取 Cargo.toml 版本（`build_info::BASE_VERSION`）。
 const PANE_TERM_PROGRAM: &str = "herdr";
 const FISH_HANDLE_REFLOW_ENV_VAR: &str = "fish_handle_reflow";
 
@@ -141,8 +141,8 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("TERM", PANE_TERM);
     cmd.env("COLORTERM", PANE_COLORTERM);
     // 宿主终端的身份变量描述的是启动 server 的终端，而不是 pane 真正的渲染层；
-    // 继承它们会让 pane 内进程把 herdr 误判成 WezTerm/kitty/iTerm/tmux 等
-    // （WEZ-INT-01；清单并入上游 8ac95427）。
+    // 继承它们会让 pane 内进程把 herdr 误判成宿主终端
+    // （HOST-INT-01；清单并入上游 8ac95427）。
     for key in [
         "ITERM_SESSION_ID",
         "LC_TERMINAL",
@@ -179,7 +179,7 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     apply_pane_ssh_auth_sock(cmd);
 }
 
-/// pane 的 `SSH_AUTH_SOCK` 自愈链（WEZ-INT-01）：server 是 detached 长驻进程，启动时冻结
+/// pane 的 `SSH_AUTH_SOCK` 自愈链（HOST-INT-01）：server 是 detached 长驻进程，启动时冻结
 /// 的环境在宿主终端重启后指向已失效的 agent socket。spawn 前对继承值做活性判定；失效时
 /// 改用最近一个前台 client attach 时上报的值（同样先校验属主与 socket 类型），再不行就不
 /// 注入，让 pane 内 ssh 明确报「无 agent」而不是连一个死 socket。

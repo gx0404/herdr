@@ -266,4 +266,4 @@ SSH エンドポイントは、互換性のある上流の公式 Herdr サーバ
 
 取消はそのタスクのローカル SSH/SCP/SFTP プロセスを終了します。すでに完了したリモート書き込みは元に戻しません。古い一覧応答は表示を変更せず、各要求の完了は処理します。
 
-Windows では `powershell -File scripts/windows_tui_compat.ps1 -ExePath target/debug/herdr.exe -Shell powershell`、PowerShell 7 は `-Shell pwsh` で確認します。WezTerm 内で `-Interactive` を付け、選択、IME、60×16、80×24、120×40、160×50 の表示を確認します。WSL はディストリビューションの既定ユーザーとログインシェルで Linux 版 Herdr を実行します。CI の ConPTY 検証とは別に、デスクトップのマウスと IME を確認してください。
+Windows では `powershell -File scripts/windows_tui_compat.ps1 -ExePath target/debug/herdr.exe -Shell powershell`、PowerShell 7 は `-Shell pwsh` で確認します。Ghostty GX 内で `-Interactive` を付け、選択、IME、60×16、80×24、120×40、160×50 の表示を確認します。WSL はディストリビューションの既定ユーザーとログインシェルで Linux 版 Herdr を実行します。CI の ConPTY 検証とは別に、デスクトップのマウスと IME を確認してください。

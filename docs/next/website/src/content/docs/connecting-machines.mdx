@@ -289,4 +289,4 @@ Approved interactive authentication uses an in-memory askpass channel through pr
 
 Canceling setup, authentication, or the file page terminates its local SSH/SCP/SFTP task. Completed remote writes are not rolled back. Stale directory reads are ignored while every request is settled, preventing stuck loading indicators.
 
-Run `powershell -File scripts/windows_tui_compat.ps1 -ExePath target/debug/herdr.exe -Shell powershell` for PowerShell 5.1, or use `-Shell pwsh` for PowerShell 7. Add `-Interactive` inside WezTerm to check selection, IME, and 60×16, 80×24, 120×40, 160×50 layouts. In WSL, build and run Linux Herdr with the distribution's default user and login shell. CI checks ConPTY; desktop mouse and IME acceptance remain separate.
+Run `powershell -File scripts/windows_tui_compat.ps1 -ExePath target/debug/herdr.exe -Shell powershell` for PowerShell 5.1, or use `-Shell pwsh` for PowerShell 7. Add `-Interactive` inside Ghostty GX to check selection, IME, and 60×16, 80×24, 120×40, 160×50 layouts. In WSL, build and run Linux Herdr with the distribution's default user and login shell. CI checks ConPTY; desktop mouse and IME acceptance remain separate.

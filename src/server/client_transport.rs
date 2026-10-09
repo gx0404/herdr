@@ -1201,7 +1201,7 @@ pub(crate) enum ServerEvent {
         surface_active: bool,
         surface_reuse: bool,
         surface_delta: bool,
-        /// 前台 client 宿主环境上报的 `SSH_AUTH_SOCK`（WEZ-INT-01 自愈链兜底源）。
+        /// 前台 client 宿主环境上报的 `SSH_AUTH_SOCK`（HOST-INT-01 自愈链兜底源）。
         ssh_auth_sock: Option<String>,
         surface_scroll: bool,
         writer: ClientWriter,
