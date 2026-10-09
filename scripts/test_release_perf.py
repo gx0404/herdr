@@ -208,9 +208,12 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
                 if os.name == "nt":
                     linked = subprocess.run(
                         ["cmd.exe", "/c", "mklink", "/J", str(link), str(root / "outside")],
-                        capture_output=True, text=True, timeout=20, check=False,
+                        capture_output=True, timeout=20, check=False,
                     )
-                    self.assertEqual(linked.returncode, 0, linked.stdout + linked.stderr)
+                    self.assertEqual(
+                        linked.returncode, 0,
+                        f"mklink stdout: {linked.stdout!r}\nstderr: {linked.stderr!r}",
+                    )
                 else:
                     link.symlink_to(root / "outside", target_is_directory=True)
             environment = {
@@ -230,10 +233,10 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
             if os.name == "nt":
                 converted = subprocess.run(
                     [bash, "--noprofile", "--norc", "-c", 'cygpath -u "$1"', "contract", str(root)],
-                    cwd=root, env=environment, capture_output=True, text=True, timeout=20, check=False,
+                    cwd=root, env=environment, capture_output=True, timeout=20, check=False,
                 )
                 self.assertEqual(converted.returncode, 0, converted.stderr)
-                shell_root = converted.stdout.strip()
+                shell_root = converted.stdout.decode("utf-8").strip()
                 self.assertTrue(shell_root.startswith("/"), shell_root)
             environment.update({key: f"{shell_root}/inherited/{key}" for key in self.ISOLATED_DIRS})
             environment.update({key: f"{shell_root}/inherited/{key}" for key in self.CASE_UNSET})
@@ -452,7 +455,7 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
             try:
                 result = subprocess.run(
                     [bash, "--noprofile", "--norc", f"{shell_root}/contract.sh"],
-                    cwd=root, env=environment, capture_output=True, text=True, timeout=60, check=False,
+                    cwd=root, env=environment, capture_output=True, timeout=60, check=False,
                 )
             except subprocess.TimeoutExpired as error:
                 try:
@@ -464,35 +467,39 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
             if result.stderr:
                 diagnostics.mkdir(parents=True)
                 stderr_path = diagnostics / "harness-stderr.txt"
-                stderr_path.write_bytes(result.stderr.encode("utf-8"))
-                self.assertEqual(stderr_path.read_bytes(), result.stderr.encode("utf-8"))
+                stderr_path.write_bytes(result.stderr)
+                self.assertEqual(stderr_path.read_bytes(), result.stderr)
+            stderr = result.stderr.decode("utf-8")
             if startup_stderr:
-                self.assertIn(startup_stderr, result.stderr)
+                self.assertIn(startup_stderr, stderr)
             expected = status
             if script == CASE and fault in ("owner", "public-root", "long-runtime", "unicode-runtime"):
                 expected = 2
             elif fault and fault not in ("long-evidence", "missing-log", "tmux-delay") and not status:
                 expected = 1
-            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+            self.assertEqual(
+                result.returncode, expected,
+                f"harness stdout: {result.stdout!r}\nstderr: {result.stderr!r}",
+            )
             self.assertEqual(sentinel.read_bytes(), b"do not read or modify this fake user config\n")
             self.assertEqual(baseline.read_bytes(), b"fake baseline override; never executed\n")
             if script == CASE and fault in ("owner", "public-root"):
-                self.assertIn("ownership receipt", result.stderr)
+                self.assertIn("ownership receipt", stderr)
                 self.assertFalse((root / "probes/launch.env").exists())
                 return
-            self.assertEqual((evidence / "exit-code.txt").read_text().strip(), str(expected))
+            self.assertEqual((evidence / "exit-code.txt").read_text(encoding="utf-8").strip(), str(expected))
             if script == SMOKE:
-                receipt = (evidence / "runtime-owner.txt").read_text()
+                receipt = (evidence / "runtime-owner.txt").read_text(encoding="utf-8")
                 runtime_path = next(line.split("=", 1)[1] for line in receipt.splitlines() if line.startswith("runtime="))
                 self.assertIn("/.local/p-", runtime_path)
                 self.assertTrue((evidence / "metadata.txt").is_file())
-                self.assertIn(f"source={shell_root}/baseline", (evidence / "baseline-command.txt").read_text())
+                self.assertIn(f"source={shell_root}/baseline", (evidence / "baseline-command.txt").read_text(encoding="utf-8"))
                 self.assertEqual(len(list((root / ".local").glob("p-*"))), 1 if fault else 0)
             else:
                 self.assertTrue((evidence / "case-metadata.txt").is_file())
                 if fault in ("long-runtime", "unicode-runtime"):
-                    self.assertIn("Unix socket path too long", result.stderr)
-                    self.assertEqual((evidence / "cleanup.txt").read_text(), "state=not-started\n")
+                    self.assertIn("Unix socket path too long", stderr)
+                    self.assertEqual((evidence / "cleanup.txt").read_text(encoding="utf-8"), "state=not-started\n")
                     self.assertFalse((root / "probes/launch.env").exists())
                     return
                 self.assertTrue((evidence / "launch-command.txt").is_file())
@@ -504,7 +511,7 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                 else:
                     self.assertFalse(list((root / "tmp").glob("c-*")))
                 if unsafe_path:
-                    self.assertIn("ownership=refused", (evidence / "cleanup.txt").read_text())
+                    self.assertIn("ownership=refused", (evidence / "cleanup.txt").read_text(encoding="utf-8"))
                     self.assertFalse((root / "probes/log-reads.txt").exists())
                     for phase in ("stop", "delete", "list", "tmux-cleanup"):
                         self.assertFalse((root / f"probes/{phase}.env").exists())
@@ -512,56 +519,56 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                     for external, content in outside_files.items():
                         self.assertEqual(external.read_bytes(), content)
                 elif diagnostics_failed:
-                    self.assertIn("diagnostics=failed", (evidence / "cleanup.txt").read_text())
+                    self.assertIn("diagnostics=failed", (evidence / "cleanup.txt").read_text(encoding="utf-8"))
                     self.assertTrue((root / "probes/stop.env").exists())
                     self.assertFalse((root / "probes/delete.env").exists())
                     self.assertFalse((root / "probes/tmux-cleanup.env").exists())
                     originals = list((root / "tmp").glob("c-*/c/herdr/sessions/p/herdr-server.log"))
                     self.assertEqual(len(originals), 1)
-                    self.assertIn("synthetic server failure", originals[0].read_text())
+                    self.assertIn("synthetic server failure", originals[0].read_text(encoding="utf-8"))
                 elif fault != "case-owner":
-                    self.assertIn("synthetic dead pane", (evidence / "tmux-pane.txt").read_text())
-                    self.assertIn("202 1 37", (evidence / "tmux-status.txt").read_text())
+                    self.assertIn("synthetic dead pane", (evidence / "tmux-pane.txt").read_text(encoding="utf-8"))
+                    self.assertIn("202 1 37", (evidence / "tmux-status.txt").read_text(encoding="utf-8"))
                     if fault == "missing-log":
-                        self.assertIn("herdr-server.log=absent", (evidence / "diagnostics-status.txt").read_text())
+                        self.assertIn("herdr-server.log=absent", (evidence / "diagnostics-status.txt").read_text(encoding="utf-8"))
                     else:
-                        self.assertIn("synthetic server failure", (evidence / "herdr-server.log.txt").read_text())
+                        self.assertIn("synthetic server failure", (evidence / "herdr-server.log.txt").read_text(encoding="utf-8"))
                     self.assertFalse((evidence / "private.txt").exists())
-                calls = (root / "probes/calls.txt").read_text().splitlines()
+                calls = (root / "probes/calls.txt").read_text(encoding="utf-8").splitlines()
                 if fault == "delete":
                     self.assertEqual(calls.count("delete"), 50)
-                    self.assertEqual((evidence / "cleanup.txt").read_text().count("delete=41\n"), 50)
+                    self.assertEqual((evidence / "cleanup.txt").read_text(encoding="utf-8").count("delete=41\n"), 50)
                 if fault == "readiness":
                     self.assertEqual(calls.count("control"), 150)
-                    self.assertEqual((evidence / "readiness-exit-code.txt").read_text().strip(), "37")
-                    self.assertEqual((evidence / "readiness-stderr.txt").read_text(), readiness_stderr)
-                    self.assertEqual((evidence / "readiness-stdout.txt").read_text(), "partial")
+                    self.assertEqual((evidence / "readiness-exit-code.txt").read_text(encoding="utf-8").strip(), "37")
+                    self.assertEqual((evidence / "readiness-stderr.txt").read_text(encoding="utf-8"), readiness_stderr)
+                    self.assertEqual((evidence / "readiness-stdout.txt").read_text(encoding="utf-8"), "partial")
                 elif full_case:
-                    self.assertEqual(float((evidence / "total-cpu.txt").read_text()), 3.0)
+                    self.assertEqual(float((evidence / "total-cpu.txt").read_text(encoding="utf-8")), 3.0)
                 if not unsafe_path and not diagnostics_failed and fault != "case-owner":
-                    self.assertEqual((evidence / "tmux-server-pid.txt").read_text().strip(), "303")
-                    probes = (evidence / "tmux-process-probe.txt").read_text().splitlines()
+                    self.assertEqual((evidence / "tmux-server-pid.txt").read_text(encoding="utf-8").strip(), "303")
+                    probes = (evidence / "tmux-process-probe.txt").read_text(encoding="utf-8").splitlines()
                     if fault in ("tmux-alive", "tmux-alive-no-socket", "tmux-unknown"):
-                        self.assertIn("tmux_process=unknown-or-running", (evidence / "cleanup.txt").read_text())
+                        self.assertIn("tmux_process=unknown-or-running", (evidence / "cleanup.txt").read_text(encoding="utf-8"))
                         self.assertEqual(len(probes), 1 if fault == "tmux-unknown" else 50)
                         self.assertEqual(bool(list((root / "tmp").glob("c-*/t"))), fault != "tmux-alive-no-socket")
                     else:
-                        self.assertIn("tmux_process=exited\ntmux_socket=stale-owned", (evidence / "cleanup.txt").read_text())
+                        self.assertIn("tmux_process=exited\ntmux_socket=stale-owned", (evidence / "cleanup.txt").read_text(encoding="utf-8"))
                         self.assertEqual(probes[-1], "pid=303 probe=3")
                         self.assertEqual(len(probes), 3 if fault == "tmux-delay" else 1)
-                tmux_args = (root / "probes/tmux-args.txt").read_text().splitlines()
+                tmux_args = (root / "probes/tmux-args.txt").read_text(encoding="utf-8").splitlines()
                 self.assertEqual(len(set(tmux_args)), 1)
             observations = {
-                path.stem: dict(entry.split("=", 1) for entry in path.read_text().split("\0") if entry)
+                path.stem: dict(entry.split("=", 1) for entry in path.read_text(encoding="utf-8").split("\0") if entry)
                 for path in (root / "probes").glob("*.env")
             }
             self.assertEqual(observations["before"]["HERDR_CONFIG_PATH"], f"{shell_root}/inherited/config-sentinel.toml")
             for observed in observations.values():
                 for key in ("TMP", "TEMP"):
                     self.assertIn(observed[key], (process_tmp.as_posix(), f"{shell_root}/process tmp"))
-            self.assertEqual((process_tmp / "capture-before").read_text(), "private temp write\n")
+            self.assertEqual((process_tmp / "capture-before").read_text(encoding="utf-8"), "private temp write\n")
             if script == SMOKE and fault == "remove":
-                self.assertEqual((evidence / "cleanup.txt").read_text(), "runtime=remove-failed\n")
+                self.assertEqual((evidence / "cleanup.txt").read_text(encoding="utf-8"), "runtime=remove-failed\n")
                 for phase in ("smoke-launch", "smoke-cleanup"):
                     tmpdir = observations[phase]["TMPDIR"]
                     self.assertTrue(tmpdir.startswith(shell_root + "/"))
@@ -570,7 +577,7 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                 for phase in phases:
                     self.assertIn(phase, observations)
             if script == CASE:
-                self.assertEqual((root / "probes/launch-name.txt").read_text(), observations["control"]["HERDR_SESSION"])
+                self.assertEqual((root / "probes/launch-name.txt").read_text(encoding="utf-8"), observations["control"]["HERDR_SESSION"])
             return observations, shell_root, phases
 
     def _assert_isolated(self, observations, shell_root, phases, temporary_root):
@@ -719,7 +726,7 @@ cp "$CONTRACT_ROOT/tmp/owner.txt" "$CONTRACT_ROOT/runtime-owner.txt"
                 self.assertEqual((diagnostics / "last-step.txt").stat().st_size, 4096)
                 self.assertEqual((diagnostics / "calls.txt").stat().st_size, 4096)
                 self.assertFalse((diagnostics / "before.env").exists())
-                metadata = json.loads((diagnostics / "timeout.json").read_text())
+                metadata = json.loads((diagnostics / "timeout.json").read_text(encoding="utf-8"))
                 self.assertEqual(metadata["status"], "timeout")
                 self.assertEqual(metadata["timeout_seconds"], 60)
                 self.assertEqual(metadata["stderr_truncated"], len(raw) > 65536)

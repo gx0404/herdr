@@ -1168,6 +1168,20 @@ fn local_selection_abandons_every_unfinished_remote_handoff_phase() {
         let mut state = ClientState::test_new();
         state.shell = Some(shell);
         let mut commands = EndpointCommands::default();
+        let _ = commands.enqueue(
+            ClientEndpointId::Local,
+            1,
+            "local-boot".into(),
+            Box::new(crate::api::schema::Request {
+                id: "abandoned-workspace-focus".into(),
+                method: crate::api::schema::Method::WorkspaceFocus(
+                    crate::api::schema::WorkspaceTarget {
+                        workspace_id: "stale-workspace".into(),
+                    },
+                ),
+            }),
+            true,
+        );
         let mut pending = Some(abandoned);
         let mut serial = 31;
         let mut scheduled = None;
@@ -1192,6 +1206,14 @@ fn local_selection_abandons_every_unfinished_remote_handoff_phase() {
         assert_eq!(local.target(), &ClientEndpointId::Local);
         assert!(!endpoints.active_surface_available());
         assert!(state.presentation_frozen);
+        assert!(commands
+            .send_next(&ClientEndpointId::Local, &mut endpoints)
+            .is_empty());
+        assert!(!local_sent.lock().unwrap().iter().any(|message| {
+            matches!(message, crate::protocol::ClientMessage::ClientShellEndpointRequest { request, .. }
+                if serde_json::from_str::<crate::api::schema::Request>(request)
+                    .is_ok_and(|request| request.id == "abandoned-workspace-focus"))
+        }), "a fresh activation must discard focus retained by an older target epoch");
         let activations = local_sent
             .lock()
             .unwrap()

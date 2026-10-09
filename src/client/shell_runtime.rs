@@ -19,11 +19,18 @@ pub(super) fn dispatch_client_shell_actions(
                 request,
                 coalesce,
             } => {
-                if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
+                if let Some(connection) = endpoints.connection(&endpoint_id).filter(|connection| {
                     crate::api::api_method_name(&request.method).starts_with("account.")
                         || crate::api::api_method_name(&request.method).starts_with("system.")
                         || (endpoints.active_id() == &endpoint_id
-                            && endpoints.active_surface_available())
+                            && (endpoints.active_surface_available()
+                                // The coherent target is visible before its input fence opens.
+                                // EndpointCommands retains navigation until the fence opens.
+                                || (connection.surface_active
+                                    && matches!(
+                                        request.method,
+                                        crate::api::schema::Method::WorkspaceFocus(_)
+                                    ))))
                 }) {
                     let superseded = endpoint_commands.enqueue(
                         endpoint_id,
@@ -453,10 +460,11 @@ fn install_pending_activation(
     next_surface_serial: &mut u64,
     activation: endpoint::PendingEndpointActivation,
 ) {
-    let retired = activation
-        .source_command_lane()
-        .map(|source| endpoint_commands.retire_lane(source))
-        .unwrap_or_default();
+    // A fresh target epoch must not replay navigation retained by an abandoned handoff.
+    let mut retired = endpoint_commands.retire_lane(activation.target());
+    if let Some(source) = activation.source_command_lane() {
+        retired.extend(endpoint_commands.retire_lane(source));
+    }
     if let Some(shell) = state.shell.as_mut() {
         for request_id in retired {
             shell.cancel_endpoint_request(&request_id);

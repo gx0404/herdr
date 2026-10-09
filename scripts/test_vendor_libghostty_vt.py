@@ -95,7 +95,7 @@ class VendorLibghosttyVtTests(unittest.TestCase):
         project_root = Path(__file__).resolve().parent.parent
         metadata = project_root / "vendor" / "libghostty-vt.vendor.json"
         self.assertTrue(metadata.exists())
-        text = metadata.read_text()
+        text = metadata.read_text(encoding="utf-8")
         self.assertIn('"source_commit"', text)
         self.assertIn('"dist_archive"', text)
         self.assertIn('"extracted_dir"', text)
@@ -110,7 +110,7 @@ class VendorLibghosttyVtTests(unittest.TestCase):
             return
 
         self.assertTrue(index.exists())
-        text = index.read_text()
+        text = index.read_text(encoding="utf-8")
         missing = [
             path.relative_to(project_root).as_posix()
             for path in patches
@@ -141,8 +141,8 @@ class VendorLibghosttyVtTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent / "vendor" / "libghostty-vt"
         lib_vt = root / "src" / "lib_vt.zig"
         sys_zig = root / "src" / "terminal" / "c" / "sys.zig"
-        lib_text = lib_vt.read_text()
-        sys_text = sys_zig.read_text()
+        lib_text = lib_vt.read_text(encoding="utf-8")
+        sys_text = sys_zig.read_text(encoding="utf-8")
         self.assertIn('.logFn = @import("terminal/c/sys.zig").logFn', lib_text)
         self.assertIn("if (global.log == null) return;", sys_text)
 

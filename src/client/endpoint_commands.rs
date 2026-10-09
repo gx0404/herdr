@@ -180,12 +180,32 @@ impl EndpointCommands {
         if lane.in_flight.is_some() {
             return cancelled;
         }
-        while let Some(queued) = lane.queued.pop_front() {
-            let request_id = queued.request.id.clone();
-            if !endpoints.accepts(endpoint_id, queued.generation) {
-                cancelled.push(request_id);
+        let mut index = 0;
+        while let Some(queued) = lane.queued.get(index) {
+            let workspace_navigation = matches!(
+                queued.request.method,
+                crate::api::schema::Method::WorkspaceFocus(_)
+            );
+            if !endpoints.accepts(endpoint_id, queued.generation)
+                || (workspace_navigation
+                    && (endpoints.active_id() != endpoint_id
+                        || !endpoints
+                            .connection(endpoint_id)
+                            .is_some_and(|connection| connection.surface_active)))
+            {
+                if let Some(queued) = lane.queued.remove(index) {
+                    cancelled.push(queued.request.id);
+                }
                 continue;
             }
+            if workspace_navigation && !endpoints.active_surface_available() {
+                index += 1;
+                continue;
+            }
+            let Some(queued) = lane.queued.remove(index) else {
+                break;
+            };
+            let request_id = queued.request.id.clone();
             let request = match serde_json::to_string(&queued.request) {
                 Ok(request) => request,
                 Err(error) => {
@@ -1340,6 +1360,156 @@ mod tests {
             !commands.lanes.contains_key(&endpoint()),
             "不进用户动作泳道"
         );
+    }
+
+    #[test]
+    fn workspace_fence_preserves_independent_work_and_rejects_stale_navigation() {
+        use crate::api::schema::{
+            AgentActivityReadParams, EmptyParams, Method, PaneSendTextParams, SystemMetricsParams,
+            TextSnapshotTarget, WorkspaceTarget,
+        };
+        use crate::client::endpoint::{EndpointNegotiation, EndpointTransport, ProfileId};
+        use std::sync::{Arc, Mutex};
+
+        struct Recording(Arc<Mutex<Vec<String>>>);
+        impl EndpointTransport for Recording {
+            fn send(&mut self, message: &ClientMessage) -> io::Result<()> {
+                if let ClientMessage::ClientShellEndpointRequest { request, .. } = message {
+                    let request: Request = serde_json::from_str(request).unwrap();
+                    self.0.lock().unwrap().push(request.id);
+                }
+                Ok(())
+            }
+        }
+
+        for (generation, selected, surface_active, frozen) in [
+            (7, true, true, true),
+            (6, true, true, true),
+            (7, false, true, true),
+            (7, true, false, true),
+            (7, false, true, false),
+        ] {
+            let remote = ClientEndpointId::Ssh(
+                ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            );
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            let mut endpoints = EndpointRegistry::empty();
+            endpoints.insert(
+                remote.clone(),
+                Recording(sent.clone()),
+                7,
+                EndpointNegotiation::default(),
+                true,
+            );
+            if selected {
+                assert!(endpoints.set_active(&remote));
+            }
+            endpoints.set_surface_active(&remote, surface_active);
+            if frozen {
+                endpoints.freeze_input();
+            } else {
+                endpoints.unfreeze_input();
+            }
+            let mut commands = EndpointCommands::default();
+            assert!(commands
+                .enqueue(
+                    remote.clone(),
+                    generation,
+                    "boot-a".into(),
+                    Box::new(Request {
+                        id: "navigation".into(),
+                        method: Method::WorkspaceFocus(WorkspaceTarget {
+                            workspace_id: "ws_2".into(),
+                        }),
+                    }),
+                    false,
+                )
+                .is_empty());
+            let retained = generation == 7 && selected && surface_active;
+            assert_eq!(
+                commands.send_next(&remote, &mut endpoints),
+                if retained { vec![] } else { vec!["navigation"] }
+            );
+            assert!(sent.lock().unwrap().is_empty());
+
+            for (id, method) in [
+                (
+                    "activity",
+                    Method::AgentActivityRead(AgentActivityReadParams::default()),
+                ),
+                (
+                    "account",
+                    Method::AccountUsageProviders(EmptyParams::default()),
+                ),
+                (
+                    "system",
+                    Method::SystemMetricsGet(SystemMetricsParams {
+                        interval_ms: 1000,
+                        include_processes: false,
+                        groups: vec!["cpu".into()],
+                    }),
+                ),
+                (
+                    "reading",
+                    Method::PaneTextSnapshotRelease(TextSnapshotTarget {
+                        snapshot_id: "snapshot-1".into(),
+                    }),
+                ),
+                (
+                    "snippet-1",
+                    Method::PaneSendText(PaneSendTextParams {
+                        pane_id: "pane_1".into(),
+                        text: "first".into(),
+                    }),
+                ),
+                (
+                    "snippet-2",
+                    Method::PaneSendText(PaneSendTextParams {
+                        pane_id: "pane_1".into(),
+                        text: "second".into(),
+                    }),
+                ),
+            ] {
+                assert!(commands
+                    .enqueue(
+                        remote.clone(),
+                        7,
+                        "boot-a".into(),
+                        Box::new(Request {
+                            id: id.into(),
+                            method
+                        }),
+                        false,
+                    )
+                    .is_empty());
+                assert!(commands.send_next(&remote, &mut endpoints).is_empty());
+                assert_eq!(std::mem::take(&mut *sent.lock().unwrap()), vec![id]);
+                let completed = commands
+                    .receive_chunk(
+                        &remote,
+                        7,
+                        "boot-a",
+                        id,
+                        true,
+                        serde_json::to_vec(&SuccessResponse {
+                            id: id.into(),
+                            result: ResponseResult::Ok {},
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .expect("independent command completion");
+                assert!(completed.result.is_ok());
+                assert!(commands.send_next(&remote, &mut endpoints).is_empty());
+                assert!(sent.lock().unwrap().is_empty());
+            }
+            endpoints.unfreeze_input();
+            assert!(commands.send_next(&remote, &mut endpoints).is_empty());
+            assert_eq!(
+                *sent.lock().unwrap(),
+                if retained { vec!["navigation"] } else { vec![] }
+            );
+        }
     }
 
     #[test]

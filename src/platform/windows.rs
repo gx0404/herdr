@@ -210,6 +210,14 @@ pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::C
     }
 }
 
+pub(crate) fn host_shutdown_in_progress() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
+
+    // This describes the current Windows session, including logoff. Child exit
+    // codes alone cannot distinguish host shutdown from ordinary process failure.
+    unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) != 0 }
+}
+
 pub(crate) struct RemoteBridgeWake;
 
 impl RemoteBridgeWake {
@@ -488,6 +496,11 @@ pub(crate) fn set_default_plugin_pane_pwd(
 ) {
 }
 
+#[cfg(target_pointer_width = "64")]
+use windows_sys::{
+    Wdk::System::Threading::ProcessWow64Information, Win32::System::Kernel::STRING32,
+};
+
 use windows_sys::{
     Wdk::System::Threading::ProcessCommandLineInformation,
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},
@@ -714,11 +727,21 @@ fn standard_windows_path(path: &std::path::Path) -> Option<PathBuf> {
 /// Resolves against the current foreground layout because asynchronous console
 /// records do not retain the layout that was active when the key was pressed.
 pub(crate) fn resolve_base_printable_key(vk: u16, scan: u16) -> Option<char> {
+    // SAFETY: the foreground window and its layout are owned by Win32.
+    let layout = unsafe {
+        let thread_id = GetWindowThreadProcessId(GetForegroundWindow(), null_mut());
+        GetKeyboardLayout(thread_id)
+    };
+    resolve_base_printable_key_in_layout(vk, scan, layout)
+}
+
+pub(crate) fn resolve_base_printable_key_in_layout(
+    vk: u16,
+    scan: u16,
+    layout: windows_sys::Win32::UI::Input::KeyboardAndMouse::HKL,
+) -> Option<char> {
     // SAFETY: Win32 owns the handles; the fixed buffers match the API lengths.
     unsafe {
-        let thread_id = GetWindowThreadProcessId(GetForegroundWindow(), null_mut());
-        let layout = GetKeyboardLayout(thread_id);
-
         let key_state = [0u8; 256];
         let mut output = [0u16; 2];
         let written = ToUnicodeEx(
@@ -730,7 +753,9 @@ pub(crate) fn resolve_base_printable_key(vk: u16, scan: u16) -> Option<char> {
             0x4,
             layout,
         );
-        let units = output.get(..usize::try_from(written).ok()?)?;
+        // A negative result identifies a dead key; its spacing accent is still
+        // the key's identity. Flag 0x4 above keeps composition state unchanged.
+        let units = output.get(..usize::try_from(written.unsigned_abs()).ok()?)?;
         let mut chars = char::decode_utf16(units.iter().copied());
         let ch = chars.next()?.ok()?;
         (chars.next().is_none() && !ch.is_control()).then_some(ch)
@@ -2218,10 +2243,115 @@ pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
 
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)?;
-    let process_parameters = read_process_parameters(process.0)?;
-    read_unicode_string(process.0, process_parameters.current_directory.dos_path)
+    process_cwd_from_handle(process.0)
+}
+
+pub(crate) fn pane_process_cwd(child_pid: u32) -> Option<PathBuf> {
+    let process = ProcessHandle::open(
+        child_pid,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+    )?;
+    let executable = PathBuf::from(process_executable_path(process.0)?);
+    if executable.with_extension("shim").is_file() {
+        // A Scoop shim keeps its launch cwd while the real shell can change directories.
+        // Never replace the saved shell directory with that launcher directory on exit.
+        let snapshot = cached_foreground_processes();
+        let parent = snapshot.entry(child_pid)?.observation()?;
+        if !process_matches_cwd_observation(process.0, parent) {
+            return None;
+        }
+        let shell = shim_shell_entry(child_pid, &snapshot)?;
+        let cwd = process_cwd_for_observation(shell.pid, shell.observation()?)?;
+        return parent.identity.running().then_some(cwd);
+    }
+    process_cwd_from_handle(process.0)
+}
+
+fn process_cwd_from_handle(process: HANDLE) -> Option<PathBuf> {
+    read_unicode_string(process, process_cwd_descriptor(process)?)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
+}
+
+fn process_cwd_descriptor(process: HANDLE) -> Option<UNICODE_STRING> {
+    #[cfg(target_pointer_width = "64")]
+    {
+        let mut peb32_address = 0_usize;
+        // SAFETY: the output is a writable ULONG_PTR with its exact buffer size.
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process,
+                ProcessWow64Information,
+                (&mut peb32_address as *mut usize).cast(),
+                size_of::<usize>() as u32,
+                null_mut(),
+            )
+        };
+        if status != STATUS_SUCCESS as NTSTATUS {
+            return None;
+        }
+        if peb32_address != 0 {
+            // WoW64's native PEB can report C:\Windows while the x86 shell uses
+            // another directory. Read its own pointer-width layout instead.
+            let peb = read_process_value::<Peb32>(process, peb32_address as *const c_void)?;
+            let parameters = read_process_value::<ProcessCwdParameters32>(
+                process,
+                peb.process_parameters as usize as *const c_void,
+            )?;
+            let cwd = parameters.current_directory;
+            return Some(UNICODE_STRING {
+                Length: cwd.Length,
+                MaximumLength: cwd.MaximumLength,
+                Buffer: cwd.Buffer as usize as *mut u16,
+            });
+        }
+    }
+    Some(read_process_parameters(process)?.current_directory.dos_path)
+}
+
+fn process_matches_cwd_observation(process: HANDLE, observation: &ProcessObservation) -> bool {
+    observation.identity.running()
+        && process_creation_time(process) == Some(observation.created)
+        && observation.parent_pid.is_some()
+        && process_basic_information(process)
+            .and_then(|basic| u32::try_from(basic.InheritedFromUniqueProcessId).ok())
+            == observation.parent_pid
+        && observation.image.is_some()
+        && process_executable_path(process) == observation.image
+}
+
+fn process_cwd_for_observation(pid: u32, observation: &ProcessObservation) -> Option<PathBuf> {
+    let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)?;
+    if !process_matches_cwd_observation(process.0, observation) {
+        return None;
+    }
+    let cwd = process_cwd_from_handle(process.0)?;
+    observation.identity.running().then_some(cwd)
+}
+
+fn shim_shell_entry(child_pid: u32, snapshot: &ProcessSnapshot) -> Option<&WindowsProcessEntry> {
+    let parent = snapshot.entry(child_pid)?;
+    if !parent.observation()?.identity.running() {
+        return None;
+    }
+    let mut shell = None;
+    for &index in snapshot.children_by_parent.get(&child_pid)? {
+        let entry = &snapshot.entries[index];
+        let observation = entry.observation()?;
+        if !observation.identity.running()
+            || !verified_parent_child(parent, entry)
+            || observation.name().is_empty()
+        {
+            return None;
+        }
+        if super::is_pane_shell_process_name(observation.name()) {
+            if shell.is_some() {
+                return None;
+            }
+            shell = Some(entry);
+        }
+    }
+    shell
 }
 
 fn select_pane_foreground_job_cached(shell_pid: u32) -> Option<ForegroundJob> {
@@ -3950,6 +4080,24 @@ struct Peb {
     reserved3: [*mut c_void; 2],
     ldr: *mut c_void,
     process_parameters: *mut RtlUserProcessParameters,
+}
+
+// Prefixes of the x86 PEB and RTL_USER_PROCESS_PARAMETERS through the fields
+// needed for cwd; remote pointers must stay 32-bit on a 64-bit reader.
+#[cfg(target_pointer_width = "64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Peb32 {
+    reserved: [u32; 4],
+    process_parameters: u32,
+}
+
+#[cfg(target_pointer_width = "64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcessCwdParameters32 {
+    reserved: [u32; 9],
+    current_directory: STRING32,
 }
 
 #[repr(C)]
@@ -5810,6 +5958,8 @@ mod tests {
 
     #[test]
     fn windows_process_cwd_reads_normalized_child_launch_directory() {
+        use std::path::PathBuf;
+
         let cwd = unique_temp_path("Herdr-Cwd-Case");
         let name = cwd
             .file_name()
@@ -5817,11 +5967,12 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         fs::create_dir_all(&cwd).expect("create cwd fixture");
+        let cwd = super::normalize_cwd_for_launch_platform(&cwd);
         let launch_cwd = cwd.with_file_name(name.to_ascii_lowercase());
 
         // 直接起 ping（不经 cmd /C）：kill 掉的就是占着 cwd 的进程，fixture 目录才删得掉；
         // 经 cmd 时 ping 孙进程还会占着目录十秒，目录删不掉、留在临时目录里。
-        let mut child = Command::new("ping")
+        let mut ping = Command::new("ping")
             .args(["-n", "11", "127.0.0.1"])
             .current_dir(super::normalize_cwd_for_launch_platform(&launch_cwd))
             .stdin(Stdio::null())
@@ -5829,25 +5980,262 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn ping");
-
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut observed = None;
+        let mut direct_observed = None;
         while Instant::now() < deadline {
-            observed = super::process_cwd(child.id());
-            if observed.as_ref().and_then(|path| path.file_name()) == Some(name.as_ref()) {
+            direct_observed = super::process_cwd(ping.id());
+            if direct_observed.as_ref().and_then(|path| path.file_name()) == Some(name.as_ref()) {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
         }
+        let _ = ping.kill();
+        let _ = ping.wait();
 
-        let _ = child.kill();
-        let _ = child.wait();
+        let changed = cwd.join("Changed");
+        fs::create_dir(&changed).expect("create changed cwd");
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"));
+        let shells = [
+            windows.join("System32").join("cmd.exe"),
+            #[cfg(target_pointer_width = "64")]
+            windows.join("SysWOW64").join("cmd.exe"),
+        ];
+        let mut observations = Vec::new();
+        for shell in shells {
+            let mut child = Command::new(&shell)
+                .args(["/D", "/Q", "/K"])
+                .current_dir(super::normalize_cwd_for_launch_platform(&launch_cwd))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn cmd");
+            let observe = |expected: &PathBuf| {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let observed = super::process_cwd(child.id());
+                    if observed.as_ref() == Some(expected) || Instant::now() >= deadline {
+                        break observed;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+            };
+            let initial = observe(&cwd);
+            use std::io::Write;
+            writeln!(
+                child.stdin.as_ref().unwrap(),
+                "cd /d \"{}\"\r",
+                changed.display()
+            )
+            .expect("change cmd cwd");
+            let after_cd = observe(&changed);
+            let pane_cwd = super::pane_process_cwd(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            observations.push((shell, initial, after_cd, pane_cwd));
+        }
         let _ = fs::remove_dir_all(&cwd);
-
         assert_eq!(
-            observed.as_ref().and_then(|path| path.file_name()),
+            direct_observed.as_ref().and_then(|path| path.file_name()),
             Some(name.as_ref())
         );
+        for (shell, initial, after_cd, pane_cwd) in observations {
+            assert_eq!(initial, Some(cwd.clone()), "{} launch cwd", shell.display());
+            assert_eq!(
+                after_cd,
+                Some(changed.clone()),
+                "{} live cd",
+                shell.display()
+            );
+            assert_eq!(pane_cwd, Some(changed.clone()), "ordinary shell owns cwd");
+        }
+    }
+
+    #[test]
+    fn windows_shim_cwd_uses_only_an_unambiguous_direct_shell() {
+        let cases = [
+            ("cmdx.exe", vec![(11, 10, "cmd.exe")], Some(11)),
+            ("pwsh.exe", vec![(11, 10, "pwsh.exe")], Some(11)),
+            (
+                "cmdx.exe",
+                vec![
+                    (11, 10, "cmd.exe"),
+                    (12, 11, "pwsh.exe"),
+                    (13, 11, "node.exe"),
+                ],
+                Some(11),
+            ),
+            (
+                "cmdx.exe",
+                vec![(11, 10, "node.exe"), (12, 11, "cmd.exe")],
+                None,
+            ),
+            ("cmdx.exe", vec![], None),
+            (
+                "cmdx.exe",
+                vec![(11, 10, "cmd.exe"), (12, 10, "pwsh.exe")],
+                None,
+            ),
+        ];
+        for (root_name, children, expected) in cases {
+            let mut entries = vec![test_entry(10, 1, root_name, &[root_name])];
+            entries.extend(
+                children
+                    .iter()
+                    .map(|&(pid, parent, name)| test_entry(pid, parent, name, &[name])),
+            );
+            let snapshot = super::ProcessSnapshot::new(entries);
+            assert_eq!(
+                super::shim_shell_entry(10, &snapshot).map(|entry| entry.pid),
+                expected,
+                "{root_name}: {children:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_shim_cwd_rejects_stale_or_unknown_observations() {
+        for (parent, created, image) in [
+            (Some(77), Some(200), "cmd.exe"),
+            (None, Some(200), "cmd.exe"),
+            (Some(10), Some(50), "cmd.exe"),
+            (Some(10), None, "cmd.exe"),
+            (Some(10), Some(200), "worker.exe"),
+            (Some(10), Some(200), ""),
+        ] {
+            let mut child =
+                observation_entry((20, 10, "cmd.exe"), (10, created, image), created, None);
+            Arc::get_mut(child.reader.as_mut().unwrap())
+                .unwrap()
+                .parent_pid = parent;
+            let snapshot = super::ProcessSnapshot::new(vec![
+                test_entry_with_creation_time(10, 0, "shim.exe", &[], Some(100)),
+                child,
+            ]);
+            assert!(
+                super::shim_shell_entry(10, &snapshot).is_none(),
+                "parent={parent:?}, created={created:?}, image={image}"
+            );
+        }
+        for unreadable in [10, 30] {
+            let snapshot = super::ProcessSnapshot::new(vec![
+                test_entry_with_creation_time(
+                    10,
+                    0,
+                    "shim.exe",
+                    &[],
+                    (unreadable != 10).then_some(100),
+                ),
+                test_entry_with_creation_time(20, 10, "cmd.exe", &[], Some(200)),
+                test_entry_with_creation_time(
+                    30,
+                    10,
+                    "worker.exe",
+                    &[],
+                    (unreadable != 30).then_some(300),
+                ),
+            ]);
+            assert!(super::shim_shell_entry(10, &snapshot).is_none());
+        }
+    }
+
+    #[test]
+    fn windows_shim_cwd_uses_actual_names_and_reuses_pinned_observations() {
+        for panes in [1, 16] {
+            let mut entries = Vec::new();
+            for pane in 0..panes {
+                let pid = 100 + pane * 10;
+                entries.push(test_entry(pid, 0, "shim.exe", &[]));
+                entries.push(observation_entry(
+                    (pid + 1, pid, "worker.exe"),
+                    (pid, Some(u64::from(pid + 1)), "cmd.exe"),
+                    None,
+                    None,
+                ));
+                entries.push(test_entry(pid + 2, pid, "node.exe", &[]));
+            }
+            let snapshot = super::ProcessSnapshot::new(entries);
+            for _ in 0..3 {
+                for pane in 0..panes {
+                    let pid = 100 + pane * 10;
+                    assert_eq!(
+                        super::shim_shell_entry(pid, &snapshot).map(|entry| entry.pid),
+                        Some(pid + 1)
+                    );
+                }
+            }
+            let pins: Vec<_> = snapshot
+                .entries
+                .iter()
+                .map(|entry| {
+                    let reader = entry.reader.as_ref().unwrap();
+                    assert_eq!(reader.observations.load(super::AtomicOrdering::Relaxed), 1);
+                    assert_eq!(reader.commands.load(super::AtomicOrdering::Relaxed), 0);
+                    Arc::downgrade(entry.observation().unwrap())
+                })
+                .collect();
+            drop(snapshot);
+            assert!(pins.iter().all(|pin| pin.upgrade().is_none()));
+        }
+        let snapshot = super::ProcessSnapshot::new(vec![
+            test_entry(10, 0, "shim.exe", &[]),
+            test_entry(20, 10, "cmd.exe", &[]),
+            observation_entry(
+                (30, 10, "worker.exe"),
+                (10, Some(30), "pwsh.exe"),
+                None,
+                None,
+            ),
+        ]);
+        assert!(super::shim_shell_entry(10, &snapshot).is_none());
+    }
+
+    #[test]
+    fn windows_shim_cwd_native_read_checks_reopened_identity_and_releases_pins() {
+        let mut child = ObservationTestChild::spawn();
+        let pid = child.0.id();
+        let parent_pid = std::process::id();
+        let snapshot = super::ProcessSnapshot::new(vec![
+            super::WindowsProcessEntry::new(parent_pid, 0, "shim.exe".into()),
+            super::WindowsProcessEntry::new(pid, parent_pid, "worker.exe".into()),
+        ]);
+        let shell = super::shim_shell_entry(parent_pid, &snapshot).unwrap();
+        let observation = shell.observation().unwrap();
+        let super::ProcessIdentity::Handle(handle) = &observation.identity else {
+            panic!("native identity required");
+        };
+        let pin = Arc::downgrade(handle);
+        super::PROCESS_INSPECTION_COUNTS.with_borrow_mut(|counts| *counts = Default::default());
+        let cwd = super::process_cwd_for_observation(pid, observation).unwrap();
+        assert!(cwd.is_absolute());
+        assert_eq!(
+            super::PROCESS_INSPECTION_COUNTS.with_borrow(|counts| counts.opens),
+            1
+        );
+        assert_eq!(Arc::strong_count(handle), 1);
+        for mismatch in 0..5 {
+            let mut wrong = super::ProcessObservation {
+                identity: observation.identity.clone(),
+                parent_pid: observation.parent_pid,
+                created: observation.created,
+                image: observation.image.clone(),
+            };
+            match mismatch {
+                0 => wrong.created += 1,
+                1 => wrong.parent_pid = Some(parent_pid + 1),
+                2 => wrong.image = Some("different.exe".into()),
+                3 => wrong.parent_pid = None,
+                _ => wrong.image = None,
+            }
+            assert!(super::process_cwd_for_observation(pid, &wrong).is_none());
+        }
+        assert!(super::process_cwd_for_observation(0, observation).is_none());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert!(super::shim_shell_entry(parent_pid, &snapshot).is_none());
+        assert!(super::process_cwd_for_observation(pid, observation).is_none());
+        drop(snapshot);
+        assert!(pin.upgrade().is_none());
     }
 
     #[test]
