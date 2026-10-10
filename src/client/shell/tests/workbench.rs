@@ -252,7 +252,7 @@ fn workbench_drop_preview_border_follows_the_border_style() {
     let page = state.observability.page_rect;
     assert_eq!(
         page,
-        super::super::workbench::body(area, &panel),
+        super::super::workbench::body(area, &panel, state.workbench.geometry.compact),
         "监控页铺满落点面板正文"
     );
     // 停靠面板里页面不自带外框（冒烟 L13），页签就在正文第一行。
@@ -1044,8 +1044,9 @@ fn layout_arrow_keys_stop_marking_dirty_at_the_resize_clamp() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// `workbench_mouse` 的非脏集合：标签滚动、全局菜单与 `arranging` 开关都不写
-/// `ClientChromePreferences`，命中后不得标脏、不得落盘（C-13）。
+/// `workbench_mouse` 的非脏集合：标签滚动、全局菜单、标题栏的注意力计数 / 命令搜索 /
+/// `⋯` 与 `arranging` 开关都不写 `ClientChromePreferences`，命中后不得标脏、不得落盘
+/// （C-13）。
 #[test]
 fn presentation_only_workbench_clicks_never_mark_preferences_dirty() {
     use crate::client::shell::workbench::interaction::Action;
@@ -1053,12 +1054,13 @@ fn presentation_only_workbench_clicks_never_mark_preferences_dirty() {
 
     // 每个动作都用全新状态：全局菜单会打开 overlay，复用状态会让后续点击被
     // `workbench_mouse` 的 overlay 守卫直接吞掉。
-    let click = |name: &str, wanted: fn(&Action) -> bool| {
+    let click = |name: &str, setup: fn(&mut ClientShellState), wanted: fn(&Action) -> bool| {
         let path = preferences_path(name);
         let mut state = ready();
         state.config.mouse_capture = true;
         state.workbench_open(PanelId::Monitor);
-        state.compose(120, 40).expect("布局命中图");
+        setup(&mut state);
+        state.compose(160, 40).expect("布局命中图");
         state.config.preferences_path = Some(path.clone());
         let rect = state
             .workbench
@@ -1088,8 +1090,51 @@ fn presentation_only_workbench_clicks_never_mark_preferences_dirty() {
         let _ = std::fs::remove_file(&path);
     };
 
-    click("menu", |action| matches!(action, Action::Menu));
-    click("arrange", |action| matches!(action, Action::Arrange));
+    // 标题栏的注意力计数只在有 agent 时出现：投影一个运行中的 agent。
+    fn with_running_agent(state: &mut ClientShellState) {
+        let mut projected = snapshot();
+        projected.agents = vec![crate::protocol::ClientShellAgent {
+            pane_id: "pane_1".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some("claude".into()),
+            display_agent: Some("claude".into()),
+            agent: Some("claude".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: crate::api::schema::AgentStatus::Working,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: true,
+            launch_seq: 1,
+            activity: Default::default(),
+            insight: Default::default(),
+        }];
+        state.set_snapshot(Box::new(projected));
+    }
+
+    click("menu", |_| {}, |action| matches!(action, Action::Menu));
+    click(
+        "layout-menu",
+        |_| {},
+        |action| matches!(action, Action::LayoutMenu),
+    );
+    click(
+        "command-search",
+        |_| {},
+        |action| matches!(action, Action::CommandSearch),
+    );
+    click("attention", with_running_agent, |action| {
+        matches!(action, Action::Attention)
+    });
+    // 「调整布局」标记只在调整布局模式下出现，点它退出模式。
+    click(
+        "arrange",
+        |state| state.workbench.arranging = true,
+        |action| matches!(action, Action::Arrange),
+    );
 }
 
 /// 延迟落盘新增的数据丢失面：`run_client_loop` 还有 `ServerShutdown` /
@@ -1239,7 +1284,9 @@ fn widening_out_of_the_compact_agents_view_repaints_at_the_new_size() {
         .panels
         .iter()
         .find(|(panel, _)| matches!(panel, PanelId::Terminal(_)))
-        .map(|(panel, area)| crate::client::shell::workbench::body(*area, panel))
+        .map(|(panel, area)| {
+            crate::client::shell::workbench::body(*area, panel, shell.workbench.geometry.compact)
+        })
         .expect("134 列时终端面板可见");
     assert_eq!(
         shell
@@ -1304,15 +1351,15 @@ fn which_key_spans_the_content_area_when_the_agents_panel_is_focused() {
             rows[title_row]
         );
     }
-    // 浮层在顶栏与页脚（模式条）之间，二者都不被压住。
-    assert!(title_row > 1, "上边框不压顶栏");
+    // 浮层在标题栏与状态栏之间，二者都不被压住。
+    assert!(title_row > 1, "上边框不压标题栏");
     let bottom = rows
         .iter()
         .skip(title_row)
         .position(|row| row.contains('╯'))
         .map(|offset| offset + title_row)
         .expect("which-key 下边框");
-    assert!(bottom < 31, "下边框不压页脚：{bottom}");
+    assert!(bottom < 31, "下边框不压状态栏：{bottom}");
 }
 
 /// 页脚行里某个字符所在的单元格（找不到就失败），按字符定位样式断言。
@@ -1325,8 +1372,8 @@ fn footer_cell(state: &ClientShellState, needle: &str) -> ratatui::buffer::Cell 
         .unwrap_or_else(|| panic!("页脚没有 {needle:?}"))
 }
 
-/// 冒烟 L1：锁定布局后拖动已被拒绝，状态栏不再提示拖动、面板标题也不再显示
-/// `⠿` 把手；调整布局模式里「调尺寸 / 移动」两条提示随之置灰，切换面板等
+/// 冒烟 L1：锁定布局后拖动已被拒绝，面板标题不再显示 `⠿` 把手，状态栏改说布局
+/// 已锁定、怎么解锁；调整布局模式里「调尺寸 / 移动」两条提示随之置灰，切换面板等
 /// 锁定下仍可用的提示照常。
 #[test]
 fn locked_layout_stops_advertising_drag_affordances() {
@@ -1334,7 +1381,11 @@ fn locked_layout_stops_advertising_drag_affordances() {
     let mut state = ready();
     let rows = frame_rows(&state.compose(133, 32).expect("未锁定"));
     assert!(rows[1].contains('⠿'), "未锁定：面板标题带拖动把手");
-    assert!(compact(&rows[31]).contains("拖动"), "未锁定：页脚提示拖动");
+    let footer = compact(&rows[31]);
+    assert!(
+        footer.contains("ctrl+b") && !footer.contains("已锁定"),
+        "未锁定：状态栏是键位提示：{footer}"
+    );
 
     state.workbench.dock.locked = true;
     let rows = frame_rows(&state.compose(133, 32).expect("已锁定"));
@@ -1361,15 +1412,22 @@ fn locked_layout_stops_advertising_drag_affordances() {
             "锁定时「{disabled}」所在提示置灰"
         );
     }
+    // 可用的提示用状态栏的标签色（元信息色），不置灰。
+    let enabled = crate::client::shell::chrome::bar_hint_label(
+        &palette,
+        crate::client::shell::chrome::bar_surface(&palette),
+    )
+    .fg;
     assert_eq!(
-        footer_cell(&state, "切").fg,
-        palette.subtext0,
+        Some(footer_cell(&state, "切").fg),
+        enabled,
         "切换面板在锁定时照常可用"
     );
+    assert_ne!(footer_cell(&state, "切").fg, palette.overlay0);
 }
 
 /// 调整布局模式下，把一组无边框窗格（相对面板 body 的矩形）与若干行文字铺进
-/// 133×32 的工作台：终端面板 body 是 (30, 3) 起 103×28。
+/// 133×32 的工作台：终端面板 body 是 (30, 2) 起 103×29（视图帧铺前 28 行）。
 fn arranged_borderless_panes(
     panes: &[(SurfaceRect, &str)],
     texts: &[(u16, &str)],
@@ -1435,7 +1493,7 @@ fn arrange_mode_pane_handle_leaves_the_first_terminal_row_intact() {
     let mut state = arranged_borderless_panes(&[(full, "pane_1")], &[(0, "xyz% FIRST TEXT")]);
     let rows = frame_rows(&state.compose(133, 32).expect("调整布局模式"));
     let pane = state.hits.panes[0].rect;
-    assert_eq!(pane, Rect::new(30, 3, 103, 28), "终端面板 body 起点");
+    assert_eq!(pane, Rect::new(30, 2, 103, 28), "终端面板 body 起点");
     assert_eq!(
         body_text(&rows, pane.y, 15),
         "xyz% FIRST TEXT",
@@ -1489,9 +1547,9 @@ fn stacked_borderless_pane_handles_never_cover_the_pane_above() {
     let texts = [(0, "UPPER TOP"), (12, "UPPER LAST"), (14, "LOWER TOP")];
     let mut state = arranged_borderless_panes(&[(upper, "pane_1"), (lower, "pane_2")], &texts);
     let rows = frame_rows(&state.compose(133, 32).expect("有空隙"));
-    assert_eq!(body_text(&rows, 3, 9), "UPPER TOP");
-    assert_eq!(body_text(&rows, 15, 10), "UPPER LAST");
-    assert_eq!(body_text(&rows, 17, 9), "LOWER TOP");
+    assert_eq!(body_text(&rows, 2, 9), "UPPER TOP");
+    assert_eq!(body_text(&rows, 14, 10), "UPPER LAST");
+    assert_eq!(body_text(&rows, 16, 9), "LOWER TOP");
     let handles = pane_handles(&state);
     let handle_of = |id: &str| {
         handles
@@ -1500,8 +1558,12 @@ fn stacked_borderless_pane_handles_never_cover_the_pane_above() {
             .map(|(_, rect)| *rect)
             .unwrap_or_else(|| panic!("{id} 的把手：{handles:?}"))
     };
-    assert_eq!(handle_of("pane_1").y, 2, "上方窗格的把手在标签栏行");
-    assert_eq!(handle_of("pane_2").y, 16, "下方窗格的把手在空隙行");
+    assert_eq!(
+        handle_of("pane_1").y,
+        1,
+        "上方窗格的把手在面板头（标签栏）行"
+    );
+    assert_eq!(handle_of("pane_2").y, 15, "下方窗格的把手在空隙行");
 
     let flush = SurfaceRect {
         y: 13,
@@ -1511,14 +1573,14 @@ fn stacked_borderless_pane_handles_never_cover_the_pane_above() {
     let texts = [(12, "UPPER LAST"), (13, "LOWER TOP")];
     let mut state = arranged_borderless_panes(&[(upper, "pane_1"), (flush, "pane_2")], &texts);
     let rows = frame_rows(&state.compose(133, 32).expect("无空隙"));
-    assert_eq!(body_text(&rows, 15, 10), "UPPER LAST", "不压上方窗格的内容");
+    assert_eq!(body_text(&rows, 14, 10), "UPPER LAST", "不压上方窗格的内容");
     let handles = pane_handles(&state);
     let lower_handle = handles
         .iter()
         .find(|(pane, _)| pane == "pane_2")
         .map(|(_, rect)| *rect)
         .expect("没有 chrome 行也保留把手");
-    assert_eq!(lower_handle.y, 16, "退回自己的首行");
+    assert_eq!(lower_handle.y, 15, "退回自己的首行");
 }
 
 /// 页脚行里某个字符所在的列（找不到就失败），用来往那一格发鼠标事件。
@@ -1795,8 +1857,8 @@ fn sgr_click(state: &mut ClientShellState, x: u16, y: u16) {
 
 /// 冒烟 L18：workbench 不走 mobile 单列布局，窗口小于停靠布局的最小尺寸时改用
 /// 「紧凑视图」只投影聚焦面板，以前切面板只能进「调整布局」再按 Tab。紧凑视图的
-/// 标题栏改成面板切换条：按布局顺序列出全部面板，当前面板反色，点别的名字直接
-/// 切过去；页脚随之说明。
+/// 面板头改成面板切换条：按布局顺序列出全部面板，当前面板浅一档底色加粗，点别的
+/// 名字直接切过去；页脚随之说明。
 #[test]
 fn compact_view_title_bar_switches_panels_with_one_click() {
     // 文档里的阈值：默认布局需要 37 列、13 行；终端旁停靠监控面板后需要 66 列。
@@ -1836,9 +1898,13 @@ fn compact_view_title_bar_switches_panels_with_one_click() {
     );
     let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
     let current = &buffer[(title_x(&state, "A"), 1)];
-    assert_eq!(current.bg, state.config.palette.accent, "当前面板反色");
+    assert_eq!(
+        current.bg, state.config.palette.surface1,
+        "当前面板浅一档底色"
+    );
+    assert!(current.modifier.contains(Modifier::BOLD), "当前面板加粗");
     let other = &buffer[(title_x(&state, "工"), 1)];
-    assert_ne!(other.bg, state.config.palette.accent, "其它面板不反色");
+    assert_ne!(other.bg, state.config.palette.surface1, "其它面板平铺");
     let ratio = crate::ui::color::contrast_ratio(other.fg, other.bg).expect("可比较");
     assert!(ratio >= 4.5, "其它面板名对标题栏底色的对比度 {ratio}");
     let footer = frame_rows(&state.compose(62, 32).expect("页脚"))[31]
@@ -1876,8 +1942,8 @@ fn compact_view_title_bar_switches_panels_with_one_click() {
     let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
     assert_eq!(
         buffer[(title_x(&state, "c"), 1)].bg,
-        state.config.palette.accent,
-        "反色跟到终端组"
+        state.config.palette.surface1,
+        "当前段跟到终端组"
     );
 }
 
@@ -2162,7 +2228,7 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
             "{size}：没有拖动手势，松开时不立即落盘"
         );
 
-        // 鼠标路径：照页脚点 `◫` 还原，拖动把手与拖动提示随之回来。
+        // 鼠标路径：照页脚点 `◫` 还原，拖动把手随之回来，状态栏回到键位提示。
         state.compose(cols, rows).expect("还原前");
         let toggle = title_x(&state, "◫");
         sgr_click(&mut state, toggle, 1);
@@ -2173,9 +2239,10 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
             "{size}：还原后标题带回拖动把手：{}",
             screen[1]
         );
+        let footer = squash(&screen[usize::from(rows) - 1]);
         assert!(
-            squash(&screen[usize::from(rows) - 1]).contains("拖动"),
-            "{size}：还原后页脚回到拖动提示"
+            footer.contains("ctrl+b") && !footer.contains("已最大化"),
+            "{size}：还原后状态栏回到键位提示：{footer}"
         );
         let _ = std::fs::remove_file(&path);
 
@@ -2214,9 +2281,9 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
             state.workbench.dock.focused = PanelId::Agents;
             let screen = frame_rows(&state.compose(cols, rows).expect("锁定且最大化"));
             let expected = if mouse_capture {
-                "已最大化·点◫还原布局·布局已锁定"
+                "终端已最大化·点◫还原布局·布局已锁定"
             } else {
-                "已最大化·在「调整布局」模式按Enter还原布局·布局已锁定"
+                "终端已最大化·在「调整布局」模式按Enter还原布局·布局已锁定"
             };
             assert_eq!(
                 squash(&screen[usize::from(rows) - 1]),
@@ -2241,24 +2308,33 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
         }
     }
 
-    // 复审轻级 3：英文界面 80×24 的最大化页脚整句断言（接不接鼠标 × 锁不锁定）。
+    // 复审轻级 3：英文界面 80×24 的最大化页脚整句断言（接不接鼠标 × 锁不锁定）。状态栏
+    // 先画低调的「TERMINAL」标签；整句连同标签放不下时标签让位，说明不截断。
     let _en = crate::i18n::lang_guard(crate::i18n::Lang::En);
-    for (mouse_capture, locked, expected) in [
-        (true, false, "Maximized · click ◫ to restore the layout"),
+    for (mouse_capture, locked, expected, chip) in [
+        (
+            true,
+            false,
+            "Maximized · click ◫ to restore the layout",
+            true,
+        ),
         (
             false,
             false,
             "Maximized · press Enter in Arrange layout to restore the layout",
+            true,
         ),
         (
             true,
             true,
             "Maximized · click ◫ to restore the layout · layout locked",
+            true,
         ),
         (
             false,
             true,
             "Maximized · press Enter in Arrange layout to restore the layout · layout locked",
+            false,
         ),
     ] {
         let mut state = ready();
@@ -2267,6 +2343,11 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
         state.workbench.dock.maximized = Some(PanelId::Agents);
         state.workbench.dock.focused = PanelId::Agents;
         let screen = frame_rows(&state.compose(80, 24).expect("英文界面、最大化"));
+        let expected = if chip {
+            format!(" TERMINAL  {expected}")
+        } else {
+            expected.to_owned()
+        };
         assert_eq!(
             screen[23].trim_end(),
             expected,
@@ -2308,7 +2389,8 @@ fn ready_with_bordered_pane() -> ClientShellState {
 /// 面板标题与带边框的窗格照画 `⠿` 把手，锁定时页脚让人去点不到的顶栏取消锁定。
 /// 现在不接鼠标时不画把手、不登记点不到的窗格把手，页脚改说键盘怎么排布（从主菜单
 /// 进「调整布局」，键位与该模式页脚同名），锁定时指向主菜单里的同名开关。键盘路径
-/// 照页脚做即可：命令搜索进「调整布局」后 Tab 切换面板；接鼠标时拖动提示与把手照旧。
+/// 照页脚做即可：命令搜索进「调整布局」后 Tab 切换面板；接鼠标时把手照旧，状态栏是
+/// 键位提示。
 #[test]
 fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
     let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
@@ -2332,9 +2414,10 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
             1,
             "{size}：接鼠标：带边框的窗格画拖动把手"
         );
+        let footer = squash(&screen[last]);
         assert!(
-            squash(&screen[last]).starts_with("拖动⠿停靠"),
-            "{size}：接鼠标：页脚提示拖动"
+            footer.starts_with("终端ctrl+b前缀"),
+            "{size}：接鼠标：状态栏是终端标签与键位提示：{footer}"
         );
 
         state.config.mouse_capture = false;
@@ -2358,7 +2441,7 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
             "{size}：不接鼠标：页脚不提示拖动：{footer}"
         );
         assert_eq!(
-            footer, "从主菜单进入「调整布局」：Tab切换面板·←↑↓→调尺寸·Shift+←↑↓→移动",
+            footer, "终端从主菜单进入「调整布局」：Tab切换面板·←↑↓→调尺寸·Shift+←↑↓→移动",
             "{size}：页脚说键盘怎么排布"
         );
 
@@ -2369,8 +2452,8 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
             "{size}：锁定时指向主菜单里的开关：{footer}"
         );
         assert!(
-            !footer.contains("顶栏"),
-            "{size}：不指向点不到的顶栏：{footer}"
+            !footer.contains("标题栏") && !footer.contains('⋯'),
+            "{size}：不指向点不到的标题栏 ⋯ 菜单：{footer}"
         );
         state.workbench.dock.locked = false;
 
@@ -2387,7 +2470,8 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
         );
     }
 
-    // 复审轻级 3：英文界面 80×24 的整句断言（不接鼠标的排布提示与锁定提示）。
+    // 复审轻级 3：英文界面 80×24 的整句断言（不接鼠标的排布提示与锁定提示）。排布提示
+    // 连同「TERMINAL」标签放不下：标签让位，整句照画；锁定提示放得下，标签照画。
     let _en = crate::i18n::lang_guard(crate::i18n::Lang::En);
     let mut state = ready_with_bordered_pane();
     state.config.mouse_capture = false;
@@ -2401,7 +2485,7 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
     let screen = frame_rows(&state.compose(80, 24).expect("英文界面、不接鼠标、锁定"));
     assert_eq!(
         screen[23].trim_end(),
-        "Layout locked · turn off Lock layout in the main menu to rearrange",
+        " TERMINAL  Layout locked · turn off Lock layout in the main menu to rearrange",
         "英文 80×24：锁定时指向主菜单里的开关"
     );
 }
@@ -2490,65 +2574,69 @@ fn unpaired_zoomed_view_keeps_the_frame_only_while_the_zoom_target_is_unchanged(
     );
 }
 
-/// 文档终审 D1：锁定布局时，调整布局模式里的「复位」置灰、点击无效。以前照样
+/// 文档终审 D1：锁定布局时，`⋯` 布局菜单里的「复位布局」置灰、点击无效。以前照样
 /// 可点：换成默认布局，顺带解除锁定并关掉已停靠的监控面板，还标脏落盘。
-/// 解锁后同一按钮恢复可用（accent 加粗），点它才恢复默认布局。窄 / 中 / 宽三档
-/// 逐格读出复位按钮的字符与颜色（T1 审查轻 6）。
+/// 解锁后重新打开菜单，同一项恢复可用，点它才恢复默认布局。窄 / 中 / 宽三档
+/// 逐格读出复位项的字符与颜色（T1 审查轻 6）。
 #[test]
 fn locked_layout_dims_reset_and_ignores_its_clicks() {
-    use crate::client::shell::workbench::interaction::Action;
-    let reset_rect = |state: &ClientShellState, size: (u16, u16)| {
-        state
-            .workbench
-            .hits
-            .iter()
-            .find(|(_, action)| matches!(action, Action::Reset))
-            .map(|(rect, _)| *rect)
-            .unwrap_or_else(|| panic!("{size:?}：调整布局模式的顶栏有复位按钮"))
+    let reset_label = crate::i18n::texts().menu.reset_layout;
+    // 打开 `⋯` 布局菜单，返回「复位布局」所在行（菜单矩形与绝对 y）。
+    let open_menu = |state: &mut ClientShellState, size: (u16, u16)| {
+        state.compose(size.0, size.1).expect("工作台帧");
+        let menu = state.hits.title_menu;
+        assert!(!menu.is_empty(), "{size:?}：标题栏有 ⋯");
+        sgr_click(state, menu.x + 1, menu.y);
+        state.compose(size.0, size.1).expect("布局菜单帧");
+        let area = state.hits.menu_popup;
+        assert!(!area.is_empty(), "{size:?}：点 ⋯ 打开布局菜单");
+        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+        let row = (area.y..area.bottom())
+            .find(|y| {
+                let text: String = (area.x..area.right())
+                    .map(|x| buffer[(x, *y)].symbol())
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect();
+                text.contains(&reset_label.split_whitespace().collect::<String>())
+            })
+            .unwrap_or_else(|| panic!("{size:?}：布局菜单里有「{reset_label}」"));
+        (area, row)
     };
-    let reset_label = crate::client::shell::observability::tr("Reset", "复位")
-        .chars()
-        .next()
-        .expect("复位文案首字");
+    // 菜单边框以内、画了字的格（宽字符的续格被 ratatui 复位成默认样式，跳过）。
+    let label_cells = |state: &ClientShellState, area: Rect, y: u16| {
+        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+        (area.x + 1..area.right().saturating_sub(1))
+            .filter(|x| !buffer[(*x, y)].symbol().trim().is_empty())
+            .map(|x| (x, buffer[(x, y)].clone()))
+            .collect::<Vec<_>>()
+    };
     for (cols, rows) in [(80, 24), (133, 32), (200, 50)] {
         let size = (cols, rows);
         let path = preferences_path(&format!("locked-reset-{cols}"));
         let mut state = ready();
         state.config.mouse_capture = true;
         state.workbench_open(PanelId::Monitor);
-        state.workbench.arranging = true;
         state.workbench.dock.locked = true;
         state.config.preferences_path = Some(path.clone());
-        state.compose(cols, rows).expect("锁定下的调整布局");
         let palette = state.config.palette.clone();
-        let reset = reset_rect(&state, size);
-        {
-            let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
-            let label: String = (reset.x..reset.right())
-                .map(|x| buffer[(x, reset.y)].symbol().to_owned())
-                .collect();
-            assert!(
-                label.contains(reset_label),
-                "{size:?}：复位按钮仍在顶栏：{label:?}"
+
+        let (area, row) = open_menu(&mut state, size);
+        let cells = label_cells(&state, area, row);
+        assert!(!cells.is_empty(), "{size:?}：复位项画了字");
+        for (x, cell) in &cells {
+            assert_eq!(
+                cell.fg, palette.overlay0,
+                "{size:?}：锁定时复位置灰（第 {x} 列）"
             );
-            // 宽字符的续格被 ratatui 复位成默认样式，只看画了字的格。
-            for x in (reset.x..reset.right())
-                .filter(|x| !buffer[(*x, reset.y)].symbol().trim().is_empty())
-            {
-                let cell = &buffer[(x, reset.y)];
-                assert_eq!(
-                    cell.fg, palette.overlay0,
-                    "{size:?}：锁定时复位置灰（第 {x} 列）"
-                );
-                assert!(
-                    !cell.modifier.contains(Modifier::BOLD),
-                    "{size:?}：置灰的复位不加粗（第 {x} 列）"
-                );
-            }
+            assert!(
+                !cell.modifier.contains(Modifier::BOLD),
+                "{size:?}：置灰的复位不加粗（第 {x} 列）"
+            );
         }
 
         let layout = state.workbench.dock.clone();
-        sgr_click(&mut state, reset.x + 1, reset.y);
+        sgr_click(&mut state, cells[0].0, row);
         assert_eq!(
             state.workbench.dock, layout,
             "{size:?}：锁定时点复位不改布局"
@@ -2558,21 +2646,26 @@ fn locked_layout_dims_reset_and_ignores_its_clicks() {
             state.workbench.dock.root.contains(&PanelId::Monitor),
             "{size:?}：已停靠的监控面板保留"
         );
+        assert!(state.overlay.is_some(), "{size:?}：点置灰项菜单保持打开");
         assert!(
             state.preferences_dirty_since.is_none(),
             "{size:?}：无效点击不标脏、不落盘"
         );
+        assert_eq!(state.preferences_writes, 0, "{size:?}：无效点击不落盘");
 
+        // 再点 ⋯ 收起；解锁后重新打开，菜单条目按打开时的状态重建。
+        let menu = state.hits.title_menu;
+        sgr_click(&mut state, menu.x + 1, menu.y);
+        assert!(state.overlay.is_none(), "{size:?}：再点 ⋯ 收起菜单");
         state.workbench.dock.locked = false;
-        state.compose(cols, rows).expect("解锁后的调整布局");
-        let reset = reset_rect(&state, size);
-        {
-            let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
-            let cell = &buffer[(reset.x + 1, reset.y)];
-            assert_eq!(cell.fg, palette.accent, "{size:?}：解锁后复位恢复可用");
-            assert!(cell.modifier.contains(Modifier::BOLD));
-        }
-        sgr_click(&mut state, reset.x + 1, reset.y);
+        let (area, row) = open_menu(&mut state, size);
+        let cells = label_cells(&state, area, row);
+        assert!(
+            cells.iter().all(|(_, cell)| cell.fg != palette.overlay0),
+            "{size:?}：解锁后复位恢复可用"
+        );
+        sgr_click(&mut state, cells[0].0, row);
+        assert!(state.overlay.is_none(), "{size:?}：选中后菜单收起");
         assert!(
             !state.workbench.dock.root.contains(&PanelId::Monitor),
             "{size:?}：解锁后复位恢复默认布局"
@@ -2631,7 +2724,9 @@ fn panel_body(state: &ClientShellState, panel: &PanelId) -> Rect {
         .panels
         .iter()
         .find(|(id, _)| id == panel)
-        .map(|(id, area)| crate::client::shell::workbench::body(*area, id))
+        .map(|(id, area)| {
+            crate::client::shell::workbench::body(*area, id, state.workbench.geometry.compact)
+        })
         .unwrap_or_else(|| panic!("面板 {panel:?} 不在当前几何里"))
 }
 

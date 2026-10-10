@@ -9,6 +9,7 @@ mod aggregate_navigation;
 mod workspace_navigation;
 use workspace_navigation::{PendingWorkspaceHighlight, WorkspaceNavigationTarget};
 mod broadcast;
+mod chrome;
 mod command_palette;
 mod compose_canvas;
 mod composition;
@@ -197,14 +198,52 @@ fn pane_surface_topology_signature(surface: &PaneSurfaceFrame) -> u64 {
     hash
 }
 
-/// 生命周期 → 统一状态桶（失败锁存接入前一律按未失败处理）。所有状态字形、颜色与
+/// 只有生命周期时的统一状态桶（没有失败信息，按未失败处理）。所有状态字形、颜色与
 /// 排序都经桶取，保证侧栏、标签、总览与通知用同一套语义。
 fn agent_bucket(status: crate::api::schema::AgentStatus) -> crate::harness::AgentBucket {
     crate::harness::AgentBucket::derive(status, false)
 }
 
-/// 静态状态字形（运行中画静态字形；需要转圈的界面直接用 `ui::design::status_glyph`
-/// 并传入全局转圈帧）。
+/// 快照里一个 agent 的统一状态桶：生命周期加 server 下发的失败锁存
+/// （`insight.attention` 为 failed）。
+fn client_agent_bucket(agent: &crate::protocol::ClientShellAgent) -> crate::harness::AgentBucket {
+    let failed =
+        agent.insight.attention.as_ref().is_some_and(|attention| {
+            attention.kind == crate::api::schema::AgentAttentionKind::Failed
+        });
+    crate::harness::AgentBucket::derive(agent.agent_status, failed)
+}
+
+/// 状态字形的取法：指示风格 + 全局转圈帧。`animate` 为假（`ui.animations` 或
+/// `ui.spinner` 关闭）时运行中画静态字形。按值传递、不分配；侧栏行、标签与标题栏
+/// 计数共用，所有转圈同相位。
+#[derive(Clone, Copy, Debug)]
+struct StatusGlyphs {
+    style: crate::config::StatusIndicatorStyle,
+    frame: usize,
+    animate: bool,
+}
+
+impl StatusGlyphs {
+    /// 不转圈的取法：运行中画静态字形。
+    const fn fixed(style: crate::config::StatusIndicatorStyle) -> Self {
+        Self {
+            style,
+            frame: 0,
+            animate: false,
+        }
+    }
+
+    fn bucket(self, bucket: crate::harness::AgentBucket) -> &'static str {
+        crate::ui::design::status_glyph(bucket, self.style, self.frame, self.animate)
+    }
+
+    fn status(self, status: crate::api::schema::AgentStatus) -> &'static str {
+        self.bucket(agent_bucket(status))
+    }
+}
+
+/// 静态状态字形（运行中画静态字形；需要转圈的界面用 [`StatusGlyphs`]）。
 fn status_icon(
     status: crate::api::schema::AgentStatus,
     style: crate::config::StatusIndicatorStyle,

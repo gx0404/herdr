@@ -2935,6 +2935,7 @@ fn flat_view_rows_do_not_depend_on_the_first_tree_row() {
                 ..Default::default()
             },
             &state.config,
+            state.status_glyphs(),
             &mut scroll,
             None,
             &mut hits,
@@ -3101,6 +3102,7 @@ fn render_tree_at(state: &ClientShellState, width: u16) -> (Vec<(String, String,
             ..Default::default()
         },
         &state.config,
+        state.status_glyphs(),
         &mut scroll,
         None,
         &mut hits,

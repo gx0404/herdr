@@ -161,7 +161,7 @@ Broadcasting sends the same input to one registered pane per endpoint (Local or 
 
 `send` reuses the existing per-endpoint JSON API channels (`pane.send-input`, pressing Enter unless `--no-enter`; local panes go through the local API socket, machine panes through a saved-machine SSH bridge), sends targets one at a time, and reports per-target outcomes; the exit code is 1 if any target failed. The set persists across restarts, so scripts can prepare it once and drive it repeatedly.
 
-The same set drives the in-UI broadcast: open it from the machines page (`b`) or the command palette's "broadcast input…", toggle with `g`, and add panes from online machines with `a`. While broadcasting is on, the mode bar shows a permanent `⇄ BROADCAST ×N` badge and everything you type into the focused pane fans out to the registered panes (the typed pane itself excluded; mouse input never fans out). See [Connecting machines](/docs/connecting-machines/#input-broadcast).
+The same set drives the in-UI broadcast: open it from the machines page (`b`) or the command palette's "broadcast input…", toggle with `g`, and add panes from online machines with `a`. While broadcasting is on, the status bar (the mode bar in the classic layout) shows a permanent `⇄ BROADCAST ×N` badge and everything you type into the focused pane fans out to the registered panes (the typed pane itself excluded; mouse input never fans out). See [Connecting machines](/docs/connecting-machines/#input-broadcast).
 
 ## Snippets
 

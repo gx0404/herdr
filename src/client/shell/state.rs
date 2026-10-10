@@ -106,7 +106,7 @@ pub(super) enum ClientMobileTarget {
 #[derive(Default)]
 pub(super) struct ShellHitMap {
     pub(super) overlay_bounds: Rect,
-    /// 本帧 chrome 悬浮区的分组包围盒（侧栏 / 顶栏 / 横幅）：指针不在任何一组
+    /// 本帧 chrome 悬浮区的分组包围盒（侧栏 / 顶部 / 横幅）：指针不在任何一组
     /// 里时无需走整份线性扫描——pane 上的指针是最常见的 `Moved` 场景
     /// （HERDR-PERF-008）。每帧由 compose 收尾重算一次，鼠标事件里只读。
     pub(super) chrome_bounds: super::feedback::ChromeBounds,
@@ -120,6 +120,9 @@ pub(super) struct ShellHitMap {
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) workspace_max_scroll: usize,
     pub(super) tabs: Vec<(Rect, String)>,
+    /// 标签上的关闭按钮（聚焦标签与悬浮标签各一个）：矩形在标签矩形之内，命中
+    /// 解析与点击分派都先查它。
+    pub(super) tab_close: Vec<(Rect, String)>,
     pub(super) panes: Vec<PaneHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
@@ -152,6 +155,20 @@ pub(super) struct ShellHitMap {
     pub(super) mobile_targets: Vec<(Rect, ClientMobileTarget)>,
     pub(super) mobile_max_scroll: usize,
     pub(super) global_launcher: Rect,
+    /// 工作台标题栏（第 0 行）的注意力计数、命令搜索提示、`⋯` 布局菜单入口与
+    /// 「调整布局」标记。
+    pub(super) title_chips: Vec<(Rect, crate::harness::AgentBucket)>,
+    pub(super) title_command: Rect,
+    pub(super) title_menu: Rect,
+    pub(super) title_arrange: Rect,
+    /// 停靠面板的面板头与它右侧的按钮（标签条画在终端组面板头里，悬浮解析先查
+    /// 标签）。
+    pub(super) panel_headers: Vec<(Rect, super::dock::PanelId)>,
+    pub(super) panel_buttons: Vec<(
+        Rect,
+        super::dock::PanelId,
+        super::chrome::panel_header::PanelButton,
+    )>,
     pub(super) notification_toast: Rect,
     pub(super) menu_popup: Rect,
     pub(super) menu_search: Rect,

@@ -190,7 +190,7 @@ herdr machine log <profile-id> off
 
 在界面中从 machines 页面管理集合（列表或详情卡按 `b`，或命令面板的「广播输入…」）：`g` 开关广播，`a` 依次选择机器与其在线窗格完成注册，`x` 移除选中目标，`c` 清空集合。集合持久化在 endpoint catalog 旁的 `broadcast.json`，与 CLI 共享（`herdr broadcast status/enable/disable/add/remove/clear/send`，见 [CLI 参考](/zh-cn/docs/cli-reference/#输入广播)）。
 
-广播生效期间，mode bar 常驻 `⇄ 广播 ×N` 徽标——即使在普通终端模式下——让你不会在不知情时把输入扇出到其他机器。输入的文本与按键经各端点的 API 通道送达每个已注册窗格；你正在输入的窗格本身除外（它已收到输入），粘贴保留目标窗格各自的 bracketed-paste 处理，鼠标输入绝不广播。拒绝输入的目标会以 toast 报告一次，下一次成功后重新武装；离线目标直接跳过。在同一弹层再按 `g` 或用 `herdr broadcast disable` 即可关闭。
+广播生效期间，状态栏（经典布局下是 mode bar）常驻 `⇄ 广播 ×N` 徽标——即使在普通终端模式下——让你不会在不知情时把输入扇出到其他机器。输入的文本与按键经各端点的 API 通道送达每个已注册窗格；你正在输入的窗格本身除外（它已收到输入），粘贴保留目标窗格各自的 bracketed-paste 处理，鼠标输入绝不广播。拒绝输入的目标会以 toast 报告一次，下一次成功后重新武装；离线目标直接跳过。在同一弹层再按 `g` 或用 `herdr broadcast disable` 即可关闭。
 
 ## 状态查看与一次性命令
 

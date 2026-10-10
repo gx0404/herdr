@@ -33,6 +33,7 @@ pub(super) fn render_collapsed(
     area: Rect,
     rows: AgentRowsView<'_>,
     config: &ClientShellConfig,
+    glyphs: StatusGlyphs,
     agent_scroll: usize,
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
@@ -67,7 +68,11 @@ pub(super) fn render_collapsed(
             rect.width,
             &format!(
                 "{initial}{}",
-                status_icon(agent.status, config.status_indicators)
+                if node.stale {
+                    status_icon(agent.status, config.status_indicators)
+                } else {
+                    glyphs.status(agent.status)
+                }
             ),
             Style::default()
                 .fg(if node.stale {
@@ -95,6 +100,7 @@ pub(super) fn render_expanded(
     agent_view_label: Option<&str>,
     rows: AgentRowsView<'_>,
     config: &ClientShellConfig,
+    glyphs: StatusGlyphs,
     agent_scroll: &mut usize,
     chrome_hover: Option<&super::feedback::ChromeHover>,
     hits: &mut ShellHitMap,
@@ -105,6 +111,7 @@ pub(super) fn render_expanded(
         agent_view_label,
         rows,
         config,
+        glyphs,
         agent_scroll,
         chrome_hover,
         hits,
@@ -141,6 +148,39 @@ pub(super) struct AgentRowsCache {
     flat_rows: Vec<AgentTreeRow>,
     /// 平铺行里 agent 行的个数（见 `AgentRowsView::flat_agents`）。
     flat_agents: usize,
+    /// 在线端点里各状态桶的 agent 数（标题栏注意力计数）。
+    counts: crate::harness::BucketCounts,
+    /// 有没有正在转圈的状态（运行中的 agent、外部条目或活动节点）：转圈时钟只在
+    /// 这时走，没有运行中的 agent 就不周期重绘。
+    animated: bool,
+}
+
+/// 在线端点快照里每个 pane agent 的状态桶计数，以及有没有需要转圈的状态。离线端点
+/// 的缓存快照照常画成 stale 行，但不计数、也不让转圈时钟走。
+fn agent_attention(endpoints: &[ClientShellEndpoint]) -> (crate::harness::BucketCounts, bool) {
+    use crate::api::schema::{AgentActivityStatus, AgentStatus};
+    let running = |activity: &crate::protocol::ClientShellAgentActivity| {
+        activity
+            .nodes
+            .iter()
+            .any(|node| node.status == AgentActivityStatus::Running)
+    };
+    let mut counts = crate::harness::BucketCounts::default();
+    let mut animated = false;
+    for snapshot in endpoints
+        .iter()
+        .filter(|endpoint| endpoint.status == ClientEndpointStatus::Online)
+        .filter_map(|endpoint| endpoint.snapshot.as_deref())
+    {
+        for agent in &snapshot.agents {
+            counts.add(super::client_agent_bucket(agent));
+            animated |= agent.agent_status == AgentStatus::Working || running(&agent.activity);
+        }
+        animated |= snapshot.external_agents.iter().any(|external| {
+            external.agent_status == AgentStatus::Working || running(&external.activity)
+        });
+    }
+    (counts, animated)
 }
 
 impl AgentRowsCache {
@@ -204,6 +244,16 @@ impl AgentRowsCache {
         self.key == *key
     }
 
+    /// 标题栏注意力计数（与行同一代缓存）。
+    pub(super) fn counts(&self) -> crate::harness::BucketCounts {
+        self.counts
+    }
+
+    /// 有没有需要转圈的状态。
+    pub(super) fn animated(&self) -> bool {
+        self.animated
+    }
+
     fn build(
         key: AgentRowsKey,
         endpoints: &[ClientShellEndpoint],
@@ -217,10 +267,13 @@ impl AgentRowsCache {
             ..AgentRowsView::default()
         })
         .count();
+        let (counts, animated) = agent_attention(endpoints);
         Self {
             rows: tree.rows,
             flat_rows: tree.flat,
             flat_agents,
+            counts,
+            animated,
             key,
         }
     }

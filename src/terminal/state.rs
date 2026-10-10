@@ -2132,6 +2132,12 @@ impl TerminalState {
             .and_then(|authority| authority.message.as_deref())
     }
 
+    /// 对外可见的失败锁存（与 [`Self::agent_attention`] 同一口径：Working 与受阻时
+    /// 不算）。字段读取、不分配，供每帧的窗格标题取状态桶。
+    pub fn agent_failed(&self) -> bool {
+        matches!(self.state, AgentState::Idle | AgentState::Unknown) && self.turn.has_failure()
+    }
+
     /// 待处理事项的修订号：变化即客户端投影要重建。
     pub(crate) fn attention_revision(&self) -> u64 {
         self.turn.revision()

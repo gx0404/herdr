@@ -188,7 +188,7 @@ pub(crate) fn render_collapsed_sidebar(
             rect.x.saturating_add(2),
             rect.y,
             rect.width.saturating_sub(2),
-            status_icon(status, config.status_indicators),
+            state.status_glyphs.status(status),
             Style::default().fg(status_color(status, palette, &config.components)),
         );
         hits.workspaces.push(WorkspaceHit {
@@ -276,7 +276,7 @@ pub(crate) fn render_collapsed_sidebar(
             rect.x.saturating_add(2),
             rect.y,
             rect.width.saturating_sub(2),
-            status_icon(agent.agent_status, config.status_indicators),
+            state.status_glyphs.status(agent.agent_status),
             Style::default().fg(status_color(
                 agent.agent_status,
                 palette,
@@ -485,7 +485,7 @@ pub(crate) fn render_sidebar_regions(
             buffer,
             rect,
             status,
-            config.status_indicators,
+            state.status_glyphs,
             entry,
             rows,
             workspace.focused,
@@ -625,6 +625,7 @@ pub(crate) fn render_sidebar_regions(
         snapshot.agent_view_label.as_deref(),
         state.federated_agent_rows,
         config,
+        state.status_glyphs,
         state.agent_scroll,
         state.chrome_hover,
         hits,
@@ -891,7 +892,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
     status: crate::api::schema::AgentStatus,
-    indicators: crate::config::StatusIndicatorStyle,
+    glyphs: StatusGlyphs,
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
     focused: bool,
@@ -953,10 +954,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
         });
         let spans = crate::ui::resolved_token_spans(
             row,
-            (
-                status_icon(status, indicators),
-                Style::default().fg(status_fg),
-            ),
+            (glyphs.status(status), Style::default().fg(status_fg)),
             Style::default().fg(status_fg),
             workspace_style,
             secondary_style,

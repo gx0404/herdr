@@ -110,6 +110,7 @@ pub(super) enum ActionId {
     CloseMonitor,
     ArrangeLayout,
     LockLayout,
+    ResetLayout,
     AgentFocus,
     AgentViewActivity,
     AgentRename,
@@ -1023,6 +1024,15 @@ pub(super) static ACTIONS: &[ActionSpec] = &[
             3,
         )
     },
+    ActionSpec {
+        ..spec(
+            Id::ResetLayout,
+            "layout:reset",
+            |t| t.menu.reset_layout,
+            Cat::TabsPanes,
+            3,
+        )
+    },
     // Agent 行右键菜单（条目由 `context_menu.rs::items` 的 Agent 臂给出，执行由
     // 面板车道的 `activate_agent_context_action` 承接）。
     ActionSpec {
@@ -1234,6 +1244,8 @@ pub(super) struct GlobalActionContext<'a> {
     pub(super) workbench: bool,
     pub(super) monitor_docked: bool,
     pub(super) layout_locked: bool,
+    /// 「调整布局」模式开着（布局菜单里该项打勾）。
+    pub(super) arranging: bool,
 }
 
 impl<'a> GlobalActionContext<'a> {
@@ -1280,12 +1292,24 @@ pub(super) fn global_action_state(id: ActionId, cx: &GlobalActionContext<'_>) ->
             }
             ActionState::enabled_if(cx.monitor_docked)
         }
-        ActionId::ArrangeLayout if !cx.workbench => ActionState::HIDDEN,
+        ActionId::ArrangeLayout => {
+            if !cx.workbench {
+                return ActionState::HIDDEN;
+            }
+            ActionState::checked(cx.arranging)
+        }
         ActionId::LockLayout => {
             if !cx.workbench {
                 return ActionState::HIDDEN;
             }
             ActionState::checked(cx.layout_locked)
+        }
+        // 锁定时复位置灰：换成默认布局会顺带解除锁定（文档终审 D1）。
+        ActionId::ResetLayout => {
+            if !cx.workbench {
+                return ActionState::HIDDEN;
+            }
+            ActionState::enabled_if(!cx.layout_locked)
         }
         _ => ActionState::ENABLED,
     }
@@ -1318,6 +1342,7 @@ impl ClientShellState {
                     .root
                     .contains(&super::dock::PanelId::Monitor),
             layout_locked: self.workbench.dock.locked,
+            arranging: self.workbench.arranging,
         }
     }
 
@@ -1385,10 +1410,14 @@ impl ClientShellState {
             ActionId::CloseMonitor => {
                 self.close_workbench_panel(super::dock::PanelId::Monitor, outcome);
             }
-            ActionId::ArrangeLayout => self.workbench.arranging = true,
+            // 二态开关：布局菜单与命令搜索里打勾显示当前状态，再选一次退出。
+            ActionId::ArrangeLayout => self.workbench.arranging = !self.workbench.arranging,
             ActionId::LockLayout => {
                 self.workbench.dock.locked = !self.workbench.dock.locked;
                 self.schedule_chrome_preferences(std::time::Instant::now());
+            }
+            ActionId::ResetLayout => {
+                self.reset_workbench_layout(outcome);
             }
             ActionId::CustomCommand => {
                 if let ActionTarget::Command(command) = target {
@@ -1811,6 +1840,7 @@ mod tests {
         ActionId::CloseMonitor,
         ActionId::ArrangeLayout,
         ActionId::LockLayout,
+        ActionId::ResetLayout,
         ActionId::AgentFocus,
         ActionId::AgentViewActivity,
         ActionId::AgentRename,
@@ -1886,6 +1916,7 @@ mod tests {
             | ActionId::CloseMonitor
             | ActionId::ArrangeLayout
             | ActionId::LockLayout
+            | ActionId::ResetLayout
             | ActionId::AgentFocus
             | ActionId::AgentViewActivity
             | ActionId::AgentRename
@@ -2005,6 +2036,7 @@ mod tests {
         for id in [
             ActionId::ArrangeLayout,
             ActionId::LockLayout,
+            ActionId::ResetLayout,
             ActionId::CloseMonitor,
         ] {
             assert!(!global_action_state(id, &classic).visible, "{id:?}");
@@ -2020,6 +2052,19 @@ mod tests {
         );
         let close = global_action_state(ActionId::CloseMonitor, &workbench);
         assert!(close.visible && !close.enabled, "没停靠监控面板时置灰");
+        let reset = global_action_state(ActionId::ResetLayout, &workbench);
+        assert!(reset.visible && !reset.enabled, "锁定时复位置灰");
+        let unlocked = GlobalActionContext {
+            layout_locked: false,
+            arranging: true,
+            ..workbench
+        };
+        assert!(global_action_state(ActionId::ResetLayout, &unlocked).enabled);
+        assert_eq!(
+            global_action_state(ActionId::ArrangeLayout, &unlocked).checked,
+            Some(true),
+            "调整布局是二态开关"
+        );
     }
 
     #[test]

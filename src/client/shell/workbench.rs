@@ -37,11 +37,13 @@ pub(super) struct State {
     pub(in crate::client::shell) stale_until: Option<Instant>,
     pub geometry: Geometry,
     pub(in crate::client::shell) hits: Vec<(Rect, interaction::Action)>,
-    /// 「调整布局」页脚里可点提示的 `(命中矩形, 提示下标)`，每帧重建；鼠标移动
-    /// 据此算出 `footer_hover`（复审轻级 B2）。
+    /// 状态栏里可点提示的 `(命中矩形, 提示下标)`（调整布局的「Esc 完成」、终端模式的
+    /// 导航 / 命令 / 快捷键），每帧重建；鼠标移动据此算出 `footer_hover`（复审轻级 B2）。
     pub(in crate::client::shell) footer_hits: Vec<(Rect, usize)>,
-    /// 指针悬浮的页脚提示下标，只会是 `footer_hits` 里的可点项。
+    /// 指针悬浮的状态栏提示下标，只会是 `footer_hits` 里的可点项。
     pub(in crate::client::shell) footer_hover: Option<usize>,
+    /// 上一帧状态栏画的是不是调整布局模式的提示：换了一套提示时清掉悬浮下标。
+    pub(in crate::client::shell) footer_arranging: bool,
     drag: Option<interaction::Drag>,
     pub arranging: bool,
     pub tab_scroll: HashMap<u64, usize>,
@@ -54,14 +56,16 @@ pub(super) struct State {
     pub(super) compose_count: usize,
 }
 
-/// 工作台的整帧内容区：顶栏（首行）与页脚 / 模式条（末行）之间。停靠几何与
+/// 工作台的整帧内容区：标题栏（首行）与状态栏（末行）之间。停靠几何与
 /// 不属于任何面板的浮层（which-key）都以它为边界。
 pub(super) fn content_area(cols: u16, rows: u16) -> Rect {
     Rect::new(0, 1.min(rows), cols, rows.saturating_sub(2))
 }
 
-pub(super) fn body(area: Rect, panel: &PanelId) -> Rect {
-    let header = if matches!(panel, PanelId::Terminal(_)) {
+/// 面板正文（面板头以下）。面板头是 1 行——终端组把标签条并进面板头；紧凑视图的
+/// 面板头换成切换条，终端组的标签条退到第 2 行。
+pub(super) fn body(area: Rect, panel: &PanelId, compact: bool) -> Rect {
+    let header = if compact && matches!(panel, PanelId::Terminal(_)) {
         2
     } else {
         1
@@ -196,6 +200,7 @@ impl State {
             hits: Vec::new(),
             footer_hits: Vec::new(),
             footer_hover: None,
+            footer_arranging: false,
             drag: None,
             arranging: false,
             tab_scroll: HashMap::new(),
@@ -252,7 +257,7 @@ impl State {
                     .iter()
                     .find(|(id, _)| matches!(id, PanelId::Terminal(_)))
             })
-            .map(|(id, area)| body(*area, id))
+            .map(|(id, area)| body(*area, id, geometry.compact))
             .unwrap_or_default();
         ClientShellLayout {
             sidebar: Rect::default(),
@@ -485,7 +490,7 @@ impl ClientShellState {
                     .find(|group| group.id == *id)?
                     .active
                     .as_ref()?;
-                let area = body(*area, panel);
+                let area = body(*area, panel, geometry.compact);
                 (!area.is_empty()).then(|| ClientViewSpec {
                     view_id: id.to_string(),
                     tab_id: tab.clone(),

@@ -7,11 +7,15 @@ use dock::{Axis, Divider, Edge};
 #[derive(Clone)]
 pub(in crate::client::shell) enum Action {
     Menu,
-    Open(PanelId),
+    /// 标题栏的注意力计数：打开 agent 导航浮层。
+    Attention,
+    /// 标题栏的命令搜索提示。
+    CommandSearch,
+    /// 标题栏的 `⋯`：开关布局菜单（监控 / 调整布局 / 锁定布局 / 复位布局）。
+    LayoutMenu,
     Close(PanelId),
+    /// 调整布局模式的开关：标题栏「调整布局」标记与状态栏「Esc 完成」。
     Arrange,
-    Lock,
-    Reset,
     Header(PanelId),
     /// 紧凑视图标题栏切换条上的面板名：只切焦点（最大化随之移过去），不开始拖动
     /// ——紧凑视图只投影一个面板，没有可停靠的目标。
@@ -24,6 +28,10 @@ pub(in crate::client::shell) enum Action {
         group: u64,
         tab: String,
     },
+    /// 标签上的关闭按钮：与右键菜单「关闭」、快捷键同一条确认路径。
+    CloseTab(String),
+    /// 状态栏里可点的键位提示：与按下那组键同一条路径。
+    Binding(crate::input::KeybindAction),
 }
 
 pub(super) enum Drag {
@@ -192,6 +200,26 @@ impl ClientShellState {
         true
     }
 
+    /// 复位布局（`⋯` 布局菜单与命令搜索里的「复位布局」）：换回默认停靠布局，上报
+    /// 焦点并按去抖落盘。锁定布局时是空操作——换成默认布局会顺带解除锁定、关掉已
+    /// 停靠的监控面板（文档终审 D1），所以菜单里这一项锁定时置灰。
+    pub(in crate::client::shell) fn reset_workbench_layout(
+        &mut self,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !self.workbench.enabled || self.workbench.dock.locked {
+            return false;
+        }
+        let previous_tab = self.focused_tab_id();
+        self.workbench.dock = self.default_dock();
+        self.workbench.last_focus = None;
+        self.sync_observation_page_with_focus();
+        self.publish_workbench_focus(previous_tab, outcome);
+        self.schedule_chrome_preferences(std::time::Instant::now());
+        outcome.repaint = true;
+        true
+    }
+
     /// `close_workbench_panel` 的只改状态部分：不上报焦点、不写偏好，由调用方
     /// 统一收尾。
     fn close_workbench_panel_state(
@@ -353,9 +381,12 @@ impl ClientShellState {
             return true;
         }
         if mouse.kind == MouseEventKind::Moved {
-            // 调整布局页脚可点提示的悬浮（复审轻级 B2）：按上一帧记下的命中区算
-            // 下标，变了才重绘；移动事件照常往下传给其它悬浮逻辑。
-            let hovered = (self.workbench.arranging && self.config.feedback.hover_effects)
+            // 状态栏可点提示的悬浮（复审轻级 B2）：按上一帧记下的命中区算下标，变了
+            // 才重绘；移动事件照常往下传给其它悬浮逻辑。
+            let hovered = self
+                .config
+                .feedback
+                .hover_effects
                 .then(|| {
                     self.workbench
                         .footer_hits
@@ -413,44 +444,45 @@ impl ClientShellState {
             .map(|(_, action)| action.clone());
         if let Some(action) = action {
             let creates_tab = matches!(&action, Action::NewTab(_));
-            // 锁定布局时顶栏的复位置灰且无效（文档终审 D1）：换成默认布局会顺带
-            // 解除锁定、关掉已停靠的监控面板。命中照样消费，不落到其它点击。
-            let inert = matches!(action, Action::Reset) && self.workbench.dock.locked;
             // 判据是「是否会写入 `ClientChromePreferences`」而不是「是否呈现
-            // 状态」：标签滚动、全局菜单、`arranging` 开关与开始拖 pane 都不进
-            // `DockLayout` / `saved_layouts()`，标脏只会换来一次无效全量写
-            // （PERF-01）。
-            let dirty = !inert
-                && !matches!(
-                    action,
-                    Action::ScrollTabs(..) | Action::Menu | Action::Arrange | Action::Pane(_)
-                );
+            // 状态」：标签滚动、全局菜单、标题栏入口、`arranging` 开关、关标签与
+            // 开始拖 pane 都不进 `DockLayout` / `saved_layouts()`，标脏只会换来一次
+            // 无效全量写（PERF-01）。
+            let dirty = !matches!(
+                action,
+                Action::ScrollTabs(..)
+                    | Action::Menu
+                    | Action::Attention
+                    | Action::CommandSearch
+                    | Action::LayoutMenu
+                    | Action::Arrange
+                    | Action::Pane(_)
+                    | Action::CloseTab(_)
+                    | Action::Binding(_)
+            );
             match action {
                 Action::ScrollTabs(group, delta) => {
                     let scroll = self.workbench.tab_scroll.entry(group).or_default();
                     *scroll = scroll.saturating_add_signed(delta);
                 }
-                Action::Menu => self.toggle_global_menu(),
+                Action::Menu => {
+                    self.toggle_global_menu();
+                    self.release_catalog_selection();
+                }
+                Action::Attention => self.open_navigator_overlay(),
+                Action::CommandSearch => self.open_command_search(),
+                Action::LayoutMenu => {
+                    self.toggle_layout_menu();
+                    self.release_catalog_selection();
+                }
                 Action::Close(panel) => {
                     // 焦点上报与偏好持久化由本派发块末尾统一完成。
                     self.close_workbench_panel_state(panel, outcome);
                 }
-                Action::Open(panel) => {
-                    // 只有监控面板能从这里打开（已退役的账号面板不会再出现）。
-                    if panel == PanelId::Monitor {
-                        self.open_observation_page(
-                            super::super::observability::Page::Monitor,
-                            outcome,
-                        );
-                    }
-                }
                 Action::Arrange => self.workbench.arranging = !self.workbench.arranging,
-                Action::Lock => self.workbench.dock.locked = !self.workbench.dock.locked,
-                Action::Reset => {
-                    if !inert {
-                        self.workbench.dock = self.default_dock();
-                        self.workbench.last_focus = None;
-                    }
+                Action::CloseTab(tab) => self.request_tab_close(tab, outcome),
+                Action::Binding(binding) => {
+                    self.record_binding(crate::input::KeybindMatch::Action(binding), outcome);
                 }
                 Action::Maximize(panel) => {
                     self.focus_workbench_panel(panel.clone());

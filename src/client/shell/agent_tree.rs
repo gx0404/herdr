@@ -1149,6 +1149,7 @@ pub(super) fn render_agent_tree_rows(
     agent_view_label: Option<&str>,
     rows: AgentRowsView<'_>,
     config: &ClientShellConfig,
+    glyphs: StatusGlyphs,
     agent_scroll: &mut usize,
     chrome_hover: Option<&ChromeHover>,
     hits: &mut ShellHitMap,
@@ -1168,6 +1169,7 @@ pub(super) fn render_agent_tree_rows(
     let thumb_hovered = matches!(chrome_hover, Some(ChromeHover::AgentScrollbarThumb));
     let cx = RowContext {
         config,
+        glyphs,
         chrome_hover,
         endpoint_qualified,
         inset: tree_inset(area.width),
@@ -1207,8 +1209,11 @@ fn row_lines(row: &AgentTreeRow) -> usize {
     row.kind.agent().map_or(1, |agent| agent.rows.len().max(1))
 }
 
+#[derive(Clone, Copy)]
 struct RowContext<'a> {
     config: &'a ClientShellConfig,
+    /// 运行中的状态字形按全局转圈帧画；stale（离线端点）行画静态字形。
+    glyphs: StatusGlyphs,
     chrome_hover: Option<&'a ChromeHover>,
     endpoint_qualified: bool,
     /// 行首留白与右对齐元素离右缘的列数（[`tree_inset`]）；高亮与命中区仍是整行。
@@ -1229,8 +1234,19 @@ fn render_tree_row(
     hits: &mut ShellHitMap,
     flat: bool,
 ) {
-    let palette = &cx.config.palette;
     let node = &row.kind;
+    // 离线端点的缓存行不转圈：画的是断线前的状态，不该看起来还在跑。
+    let stale_cx;
+    let cx = if node.stale {
+        stale_cx = RowContext {
+            glyphs: StatusGlyphs::fixed(cx.config.status_indicators),
+            ..*cx
+        };
+        &stale_cx
+    } else {
+        cx
+    };
+    let palette = &cx.config.palette;
     let (depth, mask, has_children, collapsed) = if flat {
         (0, 0, false, false)
     } else {
@@ -1488,7 +1504,7 @@ fn render_group_line(
             )
         }
         AgentTreeKind::Workspace { label, status } | AgentTreeKind::Tab { label, status } => (
-            status_icon(*status, cx.config.status_indicators),
+            cx.glyphs.status(*status),
             status_color(*status, palette, &cx.config.components),
             label.as_str(),
             None,
@@ -1621,10 +1637,7 @@ fn render_agent_lines(
         status_style
     };
     let secondary = Style::default().fg(muted);
-    let icon = (
-        status_icon(agent.status, cx.config.status_indicators),
-        status_style,
-    );
+    let icon = (cx.glyphs.status(agent.status), status_style);
     // 行配置解析后一个 token 都没有：至少画状态图标，行仍可点。
     let fallback = [crate::ui::ResolvedToken {
         kind: crate::ui::ResolvedTokenKind::StateIcon,
@@ -1837,7 +1850,7 @@ fn render_activity_line(
     let palette = &cx.config.palette;
     let mapped = activity_status_as_agent(status);
     let icon = group.map_or_else(
-        || status_icon(mapped, cx.config.status_indicators),
+        || cx.glyphs.status(mapped),
         |group| {
             if content.width < 12 {
                 match group.glyph {
@@ -1914,7 +1927,7 @@ fn render_external_line(
     let palette = &cx.config.palette;
     let mut remaining = render_badge(buffer, content, node, node.primary.first, cx);
     let mut x = content.x;
-    let icon = status_icon(status, cx.config.status_indicators);
+    let icon = cx.glyphs.status(status);
     let icon_width = display_width(icon) as u16;
     if remaining < icon_width + 1 {
         return;

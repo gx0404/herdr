@@ -89,6 +89,7 @@ impl ClientShellState {
                     == Some(ClientEndpointStatus::Online)
         });
         let spinner = self.spinner_glyph();
+        let status_glyphs = self.status_glyphs();
         let federated_agent_rows = self
             .federated_agent_rows
             .as_ref()
@@ -120,6 +121,7 @@ impl ClientShellState {
             workspace_drop_indicator_row: None,
             chrome_hover: self.hover.as_ref(),
             spinner,
+            status_glyphs,
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -279,6 +281,7 @@ impl ClientShellState {
         };
         let visual_bell = self.visual_bell_active();
         let spinner = self.spinner_glyph();
+        let status_glyphs = self.status_glyphs();
         // 单 Buffer 管线（批 12b）：chrome 与 pane 内容画进同一个保留 Buffer，
         // 各装饰段直写，收尾只做一次 Buffer→FrameData 转换。
         let mut canvas = super::compose_canvas::ComposeCanvas::reuse_or_new(
@@ -322,6 +325,7 @@ impl ClientShellState {
                 workspace_drop_indicator_row,
                 chrome_hover: self.hover.as_ref(),
                 spinner,
+                status_glyphs,
             },
             visual_bell,
         );
@@ -921,7 +925,7 @@ impl ClientShellState {
         let (frame_width, frame_height) = canvas.size();
         if self.mode == ClientShellMode::Prefix && self.config.which_key && self.overlay.is_none() {
             // which-key 不属于任何面板：工作台下与其它浮层同口径占整帧内容区
-            // （顶栏与模式条之间），不再被夹进聚焦面板的 body（冒烟 M3）。经典
+            // （标题栏与状态栏之间），不再被夹进聚焦面板的 body（冒烟 M3）。经典
             // 布局仍用终端区，末行留给模式条。
             let area = if self.workbench.enabled {
                 super::workbench::content_area(frame_width, frame_height)

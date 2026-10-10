@@ -4,8 +4,6 @@
 //! 侧栏、标签、标题栏计数、总览、通知全部按桶取字形、颜色与排序，不再各自映射。
 //! 借鉴 Paseo 的 `deriveAgentStateBucket`：需要输入不锁存（由当前状态实时推导），
 //! 失败锁存到用户看过为止，未知不等于空闲（不画指示、不参与汇总）。
-// 列表顺序、计数与汇总由会话侧栏、总览与标题栏计数（同一改版的后续提交）接入。
-#![allow(dead_code)]
 
 use crate::api::schema::AgentStatus;
 
@@ -53,6 +51,19 @@ impl AgentBucket {
         }
     }
 
+    /// 按汇总优先级取最高的桶；空集合为 `None`。
+    pub fn rollup(buckets: impl IntoIterator<Item = AgentBucket>) -> Self {
+        buckets
+            .into_iter()
+            .max_by_key(|bucket| bucket.rollup_rank())
+            .unwrap_or(Self::None)
+    }
+}
+
+// 按状态分组的会话侧栏、总览与 API 标识（改版后续阶段）才用到；先与状态语义一起定义、
+// 由单测锁定，接入后删掉这条 allow。
+#[allow(dead_code)]
+impl AgentBucket {
     /// 列表顺序（按状态分组、总览）：数值越小越靠前。要你处理的排最前，待查看
     /// 排在运行中之前。
     pub fn listing_rank(self) -> u8 {
@@ -69,14 +80,6 @@ impl AgentBucket {
     /// 需要用户处理（下一个待处理、注意力计数）的桶。
     pub fn wants_attention(self) -> bool {
         matches!(self, Self::NeedsInput | Self::Failed | Self::Review)
-    }
-
-    /// 按汇总优先级取最高的桶；空集合为 `None`。
-    pub fn rollup(buckets: impl IntoIterator<Item = AgentBucket>) -> Self {
-        buckets
-            .into_iter()
-            .max_by_key(|bucket| bucket.rollup_rank())
-            .unwrap_or(Self::None)
     }
 
     /// 稳定的英文标识（API / 偏好里用）。
@@ -134,6 +137,8 @@ impl BucketCounts {
         }
     }
 
+    // 总览头部的合计（改版后续阶段）接入前只有单测使用；接入后删掉这条 allow。
+    #[allow(dead_code)]
     pub fn total(&self) -> usize {
         self.needs_input + self.failed + self.working + self.review + self.idle
     }

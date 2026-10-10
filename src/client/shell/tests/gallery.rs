@@ -17,10 +17,25 @@ const REVISION: u64 = 7;
 /// 画廊里打开某个浮层的动作。
 type OpenOverlay = fn(&mut ClientShellState);
 
-/// 一帧画廊输出：标题、尺寸与合成结果。
+/// 画廊场景在第一帧之后改的状态（终端组与命中区要先合成一帧才有）。
+type Prepare = fn(&mut ClientShellState);
+
+/// 一帧画廊输出：标题、合成结果与它所在的宿主终端配色。
 struct Shot {
     title: String,
     frame: FrameData,
+    host: Host,
+}
+
+impl Shot {
+    /// 深色宿主上的一帧（画廊默认）。
+    fn dark(title: String, frame: FrameData) -> Self {
+        Self {
+            title,
+            frame,
+            host: DARK_HOST,
+        }
+    }
 }
 
 /// 宿主终端的默认前景 / 背景（`Color::Reset` 落在这里）。
@@ -35,6 +50,13 @@ const DARK_HOST: Host = Host {
     bg: (0x0c, 0x0c, 0x0c),
 };
 
+/// 浅色宿主（浅色主题的画面画在它上面）。
+const LIGHT_HOST: Host = Host {
+    fg: (0x38, 0x3a, 0x42),
+    bg: (0xfa, 0xfa, 0xfa),
+};
+
+// 夹具构造：参数与画廊里各 agent 不同的字段一一对应，再包一层结构体只是搬运。
 #[allow(clippy::too_many_arguments)]
 fn agent(
     pane: &str,
@@ -304,12 +326,13 @@ fn gallery_snapshot() -> ClientShellSnapshot {
     snapshot
 }
 
-/// 模拟 agent 自己的 TUI 画面（真实画面由 server 渲染，这里只求有代表性）。
-fn paint_agent_screen(buffer: &mut Buffer, area: Rect, agent: Option<&str>) {
-    let dim = Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98));
-    let text = Style::default().fg(Color::Rgb(0xd8, 0xd8, 0xd8));
-    let accent = Style::default().fg(Color::Rgb(0xd9, 0x77, 0x57));
-    let green = Style::default().fg(Color::Rgb(0x6c, 0xc6, 0x7e));
+/// 模拟 agent 自己的 TUI 画面（真实画面由 server 渲染，这里只求有代表性）。颜色取主题
+/// 色板，深浅宿主都读得清。
+fn paint_agent_screen(buffer: &mut Buffer, area: Rect, agent: Option<&str>, palette: &Palette) {
+    let dim = Style::default().fg(palette.overlay1);
+    let text = Style::default().fg(palette.text);
+    let accent = Style::default().fg(palette.peach);
+    let green = Style::default().fg(palette.green);
     let lines: Vec<(Style, String)> = match agent {
         Some("claude") => vec![
             (accent, "✻ Welcome to Claude Code".into()),
@@ -386,8 +409,14 @@ fn paint_agent_screen(buffer: &mut Buffer, area: Rect, agent: Option<&str>) {
     }
 }
 
-/// 按视图规格合成一帧模拟的终端组画面：单窗格铺满；两个窗格左右拆分并画边框。
-fn mock_surface(spec: &ClientViewSpec, snapshot: &ClientShellSnapshot) -> PaneSurfaceFrame {
+/// 按视图规格合成一帧模拟的终端组画面：单窗格铺满；两个窗格左右拆分并画边框。边框
+/// 字形、颜色与标题和 server 同一口径（`ui.border_style`、窗格边框 token、agent 窗格
+/// 标题 ` ◆ 名称 ` 画静态状态字形）。
+fn mock_surface(
+    spec: &ClientViewSpec,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+) -> PaneSurfaceFrame {
     let area = Rect::new(0, 0, spec.cols, spec.rows);
     let mut buffer = Buffer::empty(area);
     let panes = snapshot
@@ -400,8 +429,8 @@ fn mock_surface(spec: &ClientViewSpec, snapshot: &ClientShellSnapshot) -> PaneSu
             .agents
             .iter()
             .find(|agent| agent.pane_id == pane_id)
-            .and_then(|agent| agent.agent.clone())
     };
+    let agent_name = |pane_id: &str| agent_of(pane_id).and_then(|agent| agent.agent.as_deref());
     let mut surface_panes = Vec::new();
     if panes.len() >= 2 {
         let left_width = spec.cols / 2;
@@ -410,27 +439,72 @@ fn mock_surface(spec: &ClientViewSpec, snapshot: &ClientShellSnapshot) -> PaneSu
             Rect::new(left_width, 0, spec.cols - left_width, spec.rows),
         ];
         for (pane, rect) in panes.iter().take(2).zip(rects) {
-            let border = Style::default().fg(if pane.focused {
-                Color::Rgb(0x89, 0xb4, 0xfa)
+            let color = if pane.focused {
+                config.components.pane_border_focused
             } else {
-                Color::Rgb(0x45, 0x47, 0x5a)
-            });
+                config.components.pane_border_unfocused
+            };
             ratatui::widgets::Widget::render(
-                ratatui::widgets::Block::bordered().border_style(border),
+                ratatui::widgets::Block::bordered()
+                    .border_set(config.border_glyphs.border_set())
+                    .border_style(Style::default().fg(color)),
                 rect,
                 &mut buffer,
             );
+            if let Some(agent) = agent_of(&pane.pane_id) {
+                let bucket = crate::client::shell::client_agent_bucket(agent);
+                let glyph = (bucket != crate::harness::AgentBucket::None).then(|| {
+                    (
+                        crate::ui::design::status_glyph(
+                            bucket,
+                            crate::config::StatusIndicatorStyle::Graphite,
+                            0,
+                            false,
+                        ),
+                        crate::ui::design::status_style(
+                            bucket,
+                            &config.palette,
+                            &config.components,
+                        ),
+                    )
+                });
+                let mut style = Style::default().fg(color);
+                if pane.focused {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                crate::ui::paint_pane_title(
+                    &mut buffer,
+                    (
+                        rect.x + crate::ui::PANE_TITLE_INSET,
+                        rect.right().saturating_sub(1),
+                        rect.y,
+                    ),
+                    glyph,
+                    &format!(" {} ", agent.agent.as_deref().unwrap_or_default()),
+                    style,
+                );
+            }
             let inner = Rect::new(
                 rect.x + 1,
                 rect.y + 1,
                 rect.width.saturating_sub(2),
                 rect.height.saturating_sub(2),
             );
-            paint_agent_screen(&mut buffer, inner, agent_of(&pane.pane_id).as_deref());
+            paint_agent_screen(
+                &mut buffer,
+                inner,
+                agent_name(&pane.pane_id),
+                &config.palette,
+            );
             surface_panes.push(surface_pane(&pane.pane_id, rect, inner, pane.focused));
         }
     } else if let Some(pane) = panes.first() {
-        paint_agent_screen(&mut buffer, area, agent_of(&pane.pane_id).as_deref());
+        paint_agent_screen(
+            &mut buffer,
+            area,
+            agent_name(&pane.pane_id),
+            &config.palette,
+        );
         surface_panes.push(surface_pane(&pane.pane_id, area, area, pane.focused));
     }
     PaneSurfaceFrame {
@@ -502,12 +576,13 @@ fn shoot_workbench(
     state.workbench.acknowledged = state.workbench.revision;
     let snapshot = state.snapshot.as_deref().cloned().expect("snapshot");
     for spec in state.workbench.requested.clone() {
+        let surface = mock_surface(&spec, &snapshot, &state.config);
         let view = crate::protocol::views::DecodedView {
             boot_id: snapshot.boot_id.clone(),
             views_revision: state.workbench.revision,
             view_id: spec.view_id.clone(),
             tab_id: spec.tab_id.clone(),
-            message: ServerMessage::PaneSurface(mock_surface(&spec, &snapshot)),
+            message: ServerMessage::PaneSurface(surface),
         };
         state.receive_view(GENERATION, view);
     }
@@ -533,7 +608,8 @@ fn shoot_classic(state: &mut ClientShellState, cols: u16, rows: u16) -> FrameDat
         rows: rows.saturating_sub(1),
         focused: true,
     };
-    state.set_pane_surface(mock_surface(&spec, &snapshot));
+    let surface = mock_surface(&spec, &snapshot, &state.config);
+    state.set_pane_surface(surface);
     state.compose(cols, rows).expect("经典布局帧").frame.clone()
 }
 
@@ -652,7 +728,7 @@ fn frame_html(frame: &FrameData, host: Host) -> String {
     html
 }
 
-fn page(shots: &[Shot], host: Host) -> String {
+fn page(shots: &[Shot]) -> String {
     let mut html = String::from(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>herdr ui gallery</title><style>\
          body{background:#2b2b2b;color:#ddd;font-family:system-ui,sans-serif;margin:16px}\
@@ -670,10 +746,10 @@ fn page(shots: &[Shot], host: Host) -> String {
             escape(&shot.title),
             shot.frame.width,
             shot.frame.height,
-            host.bg.0,
-            host.bg.1,
-            host.bg.2,
-            frame_html(&shot.frame, host)
+            shot.host.bg.0,
+            shot.host.bg.1,
+            shot.host.bg.2,
+            frame_html(&shot.frame, shot.host)
         );
     }
     html.push_str("</body></html>\n");
@@ -693,7 +769,7 @@ fn gallery_dir() -> std::path::PathBuf {
 fn write_shots(name: &str, shots: &[Shot]) {
     let dir = gallery_dir();
     std::fs::create_dir_all(&dir).expect("gallery dir");
-    std::fs::write(dir.join(format!("{name}.html")), page(shots, DARK_HOST)).expect("gallery html");
+    std::fs::write(dir.join(format!("{name}.html")), page(shots)).expect("gallery html");
     for shot in shots {
         let text = frame_rows(&shot.frame).join("\n");
         let file = shot
@@ -704,15 +780,29 @@ fn write_shots(name: &str, shots: &[Shot]) {
         std::fs::write(dir.join(format!("{name}-{file}.txt")), text).expect("gallery text");
         std::fs::write(
             dir.join(format!("{name}-{file}.html")),
-            page(std::slice::from_ref(shot), DARK_HOST),
+            page(std::slice::from_ref(shot)),
         )
         .expect("gallery shot html");
     }
 }
 
+/// 先按尺寸合成一帧（建立终端组与命中区），再改状态、重新应答视图后合成。
+fn shoot_scene(
+    config: ClientShellConfig,
+    (cols, rows): (u16, u16),
+    prepare: Prepare,
+    step: &mut u64,
+) -> FrameData {
+    let mut state = workbench_state(config);
+    let _ = shoot_workbench(&mut state, cols, rows, step);
+    prepare(&mut state);
+    shoot_workbench(&mut state, cols, rows, step)
+}
+
 #[test]
 #[ignore = "manual visual gallery; run `just ui-gallery`"]
 fn ui_gallery() {
+    use crate::client::shell::dock::PanelId;
     let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
     let config = || ClientShellConfig::from_config(&Config::default());
 
@@ -728,13 +818,57 @@ fn ui_gallery() {
     ] {
         let mut state = workbench_state(config());
         let frame = shoot_workbench(&mut state, cols, rows, &mut step);
-        shots.push(Shot {
-            title: format!("workbench {cols}x{rows}"),
-            frame,
-        });
+        shots.push(Shot::dark(format!("workbench {cols}x{rows}"), frame));
     }
 
-    let overlays: [(&str, OpenOverlay); 5] = [
+    // 工作台的几种状态：停靠监控面板（多个面板头与关闭按钮）、调整布局、最大化、
+    // 紧凑视图（停靠监控面板后 60 列放不下）、前缀模式的状态栏。
+    let scenes: [(&str, (u16, u16), Prepare); 5] = [
+        ("monitor docked", (200, 50), |state| {
+            state.workbench_open(PanelId::Monitor);
+        }),
+        ("arrange", (160, 45), |state| {
+            state.workbench.arranging = true
+        }),
+        ("maximized", (160, 45), |state| {
+            let terminal = state
+                .workbench
+                .dock
+                .groups
+                .first()
+                .map(|group| PanelId::Terminal(group.id));
+            state.workbench.dock.maximized = terminal;
+        }),
+        ("compact", (60, 20), |state| {
+            state.workbench_open(PanelId::Monitor);
+        }),
+        ("prefix mode", (160, 45), |state| {
+            state.mode = ClientShellMode::Prefix;
+        }),
+    ];
+    for (name, size, prepare) in scenes {
+        let frame = shoot_scene(config(), size, prepare, &mut step);
+        shots.push(Shot::dark(format!("{name} {}x{}", size.0, size.1), frame));
+    }
+
+    // 菜单按「点入口」的方式打开（不预选首项）；锁定那一帧再把指针停在「锁定布局」上，
+    // 看勾选、置灰的复位与悬浮底色。
+    let overlays: [(&str, OpenOverlay); 8] = [
+        ("main menu", |state| {
+            state.toggle_global_menu();
+            state.release_catalog_selection();
+        }),
+        ("layout menu", |state| {
+            state.toggle_layout_menu();
+            state.release_catalog_selection();
+        }),
+        ("layout menu locked", |state| {
+            state.workbench.dock.locked = true;
+            state.toggle_layout_menu();
+            state.release_catalog_selection();
+            let lock = palette_row_index(state, "layout:lock");
+            state.set_palette_hover(Some(lock));
+        }),
         ("palette", |state| state.open_command_search()),
         ("navigator", |state| state.open_navigator_overlay()),
         ("settings", |state| state.open_settings_overlay()),
@@ -753,20 +887,42 @@ fn ui_gallery() {
         let _ = shoot_workbench(&mut state, 160, 45, &mut step);
         open(&mut state);
         let frame = state.compose(160, 45).expect("浮层帧").frame.clone();
+        shots.push(Shot::dark(format!("overlay {name}"), frame));
+    }
+
+    // 浅色主题：graphite-light 画在浅色宿主上。
+    let mut light = Config::default();
+    light.theme.name = Some("graphite-light".into());
+    let light_scenes: [(&str, (u16, u16), Prepare); 2] = [
+        ("graphite-light", (160, 45), |_| {}),
+        ("graphite-light monitor docked", (200, 50), |state| {
+            state.workbench_open(PanelId::Monitor);
+        }),
+    ];
+    for (name, size, prepare) in light_scenes {
+        let frame = shoot_scene(
+            ClientShellConfig::from_config(&light),
+            size,
+            prepare,
+            &mut step,
+        );
         shots.push(Shot {
-            title: format!("overlay {name}"),
+            title: format!("{name} {}x{}", size.0, size.1),
             frame,
+            host: LIGHT_HOST,
         });
     }
 
     for (cols, rows) in [(140, 40), (60, 24)] {
         let mut state = classic_state(config());
         let frame = shoot_classic(&mut state, cols, rows);
-        shots.push(Shot {
-            title: format!("classic {cols}x{rows}"),
-            frame,
-        });
+        shots.push(Shot::dark(format!("classic {cols}x{rows}"), frame));
     }
+    // 经典布局的模式条与工作台状态栏是同一个组件：前缀模式压在终端区最后一行。
+    let mut state = classic_state(config());
+    state.mode = ClientShellMode::Prefix;
+    let frame = shoot_classic(&mut state, 140, 40);
+    shots.push(Shot::dark("classic prefix 140x40".into(), frame));
 
     write_shots("gallery", &shots);
 }

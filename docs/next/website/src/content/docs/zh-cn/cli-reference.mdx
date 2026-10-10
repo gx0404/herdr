@@ -150,7 +150,7 @@ herdr broadcast send <text> [--no-enter] [--json]
 
 `send` 复用现有的逐端点 JSON API 通道（`pane.send-input`，默认按 Enter，`--no-enter` 关闭；Local 窗格走本地 API socket，机器窗格走保存机器的 SSH 桥），逐目标发送并回报各自结果；任一目标失败则退出码为 1。集合跨重启保留，脚本可以准备一次后反复驱动。
 
-同一集合也驱动界面内的广播：在 machines 页面按 `b` 或从命令面板的「广播输入…」进入，`g` 开关，`a` 从在线机器添加窗格。广播开启时 mode bar 常驻 `⇄ 广播 ×N` 徽标，你在焦点窗格中输入的所有内容都会扇出到已注册窗格（该窗格自身除外；鼠标输入绝不扇出）。详见[连接机器](/zh-cn/docs/connecting-machines/#输入广播)。
+同一集合也驱动界面内的广播：在 machines 页面按 `b` 或从命令面板的「广播输入…」进入，`g` 开关，`a` 从在线机器添加窗格。广播开启时状态栏（经典布局下是 mode bar）常驻 `⇄ 广播 ×N` 徽标，你在焦点窗格中输入的所有内容都会扇出到已注册窗格（该窗格自身除外；鼠标输入绝不扇出）。详见[连接机器](/zh-cn/docs/connecting-machines/#输入广播)。
 
 ## 代码片段（Snippets）
 

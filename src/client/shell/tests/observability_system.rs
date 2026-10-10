@@ -49,7 +49,7 @@ fn terminal_body(state: &ClientShellState) -> Rect {
         .panels
         .iter()
         .find(|(panel, _)| matches!(panel, PanelId::Terminal(_)))
-        .map(|(panel, area)| body(*area, panel))
+        .map(|(panel, area)| body(*area, panel, state.workbench.geometry.compact))
         .expect("终端面板在布局中")
 }
 

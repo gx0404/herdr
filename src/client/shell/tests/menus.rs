@@ -75,6 +75,7 @@ fn palette_items_are_expanded_from_the_action_table() {
             ActionId::CloseMonitor
                 | ActionId::ArrangeLayout
                 | ActionId::LockLayout
+                | ActionId::ResetLayout
                 | ActionId::WhatsNew
         );
         assert_eq!(listed, !hidden_here, "{:?}", spec.id);
@@ -1199,29 +1200,16 @@ fn workbench_state() -> ClientShellState {
     state
 }
 
-fn workbench_action_rect(
-    state: &ClientShellState,
-    wanted: fn(&super::super::workbench::interaction::Action) -> bool,
-) -> Rect {
-    state
-        .workbench
-        .hits
-        .iter()
-        .find(|(_, action)| wanted(action))
-        .map(|(rect, _)| *rect)
-        .expect("工作台命中区")
-}
-
-/// 工作台布局只保留顶栏「herdr ≡」一个主菜单入口：侧栏页脚不画「菜单」，也不画
-/// 点不了的「«」；点顶栏入口，目录菜单从入口下沿向下展开。
+/// 工作台布局只保留标题栏「≡ herdr」一个主菜单入口：侧栏页脚不画「菜单」，也不画
+/// 点不了的「«」；点标题栏入口，目录菜单从入口下沿向下展开。
 #[test]
 fn workbench_keeps_a_single_menu_entry_in_the_top_bar() {
     let mut state = workbench_state();
     let frame = state.compose(120, 40).expect("workbench frame");
     let rows = frame_rows(&frame);
     let launcher = state.hits.global_launcher;
-    assert_eq!(launcher.y, 0, "入口在顶栏：{launcher:?}");
-    assert!(compact(&rows[0]).contains("herdr≡"));
+    assert_eq!(launcher.y, 0, "入口在标题栏：{launcher:?}");
+    assert!(compact(&rows[0]).starts_with("≡herdr"), "{}", rows[0]);
     assert!(state.hits.sidebar_toggle.is_empty());
     let menu_label = compact(crate::i18n::texts().sidebar.menu);
     for row in &rows[1..] {
@@ -1243,7 +1231,7 @@ fn workbench_keeps_a_single_menu_entry_in_the_top_bar() {
         super::super::command_palette::BrowserView::Menu(None)
     );
     let popup = catalog_area(&state);
-    assert_eq!(popup.y, launcher.bottom(), "下拉菜单贴着顶栏入口展开");
+    assert_eq!(popup.y, launcher.bottom(), "下拉菜单贴着标题栏入口展开");
     assert_eq!(popup.x, launcher.x);
 }
 
@@ -1306,56 +1294,247 @@ fn footer_menu_slot_steps_aside_for_the_toggle_on_the_same_row() {
     );
 }
 
-/// 顶栏「布局」改名「调整布局」：点它进入模式（按钮反色），页脚换成状态标签 +
-/// 键位提示条，「Esc 完成」可点退出；「锁定布局」是勾选态，不再换「解锁」文案。
+/// 在标题栏 `⋯` 上按下左键，打开布局菜单，返回菜单矩形。
+fn open_layout_menu(state: &mut ClientShellState, cols: u16, rows: u16) -> Rect {
+    state.compose(cols, rows).expect("workbench frame");
+    let menu = state.hits.title_menu;
+    assert!(!menu.is_empty(), "{cols} 列：标题栏有 ⋯");
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        menu.x + 1,
+        menu.y,
+    )]);
+    state.compose(cols, rows).expect("layout menu frame");
+    assert_eq!(
+        palette_overlay(state).view,
+        super::super::command_palette::BrowserView::Layout,
+        "{cols} 列：点 ⋯ 打开布局菜单"
+    );
+    catalog_area(state)
+}
+
+/// 点布局菜单里写着 `label` 的那一行。
+fn click_menu_label(state: &mut ClientShellState, area: Rect, label: &str) {
+    let (x, y) = label_cell(state, area, label);
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        x,
+        y,
+    )]);
+}
+
+/// 标题栏 `⋯` 打开布局菜单：监控、调整布局（勾选态）、锁定布局（勾选态）、复位布局，
+/// 贴着 `⋯` 下沿展开、不越出屏幕；条目与主菜单 / 命令搜索里是同一批动作。
 #[test]
-fn arrange_layout_button_enters_the_mode_with_footer_hints() {
+fn layout_menu_lists_monitor_arrange_lock_and_reset_under_the_ellipsis() {
+    let mut state = workbench_state();
+    state.config.mouse_capture = true;
+    let t = &crate::i18n::texts().menu;
+    let area = open_layout_menu(&mut state, 120, 40);
+    let menu = state.hits.title_menu;
+    assert_eq!(area.y, menu.bottom(), "菜单贴着 ⋯ 向下展开");
+    assert!(area.right() <= 120, "菜单不越出屏幕：{area:?}");
+    let rows = catalog_text(&state);
+    let text = rows.iter().map(|row| compact(row)).collect::<Vec<_>>();
+    let position = |label: &str| {
+        text.iter()
+            .position(|row| row.contains(&compact(label)))
+            .unwrap_or_else(|| panic!("布局菜单缺「{label}」：{text:?}"))
+    };
+    let order = [
+        position(t.monitor_short),
+        position(t.arrange_layout),
+        position(t.lock_layout),
+        position(t.reset_layout),
+    ];
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text:?}");
+    assert!(
+        !text.iter().any(|row| row.contains('✓')),
+        "未锁定、未调整布局时没有勾：{text:?}"
+    );
+    // 与主菜单一样标签贴左：边框、1 列内边距之后就是标签（没有项打勾时不让出勾选列）。
+    for label in [
+        t.monitor_short,
+        t.arrange_layout,
+        t.lock_layout,
+        t.reset_layout,
+    ] {
+        assert_eq!(
+            label_cell(&state, area, label).0,
+            area.x + 2,
+            "「{label}」贴左"
+        );
+    }
+    // 同一批动作仍在命令搜索里（入口只是多了一个）。
+    state.open_command_search();
+    for id in [
+        "observation:monitor",
+        "layout",
+        "layout:lock",
+        "layout:reset",
+    ] {
+        palette_row_index(&state, id);
+    }
+}
+
+/// 布局菜单的四个动作：监控打开监控面板；调整布局与锁定布局是二态开关（菜单里打勾）；
+/// 再点一次关掉；点 `⋯` 本身再次点击收起菜单。
+#[test]
+fn layout_menu_items_toggle_arrange_and_lock_and_open_the_monitor() {
+    let t = &crate::i18n::texts().menu;
+    let mut state = workbench_state();
+    state.config.mouse_capture = true;
+    let area = open_layout_menu(&mut state, 120, 40);
+    click_menu_label(&mut state, area, t.arrange_layout);
+    assert!(state.workbench.arranging, "调整布局进入模式");
+    assert!(state.overlay.is_none(), "选中后菜单收起");
+
+    let area = open_layout_menu(&mut state, 120, 40);
+    let arrange = menu_row_with(&state, area, t.arrange_layout);
+    assert!(
+        row_cells(&state, area, arrange)
+            .iter()
+            .any(|cell| cell == "✓"),
+        "调整布局开着时打勾"
+    );
+    click_menu_label(&mut state, area, t.lock_layout);
+    assert!(state.workbench.dock.locked, "锁定布局");
+    let area = open_layout_menu(&mut state, 120, 40);
+    let lock = menu_row_with(&state, area, t.lock_layout);
+    assert!(
+        row_cells(&state, area, lock).iter().any(|cell| cell == "✓"),
+        "锁定时打勾"
+    );
+    // 有项打勾时才让出勾选列：✓ 紧跟内边距，标签整体让出两列、仍然对齐。
+    assert_eq!(row_cells(&state, area, lock)[2], "✓");
+    for label in [t.lock_layout, t.reset_layout] {
+        assert_eq!(label_cell(&state, area, label).0, area.x + 4, "「{label}」");
+    }
+    click_menu_label(&mut state, area, t.arrange_layout);
+    assert!(!state.workbench.arranging, "再选一次退出调整布局");
+
+    let area = open_layout_menu(&mut state, 120, 40);
+    click_menu_label(&mut state, area, t.monitor_short);
+    assert!(
+        state
+            .workbench
+            .dock
+            .root
+            .contains(&super::super::dock::PanelId::Monitor),
+        "监控打开监控面板"
+    );
+
+    // 菜单开着时再点 ⋯：收起。
+    open_layout_menu(&mut state, 120, 40);
+    let menu = state.hits.title_menu;
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        menu.x + 1,
+        menu.y,
+    )]);
+    assert!(state.overlay.is_none(), "再点 ⋯ 收起菜单");
+}
+
+/// 点入口打开的下拉菜单（`⋯` 布局菜单与「≡ herdr」主菜单同一口径）不预选首项：按方向
+/// 键之前没有反色的选中行，回车不替用户挑一项；方向键从首项开始。键盘打开（与
+/// `prefix+Space` 同一入口）照旧选中首项。
+#[test]
+fn pointer_opened_menus_start_without_a_keyboard_selection() {
+    use crossterm::event::KeyCode;
+    let t = &crate::i18n::texts().menu;
+    let mut state = workbench_state();
+    state.config.mouse_capture = true;
+    let selected_rows = |state: &ClientShellState, area: Rect| {
+        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
+        (area.y + 1..area.bottom().saturating_sub(1))
+            .filter(|y| buffer[(area.x + 2, *y)].bg == state.config.palette.accent)
+            .collect::<Vec<_>>()
+    };
+
+    let area = open_layout_menu(&mut state, 120, 40);
+    assert!(
+        selected_rows(&state, area).is_empty(),
+        "点开时没有反色的选中行"
+    );
+    state.handle_raw_events(vec![key_event(KeyCode::Enter)]);
+    assert!(state.overlay.is_some(), "没有选中行时回车不激活任何项");
+    assert!(!state.workbench.arranging && !state.workbench.dock.locked);
+    state.handle_raw_events(vec![key_event(KeyCode::Down)]);
+    state.compose(120, 40).expect("方向键之后");
+    let monitor = menu_row_with(&state, area, t.monitor_short);
+    assert_eq!(
+        selected_rows(&state, area),
+        vec![monitor],
+        "方向键从首项开始"
+    );
+
+    // 主菜单入口同一口径。
+    state.close_command_browser();
+    state.compose(120, 40).expect("关掉菜单");
+    let launcher = state.hits.global_launcher;
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        launcher.x + 1,
+        launcher.y,
+    )]);
+    state.compose(120, 40).expect("主菜单");
+    assert!(selected_rows(&state, catalog_area(&state)).is_empty());
+
+    // 键盘打开照旧选中首项。
+    state.close_command_browser();
+    state.compose(120, 40).expect("关掉菜单");
+    state.toggle_layout_menu();
+    state.compose(120, 40).expect("键盘打开的布局菜单");
+    let area = catalog_area(&state);
+    assert_eq!(
+        selected_rows(&state, area),
+        vec![menu_row_with(&state, area, t.monitor_short)]
+    );
+}
+
+/// 调整布局模式：标题栏右侧出现 accent 反色的「调整布局」标记（点它退出），状态栏
+/// 换成调整布局标签 + 键位提示，「Esc 完成」可点退出。
+#[test]
+fn arrange_mode_shows_the_title_chip_and_status_hints() {
     use super::super::workbench::interaction::Action;
     let mut state = workbench_state();
     state.config.mouse_capture = true;
     let t = &crate::i18n::texts().menu;
-    let frame = state.compose(120, 40).expect("workbench frame");
-    let top = compact(&frame_rows(&frame)[0]);
-    assert!(top.contains(&compact(t.arrange_layout)), "{top}");
+    let rows = frame_rows(&state.compose(120, 40).expect("workbench frame"));
     assert!(
-        top.contains(&compact(t.lock_layout)) && !top.contains('✓'),
-        "{top}"
+        !compact(&rows[0]).contains(&compact(t.arrange_chip)),
+        "不在调整布局时标题栏没有标记：{}",
+        rows[0]
     );
-
-    let arrange = workbench_action_rect(&state, |action| matches!(action, Action::Arrange));
-    let mut outcome = ClientShellInput::default();
-    assert!(state.workbench_mouse(
-        MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: arrange.x + 1,
-            row: arrange.y,
-            modifiers: KeyModifiers::empty(),
-        },
-        &mut outcome,
-    ));
-    assert!(state.workbench.arranging);
+    state.workbench.arranging = true;
     state.workbench.dock.locked = true;
-    let frame = state.compose(120, 40).expect("arranging frame");
-    let rows = frame_rows(&frame);
-    assert!(compact(&rows[0]).contains(&format!("✓{}", compact(t.lock_layout))));
+    let rows = frame_rows(&state.compose(120, 40).expect("arranging frame"));
+    assert!(
+        compact(&rows[0]).contains(&compact(t.arrange_chip)),
+        "{}",
+        rows[0]
+    );
+    let chip = state.hits.title_arrange;
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    assert_eq!(
+        buffer[(chip.x + 1, chip.y)].style().bg,
+        Some(state.config.palette.accent),
+        "标记 accent 反色"
+    );
     let footer = compact(&rows[39]);
     for label in [
-        t.arrange_hint,
+        crate::i18n::texts().mode_bar.arrange,
         t.arrange_focus,
         t.arrange_resize,
         t.arrange_maximize,
         t.arrange_done,
     ] {
-        assert!(footer.contains(&compact(label)), "页脚缺 {label}：{footer}");
+        assert!(
+            footer.contains(&compact(label)),
+            "状态栏缺 {label}：{footer}"
+        );
     }
-    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
-    let arrange = workbench_action_rect(&state, |action| matches!(action, Action::Arrange));
-    assert_eq!(
-        buffer[(arrange.x, arrange.y)].style().bg,
-        Some(state.config.palette.accent),
-        "模式开着时按钮反色"
-    );
-    // 页脚「Esc 完成」可点：退出调整布局。
+    // 状态栏「Esc 完成」可点：退出调整布局。
     let done = state
         .workbench
         .hits
@@ -1363,7 +1542,8 @@ fn arrange_layout_button_enters_the_mode_with_footer_hints() {
         .filter(|(_, action)| matches!(action, Action::Arrange))
         .map(|(rect, _)| *rect)
         .find(|rect| rect.y == 39)
-        .expect("页脚完成命中区");
+        .expect("状态栏完成命中区");
+    let mut outcome = ClientShellInput::default();
     assert!(state.workbench_mouse(
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1374,121 +1554,260 @@ fn arrange_layout_button_enters_the_mode_with_footer_hints() {
         &mut outcome,
     ));
     assert!(!state.workbench.arranging);
-}
-
-/// 冒烟 B3：英文调整布局模式下顶栏整排 58 列（herdr ≡ / Monitor / Arrange
-/// layout / Lock layout / Reset，按钮间 1 列）。以前按剩余宽度硬截，窄于
-/// 58 列时「 Reset 」被截成「 Res」这类半个按钮。改为整项丢弃：监控、锁定
-/// 布局、调整布局在主菜单与命令搜索里都有对应条目，先丢；复位只有顶栏这一
-/// 个入口，保留到它们之后。
-#[test]
-fn narrow_english_top_bar_drops_whole_buttons_and_keeps_reset() {
-    use super::super::workbench::interaction::Action;
-    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
-    let mut state = workbench_state();
-    state.config.mouse_capture = true;
+    // 标题栏标记同样可点退出。
     state.workbench.arranging = true;
-    let t = &crate::i18n::texts().menu;
-    let full = [
-        " herdr ≡ ".to_owned(),
-        format!(" {} ", t.monitor_short),
-        format!(" {} ", t.arrange_layout),
-        format!(" {} ", t.lock_layout),
-        " Reset ".to_owned(),
-    ];
-    for (cols, expected) in [
-        (58, vec![0, 1, 2, 3, 4]),
-        (55, vec![0, 2, 3, 4]),
-        (40, vec![0, 2, 4]),
-        (20, vec![0, 4]),
-    ] {
-        let frame = state.compose(cols, 32).expect("workbench frame");
-        let top: Vec<char> = frame_rows(&frame)[0].chars().collect();
-        let buttons: Vec<String> = state
-            .workbench
-            .hits
-            .iter()
-            .filter(|(rect, _)| rect.y == 0)
-            .map(|(rect, _)| {
-                assert!(rect.right() <= cols, "{cols} 列：按钮越出屏幕 {rect:?}");
-                top[usize::from(rect.x)..usize::from(rect.right())]
-                    .iter()
-                    .collect()
-            })
-            .collect();
-        let expected: Vec<String> = expected.iter().map(|&index| full[index].clone()).collect();
-        assert_eq!(buttons, expected, "{cols} 列：顶栏只画完整按钮");
-    }
-
-    // 最窄时复位仍可点：点它恢复默认布局。
-    state.workbench.dock.maximized = Some(super::super::dock::PanelId::Workspaces);
-    state.compose(20, 32).expect("narrow frame");
-    let reset = workbench_action_rect(&state, |action| matches!(action, Action::Reset));
+    state.compose(120, 40).expect("arranging frame");
+    let chip = state.hits.title_arrange;
     let mut outcome = ClientShellInput::default();
     assert!(state.workbench_mouse(
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: reset.x + 1,
-            row: reset.y,
+            column: chip.x + 1,
+            row: chip.y,
             modifiers: KeyModifiers::empty(),
         },
         &mut outcome,
     ));
+    assert!(!state.workbench.arranging, "点标题栏标记退出调整布局");
+    assert!(
+        state.preferences_dirty_since.is_none(),
+        "进出调整布局不写偏好"
+    );
+}
+
+/// 带三种状态 agent 的工作台：标题栏有三个注意力计数。
+fn workbench_with_agents() -> ClientShellState {
+    let mut state = workbench_state();
+    let mut projected = snapshot();
+    let agent =
+        |pane: &str, status: AgentStatus, focused: bool| crate::protocol::ClientShellAgent {
+            pane_id: pane.into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            name: Some("claude".into()),
+            display_agent: Some("claude".into()),
+            agent: Some("claude".into()),
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: status,
+            state_change_seq: 1,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused,
+            launch_seq: 1,
+            activity: Default::default(),
+            insight: Default::default(),
+        };
+    // 客户端只把「看着它从运行中结束」的 agent 投影成待查看：先运行、再完成。
+    for (done, seq) in [(AgentStatus::Working, 1), (AgentStatus::Done, 2)] {
+        let mut finished = agent("pane_9", done, false);
+        finished.state_change_seq = seq;
+        projected.agents = vec![
+            agent("pane_1", AgentStatus::Blocked, true),
+            agent("pane_8", AgentStatus::Working, false),
+            finished,
+        ];
+        state.set_snapshot(Box::new(projected.clone()));
+    }
+    state
+}
+
+/// 标题栏的可点项（`(动作种类, 矩形)`，从左到右），都不越出屏幕。
+fn title_items(state: &ClientShellState, cols: u16) -> Vec<(&'static str, Rect)> {
+    use super::super::workbench::interaction::Action;
+    let mut items = state
+        .workbench
+        .hits
+        .iter()
+        .filter(|(rect, _)| rect.y == 0)
+        .map(|(rect, action)| {
+            assert!(rect.right() <= cols, "{cols} 列：标题栏项越出屏幕 {rect:?}");
+            let kind = match action {
+                Action::Menu => "menu",
+                Action::Arrange => "arrange",
+                Action::Attention => "chip",
+                Action::CommandSearch => "command",
+                Action::LayoutMenu => "layout",
+                _ => "other",
+            };
+            (kind, *rect)
+        })
+        .collect::<Vec<_>>();
+    items.sort_by_key(|(_, rect)| rect.x);
+    items
+}
+
+/// 冒烟 B3 的新形态：标题栏放不下时按固定顺序整项让位——先丢命令提示，再截断、
+/// 隐藏面包屑，计数收成优先级最高的一个，再丢「调整布局」标记与计数，最后入口收成
+/// 「≡」；入口与 `⋯` 始终在，最窄时布局菜单里的复位照样可点。
+#[test]
+fn narrow_title_bar_drops_items_in_order_and_keeps_the_menu() {
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = workbench_with_agents();
+    state.config.mouse_capture = true;
+    state.workbench.arranging = true;
+    let kinds = |state: &mut ClientShellState, cols: u16| {
+        state.compose(cols, 32).expect("workbench frame");
+        title_items(state, cols)
+            .into_iter()
+            .map(|(kind, _)| kind)
+            .collect::<Vec<_>>()
+    };
+    let wide = kinds(&mut state, 160);
+    assert_eq!(
+        wide,
+        vec!["menu", "arrange", "chip", "chip", "chip", "command", "layout"],
+        "宽屏：全部画出"
+    );
+    let rows = frame_rows(&state.compose(160, 32).expect("wide frame"));
+    assert!(
+        rows[0].contains("client-shell / 1 · "),
+        "面包屑：{}",
+        rows[0]
+    );
+    assert!(rows[0].contains("claude"), "聚焦窗格是 agent：{}", rows[0]);
+    // 逐列收窄，各项按降级顺序消失，且一旦消失不再回来。
+    let mut seen_drop = Vec::new();
+    for cols in (8..160).rev() {
+        let now = kinds(&mut state, cols);
+        assert_eq!(now.first(), Some(&"menu"), "{cols} 列：入口始终在");
+        if cols >= 7 {
+            assert_eq!(now.last(), Some(&"layout"), "{cols} 列：⋯ 始终在");
+        }
+        for kind in ["command", "arrange", "chip"] {
+            if !now.contains(&kind) && !seen_drop.contains(&kind) {
+                seen_drop.push(kind);
+            }
+        }
+        let chips = now.iter().filter(|kind| **kind == "chip").count();
+        assert!(
+            !now.contains(&"command") || chips == 3,
+            "{cols} 列：计数收起之前先丢命令提示"
+        );
+    }
+    assert_eq!(seen_drop, vec!["command", "arrange", "chip"], "降级顺序");
+    // 计数收成一个时留的是优先级最高的「需要输入」。
+    let single = (8..160)
+        .find(|cols| {
+            let now = kinds(&mut state, *cols);
+            now.iter().filter(|kind| **kind == "chip").count() == 1
+        })
+        .expect("某个宽度只剩一个计数");
+    kinds(&mut state, single);
+    assert_eq!(
+        state
+            .hits
+            .title_chips
+            .iter()
+            .map(|(_, bucket)| *bucket)
+            .collect::<Vec<_>>(),
+        vec![crate::harness::AgentBucket::NeedsInput]
+    );
+    // 最窄：入口收成「≡」。
+    state.compose(9, 32).expect("tiny frame");
+    let launcher = state.hits.global_launcher;
+    assert_eq!(launcher.width, 3, "入口收成「≡」");
+    // 最窄时布局菜单里的复位仍可点：恢复默认布局。
+    state.workbench.dock.maximized = Some(super::super::dock::PanelId::Workspaces);
+    let area = open_layout_menu(&mut state, 24, 32);
+    click_menu_label(&mut state, area, crate::i18n::texts().menu.reset_layout);
     assert_eq!(state.workbench.dock.maximized, None, "复位恢复默认布局");
 }
 
-/// 同一规则按显示宽度算：中文顶栏整排 45 列（汉字各占 2 列），窄时同样
-/// 整项丢弃，留下的按钮命中区都是完整文案宽度。
+/// 同一规则按显示宽度算：中文的「调整布局」标记（汉字各占 2 列）、计数与命令提示的
+/// 命中区都是完整文案宽度，不被截半个字。
 #[test]
-fn narrow_chinese_top_bar_measures_buttons_by_display_width() {
-    use super::super::workbench::interaction::Action;
+fn chinese_title_bar_items_are_measured_by_display_width() {
     use unicode_width::UnicodeWidthStr;
     let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
-    let mut state = workbench_state();
+    let mut state = workbench_with_agents();
     state.workbench.arranging = true;
-    let t = &crate::i18n::texts().menu;
-    let labels = [
-        " herdr ≡ ".to_owned(),
-        format!(" {} ", t.monitor_short),
-        format!(" {} ", t.arrange_layout),
-        format!(" {} ", t.lock_layout),
-        " 复位 ".to_owned(),
-    ];
-    let rank = |action: &Action| match action {
-        Action::Menu => 0,
-        Action::Open(_) => 1,
-        Action::Arrange => 2,
-        Action::Lock => 3,
-        Action::Reset => 4,
-        _ => usize::MAX,
-    };
-    for (cols, expected) in [
-        (45, vec![0, 1, 2, 3, 4]),
-        (44, vec![0, 2, 3, 4]),
-        (30, vec![0, 2, 4]),
-    ] {
+    for cols in [160, 60, 44, 30] {
         state.compose(cols, 32).expect("workbench frame");
-        let top: Vec<(Rect, usize)> = state
-            .workbench
-            .hits
-            .iter()
-            .filter(|(rect, _)| rect.y == 0)
-            .map(|(rect, action)| (*rect, rank(action)))
-            .collect();
-        assert_eq!(
-            top.iter().map(|(_, index)| *index).collect::<Vec<_>>(),
-            expected,
-            "{cols} 列"
-        );
-        for (rect, index) in top {
-            assert_eq!(
-                usize::from(rect.width),
-                labels[index].width(),
-                "{cols} 列：{} 不该被截",
-                labels[index]
+        let arrange = state.hits.title_arrange;
+        if !arrange.is_empty() {
+            let label = format!(" {} ", crate::i18n::texts().menu.arrange_chip);
+            assert_eq!(usize::from(arrange.width), label.width(), "{cols} 列");
+            let cells = row_cells(&state, arrange, arrange.y).concat();
+            assert_eq!(compact(&cells), compact(&label), "{cols} 列：标记完整画出");
+        }
+        for (rect, _) in &state.hits.title_chips {
+            let cells = compact(&row_cells(&state, *rect, rect.y).concat());
+            assert!(
+                cells.chars().last().is_some_and(|ch| ch.is_ascii_digit()),
+                "{cols} 列：计数完整：{cells}"
             );
         }
+        title_items(&state, cols);
     }
+}
+
+/// 注意力计数：按「需要输入 > 失败 > 运行中 > 待查看」排，零计数与空闲不画；点任何一个
+/// 打开 agent 导航浮层。
+#[test]
+fn attention_chips_count_agents_by_bucket_and_open_the_navigator() {
+    let mut state = workbench_with_agents();
+    state.config.mouse_capture = true;
+    state.compose(160, 40).expect("workbench frame");
+    let chips = state
+        .hits
+        .title_chips
+        .iter()
+        .map(|(rect, bucket)| (*bucket, compact(&row_cells(&state, *rect, rect.y).concat())))
+        .collect::<Vec<_>>();
+    use crate::harness::AgentBucket;
+    assert_eq!(
+        chips.iter().map(|(bucket, _)| *bucket).collect::<Vec<_>>(),
+        vec![
+            AgentBucket::NeedsInput,
+            AgentBucket::Working,
+            AgentBucket::Review
+        ]
+    );
+    assert_eq!(chips[0].1, "◆1");
+    assert_eq!(chips[2].1, "●1");
+    let (rect, _) = state.hits.title_chips[1];
+    let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
+    assert_eq!(
+        buffer[(rect.x + 1, rect.y)].fg,
+        state.config.components.status_running,
+        "运行中计数用运行色"
+    );
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        rect.x + 1,
+        rect.y,
+    )]);
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::Navigator(_))),
+        "点计数打开 agent 导航"
+    );
+}
+
+/// 命令搜索提示：放大镜 + 实际配置的按键序列（前缀 + 键）；点它打开命令搜索。
+#[test]
+fn command_hint_spells_the_configured_keys_and_opens_command_search() {
+    let mut state = workbench_state();
+    state.config.mouse_capture = true;
+    let rows = frame_rows(&state.compose(160, 40).expect("workbench frame"));
+    let hint = state.hits.title_command;
+    assert!(!hint.is_empty());
+    let text: String = rows[0]
+        .chars()
+        .skip(usize::from(hint.x))
+        .take(usize::from(hint.width))
+        .collect();
+    assert_eq!(text.trim(), "⌕  ctrl+b /", "{text:?}");
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        hint.x + 1,
+        hint.y,
+    )]);
+    assert_eq!(
+        palette_overlay(&state).view,
+        super::super::command_palette::BrowserView::Search
+    );
 }
 
 /// 文档终审 D8：命令面板 / 主菜单里「监控」条目括注的页签，与监控面板上的

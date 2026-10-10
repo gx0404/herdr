@@ -13,4 +13,4 @@ pub mod text;
 pub mod time;
 pub mod tool_display;
 
-pub use bucket::AgentBucket;
+pub use bucket::{AgentBucket, BucketCounts};

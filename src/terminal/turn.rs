@@ -223,6 +223,11 @@ impl TurnTracker {
         self.announced_agent = None;
     }
 
+    /// 有锁存的失败（不论是否已通知）。字段读取、不分配。
+    pub(crate) fn has_failure(&self) -> bool {
+        self.failed_attention.is_some()
+    }
+
     /// agent 被释放：与它绑定的待处理事项一并作废。
     pub(crate) fn forget_agent(&mut self) {
         let failure = self.failed_attention.take().is_some();

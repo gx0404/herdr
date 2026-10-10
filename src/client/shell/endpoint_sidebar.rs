@@ -282,7 +282,11 @@ pub(super) fn render_collapsed(
                 rect.x.saturating_add(number_width),
                 rect.y,
                 rect.width.saturating_sub(number_width),
-                status_icon(workspace.agent_status, config.status_indicators),
+                if stale {
+                    status_icon(workspace.agent_status, config.status_indicators)
+                } else {
+                    state.status_glyphs.status(workspace.agent_status)
+                },
                 Style::default()
                     .fg(if stale {
                         palette.overlay0
@@ -324,6 +328,7 @@ pub(super) fn render_collapsed(
         detail_content,
         state.federated_agent_rows,
         config,
+        state.status_glyphs,
         *state.agent_scroll,
         state.chrome_hover,
         hits,
@@ -653,7 +658,11 @@ pub(super) fn render_expanded_regions(
                     buffer,
                     nested,
                     status,
-                    config.status_indicators,
+                    if endpoint.status == ClientEndpointStatus::Online {
+                        state.status_glyphs
+                    } else {
+                        StatusGlyphs::fixed(config.status_indicators)
+                    },
                     entry,
                     tokens,
                     endpoint_active && workspace.focused,
@@ -704,7 +713,7 @@ pub(super) fn render_expanded_regions(
     }
 
     let footer_y = workspace_area.bottom().saturating_sub(1);
-    // 工作台布局（`regions` 由停靠面板给出）：主菜单入口只留顶栏「herdr ≡」，
+    // 工作台布局（`regions` 由停靠面板给出）：主菜单入口只留标题栏「≡ herdr」，
     // 工作区面板不能收起，页脚既不画「菜单」也不画「«」。经典布局两者都画。
     let workbench = regions.is_some();
     let toggle = sidebar_toggle_rect(area, workbench);
@@ -762,6 +771,7 @@ pub(super) fn render_expanded_regions(
         active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
         state.federated_agent_rows,
         config,
+        state.status_glyphs,
         state.agent_scroll,
         state.chrome_hover,
         hits,

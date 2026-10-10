@@ -57,6 +57,24 @@ pub(super) enum ClientPaletteAction {
 pub(super) enum BrowserView {
     Menu(Option<usize>),
     Search,
+    /// 标题栏 `⋯` 的布局菜单：只列 [`LAYOUT_MENU`] 里的动作，贴着 `⋯` 展开。
+    Layout,
+}
+
+/// `⋯` 布局菜单的条目（动作表声明顺序）。它们同时留在主菜单与命令搜索里，入口只是
+/// 多了一个。
+const LAYOUT_MENU: [ActionId; 4] = [
+    ActionId::Monitor,
+    ActionId::ArrangeLayout,
+    ActionId::LockLayout,
+    ActionId::ResetLayout,
+];
+
+fn layout_item(item: &ClientPaletteItem) -> bool {
+    matches!(
+        &item.action,
+        ClientPaletteAction::Run(id, ActionTarget::Focused) if LAYOUT_MENU.contains(id)
+    )
 }
 
 fn navigation(item: &ClientPaletteItem) -> bool {
@@ -83,7 +101,7 @@ pub(super) struct ClientCommandPaletteOverlay {
     /// 条目 id → 中英两种语言（含交替态）的标题，去重后逐个存放；搜索时
     /// 每个别名单独匹配（见 `ClientShellState::palette_aliases`）。
     pub(super) aliases: HashMap<String, Vec<String>>,
-    /// 打开时入口（顶栏「herdr ≡」/ 侧栏「菜单」）所在的矩形：目录视图的下拉
+    /// 打开时入口（标题栏「≡ herdr」或 `⋯` / 侧栏「菜单」）所在的矩形：目录视图的下拉
     /// 菜单贴着它展开（入口在上半屏向下、在下半屏向上）；没有可见入口时居中。
     pub(super) anchor: Option<Rect>,
 }
@@ -303,7 +321,10 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
     if query.is_empty() {
         let mut rows = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        if !matches!(palette.view, BrowserView::Menu(Some(_))) {
+        if !matches!(
+            palette.view,
+            BrowserView::Menu(Some(_)) | BrowserView::Layout
+        ) {
             for id in palette.recent_ids.iter().take(PALETTE_RECENT_LIMIT) {
                 if let Some(item) = palette.items.iter().find(|item| {
                     &item.id == id
@@ -331,6 +352,7 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
                     (!navigation(item) && item.category == group)
                         || matches!(item.action, ClientPaletteAction::Back)
                 }
+                BrowserView::Layout => layout_item(item),
             };
             if show && seen.insert(item.id.as_str()) {
                 rows.push(ClientPaletteRow {
@@ -388,7 +410,8 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
 /// 目录视图：主菜单与分类子菜单（查询为空）走 kit::menu 画成下拉菜单；搜索
 /// 视图仍是带模糊高亮的列表页。
 fn is_catalog(palette: &ClientCommandPaletteOverlay) -> bool {
-    matches!(palette.view, BrowserView::Menu(_)) && palette.query.as_str().trim().is_empty()
+    matches!(palette.view, BrowserView::Menu(_) | BrowserView::Layout)
+        && palette.query.as_str().trim().is_empty()
 }
 
 /// 目录视图的 kit 条目，以及每条对应的 [`palette_rows`] 下标（标题与分隔线为
@@ -418,19 +441,29 @@ fn machine_item(item: &ClientPaletteItem) -> bool {
     item.group >= MACHINE_GROUP_BASE
 }
 
-fn catalog_item(item: &ClientPaletteItem) -> MenuItem<'_> {
-    let base = if matches!(item.action, ClientPaletteAction::Category(_)) {
-        MenuItem::submenu(&item.title)
-    } else {
-        MenuItem::action(&item.title)
+fn catalog_item(item: &ClientPaletteItem, view: BrowserView) -> MenuItem<'_> {
+    let base = match item.action {
+        ClientPaletteAction::Category(_) => MenuItem::submenu(&item.title),
+        // `⋯` 菜单本身就是「布局」上下文，用短标签（「监控」而不是「监控（系统 · …）」）。
+        ClientPaletteAction::Run(id, _) if view == BrowserView::Layout => {
+            MenuItem::action(action_spec(id).label_text(crate::i18n::texts(), false))
+        }
+        _ => MenuItem::action(&item.title),
     };
     // 右列只放快捷键：按机器铺开的条目的副标题是机器地址，改由分组标题给出。
     let shortcut =
         (!item.subtitle.is_empty() && !machine_item(item)).then_some(item.subtitle.as_str());
+    // `⋯` 布局菜单与主菜单一样标签贴左：只在确有一项打勾（调整布局开着、布局已锁定）
+    // 时才让出勾选列，免得两个开关项让四个短标签整体右移。
+    let checked = if view == BrowserView::Layout {
+        item.checked.filter(|checked| *checked)
+    } else {
+        item.checked
+    };
     MenuItem {
         shortcut,
         enabled: item.enabled,
-        checked: item.checked,
+        checked,
         danger: matches!(item.action, ClientPaletteAction::Run(id, _) if action_spec(id).danger),
         badge: item.badge,
         ..base
@@ -482,7 +515,7 @@ fn catalog_menu<'a>(
             menu.items.push(MenuItem::header(&row.item.subtitle));
             menu.ids.push(None);
         }
-        menu.items.push(catalog_item(row.item));
+        menu.items.push(catalog_item(row.item, palette.view));
         menu.ids.push(Some(index));
         previous = Some(row);
     }
@@ -776,15 +809,45 @@ impl ClientShellState {
     }
 
     pub(super) fn toggle_global_menu(&mut self) {
-        if matches!(self.overlay, Some(ClientShellOverlay::CommandPalette(_))) {
+        match self.overlay.as_ref() {
+            // 布局菜单开着时点主菜单入口：像桌面菜单栏一样换成主菜单。
+            Some(ClientShellOverlay::CommandPalette(palette))
+                if palette.view == BrowserView::Layout =>
+            {
+                self.open_command_browser(BrowserView::Menu(None));
+            }
+            Some(ClientShellOverlay::CommandPalette(_)) => self.close_command_browser(),
+            _ => self.open_command_browser(BrowserView::Menu(None)),
+        }
+    }
+
+    /// 标题栏 `⋯`：开关布局菜单。布局菜单开着时再点就关；开着别的浏览视图时换成
+    /// 布局菜单。
+    pub(super) fn toggle_layout_menu(&mut self) {
+        if matches!(
+            self.overlay.as_ref(),
+            Some(ClientShellOverlay::CommandPalette(palette)) if palette.view == BrowserView::Layout
+        ) {
             self.close_command_browser();
         } else {
-            self.open_command_browser(BrowserView::Menu(None));
+            self.open_command_browser(BrowserView::Layout);
         }
     }
 
     pub(super) fn open_command_search(&mut self) {
         self.open_command_browser(BrowserView::Search);
+    }
+
+    /// 指针点入口（标题栏「≡ herdr」/ `⋯`、侧栏「菜单」）打开的下拉菜单不预选首项：与
+    /// 桌面菜单一样，按方向键之前没有反色的选中行，指针悬浮只给弱底色；方向键从首项
+    /// （或末项）开始走，回车在没有选中时什么都不做。键盘（`prefix+Space`）打开时照旧
+    /// 选中首项。点击后菜单被关掉（再点一次入口）时什么都不做。
+    pub(super) fn release_catalog_selection(&mut self) {
+        if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
+            if is_catalog(palette) {
+                palette.selected = usize::MAX;
+            }
+        }
     }
 
     fn open_command_browser(&mut self, view: BrowserView) {
@@ -809,9 +872,16 @@ impl ClientShellState {
                 scroll: 0,
                 items: self.build_palette_items(),
                 recent_ids: self.palette_recent.clone(),
-                // 上一帧画出来的入口：顶栏「herdr ≡」或侧栏「菜单」。
-                anchor: (!self.hits.global_launcher.is_empty())
-                    .then_some(self.hits.global_launcher),
+                // 上一帧画出来的入口：布局菜单贴着标题栏的 `⋯`，其余贴着标题栏
+                // 「≡ herdr」或侧栏「菜单」。
+                anchor: {
+                    let entry = if view == BrowserView::Layout {
+                        self.hits.title_menu
+                    } else {
+                        self.hits.global_launcher
+                    };
+                    (!entry.is_empty()).then_some(entry)
+                },
             },
         ));
         if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut() {
@@ -983,6 +1053,11 @@ impl ClientShellState {
         }
         let (cols, rows) = self.last_composed_size?;
         let rows_data = palette_rows(palette);
+        if palette.selected >= rows_data.len() {
+            // 指针打开、还没按过方向键（`release_catalog_selection`）：没有选中行，
+            // 回车不替用户挑一项。
+            return None;
+        }
         let menu = catalog_menu(palette, &rows_data);
         let geometry = catalog_geometry(palette, &menu.items, Rect::new(0, 0, cols, rows));
         let selected_kit = menu.kit_index(palette.selected);
@@ -1180,6 +1255,7 @@ pub(crate) fn render_command_palette(
         BrowserView::Search => t.command_search,
         BrowserView::Menu(None) => t.main_menu,
         BrowserView::Menu(Some(group)) => t.categories[group],
+        BrowserView::Layout => crate::i18n::texts().menu.layout_menu,
     };
     // 标题、分节标题与空态离边框留 1 列（冒烟 L4），与搜索栏的「/」同列。
     let header = super::render::text_inset(layout.header);
@@ -1425,6 +1501,11 @@ impl ClientShellState {
             MouseEventKind::Down(MouseButton::Left) => {
                 if super::contains(self.hits.global_launcher, point) {
                     self.toggle_global_menu();
+                    self.release_catalog_selection();
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.title_menu, point) {
+                    self.toggle_layout_menu();
+                    self.release_catalog_selection();
                     outcome.repaint = true;
                 } else if let Some((_, index)) = row_hit {
                     // 点击是显式选择：与键盘一样改写 `selected`，再激活。

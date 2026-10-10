@@ -23,13 +23,44 @@ pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
 }
 
-fn pane_border_title(label: &str, pane_width: u16, _focused: bool) -> Option<String> {
+/// 边框标题从窗格左缘第 [`PANE_TITLE_INSET`] 列画起：左上角之后留 1 格边框线给工作台客户端
+/// 画 `⠿` 拖动把手，把手与标题之间始终隔着标题自带的前导空格。
+pub(crate) const PANE_TITLE_INSET: u16 = 2;
+
+/// 边框标题文字 ` 标签 `（左右各一格）。`glyph` 为真时标题前还要画「空格 + 状态
+/// 字形」，标签再让出 2 列。放不下（标签为空或窗格太窄）返回 `None`。
+fn pane_border_title(label: &str, pane_width: u16, glyph: bool) -> Option<String> {
     let label = label.trim();
-    if label.is_empty() || pane_width <= 4 {
+    // 左侧缩进 + 标签两侧的空格 + 右上角；带字形时再加「空格 + 字形」。
+    let reserved = PANE_TITLE_INSET + 3 + if glyph { 2 } else { 0 };
+    if label.is_empty() || pane_width <= reserved {
         return None;
     }
-    let max_label_width = pane_width.saturating_sub(4) as usize;
+    let max_label_width = pane_width.saturating_sub(reserved) as usize;
     Some(format!(" {} ", truncate_end(label, max_label_width)))
+}
+
+/// 窗格边框标题里的状态桶：agent 窗格按生命周期、失败锁存与「看过没有」取（需要输入 /
+/// 失败 / 运行中 / 待查看 / 空闲），普通终端与未知状态不画字形。字段级读取、不分配，
+/// 每帧每窗格调用。
+fn pane_title_bucket(
+    terminal: &crate::terminal::TerminalState,
+    seen: bool,
+) -> Option<crate::harness::AgentBucket> {
+    use crate::api::schema::AgentStatus;
+    use crate::detect::AgentState;
+    if !terminal.is_agent_terminal() {
+        return None;
+    }
+    let status = match terminal.state {
+        AgentState::Blocked => AgentStatus::Blocked,
+        AgentState::Working => AgentStatus::Working,
+        AgentState::Idle if !seen => AgentStatus::Done,
+        AgentState::Idle => AgentStatus::Idle,
+        AgentState::Unknown => AgentStatus::Unknown,
+    };
+    let bucket = crate::harness::AgentBucket::derive(status, terminal.agent_failed());
+    (bucket != crate::harness::AgentBucket::None).then_some(bucket)
 }
 
 // Full view computation reaches this helper for active and background panes.
@@ -797,19 +828,20 @@ fn render_pane_border_titles(
         if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
             continue;
         }
-        let Some(title) = ws
-            .pane_state(info.id)
-            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
-            .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
-        else {
+        let Some((title, bucket)) = ws.pane_state(info.id).and_then(|pane| {
+            let terminal = app.terminals.get(&pane.attached_terminal_id)?;
+            let label = terminal.border_label(app.show_agent_labels_on_pane_borders)?;
+            let bucket = pane_title_bucket(terminal, pane.seen);
+            pane_border_title(&label, info.rect.width, bucket.is_some())
+                .map(|title| (title, bucket))
+        }) else {
             continue;
         };
         let y = info.rect.y;
         if y < area.y || y >= area.y.saturating_add(area.height) {
             continue;
         }
-        let start_x = info.rect.x.saturating_add(1);
+        let start_x = info.rect.x.saturating_add(PANE_TITLE_INSET);
         let end_x = info
             .rect
             .x
@@ -828,13 +860,52 @@ fn render_pane_border_titles(
         if info.is_focused {
             style = style.add_modifier(Modifier::BOLD);
         }
-        buf.set_stringn(
-            start_x,
-            y,
-            title,
-            end_x.saturating_sub(start_x) as usize,
+        paint_pane_title(
+            buf,
+            (start_x, end_x, y),
+            bucket.map(|bucket| {
+                (
+                    // server 不为动画重画窗格：运行中画静态字形。
+                    super::design::status_glyph(
+                        bucket,
+                        crate::config::StatusIndicatorStyle::Graphite,
+                        0,
+                        false,
+                    ),
+                    super::design::status_style(bucket, &app.palette, &app.components),
+                )
+            }),
+            &title,
             style,
         );
+    }
+}
+
+/// 在边框顶边画标题 ` ◆ 标签 `：字形用状态色，标签用边框色（聚焦加粗）。`span` 是
+/// `(起始列, 结束列（不含）, 行)`；工作台画廊的模拟窗格也走这里，与 server 同一口径。
+pub(crate) fn paint_pane_title(
+    buf: &mut Buffer,
+    span: (u16, u16, u16),
+    glyph: Option<(&str, Style)>,
+    title: &str,
+    style: Style,
+) {
+    let (start_x, end_x, y) = span;
+    if start_x >= end_x {
+        return;
+    }
+    let mut x = start_x;
+    if let Some((glyph, glyph_style)) = glyph {
+        let (after_space, _) = buf.set_stringn(x, y, " ", usize::from(end_x - x), style);
+        x = after_space;
+        if x < end_x {
+            let (after_glyph, _) =
+                buf.set_stringn(x, y, glyph, usize::from(end_x - x), glyph_style);
+            x = after_glyph;
+        }
+    }
+    if x < end_x {
+        buf.set_stringn(x, y, title, usize::from(end_x - x), style);
     }
 }
 
@@ -1033,15 +1104,18 @@ mod tests {
             Some(" claude ")
         );
         assert_eq!(pane_border_title("", 20, false), None);
+        // 标题从第 2 列画起（左上角之后留 1 格给客户端的拖动把手）。
         assert_eq!(
             pane_border_title("abcdef", 8, false).as_deref(),
-            Some(" abc… ")
+            Some(" ab… ")
         );
+        // 带状态字形时标签再让出 2 列（「空格 + 字形」画在标题前）。
         assert_eq!(
-            pane_border_title("abcdef", 8, true).as_deref(),
-            Some(" abc… ")
+            pane_border_title("abcdef", 9, true).as_deref(),
+            Some(" a… ")
         );
-        assert_eq!(pane_border_title("abcdef", 4, false), None);
+        assert_eq!(pane_border_title("abcdef", 7, true), None);
+        assert_eq!(pane_border_title("abcdef", 5, false), None);
     }
 
     #[test]
@@ -1079,9 +1153,77 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(4, 0)].symbol(), "模");
-        assert_eq!(buffer[(5, 0)].symbol(), " ");
-        assert_eq!(buffer[(6, 0)].symbol(), "块");
+        assert_eq!(buffer[(5, 0)].symbol(), "模");
+        assert_eq!(buffer[(6, 0)].symbol(), " ");
+        assert_eq!(buffer[(7, 0)].symbol(), "块");
+    }
+
+    /// 边框标题 ` ◆ 标签 `：agent 窗格按生命周期与「看过没有」画静态字形（运行中也是
+    /// 静态 `◌`，server 不为动画重画窗格），字形用状态色，标签用边框色；普通终端不画字形。
+    #[test]
+    fn agent_pane_border_title_leads_with_a_static_status_glyph() {
+        use crate::detect::{Agent, AgentState};
+        use crate::harness::AgentBucket;
+        let render = |agent: Option<(AgentState, bool)>| {
+            let mut app = AppState::test_new();
+            app.show_agent_labels_on_pane_borders = true;
+            app.view.terminal_area = Rect::new(0, 0, 20, 3);
+            let mut ws = Workspace::test_new("test");
+            let pane_id = ws.tabs[0].root_pane;
+            app.view.pane_infos = vec![PaneInfo {
+                id: pane_id,
+                rect: Rect::new(0, 0, 20, 3),
+                inner_rect: Rect::default(),
+                scrollbar_rect: None,
+                borders: Borders::ALL,
+                is_focused: false,
+            }];
+            let terminal_id = ws.tabs[0].panes[&pane_id].attached_terminal_id.clone();
+            let mut terminal_state = TerminalState::new(terminal_id.clone(), "/tmp".into());
+            match agent {
+                Some((state, seen)) => {
+                    terminal_state.set_detected_state(Some(Agent::Claude), state);
+                    ws.pane_state_mut(pane_id).expect("根窗格").seen = seen;
+                }
+                None => terminal_state.set_manual_label("notes".into()),
+            }
+            app.terminals.insert(terminal_id, terminal_state);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 3)).unwrap();
+            terminal
+                .draw(|frame| render_view_pane_borders(&app, &ws, &[], frame))
+                .unwrap();
+            (app, terminal.backend().buffer().clone())
+        };
+        for (state, seen, glyph, bucket) in [
+            (AgentState::Blocked, true, "◆", AgentBucket::NeedsInput),
+            (AgentState::Working, true, "◌", AgentBucket::Working),
+            (AgentState::Idle, false, "●", AgentBucket::Review),
+            (AgentState::Idle, true, "○", AgentBucket::Idle),
+        ] {
+            let (app, buffer) = render(Some((state, seen)));
+            // 顶边：角 · 留给拖动把手的边框线 · 空格 · 字形 · ` claude `。
+            assert_eq!(buffer[(1, 0)].symbol(), "─", "{state:?}：标题前留出把手位");
+            assert_eq!(buffer[(2, 0)].symbol(), " ");
+            assert_eq!(buffer[(3, 0)].symbol(), glyph, "{state:?} seen={seen}");
+            assert_eq!(
+                buffer[(3, 0)].style().fg,
+                Some(super::super::design::status_color(
+                    bucket,
+                    &app.palette,
+                    &app.components
+                )),
+                "{state:?}：字形用状态色"
+            );
+            assert_eq!(buffer[(5, 0)].symbol(), "c", "{state:?}：标签跟在字形后");
+            assert_eq!(
+                buffer[(5, 0)].style().fg,
+                Some(app.components.pane_border_unfocused),
+                "{state:?}：标签用边框色"
+            );
+        }
+        let (_, buffer) = render(None);
+        assert_eq!(buffer[(3, 0)].symbol(), "n", "普通终端的标题不画字形");
     }
 
     #[test]

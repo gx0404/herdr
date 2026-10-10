@@ -19,6 +19,7 @@ pub(crate) use self::borders::BorderGlyphs;
 pub(crate) use self::onboarding::{
     onboarding_welcome_continue_rect, ONBOARDING_HELP_LABEL, ONBOARDING_TITLE,
 };
+// 工作台画廊的模拟窗格按 server 同一口径画边框标题。
 #[cfg(all(test, unix))]
 pub(crate) use self::panes::popup_pane_rects;
 use self::panes::resize_popup_pane;
@@ -27,6 +28,8 @@ pub(crate) use self::panes::{
     pane_inner_rect, pane_is_scrolled_back, render_selection_highlight_styled, NewPanePlacement,
     PaneChrome,
 };
+#[cfg(test)]
+pub(crate) use self::panes::{paint_pane_title, PANE_TITLE_INSET};
 pub(crate) use self::release_notes::{
     display_lines_scroll_metrics, product_announcement_display_lines,
     release_notes_close_button_rect, release_notes_display_lines, release_notes_scroll_metrics,

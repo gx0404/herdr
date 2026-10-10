@@ -141,6 +141,11 @@ pub(super) fn render_key_hints(
     }
 }
 
+/// 经典布局的模式条：与工作台状态栏同一个组件（`chrome::status_bar`），只在非终端
+/// 模式、端点错误或广播进行中时画，位置仍是终端区（或底部标签栏）的最后一行。
+/// 返回画出的矩形，调用方据此遮挡与回填。
+// 入参是模式条要的全部状态，散在 `ClientShellState` 各处，调用方各自取用。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_mode_bar(
     buffer: &mut Buffer,
     pane_area: Rect,
@@ -153,254 +158,48 @@ pub(super) fn render_mode_bar(
     palette: &Palette,
     components: &crate::app::state::ComponentStyles,
 ) -> Option<Rect> {
+    use super::chrome::status_bar::{self, Middle, StatusBarView};
     if (mode == ClientShellMode::Terminal && endpoint_error.is_none() && broadcast_count.is_none())
         || pane_area.is_empty()
     {
         return None;
     }
-
     let bar = Rect::new(
         pane_area.x,
         pane_area.y + pane_area.height.saturating_sub(1),
         pane_area.width,
         1,
     );
-    let base = Style::default().fg(palette.overlay0).bg(palette.panel_bg);
-    for x in bar.x..bar.x + bar.width {
-        buffer[(x, bar.y)].set_symbol(" ").set_style(base);
-    }
-
-    let key = Style::default()
-        .fg(components.mode_bar_accent)
-        .bg(palette.panel_bg)
-        .add_modifier(Modifier::BOLD);
-    let mode_style = Style::default()
-        .fg(match palette.panel_bg {
-            ratatui::style::Color::Reset => palette.surface_dim,
-            color => color,
-        })
-        .bg(components.mode_bar_accent)
-        .add_modifier(Modifier::BOLD);
-    // The broadcast badge is the loudest element on the bar: input fans out
-    // to other machines while it shows, so it takes the warning color and
-    // renders even in plain Terminal mode.
-    let broadcast_style = Style::default()
-        .fg(match palette.panel_bg {
-            ratatui::style::Color::Reset => palette.surface_dim,
-            color => color,
-        })
-        .bg(palette.peach)
-        .add_modifier(Modifier::BOLD);
-    let broadcast_badge = broadcast_count.map(|count| {
-        crate::i18n::fill(
-            crate::i18n::texts().mode_bar.broadcast_fmt,
-            &[("count", &count.to_string())],
-        )
-    });
-    let broadcast_width = broadcast_badge.as_deref().map(display_width).unwrap_or(0);
-    if let Some(badge) = broadcast_badge.as_deref() {
-        buffer.set_stringn(bar.x, bar.y, badge, usize::from(bar.width), broadcast_style);
-    }
-    let prefix = keybinds.primary_prefix_label();
-    let prefix_rhs = |bindings: &crate::config::ActionKeybinds| {
-        bindings
-            .prefix_rhs_label()
-            .unwrap_or_else(|| crate::i18n::texts().keybinds.unset.to_owned())
-    };
-    let navigate_label = |bindings: &crate::config::ActionKeybinds| {
-        bindings
-            .label()
-            .unwrap_or_else(|| crate::i18n::texts().keybinds.unset.to_owned())
-    };
-
-    let mode_bar = &crate::i18n::texts().mode_bar;
-    if let Some(error) = endpoint_error {
-        let segments = [
-            (mode_bar.error.to_owned(), mode_style),
-            (format!(" {error}"), base),
-        ];
-        let mut x = bar.x.saturating_add(broadcast_width);
-        let end = bar.right();
-        for (text, style) in segments {
-            if x >= end {
-                break;
-            }
-            let remaining = end - x;
-            buffer.set_stringn(x, bar.y, &text, usize::from(remaining), style);
-            x = x.saturating_add(
-                u16::try_from(UnicodeWidthStr::width(text.as_str()))
-                    .unwrap_or(u16::MAX)
-                    .min(remaining),
-            );
-        }
-        return Some(bar);
-    }
-
-    // Terminal mode with an active broadcast: the badge alone is the bar.
-    if mode == ClientShellMode::Terminal {
-        return Some(bar);
-    }
-
-    if let (ClientShellMode::Copy, Some(copy_mode)) = (mode, copy_mode) {
-        if let Some(prompt) = copy_mode.search_prompt.as_ref() {
-            let marker = match prompt.direction {
-                crate::api::schema::PaneCopySearchDirection::Forward => "/",
-                crate::api::schema::PaneCopySearchDirection::Backward => "?",
-            };
-            let content_x = bar.x.saturating_add(broadcast_width);
-            buffer.set_stringn(
-                content_x,
-                bar.y,
-                mode_bar.copy,
-                usize::from(bar.width.saturating_sub(broadcast_width)),
-                mode_style,
-            );
-            let prefix = 8.min(bar.width.saturating_sub(broadcast_width));
-            if prefix >= 8 {
-                buffer.set_string(content_x + 7, bar.y, marker, key);
-            }
-            let footer = mode_bar.copy_footer;
-            // 页脚宽度按显示宽度算：中文页脚（"  enter 搜索  esc 取消"）比字节
-            // 长度短 4 格，用 `len()` 会把搜索输入区挤窄并让页脚左移压住查询尾部
-            // （ds-05）。
-            let footer_width = if bar.width.saturating_sub(broadcast_width) >= 50 {
-                display_width(footer)
-            } else {
-                0
-            };
-            let field = Rect::new(
-                content_x + prefix,
-                bar.y,
-                bar.width
-                    .saturating_sub(broadcast_width + prefix + footer_width),
-                1,
-            );
-            if let Some(cursor) = text_editor::render(
-                buffer,
-                field,
-                &prompt.query,
-                Style::default().fg(palette.text).bg(palette.panel_bg),
-            ) {
-                buffer[(cursor.x, cursor.y)]
-                    .set_style(Style::default().fg(palette.panel_bg).bg(palette.text));
-            }
-            if footer_width > 0 {
-                buffer.set_string(bar.right() - footer_width, bar.y, footer, base);
-            }
-            return Some(bar);
-        }
-    }
-
-    let (badge, hints): (String, Vec<(String, String)>) = match mode {
-        ClientShellMode::Prefix => (
-            mode_bar.prefix.to_owned(),
-            vec![
-                ("esc".to_owned(), mode_bar.prefix_cancel.to_owned()),
-                (prefix, mode_bar.prefix_send.to_owned()),
-                (
-                    prefix_rhs(&keybinds.keybinds.workspace_picker),
-                    mode_bar.prefix_nav.to_owned(),
-                ),
-                (
-                    prefix_rhs(&keybinds.keybinds.help),
-                    mode_bar.prefix_keybinds.to_owned(),
-                ),
-            ],
-        ),
-        ClientShellMode::Navigate => (
-            mode_bar.navigate.to_owned(),
-            vec![
-                ("esc".to_owned(), mode_bar.nav_back.to_owned()),
-                (
-                    format!(
-                        "{} / {}",
-                        navigate_label(&keybinds.keybinds.navigate.workspace_up),
-                        navigate_label(&keybinds.keybinds.navigate.workspace_down)
-                    ),
-                    mode_bar.nav_workspace.to_owned(),
-                ),
-                ("tab".to_owned(), mode_bar.nav_pane.to_owned()),
-                (
-                    prefix_rhs(&keybinds.keybinds.help),
-                    mode_bar.prefix_keybinds.to_owned(),
-                ),
-            ],
-        ),
-        ClientShellMode::Resize => (
-            mode_bar.resize.to_owned(),
-            vec![
-                ("h/l".to_owned(), mode_bar.resize_width.to_owned()),
-                ("j/k".to_owned(), mode_bar.resize_height.to_owned()),
-                ("esc".to_owned(), mode_bar.resize_done.to_owned()),
-            ],
-        ),
-        ClientShellMode::Copy => {
-            let copy_mode = copy_mode?;
-            let select = if copy_mode.selection.is_some() {
-                "selecting"
-            } else {
-                "select"
-            };
-            let match_status = copy_mode
-                .search_current_global
-                .map(|current| format!(" {}/{}", current + 1, copy_mode.search_total))
-                .or_else(|| (!copy_mode.search_query.is_empty()).then(|| " 0/0".to_owned()))
-                .unwrap_or_default();
-            let (exit_keys, exit_label) =
-                if copy_mode.search_query.is_empty() && copy_mode.selection.is_none() {
-                    ("q/esc", "exit")
-                } else {
-                    ("esc", "clear · q exit")
-                };
-            (
-                mode_bar.copy.to_owned(),
-                vec![
-                    ("h/j/k/l w/b/e { }".to_owned(), "move".to_owned()),
-                    ("/ ?".to_owned(), "search".to_owned()),
-                    ("n/N".to_owned(), format!("repeat{match_status}")),
-                    ("v/space".to_owned(), select.to_owned()),
-                    ("y/enter".to_owned(), "copy".to_owned()),
-                    (exit_keys.to_owned(), exit_label.to_owned()),
-                ],
-            )
-        }
-        // 终端的错误 / 广播两条路径已在上面各自 return；这里再保一层：渲染
-        // 路径不 panic，最多只画一个没有内容的模式条（CFP-17）。
-        ClientShellMode::Terminal => return Some(bar),
-    };
-
-    let badge_width = display_width(&badge);
-    let content_x = bar.x.saturating_add(broadcast_width);
-    buffer.set_stringn(
-        content_x,
-        bar.y,
-        &badge,
-        usize::from(bar.width.saturating_sub(broadcast_width)),
-        mode_style,
-    );
-    let hints_area = Rect::new(
-        content_x.saturating_add(badge_width).saturating_add(1),
-        bar.y,
-        bar.width
-            .saturating_sub(broadcast_width + badge_width.saturating_add(1)),
-        1,
-    );
-    render_key_hints(buffer, hints_area, &hints, palette, components);
-    if update_available && mode == ClientShellMode::Navigate {
-        let width = 13.min(bar.width);
-        let area = Rect::new(bar.right().saturating_sub(width), bar.y, width, 1);
-        buffer.set_style(area, Style::default().bg(palette.panel_bg));
-        put_right_text(
-            buffer,
-            area,
-            area.y,
+    let content = status_bar::mode_content(mode, copy_mode, endpoint_error, keybinds);
+    let right = if update_available && mode == ClientShellMode::Navigate {
+        vec![super::chrome::Span::new(
             crate::i18n::texts().overlays.release_preview_title,
             Style::default()
                 .fg(components.mode_bar_accent)
-                .bg(palette.panel_bg)
                 .add_modifier(Modifier::BOLD),
-        );
-    }
+        )]
+    } else {
+        Vec::new()
+    };
+    let (chip, middle) = match content {
+        Some((chip, middle)) => (Some(chip), middle),
+        None => (None, Middle::Empty),
+    };
+    let view = StatusBarView {
+        mode: chip,
+        broadcast: broadcast_count.map(status_bar::broadcast_badge),
+        middle,
+        hovered: None,
+        right,
+    };
+    status_bar::paint(
+        buffer,
+        bar,
+        &view,
+        super::chrome::bar_surface(palette),
+        palette,
+        components,
+    );
     Some(bar)
 }
 
@@ -430,6 +229,8 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) chrome_hover: Option<&'a super::feedback::ChromeHover>,
     /// Current spinner frame for connecting/reconnecting endpoint rows.
     pub(super) spinner: &'a str,
+    /// Agent 状态字形（运行中按全局转圈帧画）。
+    pub(super) status_glyphs: super::StatusGlyphs,
 }
 
 pub(super) fn render_shell(
@@ -491,6 +292,10 @@ pub(super) fn render_shell(
         }
     }
     if layout.tab_bar.height > 0 {
+        let stale = state.endpoints.iter().any(|endpoint| {
+            &endpoint.endpoint_id == state.active_endpoint_id
+                && endpoint.status != ClientEndpointStatus::Online
+        });
         render_tab_bar(
             buffer,
             layout.tab_bar,
@@ -501,6 +306,8 @@ pub(super) fn render_shell(
             state.tab_drag_insert_index,
             state.chrome_hover,
             visual_bell,
+            state.status_glyphs,
+            stale,
             &mut hits,
         );
     }

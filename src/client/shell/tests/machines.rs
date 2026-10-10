@@ -3936,7 +3936,12 @@ fn empty_machine_list_footer_greys_out_selection_and_details_hints() {
     );
 
     let disabled_bg = crate::protocol::color_to_u32(state.config.palette.surface_dim);
-    let enabled_bg = crate::protocol::color_to_u32(state.config.palette.surface0);
+    // 可用键帽走设计语言的键帽底色（`ui::design::key_cap`）。
+    let enabled_bg = crate::protocol::color_to_u32(
+        crate::ui::design::key_cap(&state.config.palette)
+            .bg
+            .expect("键帽有底色"),
+    );
     // 每个 cell 在拼接串里贡献恰好一个字符（宽字符续格是单个空格），字节
     // 偏移量按字符数换算成 cell 下标即可，不能直接当字节下标用。
     let cell_index_of = |byte_offset: usize| footer_text[..byte_offset].chars().count();

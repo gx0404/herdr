@@ -1075,7 +1075,10 @@ impl ClientShellState {
             .iter()
             .find_map(|(panel, area)| {
                 (*panel == dock::PanelId::Monitor
-                    && contains(super::workbench::body(*area, panel), point))
+                    && contains(
+                        super::workbench::body(*area, panel, self.workbench.geometry.compact),
+                        point,
+                    ))
                 .then_some(self.observability.monitor_tab)
             })
     }

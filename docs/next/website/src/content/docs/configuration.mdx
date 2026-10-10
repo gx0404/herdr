@@ -401,7 +401,7 @@ The title renders on the Herdr server, so `{hostname}` names the machine the pan
 
 `client.window_title.set` overrides the configured title until `client.window_title.clear` hands it back.
 
-Agent status uses one glyph per state by default (`status_indicators = "graphite"`): `◆` needs your input, `✕` failed, a spinner while working, `●` finished and not yet seen, `○` idle. The spinner follows `ui.spinner` and `ui.animations`; with either turned off a working agent shows a static `◌`. To keep compact colored dots or distinct static symbols instead, choose them in Settings or configure:
+Agent status uses one glyph per state by default (`status_indicators = "graphite"`): `◆` needs your input, `✕` failed, a spinner while working, `●` finished and not yet seen, `○` idle. The spinner follows `ui.spinner` and `ui.animations`; with either turned off a working agent shows a static `◌`. The same glyphs mark sidebar rows, the agent tree, tabs, and the title bar's breadcrumb and attention counts; glyphs from a machine that is offline stay still and dimmed. Agent pane border titles are drawn by the server and always use the still default glyphs. To keep compact colored dots or distinct static symbols instead, choose them in Settings or configure:
 
 ```toml
 [ui]

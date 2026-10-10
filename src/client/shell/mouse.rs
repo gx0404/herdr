@@ -853,6 +853,7 @@ impl ClientShellState {
             && !contains(self.hits.lifecycle_banner_give_up, point)
         {
             self.toggle_global_menu();
+            self.release_catalog_selection();
             outcome.repaint = true;
             return;
         }
@@ -2590,6 +2591,7 @@ impl ClientShellState {
                 }
                 if super::contains(self.hits.global_launcher, point) {
                     self.toggle_global_menu();
+                    self.release_catalog_selection();
                     outcome.repaint = true;
                     return;
                 }
@@ -2657,6 +2659,23 @@ impl ClientShellState {
                     });
                 if let Some(workspace_press) = workspace_press {
                     self.workspace_press = Some(workspace_press);
+                    return;
+                }
+                // 标签上的 `×` 落在标签矩形之内：必须先于按下标签（切换 / 拖动）。
+                let close_tab = self
+                    .config
+                    .mouse_capture
+                    .then(|| {
+                        self.hits
+                            .tab_close
+                            .iter()
+                            .find(|(rect, _)| super::contains(*rect, point))
+                            .map(|(_, tab_id)| tab_id.clone())
+                    })
+                    .flatten();
+                if let Some(tab_id) = close_tab {
+                    self.request_tab_close(tab_id, outcome);
+                    outcome.repaint = true;
                     return;
                 }
                 let tab_press = self

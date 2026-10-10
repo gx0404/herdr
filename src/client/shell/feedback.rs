@@ -147,10 +147,27 @@ pub(super) enum ChromeHover {
     AgentGroupRow(String),
     EndpointAgentRow(ClientEndpointId, String),
     Tab(String),
+    /// 标签上的关闭按钮（指针在它上面时所在标签也算悬浮）。
+    TabClose(String),
     NewTab,
     TabScrollLeft,
     TabScrollRight,
     GlobalLauncher,
+    /// 标题栏的注意力计数（按状态桶）。
+    TitleChip(crate::harness::AgentBucket),
+    /// 标题栏的命令搜索提示。
+    TitleCommand,
+    /// 标题栏的 `⋯` 布局菜单入口。
+    TitleMenu,
+    /// 标题栏的「调整布局」标记（点它退出调整布局）。
+    TitleArrange,
+    /// 停靠面板的面板头：悬浮时把手与按钮亮起来。
+    PanelHeader(super::dock::PanelId),
+    /// 面板头右侧的按钮。
+    PanelButton(
+        super::dock::PanelId,
+        super::chrome::panel_header::PanelButton,
+    ),
     SidebarToggle,
     AgentSortToggle,
     WorkspaceScrollbarThumb,
@@ -305,27 +322,52 @@ impl ClientShellState {
         }
     }
 
+    /// Agent 状态字形的取法：运行中按全局转圈帧画 `design::SPINNER_FRAMES`；关掉动画
+    /// 或转圈时画静态 `◌`。侧栏行、标签与标题栏计数共用这一个时钟，同相位。
+    pub(super) fn status_glyphs(&self) -> StatusGlyphs {
+        StatusGlyphs {
+            style: self.config.status_indicators,
+            frame: usize::try_from(self.spinner_tick).unwrap_or(0),
+            animate: self.config.feedback.animations && self.config.feedback.spinner.enabled,
+        }
+    }
+
+    /// 当前投影的端点不在线（断线 / 重连中）：标签、面包屑里的状态字形来自缓存快照，
+    /// 与侧栏的 stale 行同口径画静态字形、置灰。
+    pub(super) fn active_endpoint_stale(&self) -> bool {
+        self.endpoint_status(&self.active_endpoint_id)
+            .is_some_and(|status| status != ClientEndpointStatus::Online)
+    }
+
     /// Whether any visible surface should animate a spinner right now:
     /// endpoint connecting/reconnecting rows, machine bootstrap progress,
-    /// worktree create/open/remove in flight, or integrations loading.
+    /// worktree create/open/remove in flight, integrations loading, or an
+    /// agent (or one of its activity nodes) working on an online endpoint.
+    /// The agent part reads the view-phase cache, so a frame with nothing
+    /// running never arms the clock.
     pub(super) fn spinner_active(&self) -> bool {
         self.config.feedback.spinner.enabled
-            && (self.endpoints.iter().any(|endpoint| {
-                matches!(
-                    endpoint.status,
-                    ClientEndpointStatus::Connecting | ClientEndpointStatus::Reconnecting
-                )
-            }) || match self.overlay.as_ref() {
-                Some(ClientShellOverlay::Machines(overlay)) => overlay.bootstrap_running(),
-                Some(ClientShellOverlay::MachineAuth(overlay)) => overlay.auth_work_running(),
-                Some(ClientShellOverlay::WorktreeCreate(overlay)) => overlay.creating,
-                Some(ClientShellOverlay::WorktreeOpen(overlay)) => overlay.opening,
-                Some(ClientShellOverlay::WorktreeRemove(overlay)) => overlay.removing,
-                Some(ClientShellOverlay::Settings(overlay)) => {
-                    overlay.loading_integrations || overlay.installing_integrations
-                }
-                _ => false,
-            })
+            && (self
+                .federated_agent_rows
+                .as_ref()
+                .is_some_and(|rows| rows.animated())
+                || self.endpoints.iter().any(|endpoint| {
+                    matches!(
+                        endpoint.status,
+                        ClientEndpointStatus::Connecting | ClientEndpointStatus::Reconnecting
+                    )
+                })
+                || match self.overlay.as_ref() {
+                    Some(ClientShellOverlay::Machines(overlay)) => overlay.bootstrap_running(),
+                    Some(ClientShellOverlay::MachineAuth(overlay)) => overlay.auth_work_running(),
+                    Some(ClientShellOverlay::WorktreeCreate(overlay)) => overlay.creating,
+                    Some(ClientShellOverlay::WorktreeOpen(overlay)) => overlay.opening,
+                    Some(ClientShellOverlay::WorktreeRemove(overlay)) => overlay.removing,
+                    Some(ClientShellOverlay::Settings(overlay)) => {
+                        overlay.loading_integrations || overlay.installing_integrations
+                    }
+                    _ => false,
+                })
     }
 
     /// Advances the feedback-layer clocks. Returns true when a repaint is
@@ -639,14 +681,40 @@ impl ClientShellState {
                 .agent_activity_actions
                 .iter()
                 .any(|(rect, candidate)| candidate == button && super::contains(*rect, point)),
-            ChromeHover::Tab(tab_id) => hits
-                .tabs
+            ChromeHover::Tab(tab_id) => {
+                !on_tab_close(hits, point)
+                    && hits
+                        .tabs
+                        .iter()
+                        .any(|(rect, id)| id == tab_id && super::contains(*rect, point))
+            }
+            ChromeHover::TabClose(tab_id) => hits
+                .tab_close
                 .iter()
                 .any(|(rect, id)| id == tab_id && super::contains(*rect, point)),
             ChromeHover::NewTab => super::contains(hits.new_tab, point),
             ChromeHover::TabScrollLeft => super::contains(hits.tab_scroll_left, point),
             ChromeHover::TabScrollRight => super::contains(hits.tab_scroll_right, point),
             ChromeHover::GlobalLauncher => super::contains(hits.global_launcher, point),
+            ChromeHover::TitleChip(bucket) => hits
+                .title_chips
+                .iter()
+                .any(|(rect, candidate)| candidate == bucket && super::contains(*rect, point)),
+            ChromeHover::TitleCommand => super::contains(hits.title_command, point),
+            ChromeHover::TitleMenu => super::contains(hits.title_menu, point),
+            ChromeHover::TitleArrange => super::contains(hits.title_arrange, point),
+            ChromeHover::PanelHeader(panel) => {
+                !on_panel_header_child(hits, point)
+                    && hits
+                        .panel_headers
+                        .iter()
+                        .any(|(rect, id)| id == panel && super::contains(*rect, point))
+            }
+            ChromeHover::PanelButton(panel, button) => {
+                hits.panel_buttons.iter().any(|(rect, id, candidate)| {
+                    id == panel && candidate == button && super::contains(*rect, point)
+                })
+            }
             ChromeHover::SidebarToggle => super::contains(hits.sidebar_toggle, point),
             ChromeHover::AgentSortToggle => super::contains(hits.agent_sort_toggle, point),
             ChromeHover::WorkspaceScrollbarThumb => thumb_contains(
@@ -802,9 +870,10 @@ impl ClientShellState {
             return None;
         }
         // 指针不在任何 chrome 分组里（最常见的「浮在 pane 上」）：直接判定不是
-        // chrome 悬浮，不再走下面整份线性扫描（HERDR-PERF-008）。
+        // chrome 悬浮，不再走下面整份线性扫描（HERDR-PERF-008）。面板头散落在各个
+        // 面板顶端，并进分组会把包围盒撑成整屏，单独按面板数（个位数）查一遍。
         if !hits.chrome_bounds.contains(point) {
-            return None;
+            return panel_header_hover(hits, point);
         }
         if super::contains(hits.notification_toast, point)
             && (self.visible_endpoint_notice.is_some()
@@ -821,6 +890,12 @@ impl ClientShellState {
         if super::contains(hits.lifecycle_banner_give_up, point) {
             return Some(ChromeHover::LifecycleBannerGiveUp);
         }
+        // 关闭按钮落在标签矩形之内：必须先于标签查。
+        for (rect, tab_id) in &hits.tab_close {
+            if super::contains(*rect, point) {
+                return Some(ChromeHover::TabClose(tab_id.clone()));
+            }
+        }
         for (rect, tab_id) in &hits.tabs {
             if super::contains(*rect, point) {
                 return Some(ChromeHover::Tab(tab_id.clone()));
@@ -834,6 +909,20 @@ impl ClientShellState {
         }
         if super::contains(hits.tab_scroll_right, point) {
             return Some(ChromeHover::TabScrollRight);
+        }
+        for (rect, bucket) in &hits.title_chips {
+            if super::contains(*rect, point) {
+                return Some(ChromeHover::TitleChip(*bucket));
+            }
+        }
+        if super::contains(hits.title_command, point) {
+            return Some(ChromeHover::TitleCommand);
+        }
+        if super::contains(hits.title_menu, point) {
+            return Some(ChromeHover::TitleMenu);
+        }
+        if super::contains(hits.title_arrange, point) {
+            return Some(ChromeHover::TitleArrange);
         }
         // 折叠开关的矩形落在行矩形之内：必须排在统一树的全部行向量（machines /
         // workspaces / agents / endpoint_agents / agent_activity_rows /
@@ -927,7 +1016,7 @@ impl ClientShellState {
         if super::contains(hits.sidebar_divider, point) {
             return Some(ChromeHover::SidebarDivider);
         }
-        None
+        panel_header_hover(hits, point)
     }
 }
 
@@ -939,7 +1028,50 @@ fn on_agent_tree_toggle(hits: &ShellHitMap, point: (u16, u16)) -> bool {
         .any(|(rect, _, _)| super::contains(*rect, point))
 }
 
-/// chrome 悬浮区的分组包围盒：侧栏、顶栏（标签条 / 全局入口）、横幅。
+/// 指针是否落在标签的关闭按钮上（按钮在标签矩形之内，标签悬浮的复核先排除它）。
+fn on_tab_close(hits: &ShellHitMap, point: (u16, u16)) -> bool {
+    hits.tab_close
+        .iter()
+        .any(|(rect, _)| super::contains(*rect, point))
+}
+
+/// 指针是否落在面板头里的子目标上：标签、标签关闭按钮、新建 / 滚动按钮与面板
+/// 按钮都画在面板头那一行，各自的悬浮优先于面板头本身。
+fn on_panel_header_child(hits: &ShellHitMap, point: (u16, u16)) -> bool {
+    on_tab_close(hits, point)
+        || hits
+            .tabs
+            .iter()
+            .any(|(rect, _)| super::contains(*rect, point))
+        || [hits.new_tab, hits.tab_scroll_left, hits.tab_scroll_right]
+            .iter()
+            .any(|rect| super::contains(*rect, point))
+        || hits
+            .panel_buttons
+            .iter()
+            .any(|(rect, _, _)| super::contains(*rect, point))
+}
+
+/// 面板头的悬浮解析：先按钮、后整行。面板数是个位数，线性查即可。
+fn panel_header_hover(hits: &ShellHitMap, point: (u16, u16)) -> Option<ChromeHover> {
+    if let Some((_, panel, button)) = hits
+        .panel_buttons
+        .iter()
+        .find(|(rect, _, _)| super::contains(*rect, point))
+    {
+        return Some(ChromeHover::PanelButton(panel.clone(), *button));
+    }
+    if on_panel_header_child(hits, point) {
+        return None;
+    }
+    hits.panel_headers
+        .iter()
+        .find(|(rect, _)| super::contains(*rect, point))
+        .map(|(_, panel)| ChromeHover::PanelHeader(panel.clone()))
+}
+
+/// chrome 悬浮区的分组包围盒：侧栏（含主菜单入口）、顶部（标题栏的可点项与标签条）、
+/// 横幅。
 /// 分组而不是一个大并集——标签条在顶、侧栏在左、横幅在底部，并集很快退化成
 /// 整屏，早退就永远不生效。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -981,9 +1113,20 @@ impl ShellHitMap {
         for (rect, _) in &self.tabs {
             extend(&mut top, *rect);
         }
+        for (rect, _) in &self.tab_close {
+            extend(&mut top, *rect);
+        }
         extend(&mut top, self.new_tab);
         extend(&mut top, self.tab_scroll_left);
         extend(&mut top, self.tab_scroll_right);
+        // 标题栏（工作台第 0 行）的可点项与标签条同排在顶部；面板头不并进来（散落在
+        // 各面板顶端，见 `chrome_hover_at`）。
+        for (rect, _) in &self.title_chips {
+            extend(&mut top, *rect);
+        }
+        extend(&mut top, self.title_command);
+        extend(&mut top, self.title_menu);
+        extend(&mut top, self.title_arrange);
         for hit in &self.machines {
             extend(&mut sidebar, hit.rect);
         }
@@ -1019,8 +1162,8 @@ impl ShellHitMap {
         extend(&mut sidebar, self.sidebar_section_divider);
         extend(&mut sidebar, self.sidebar_toggle);
         extend(&mut sidebar, self.sidebar_divider);
-        // 全局入口在侧栏页脚（经典布局）或顶栏（工作台）：两处都并进侧栏组，
-        // 它既不与标签条同排也不在横幅区。
+        // 全局入口在侧栏页脚（经典布局）或标题栏左端（工作台）：两处都并进侧栏组
+        // （工作台的标题栏入口在侧栏面板正上方），也不在横幅区。
         extend(&mut sidebar, self.global_launcher);
         self.chrome_bounds = ChromeBounds {
             sidebar,

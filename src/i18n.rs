@@ -524,8 +524,15 @@ pub struct StatusTexts {
     pub idle: &'static str,
 }
 
+/// 状态栏（工作台最后一行）与经典布局模式条的文案。模式标签（`terminal` …
+/// `copy`、`arrange`、`error`）自带左右各一格内边距；键位提示的动作名不带空白，
+/// 键帽由按键配置生成、不翻译。
 pub struct ModeBarTexts {
     pub error: &'static str,
+    /// 终端模式的低调标签。
+    pub terminal: &'static str,
+    /// 「调整布局」模式的标签。
+    pub arrange: &'static str,
     pub prefix: &'static str,
     pub prefix_cancel: &'static str,
     pub prefix_send: &'static str,
@@ -542,6 +549,11 @@ pub struct ModeBarTexts {
     pub copy: &'static str,
     pub copy_footer: &'static str,
     pub broadcast_fmt: &'static str, // args: count
+    /// 终端模式的上下文提示：前缀键、会话导航、命令搜索、快捷键表。
+    pub hint_prefix: &'static str,
+    pub hint_navigator: &'static str,
+    pub hint_commands: &'static str,
+    pub hint_keys: &'static str,
 }
 
 pub struct NotifyTexts {
@@ -1156,13 +1168,13 @@ pub struct AgentActivityTexts {
     pub status_unknown: &'static str,
 }
 
-/// 统一菜单组件（全局菜单 / 右键菜单 / 子菜单）与工作台顶栏、「调整布局」
-/// 页脚提示的文案。
+/// 统一菜单组件（全局菜单 / 右键菜单 / 子菜单）、工作台标题栏与 `⋯` 布局菜单、
+/// 「调整布局」状态栏提示的文案。
 pub struct MenuTexts {
     pub arrange_layout: &'static str,
-    /// 「调整布局」模式下页脚最左侧的状态标签。
-    pub arrange_hint: &'static str,
-    /// 「调整布局」模式页脚键位提示的动作名（键帽不翻译）。
+    /// 「调整布局」模式开着时标题栏右侧的标记（点它退出）。
+    pub arrange_chip: &'static str,
+    /// 「调整布局」模式状态栏键位提示的动作名（键帽不翻译）。
     pub arrange_focus: &'static str,
     pub arrange_resize: &'static str,
     pub arrange_move: &'static str,
@@ -1174,6 +1186,9 @@ pub struct MenuTexts {
     pub monitor_short: &'static str,
     pub close_monitor: &'static str,
     pub lock_layout: &'static str,
+    pub reset_layout: &'static str,
+    /// 标题栏 `⋯` 布局菜单（输入时转成命令搜索的列表页标题）。
+    pub layout_menu: &'static str,
 }
 
 /// 机器表单（快速添加、分组、预览、连接测试与校验）的文案。

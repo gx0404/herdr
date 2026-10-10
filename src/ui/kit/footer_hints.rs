@@ -1,13 +1,14 @@
 //! 页脚键位提示：` key ` 键帽 + 标签，一行排开、可点。放不下时从尾部丢弃，
-//! `primary` 项最后才丢。
+//! `primary` 项最后才丢。页面页脚的键帽样式取 `ui::design`；状态栏这类常驻的栏用
+//! [`render_footer_hints_styled`] 换成低一档的配色。
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Style},
 };
 
-use super::{fill_row, put_str, selected_style};
+use super::{fill_row, put_str};
 use crate::app::state::Palette;
 use crate::ui::display_width_u16;
 
@@ -66,7 +67,27 @@ fn shown_mask(hints: &[FooterHint<'_>], width: u16) -> u64 {
     shown
 }
 
-/// 画页脚提示，返回画出来的项的 `(命中矩形, 下标)`。
+/// 提示的配色：普通键帽、标签与可点项悬浮时标签的底色。主键帽（`primary`，accent
+/// 反色）与禁用项（整条灰）不随它变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FooterHintStyles {
+    pub key: Style,
+    pub label: Style,
+    pub hover_bg: Color,
+}
+
+impl FooterHintStyles {
+    /// 页面页脚的配色：设计语言的键帽、说明色标签、主题的悬浮行底色。
+    pub(crate) fn page(palette: &Palette) -> Self {
+        Self {
+            key: crate::ui::design::key_cap(palette),
+            label: Style::default().fg(palette.subtext0),
+            hover_bg: palette.hover_row_bg(),
+        }
+    }
+}
+
+/// 画页脚提示（页面页脚的配色），返回画出来的项的 `(命中矩形, 下标)`。
 pub(crate) fn render_footer_hints(
     buffer: &mut Buffer,
     area: Rect,
@@ -74,12 +95,30 @@ pub(crate) fn render_footer_hints(
     hovered: Option<usize>,
     palette: &Palette,
 ) -> Vec<(Rect, usize)> {
+    render_footer_hints_styled(
+        buffer,
+        area,
+        hints,
+        hovered,
+        palette,
+        FooterHintStyles::page(palette),
+    )
+}
+
+/// 同 [`render_footer_hints`]，普通键帽与标签的配色由调用方给。
+pub(crate) fn render_footer_hints_styled(
+    buffer: &mut Buffer,
+    area: Rect,
+    hints: &[FooterHint<'_>],
+    hovered: Option<usize>,
+    palette: &Palette,
+    styles: FooterHintStyles,
+) -> Vec<(Rect, usize)> {
     let mut hits = Vec::new();
     if area.is_empty() || hints.is_empty() {
         return hits;
     }
     let shown = shown_mask(hints, area.width);
-    let hover_bg = palette.hover_row_bg();
     let mut x = area.x;
     let y = area.y;
     for (index, hint) in hints.iter().enumerate().take(MAX_HINTS) {
@@ -98,18 +137,14 @@ pub(crate) fn render_footer_hints(
             )
         } else {
             let key = if hint.primary {
-                selected_style(palette)
+                crate::ui::design::key_cap_primary(palette)
             } else {
-                Style::default()
-                    .fg(palette.text)
-                    .bg(palette.surface0)
-                    .add_modifier(Modifier::BOLD)
+                styles.key
             };
-            let label = Style::default().fg(palette.subtext0);
             let label = if hovered == Some(index) {
-                label.bg(hover_bg).fg(palette.text)
+                styles.label.bg(styles.hover_bg).fg(palette.text)
             } else {
-                label
+                styles.label
             };
             (key, label)
         };
@@ -127,6 +162,7 @@ pub(crate) fn render_footer_hints(
 mod tests {
     use super::super::row_text;
     use super::*;
+    use ratatui::style::Modifier;
 
     fn hint<'a>(key: &'a str, label: &'a str) -> FooterHint<'a> {
         FooterHint {
@@ -169,8 +205,9 @@ mod tests {
         assert!(primary.add_modifier.contains(Modifier::BOLD));
         assert_eq!(buffer[(5, 0)].style().fg, Some(palette.subtext0));
         let keycap = buffer[(11, 0)].style();
-        assert_eq!(keycap.bg, Some(palette.surface0), "普通键帽");
-        assert!(keycap.add_modifier.contains(Modifier::BOLD));
+        let expected = crate::ui::design::key_cap(&palette);
+        assert_eq!(keycap.bg, expected.bg, "普通键帽");
+        assert_eq!(keycap.fg, expected.fg);
         let hovered = buffer[(16, 0)].style();
         assert_eq!(hovered.bg, Some(palette.hover_row_bg()), "悬浮标签换底");
         assert_eq!(hovered.fg, Some(palette.text));
