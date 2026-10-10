@@ -189,7 +189,7 @@ pub(crate) fn render_collapsed_sidebar(
             rect.y,
             rect.width.saturating_sub(2),
             status_icon(status, config.status_indicators),
-            Style::default().fg(status_color(status, palette)),
+            Style::default().fg(status_color(status, palette, &config.components)),
         );
         hits.workspaces.push(WorkspaceHit {
             rect,
@@ -277,7 +277,11 @@ pub(crate) fn render_collapsed_sidebar(
             rect.y,
             rect.width.saturating_sub(2),
             status_icon(agent.agent_status, config.status_indicators),
-            Style::default().fg(status_color(agent.agent_status, palette)),
+            Style::default().fg(status_color(
+                agent.agent_status,
+                palette,
+                &config.components,
+            )),
         );
         hits.agents.push((rect, pane_id.clone()));
     }
@@ -490,6 +494,7 @@ pub(crate) fn render_sidebar_regions(
             dragged,
             hovered,
             palette,
+            &config.components,
         );
         let group_toggle = render_parent_group_toggle(
             buffer,
@@ -895,7 +900,9 @@ pub(in crate::client::shell) fn render_workspace_rows(
     dragged: bool,
     hovered: bool,
     palette: &Palette,
+    components: &crate::app::state::ComponentStyles,
 ) {
+    let status_fg = status_color(status, palette, components);
     for (row_index, row) in rows.iter().enumerate() {
         let y = area.y + row_index as u16;
         if y >= area.bottom() {
@@ -948,9 +955,9 @@ pub(in crate::client::shell) fn render_workspace_rows(
             row,
             (
                 status_icon(status, indicators),
-                Style::default().fg(status_color(status, palette)),
+                Style::default().fg(status_fg),
             ),
-            Style::default().fg(status_color(status, palette)),
+            Style::default().fg(status_fg),
             workspace_style,
             secondary_style,
             Style::default().fg(palette.overlay1),

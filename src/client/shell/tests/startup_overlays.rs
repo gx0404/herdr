@@ -1255,7 +1255,8 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
     ));
     let original_theme = state.config.theme_name.clone();
     let original_palette = state.config.palette.clone();
-    state.handle_input_bytes(b"j");
+    // 深色宿主下默认的 graphite 即 graphite-dark：下移两项到 graphite-light 才换色。
+    state.handle_input_bytes(b"jj");
     assert_ne!(state.config.theme_name, original_theme);
     assert_ne!(state.config.palette.accent, original_palette.accent);
     state.handle_input_bytes(b"\x1b");
@@ -1623,8 +1624,8 @@ fn onboarding_body_wraps_instead_of_cutting_words() {
             Some(ClientShellOverlay::Onboarding)
         ));
         let frame = state.compose(cols, rows).expect("onboarding frame");
-        // 浮层边框：左上「┌」、同一行的「┐」、同一列往下的「└」（正文放不下时浮层会
-        // 加高，不能按默认尺寸推算）。
+        // 浮层边框：左上「╭」、同一行的「╮」、同一列往下的「╰」（默认圆角；正文放不下
+        // 时浮层会加高，不能按默认尺寸推算）。
         let screen = frame_rows(&frame)
             .iter()
             .map(|row| row.chars().collect::<Vec<_>>())
@@ -1632,15 +1633,15 @@ fn onboarding_body_wraps_instead_of_cutting_words() {
         let (top, left) = screen
             .iter()
             .enumerate()
-            .find_map(|(y, row)| row.iter().position(|ch| *ch == '┌').map(|x| (y, x)))
+            .find_map(|(y, row)| row.iter().position(|ch| *ch == '╭').map(|x| (y, x)))
             .expect("欢迎页边框");
         let right = left
             + screen[top][left..]
                 .iter()
-                .position(|ch| *ch == '┐')
+                .position(|ch| *ch == '╮')
                 .expect("右上角");
         let bottom = (top..screen.len())
-            .find(|y| screen[*y][left] == '└')
+            .find(|y| screen[*y][left] == '╰')
             .expect("左下角");
         let inner = screen[top + 1..bottom]
             .iter()

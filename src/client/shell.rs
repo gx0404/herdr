@@ -197,40 +197,28 @@ fn pane_surface_topology_signature(surface: &PaneSurfaceFrame) -> u64 {
     hash
 }
 
+/// 生命周期 → 统一状态桶（失败锁存接入前一律按未失败处理）。所有状态字形、颜色与
+/// 排序都经桶取，保证侧栏、标签、总览与通知用同一套语义。
+fn agent_bucket(status: crate::api::schema::AgentStatus) -> crate::harness::AgentBucket {
+    crate::harness::AgentBucket::derive(status, false)
+}
+
+/// 静态状态字形（运行中画静态字形；需要转圈的界面直接用 `ui::design::status_glyph`
+/// 并传入全局转圈帧）。
 fn status_icon(
     status: crate::api::schema::AgentStatus,
     style: crate::config::StatusIndicatorStyle,
 ) -> &'static str {
-    use crate::api::schema::AgentStatus;
-    use crate::config::StatusIndicatorStyle;
-    match (style, status) {
-        (
-            StatusIndicatorStyle::Dots,
-            AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done,
-        ) => "●",
-        (StatusIndicatorStyle::Dots, AgentStatus::Idle) => "○",
-        (StatusIndicatorStyle::Dots, AgentStatus::Unknown) => "·",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Blocked) => "×",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Working) => "◐",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Done) => "✓",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Idle) => "○",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Unknown) => "·",
-    }
+    crate::ui::design::status_glyph(agent_bucket(status), style, 0, false)
 }
 
 fn status_dot(status: crate::api::schema::AgentStatus) -> &'static str {
     status_icon(status, crate::config::StatusIndicatorStyle::Dots)
 }
 
+/// 汇总优先级：需要输入 > 失败 > 运行中 > 待查看 > 空闲 > 未知。
 fn status_priority(status: crate::api::schema::AgentStatus) -> u8 {
-    use crate::api::schema::AgentStatus;
-    match status {
-        AgentStatus::Blocked => 4,
-        AgentStatus::Done => 3,
-        AgentStatus::Working => 2,
-        AgentStatus::Idle => 1,
-        AgentStatus::Unknown => 0,
-    }
+    agent_bucket(status).rollup_rank()
 }
 
 fn status_text(status: crate::api::schema::AgentStatus) -> &'static str {
@@ -244,18 +232,14 @@ fn status_text(status: crate::api::schema::AgentStatus) -> &'static str {
     }
 }
 
+/// 状态色：取 `ComponentStyles` 的状态 token（蓝 = 运行、琥珀 = 需要输入、绿 = 待查看、
+/// 红 = 失败、灰 = 空闲），主题可在 `[theme.components]` 覆盖。
 fn status_color(
     status: crate::api::schema::AgentStatus,
     palette: &Palette,
+    components: &crate::app::state::ComponentStyles,
 ) -> ratatui::style::Color {
-    use crate::api::schema::AgentStatus;
-    match status {
-        AgentStatus::Working => palette.yellow,
-        AgentStatus::Blocked => palette.red,
-        AgentStatus::Done => palette.teal,
-        AgentStatus::Idle => palette.green,
-        AgentStatus::Unknown => palette.overlay0,
-    }
+    crate::ui::design::status_color(agent_bucket(status), palette, components)
 }
 
 /// 浮层列表行的底色，三态优先级：键盘选中（accent 反色）> 指针悬浮

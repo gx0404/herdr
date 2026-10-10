@@ -1309,7 +1309,7 @@ fn which_key_spans_the_content_area_when_the_agents_panel_is_focused() {
     let bottom = rows
         .iter()
         .skip(title_row)
-        .position(|row| row.contains('┘'))
+        .position(|row| row.contains('╯'))
         .map(|offset| offset + title_row)
         .expect("which-key 下边框");
     assert!(bottom < 31, "下边框不压页脚：{bottom}");

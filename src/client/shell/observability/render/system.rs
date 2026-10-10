@@ -1928,7 +1928,7 @@ mod tests {
         let network = card_rect(&output, "network");
         assert_eq!(network.height, 5, "{text}");
         assert_eq!(network.bottom(), 31, "露出部分贴着页脚\n{text}");
-        assert_eq!(buffer[(network.x, network.y)].symbol(), "┌", "{text}");
+        assert_eq!(buffer[(network.x, network.y)].symbol(), "╭", "{text}");
         for y in network.y + 1..network.bottom() {
             assert_eq!(
                 buffer[(network.x, y)].symbol(),

@@ -38,8 +38,8 @@ pub use self::{
     tab_bar::TabBarRightEntryConfig,
     theme::{
         degrade_color_to_256, parse_color, resolve_color_depth, try_parse_color, CustomThemeColors,
-        ModeThemeColors, ThemeComponentsConfig, ThemeConfig, DEFAULT_SELECTION_MIX_RATIO,
-        THEME_NAMES,
+        ModeThemeColors, ThemeComponentsConfig, ThemeConfig, DEFAULT_DARK_THEME_NAME,
+        DEFAULT_LIGHT_THEME_NAME, DEFAULT_SELECTION_MIX_RATIO, DEFAULT_THEME_NAME, THEME_NAMES,
     },
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
 };

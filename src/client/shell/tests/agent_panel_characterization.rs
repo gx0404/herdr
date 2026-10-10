@@ -3016,8 +3016,22 @@ fn readable(cell: &ratatui::buffer::Cell) -> f32 {
 /// 计数前多一个粗体「!」——默认的圆点图标下阻塞与工作中同是「●」，不能只靠颜色。
 #[test]
 fn agent_leaf_rows_are_readable_and_blocked_is_not_color_only() {
+    // 默认的石墨字形下阻塞本来就有独立字形「◆」；这里钉的是圆点风格（阻塞与工作中
+    // 同为「●」）的兜底：分组头额外的粗体「!」。
+    {
+        let mut config = Config::default();
+        config.ui.agent_panel_sort = AgentPanelSortConfig::Spaces;
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        state.set_snapshot(Box::new(two_workspace_snapshot()));
+        state.set_pane_surface(surface());
+        enable_workbench(&mut state);
+        state.compose(133, 32).expect("workbench 帧");
+        let header = tree_rows(&state, group_rect(&state, "ws_1"))[0].clone();
+        assert!(header.contains('◆'), "石墨字形的阻塞分组头：{header}");
+    }
     let mut config = Config::default();
     config.ui.agent_panel_sort = AgentPanelSortConfig::Spaces;
+    config.ui.status_indicators = crate::config::StatusIndicatorStyle::Dots;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(two_workspace_snapshot()));
     state.set_pane_surface(surface());

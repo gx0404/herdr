@@ -1580,7 +1580,7 @@ fn overlay_text_keeps_a_one_column_inset_from_the_border() {
             "agent status indicators",
             &format!("{case} 指示器标题"),
         );
-        assert_left_inset(&screen, "choose color", &format!("{case} 指示器说明"));
+        assert_left_inset(&screen, "choose how", &format!("{case} 指示器说明"));
 
         state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
         // 切回集成页会重新请求列表并清掉上次的安装消息：夹具直接当作列表与

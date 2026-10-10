@@ -287,7 +287,7 @@ pub(super) fn render_collapsed(
                     .fg(if stale {
                         palette.overlay0
                     } else {
-                        status_color(workspace.agent_status, palette)
+                        status_color(workspace.agent_status, palette, &config.components)
                     })
                     .add_modifier(dim),
             );
@@ -662,6 +662,7 @@ pub(super) fn render_expanded_regions(
                     false,
                     hovered,
                     palette,
+                    &config.components,
                 );
                 if endpoint.status != ClientEndpointStatus::Online {
                     buffer.set_style(

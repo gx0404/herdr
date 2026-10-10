@@ -277,10 +277,10 @@ description = "apply layout"
 
 ```toml
 [theme]
-name = "catppuccin"
+name = "graphite"
 ```
 
-在[配置参考](/docs/config-reference/)中搜索 `theme.name` 可查看所有内置主题。如果想让 Herdr UI 颜色跟随宿主终端的 ANSI 调色板，请使用 `terminal`。
+默认的 `graphite` 主题以中性石墨灰为底，彩色只用来表达智能体状态：运行中是蓝色，等待你输入是琥珀色，已完成但还没查看是绿色，失败是红色。它不需要 `auto_switch` 就会跟随宿主终端的明暗（`graphite-dark` / `graphite-light`）；想固定一种时直接选 `graphite-dark` 或 `graphite-light`。在[配置参考](/docs/config-reference/)中搜索 `theme.name` 可查看所有内置主题。如果想让 Herdr UI 颜色跟随宿主终端的 ANSI 调色板，请使用 `terminal`。
 
 `terminal` 主题把 Herdr 的结构色映射到 ANSI 调色板：输入框、键帽与未聚焦标签用的弱结构面是 `DarkGray`，更强的 hover / 活动面是 `Gray`，而正文与面板底色仍跟随终端自身的颜色。因此输入框、hover 高亮与禁用按钮在 16 色终端上仍有可见边界，不会塌缩成普通文本。
 
@@ -296,7 +296,7 @@ light_name = "catppuccin-latte"
 dark_name = "catppuccin"
 ```
 
-`auto_switch` 默认为 `false`，因此现有主题配置会保持手动行为。如果省略 `light_name` 或 `dark_name`，且配置的 `name` 存在对应的内置姊妹主题，Herdr 会使用该主题，例如 `tokyo-night`/`tokyo-night-day` 或 `gruvbox`/`gruvbox-light`。在设置中手动选择主题会禁用 `auto_switch`。
+`auto_switch` 默认为 `false`，因此现有主题配置会保持手动行为（默认的 `graphite` 无论如何都跟随宿主明暗）。如果省略 `light_name` 或 `dark_name`，且配置的 `name` 存在对应的内置姊妹主题，Herdr 会使用该主题，例如 `tokyo-night`/`tokyo-night-day` 或 `gruvbox`/`gruvbox-light`。在设置中手动选择主题会禁用 `auto_switch`。
 
 你可以覆盖单个颜色：
 
@@ -313,7 +313,7 @@ red = "#f38ba8"
 yellow = "#f9e2af"
 ```
 
-`sidebar_bg` 可单独设置桌面侧边栏的背景色；停靠布局下工作区列表与 Agents 面板都使用它。未设置时，默认的 `catppuccin` 主题用它的面板色铺满侧边栏，其它内置主题则继续使用宿主终端背景。`active_row_bg` 可更改当前 Space 和已聚焦 Agent 行的背景色，而不会影响分隔线或滚动条轨道。`selection_bg` 可更改侧边栏中 Navigate 模式光标行的背景色。
+`sidebar_bg` 可单独设置桌面侧边栏的背景色；停靠布局下工作区列表与 Agents 面板都使用它。未设置时，`graphite` 主题的侧边栏比面板深一档，`catppuccin` 用它的面板色铺满侧边栏，其它内置主题则继续使用宿主终端背景。`active_row_bg` 可更改当前 Space 和已聚焦 Agent 行的背景色，而不会影响分隔线或滚动条轨道。`selection_bg` 可更改侧边栏中 Navigate 模式光标行的背景色。
 
 颜色值支持十六进制、命名颜色、`rgb(r,g,b)`，以及 `reset`、`default`、`none`、`transparent` 等重置别名。
 
@@ -344,7 +344,7 @@ toast_border_error = "#f38ba8"
 selection_mix_ratio = 0.35
 ```
 
-未设置的字段保留语义回落：窗格边框使用 `accent`/`overlay0`，滚动条滑块使用 `overlay1`（聚焦）或 `overlay0`，滚动条轨道使用 `overlay0`（聚焦）或 `surface_dim`，toast 边框使用 `green`/`blue`/`red`，模式栏使用 `accent`，`hover_bg`（菜单与浮层列表中指针悬停的那一行）取主题里第一个与面板背景明显可辨的表面色——多数主题是 `surface1`，`surface1` 与 `panel_bg` 几乎同色的浅色主题会自动退到更强的一档。`selection_mix_ratio`（0.0–1.0，默认 0.28）控制选区背景向白色或黑色混合宿主背景色的强度；被选文本的粗体、斜体和下划线样式会保留，只有单元格颜色改变。完整字段列表请在[配置参考](/docs/config-reference/)中搜索 `theme.components`。
+未设置的字段保留语义回落：窗格边框使用 `accent`/`overlay0`，滚动条滑块使用 `overlay1`（聚焦）或 `overlay0`，滚动条轨道使用 `overlay0`（聚焦）或 `surface_dim`，toast 边框使用 `green`/`blue`/`red`，模式栏使用 `accent`，智能体状态色 `status_running` / `status_input` / `status_review` / `status_failed` / `status_idle` 分别回落到 `blue` / `yellow` / `green` / `red` / `overlay1`，`hover_bg`（菜单与浮层列表中指针悬停的那一行）取主题里第一个与面板背景明显可辨的表面色——多数主题是 `surface1`，`surface1` 与 `panel_bg` 几乎同色的浅色主题会自动退到更强的一档。`selection_mix_ratio`（0.0–1.0，默认 0.28）控制选区背景向白色或黑色混合宿主背景色的强度；被选文本的粗体、斜体和下划线样式会保留，只有单元格颜色改变。完整字段列表请在[配置参考](/docs/config-reference/)中搜索 `theme.components`。
 
 ## UI 与侧边栏
 
@@ -352,7 +352,7 @@ selection_mix_ratio = 0.35
 
 `ui.pane_borders` 接受 `"auto"`（默认值，仅为分割窗格显示边框）、`"always"`（也为单个窗格显示边框）或 `"off"`。单窗格的所有边都是外边，因此还需要 `ui.pane_outer_borders = true` 才会显示边框。旧的布尔值仍然有效：`true` 对应 `"auto"`，`false` 对应 `"off"`。
 
-`ui.border_style` 可在 `"single"`（默认）、`"rounded"`、`"double"`、`"thick"` 之间切换窗格边框字形。
+`ui.border_style` 可在 `"single"`、`"rounded"`（默认）、`"double"`、`"thick"` 之间切换边框字形，窗格边框与 Herdr 自己的面板、卡片都使用它。
 
 `ui.color_depth` 控制 Herdr 自身 UI 颜色的输出色深：`"auto"`（默认）跟随宿主终端——当 TERM 为 `256color` 且没有 truecolor 证据时（SSH 或 tmux 中常见），主题 RGB 颜色会自动映射到最近的 xterm-256 调色板条目。使用 `"truecolor"` 强制 24 位输出，或使用 `"256"` 强制降级。
 
@@ -397,14 +397,12 @@ window_title = "{hostname}: {workspace}"
 
 `client.window_title.set` 会覆盖配置的标题，直到 `client.window_title.clear` 将其交还。
 
-智能体状态默认使用紧凑的彩色圆点。若要同时通过形状和颜色区分 blocked、working、done、idle 与 unknown 状态，请在设置中选择 **distinct symbols**，或配置：
+智能体状态默认每种状态一个字形（`status_indicators = "graphite"`）：`◆` 等待你的输入，`✕` 失败，运行中是转圈，`●` 已完成且还没查看，`○` 空闲。转圈跟随 `ui.spinner` 与 `ui.animations`，任一关闭时运行中显示静态的 `◌`。若想改用紧凑的彩色圆点或差异化的静态符号，请在设置中选择，或配置：
 
 ```toml
 [ui]
 status_indicators = "symbols"
 ```
-
-这些符号是静态的，因此该选项不会启用旋转动画。
 
 ### 侧边栏行布局
 
@@ -539,7 +537,7 @@ delay_seconds = 1
 position = "bottom-right"
 ```
 
-选择 `herdr` 可使用应用内 toast，选择 `terminal` 可使用适合 SSH 场景的外层终端通知，选择 `system` 可使用本地操作系统通知服务，选择 `off` 可禁用弹出通知。Herdr 会抑制活动标签页的弹出通知。在[配置参考](/docs/config-reference/)中搜索 `ui.toast`，可查看位置、延迟行为和剪贴板反馈设置。 通知横幅与 toast 会带上来源窗格的显示名（没有显示名时用 pane id），移动端窄屏下也能认出是谁在通知。
+`herdr`（默认）显示应用内通知卡片；选择 `terminal` 可使用适合 SSH 场景的外层终端通知，选择 `system` 可使用本地操作系统通知服务，选择 `off` 可禁用弹出通知。Herdr 会抑制活动标签页的弹出通知，所以只会提醒你没在看着的智能体。在[配置参考](/docs/config-reference/)中搜索 `ui.toast`，可查看位置、延迟行为和剪贴板反馈设置。 通知横幅与 toast 会带上来源窗格的显示名（没有显示名时用 pane id），移动端窄屏下也能认出是谁在通知。
 
 在 macOS 上，`system` 会先尝试 `terminal-notifier`；如果它不可用或执行失败，则回退到 `/usr/bin/osascript`。该回退方式会在通知中心显示为 Script Editor，并且无法激活承载 Herdr 的终端。可运行 `brew install terminal-notifier` 安装 `terminal-notifier`。如果 Herdr 检测到受支持的终端，点击通知时它可以激活该终端应用。也可以选择 `terminal`，让受支持的外层终端负责发送通知。
 

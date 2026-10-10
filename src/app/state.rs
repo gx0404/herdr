@@ -539,9 +539,65 @@ impl Palette {
         }
     }
 
+    /// Graphite 深色——默认主题。与 herdr 品牌同源的中性石墨灰（logo 只用
+    /// `#303438` / `#D9DAD8` 两色）：结构面只用中性色阶（侧栏最深、面板次之、
+    /// 表面逐级提亮），彩色只留给状态——蓝 = 运行、琥珀 = 需要输入、绿 = 待查看、
+    /// 红 = 失败，与 Codex / Claude Code / Paseo 桌面端的状态语义一致。
+    pub fn graphite_dark() -> Self {
+        Self {
+            accent: Color::Rgb(0xD7, 0xD9, 0xDC),
+            panel_bg: Color::Rgb(0x17, 0x18, 0x1B),
+            sidebar_bg: Color::Rgb(0x11, 0x12, 0x15),
+            active_row_bg: Color::Rgb(0x1F, 0x21, 0x25),
+            selection_bg: Color::Rgb(0x2A, 0x2D, 0x33),
+            surface0: Color::Rgb(0x1D, 0x1F, 0x23),
+            surface1: Color::Rgb(0x2B, 0x2E, 0x34),
+            surface_dim: Color::Rgb(0x22, 0x24, 0x29),
+            overlay0: Color::Rgb(0x5F, 0x64, 0x6D),
+            overlay1: Color::Rgb(0x8A, 0x8F, 0x98),
+            text: Color::Rgb(0xE6, 0xE7, 0xEA),
+            subtext0: Color::Rgb(0xA7, 0xAB, 0xB2),
+            mauve: Color::Rgb(0xA9, 0xB1, 0xBD),
+            green: Color::Rgb(0x3F, 0xC5, 0x6B),
+            yellow: Color::Rgb(0xE5, 0xA3, 0x3B),
+            red: Color::Rgb(0xF2, 0x76, 0x6B),
+            blue: Color::Rgb(0x5C, 0xAA, 0xF6),
+            teal: Color::Rgb(0x4F, 0xC1, 0xC9),
+            peach: Color::Rgb(0xE8, 0x92, 0x5B),
+        }
+    }
+
+    /// Graphite 浅色：同一套语义的浅色版（侧栏浅灰、面板纯白，近 Kimi Code 桌面端）。
+    pub fn graphite_light() -> Self {
+        Self {
+            accent: Color::Rgb(0x2B, 0x2F, 0x33),
+            panel_bg: Color::Rgb(0xFF, 0xFF, 0xFF),
+            sidebar_bg: Color::Rgb(0xF4, 0xF4, 0xF5),
+            active_row_bg: Color::Rgb(0xEC, 0xEC, 0xEE),
+            selection_bg: Color::Rgb(0xE4, 0xE5, 0xE8),
+            surface0: Color::Rgb(0xF0, 0xF0, 0xF2),
+            surface1: Color::Rgb(0xE3, 0xE4, 0xE7),
+            surface_dim: Color::Rgb(0xE9, 0xE9, 0xEC),
+            overlay0: Color::Rgb(0xA0, 0xA4, 0xAB),
+            overlay1: Color::Rgb(0x7C, 0x81, 0x8A),
+            text: Color::Rgb(0x1F, 0x23, 0x28),
+            subtext0: Color::Rgb(0x5B, 0x61, 0x6B),
+            mauve: Color::Rgb(0x5E, 0x6A, 0x7D),
+            green: Color::Rgb(0x2E, 0x9E, 0x53),
+            yellow: Color::Rgb(0xB7, 0x79, 0x1F),
+            red: Color::Rgb(0xD4, 0x48, 0x3D),
+            blue: Color::Rgb(0x2F, 0x7F, 0xD8),
+            teal: Color::Rgb(0x1A, 0x8E, 0x96),
+            peach: Color::Rgb(0xC2, 0x62, 0x2D),
+        }
+    }
+
     /// Resolve a theme by name. Returns None for unknown names.
     pub fn from_name(name: &str) -> Option<Self> {
         match crate::config::canonical_theme_name(name)? {
+            // 自适应的 `graphite` 在主题解析时按宿主明暗选版本；脱离解析的直接查表取深色。
+            "graphite" | "graphite-dark" => Some(Self::graphite_dark()),
+            "graphite-light" => Some(Self::graphite_light()),
             "catppuccin" => Some(Self::catppuccin()),
             "catppuccin-latte" => Some(Self::catppuccin_latte()),
             "terminal" => Some(Self::terminal()),
@@ -885,6 +941,16 @@ pub struct ComponentStyles {
     pub toast_border_error: Color,
     /// 菜单 / 浮层列表行的指针悬浮底色。Fallback: `Palette::hover_row_bg()`。
     pub hover_bg: Color,
+    /// 状态色：运行中。Fallback: blue。
+    pub status_running: Color,
+    /// 状态色：需要输入（权限、提问、确认）。Fallback: yellow。
+    pub status_input: Color,
+    /// 状态色：已完成待查看。Fallback: green。
+    pub status_review: Color,
+    /// 状态色：失败。Fallback: red。
+    pub status_failed: Color,
+    /// 状态色：看过的空闲。Fallback: overlay1。
+    pub status_idle: Color,
     /// Selection background mix ratio toward white/black, within 0.0..=1.0.
     pub selection_mix_ratio: f32,
     /// Effective output color depth after `auto` resolution.
@@ -947,6 +1013,11 @@ impl ComponentStyles {
             toast_border_info: overridden(component(|c| &c.toast_border_info), palette.blue),
             toast_border_error: overridden(component(|c| &c.toast_border_error), palette.red),
             hover_bg: overridden(component(|c| &c.hover_bg), palette.hover_row_bg()),
+            status_running: overridden(component(|c| &c.status_running), palette.blue),
+            status_input: overridden(component(|c| &c.status_input), palette.yellow),
+            status_review: overridden(component(|c| &c.status_review), palette.green),
+            status_failed: overridden(component(|c| &c.status_failed), palette.red),
+            status_idle: overridden(component(|c| &c.status_idle), palette.overlay1),
             selection_mix_ratio,
             color_depth,
         }
@@ -2869,11 +2940,15 @@ mod tests {
     }
 
     #[test]
-    fn built_in_themes_leave_sidebar_background_unset_except_the_default() {
+    fn built_in_themes_leave_sidebar_background_unset_except_solid_ones() {
         for name in crate::config::THEME_NAMES {
             let palette = Palette::from_name(name).unwrap();
-            if *name == "catppuccin" {
-                // The default theme paints a solid sidebar so hosts with a
+            if name.starts_with("graphite") {
+                // Graphite（默认）的侧栏比面板深一档，是一块实色面板，宿主墙纸不会透出来。
+                assert_ne!(palette.sidebar_bg, Color::Reset, "{name}");
+                assert_ne!(palette.sidebar_bg, palette.panel_bg, "{name}");
+            } else if *name == "catppuccin" {
+                // Catppuccin paints a solid sidebar so hosts with a
                 // wallpaper behind the terminal do not bleed it through.
                 assert_eq!(palette.sidebar_bg, palette.panel_bg);
             } else {

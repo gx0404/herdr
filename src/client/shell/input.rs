@@ -369,13 +369,7 @@ impl ClientShellState {
                     self.host_appearance = Some(appearance);
                     self.host_appearance_explicit = true;
                     outcome.query_host_theme = true;
-                    if self.config.theme_runtime.auto_switch {
-                        self.config.palette = crate::app::client_palette_for_appearance(
-                            &self.config.theme_runtime,
-                            appearance,
-                        );
-                        outcome.repaint = true;
-                    }
+                    outcome.repaint |= self.follow_host_appearance(appearance);
                 }
                 RawInputEvent::HostDefaultColor {
                     kind: crate::terminal_theme::DefaultColorKind::Background,
@@ -388,13 +382,7 @@ impl ClientShellState {
                     if !self.host_appearance_explicit {
                         let appearance = color.inferred_appearance();
                         self.host_appearance = Some(appearance);
-                        if self.config.theme_runtime.auto_switch {
-                            self.config.palette = crate::app::client_palette_for_appearance(
-                                &self.config.theme_runtime,
-                                appearance,
-                            );
-                            outcome.repaint = true;
-                        }
+                        outcome.repaint |= self.follow_host_appearance(appearance);
                     }
                 }
                 RawInputEvent::HostDefaultColor { .. }
@@ -406,6 +394,28 @@ impl ClientShellState {
         }
         outcome.repaint |= self.resume_mobile_switcher_if_ready();
         outcome
+    }
+
+    /// 宿主终端明暗变化：跟随宿主的主题（`auto_switch` 或自适应的 `graphite`）整套重新
+    /// 解析——调色板与组件 token 一起换，沿用已解析的输出色深；不跟随时不动。返回是否
+    /// 需要重绘。
+    fn follow_host_appearance(
+        &mut self,
+        appearance: crate::terminal_theme::HostAppearance,
+    ) -> bool {
+        if !crate::app::theme_follows_host(&self.config.theme_runtime) {
+            return false;
+        }
+        let resolved = crate::app::client_resolved_theme(
+            &self.config.theme_runtime,
+            Some(appearance),
+            self.config.components.color_depth,
+        );
+        let changed = resolved.palette != self.config.palette
+            || resolved.components != self.config.components;
+        self.config.palette = resolved.palette;
+        self.config.components = resolved.components;
+        changed
     }
 
     pub(super) fn handle_key(

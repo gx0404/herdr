@@ -2,6 +2,7 @@ use ratatui::layout::Rect;
 
 mod borders;
 pub(crate) mod color;
+pub(crate) mod design;
 pub(crate) mod kit;
 mod onboarding;
 mod panes;

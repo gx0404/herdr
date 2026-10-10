@@ -309,7 +309,7 @@ pub(super) fn render_settings_overlay(
                 content,
                 t.indicators,
                 t.indicators_hint,
-                &[t.indicator_dots, t.indicator_symbols],
+                &[t.indicator_graphite, t.indicator_dots, t.indicator_symbols],
                 settings.selected,
                 settings.current,
                 content_focused,

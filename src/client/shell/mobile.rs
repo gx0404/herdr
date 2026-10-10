@@ -112,7 +112,11 @@ fn render_header_status(
             status_icon(workspace.agent_status, config.status_indicators)
         ),
         Style::default()
-            .fg(status_color(workspace.agent_status, palette))
+            .fg(status_color(
+                workspace.agent_status,
+                palette,
+                &config.components,
+            ))
             .bg(palette.panel_bg),
     );
     put_text(
@@ -324,7 +328,7 @@ fn render_agent_summary(
         let color = if shown == 0 {
             match status {
                 AgentStatus::Done => config.palette.blue,
-                _ => status_color(status, &config.palette),
+                _ => status_color(status, &config.palette, &config.components),
             }
         } else {
             config.palette.overlay1
@@ -744,7 +748,7 @@ fn mobile_items(
                                 .fg(if endpoint.stale() {
                                     palette.overlay0
                                 } else {
-                                    status_color(agent.agent_status, palette)
+                                    status_color(agent.agent_status, palette, &config.components)
                                 })
                                 .bg(background)
                                 .add_modifier(dim),
@@ -852,7 +856,7 @@ fn mobile_items(
             let status = if endpoint.stale() {
                 palette.overlay0
             } else {
-                status_color(workspace.agent_status, palette)
+                status_color(workspace.agent_status, palette, &config.components)
             };
             let stale_detail = if endpoint.stale() {
                 format!(" · {}", endpoint_status_label(endpoint.status))

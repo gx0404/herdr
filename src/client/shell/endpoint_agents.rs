@@ -73,7 +73,7 @@ pub(super) fn render_collapsed(
                 .fg(if node.stale {
                     config.palette.overlay0
                 } else {
-                    status_color(agent.status, &config.palette)
+                    status_color(agent.status, &config.palette, &config.components)
                 })
                 .add_modifier(if node.stale {
                     Modifier::DIM

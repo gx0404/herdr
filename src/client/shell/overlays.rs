@@ -1315,7 +1315,9 @@ fn render_navigator_overlay(
             let status_style = if r.stale || ix == selected {
                 st
             } else {
-                Style::default().fg(status_color(status, p)).bg(row_bg)
+                Style::default()
+                    .fg(status_color(status, p, cx.components))
+                    .bg(row_bg)
             };
             put_text(
                 b,

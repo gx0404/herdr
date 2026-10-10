@@ -271,6 +271,10 @@ fn normalize_theme_name(name: &str) -> String {
 
 fn sibling_theme_names(name: &str) -> (String, String) {
     match normalize_theme_name(name).as_str() {
+        "graphite" | "herdr" | "graphite-dark" | "graphite-light" => (
+            crate::config::DEFAULT_DARK_THEME_NAME.to_string(),
+            crate::config::DEFAULT_LIGHT_THEME_NAME.to_string(),
+        ),
         "catppuccin" | "catppuccin-mocha" | "catppuccin-latte" | "latte" | "light" => {
             ("catppuccin".to_string(), "catppuccin-latte".to_string())
         }
@@ -304,7 +308,7 @@ fn theme_runtime_config(
         .theme
         .name
         .clone()
-        .unwrap_or_else(|| "catppuccin".to_string());
+        .unwrap_or_else(|| crate::config::DEFAULT_THEME_NAME.to_string());
     let (default_dark, default_light) = sibling_theme_names(&manual_name);
     state::ThemeRuntimeConfig {
         manual_name,
@@ -338,7 +342,7 @@ fn resolve_palette_for_theme_name(
             fallback = fallback_name,
             "unknown theme, falling back"
         );
-        state::Palette::from_name(fallback_name).unwrap_or_else(state::Palette::catppuccin)
+        state::Palette::from_name(fallback_name).unwrap_or_else(state::Palette::graphite_dark)
     });
 
     if let Some(custom) = &runtime.custom {
@@ -354,24 +358,43 @@ fn resolve_palette_for_theme_name(
     palette
 }
 
+/// 主题是否跟随宿主终端明暗：显式打开 `auto_switch`，或使用自适应的默认 `graphite`。
+pub(crate) fn theme_follows_host(runtime: &state::ThemeRuntimeConfig) -> bool {
+    runtime.auto_switch
+        || crate::config::canonical_theme_name(&runtime.manual_name)
+            == Some(crate::config::DEFAULT_THEME_NAME)
+}
+
 fn resolve_effective_theme(
     runtime: &state::ThemeRuntimeConfig,
     appearance: Option<crate::terminal_theme::HostAppearance>,
     host_depth: crate::config::ColorDepth,
 ) -> state::ResolvedTheme {
-    let (name, fallback, mode_custom) = if runtime.auto_switch {
+    // 自适应主题（默认的 `graphite`）不需要打开 `auto_switch` 也按宿主明暗选深 / 浅
+    // 版本；`auto_switch` 打开时仍以显式的 dark_name / light_name 为准。
+    let adaptive = !runtime.auto_switch && theme_follows_host(runtime);
+    let adaptive_names = (
+        crate::config::DEFAULT_DARK_THEME_NAME.to_string(),
+        crate::config::DEFAULT_LIGHT_THEME_NAME.to_string(),
+    );
+    let (dark_name, light_name) = if adaptive {
+        (&adaptive_names.0, &adaptive_names.1)
+    } else {
+        (&runtime.dark_name, &runtime.light_name)
+    };
+    let (name, fallback, mode_custom) = if runtime.auto_switch || adaptive {
         match appearance.unwrap_or(crate::terminal_theme::HostAppearance::Dark) {
             crate::terminal_theme::HostAppearance::Dark => (
-                &runtime.dark_name,
-                "catppuccin",
+                dark_name,
+                crate::config::DEFAULT_DARK_THEME_NAME,
                 runtime
                     .custom
                     .as_ref()
                     .and_then(|custom| custom.dark.as_ref()),
             ),
             crate::terminal_theme::HostAppearance::Light => (
-                &runtime.light_name,
-                "catppuccin-latte",
+                light_name,
+                crate::config::DEFAULT_LIGHT_THEME_NAME,
                 runtime
                     .custom
                     .as_ref()
@@ -379,7 +402,11 @@ fn resolve_effective_theme(
             ),
         }
     } else {
-        (&runtime.manual_name, "catppuccin", None)
+        (
+            &runtime.manual_name,
+            crate::config::DEFAULT_DARK_THEME_NAME,
+            None,
+        )
     };
     let palette = resolve_palette_for_theme_name(name, fallback, runtime, mode_custom)
         .with_color_depth(host_depth);
@@ -413,6 +440,8 @@ pub(crate) fn client_palette_from_config(config: &Config) -> state::Palette {
     resolve_effective_theme(&runtime, None, legacy_client_color_depth(&runtime)).palette
 }
 
+/// 测试用：按指定宿主明暗解析调色板（客户端运行时经 `client_resolved_theme` 整套解析）。
+#[cfg(test)]
 pub(crate) fn client_palette_for_appearance(
     runtime: &state::ThemeRuntimeConfig,
     appearance: crate::terminal_theme::HostAppearance,
@@ -1929,10 +1958,11 @@ selection_mix_ratio = 0.5
             crate::config::ColorDepth::Color256
         );
         assert_eq!(app.state.host_color_depth, app.state.components.color_depth);
-        // Palette and component overrides degrade through the same mapping.
+        // Palette and component overrides degrade through the same mapping
+        // (default theme: graphite-dark, accent #D7D9DC).
         assert_eq!(
             app.state.palette.accent,
-            ratatui::style::Color::Indexed(crate::config::rgb_to_xterm256(137, 180, 250))
+            ratatui::style::Color::Indexed(crate::config::rgb_to_xterm256(0xD7, 0xD9, 0xDC))
         );
         assert_eq!(
             app.state.components.pane_border_focused,
@@ -1960,7 +1990,7 @@ selection_mix_ratio = 0.5
         .unwrap();
 
         let mut app = test_app();
-        assert_eq!(app.state.border_glyphs, crate::ui::BorderGlyphs::SINGLE);
+        assert_eq!(app.state.border_glyphs, crate::ui::BorderGlyphs::ROUNDED);
 
         let report = app.reload_config();
 

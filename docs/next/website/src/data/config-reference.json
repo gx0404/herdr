@@ -56,8 +56,8 @@
         {
           "key": "theme.name",
           "type": "string",
-          "default": "\"catppuccin\"",
-          "description": "Built-in theme name."
+          "default": "\"graphite\"",
+          "description": "Built-in theme name. The default graphite follows the host terminal's light/dark appearance (graphite-dark / graphite-light) without enabling auto_switch."
         },
         {
           "key": "theme.auto_switch",
@@ -472,6 +472,36 @@
           "type": "color",
           "default": "unset",
           "description": "Background of the row the pointer hovers in menus and overlay lists. Falls back to the first theme surface that stays visually distinct from the panel background (surface1 in most themes). Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.status_running",
+          "type": "color",
+          "default": "unset",
+          "description": "Status color of running agents (spinner, rows, counters). Falls back to the blue token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.status_input",
+          "type": "color",
+          "default": "unset",
+          "description": "Status color of agents waiting for your input (permission, question, confirmation). Falls back to the yellow token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.status_review",
+          "type": "color",
+          "default": "unset",
+          "description": "Status color of agents that finished and that you have not looked at yet. Falls back to the green token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.status_failed",
+          "type": "color",
+          "default": "unset",
+          "description": "Status color of failed agents. Falls back to the red token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
+        },
+        {
+          "key": "theme.components.status_idle",
+          "type": "color",
+          "default": "unset",
+          "description": "Status color of idle agents you have already seen. Falls back to the overlay1 token. Accepts hex, named colors, rgb(r,g,b), or reset aliases."
         },
         {
           "key": "theme.components.selection_mix_ratio",
@@ -1176,7 +1206,7 @@
         {
           "key": "ui.border_style",
           "type": "enum",
-          "default": "\"single\"",
+          "default": "\"rounded\"",
           "description": "Pane border glyph style. Applies to borders Herdr draws around split panes.",
           "values": [
             "single",
@@ -1256,9 +1286,10 @@
         {
           "key": "ui.status_indicators",
           "type": "enum",
-          "default": "\"dots\"",
-          "description": "Choose compact color dots or distinct static symbols for agent states.",
+          "default": "\"graphite\"",
+          "description": "How agent states are drawn: graphite uses one glyph per state (◆ needs input, ✕ failed, a spinner while working, ● finished, ○ idle); dots keeps compact color marks; symbols uses distinct static glyphs.",
           "values": [
+            "graphite",
             "dots",
             "symbols"
           ]
@@ -1308,8 +1339,8 @@
         {
           "key": "ui.toast.delivery",
           "type": "enum",
-          "default": "\"off\"",
-          "description": "Popup notification delivery. off disables popups, herdr shows in-app toasts, terminal asks the outer terminal for a desktop notification, system asks the OS notification service directly.",
+          "default": "\"herdr\"",
+          "description": "Popup notification delivery. off disables popups, herdr shows in-app notification cards, terminal asks the outer terminal for a desktop notification, system asks the OS notification service directly. Notifications only appear for agents you are not currently looking at.",
           "values": [
             "off",
             "herdr",

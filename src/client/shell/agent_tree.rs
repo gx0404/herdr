@@ -1489,7 +1489,7 @@ fn render_group_line(
         }
         AgentTreeKind::Workspace { label, status } | AgentTreeKind::Tab { label, status } => (
             status_icon(*status, cx.config.status_indicators),
-            status_color(*status, palette),
+            status_color(*status, palette, &cx.config.components),
             label.as_str(),
             None,
         ),
@@ -1613,7 +1613,8 @@ fn render_agent_lines(
         .add_modifier(Modifier::BOLD);
     let blocked = agent.status == AgentStatus::Blocked;
     let blocked_cue = blocked && blocked_shares_icon(cx.config.status_indicators);
-    let status_style = Style::default().fg(status_color(agent.status, palette));
+    let status_style =
+        Style::default().fg(status_color(agent.status, palette, &cx.config.components));
     let status_style = if blocked {
         status_style.add_modifier(Modifier::BOLD)
     } else {
@@ -1849,7 +1850,7 @@ fn render_activity_line(
             }
         },
     );
-    let icon_color = status_color(mapped, palette);
+    let icon_color = status_color(mapped, palette, &cx.config.components);
     let texts = &crate::i18n::texts().agent_activity;
     let kind_label = match (group, kind) {
         (Some(group), _) => group.progress.as_deref().unwrap_or_default(),
@@ -1924,7 +1925,7 @@ fn render_external_line(
         content.y,
         icon_width,
         icon,
-        Style::default().fg(status_color(status, palette)),
+        Style::default().fg(status_color(status, palette, &cx.config.components)),
     );
     x = x.saturating_add(icon_width + 1);
     remaining = remaining.saturating_sub(icon_width + 1);

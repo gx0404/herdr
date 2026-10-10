@@ -14,7 +14,11 @@ fn theme_index(name: &str) -> usize {
 }
 
 fn indicator_index(style: crate::config::StatusIndicatorStyle) -> usize {
-    usize::from(style == crate::config::StatusIndicatorStyle::Symbols)
+    match style {
+        crate::config::StatusIndicatorStyle::Graphite => 0,
+        crate::config::StatusIndicatorStyle::Dots => 1,
+        crate::config::StatusIndicatorStyle::Symbols => 2,
+    }
 }
 
 fn toast_index(delivery: crate::config::ToastDelivery) -> usize {
@@ -255,10 +259,10 @@ impl ClientShellState {
                 }
             }
             ClientSettingsSection::Indicators => {
-                let style = if selected == 0 {
-                    crate::config::StatusIndicatorStyle::Dots
-                } else {
-                    crate::config::StatusIndicatorStyle::Symbols
+                let style = match selected {
+                    0 => crate::config::StatusIndicatorStyle::Graphite,
+                    1 => crate::config::StatusIndicatorStyle::Dots,
+                    _ => crate::config::StatusIndicatorStyle::Symbols,
                 };
                 self.save_settings_edit(
                     crate::config::ConfigEdit::StatusIndicators(style),

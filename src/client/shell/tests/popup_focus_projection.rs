@@ -1019,7 +1019,9 @@ fn popup_preemption_cancels_settings_theme_preview() {
     let original_theme = state.config.theme_name.clone();
     let original_palette = state.config.palette.clone();
 
-    state.handle_input_bytes(b"j");
+    // 默认的自适应 graphite 在深色宿主下就是 graphite-dark：下移两项到 graphite-light，
+    // 预览才真正换色。
+    state.handle_input_bytes(b"jj");
     assert_ne!(state.config.theme_name, original_theme);
     assert_ne!(state.config.palette.accent, original_palette.accent);
 

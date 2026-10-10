@@ -78,16 +78,17 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # onboarding = true
 
 [theme]
-# Built-in themes: catppuccin, terminal, tokyo-night, dracula, nord,
-#                  gruvbox, one-dark, solarized, kanagawa, rose-pine,
-#                  vesper
-# name = "catppuccin"
+# Built-in themes: graphite (default; follows the host terminal's light/dark
+#                  appearance), graphite-dark, graphite-light, catppuccin,
+#                  terminal, tokyo-night, dracula, nord, gruvbox, one-dark,
+#                  solarized, kanagawa, rose-pine, vesper
+# name = "graphite"
 
-# Follow host terminal light/dark appearance and switch Herdr UI themes.
-# Existing manual behavior is unchanged unless this is true.
+# Follow host terminal light/dark appearance and switch between explicit
+# theme names (the default "graphite" already follows it without this).
 # auto_switch = false
-# dark_name = "catppuccin"
-# light_name = "catppuccin-latte"
+# dark_name = "graphite-dark"
+# light_name = "graphite-light"
 
 # Override individual color tokens on top of the base theme.
 # Accepts: hex (#rrggbb), named colors, rgb(r,g,b), or panel_bg = "reset"
@@ -112,8 +113,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Component-level color tokens on top of the resolved palette.
 # Unset fields fall back to semantic tokens: pane borders use accent/overlay0,
 # scrollbar thumb uses overlay1, scrollbar track uses overlay0, toast borders
-# use green/blue/red, the mode bar uses accent, and the menu hover row uses
-# surface1.
+# use green/blue/red, the mode bar uses accent, the menu hover row uses
+# surface1, and agent status colors use blue (running), yellow (needs input),
+# green (finished, not yet seen), red (failed) and overlay1 (idle).
 # [theme.components]
 # pane_border_focused = "#89b4fa"
 # pane_border_unfocused = "#585b70"
@@ -124,6 +126,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # toast_border_info = "#89b4fa"
 # toast_border_error = "#f38ba8"
 # hover_bg = "#45475a"
+# status_running = "#5caaf6"
+# status_input = "#e5a33b"
+# status_review = "#3fc56b"
+# status_failed = "#f2766b"
+# status_idle = "#8a8f98"
 # Selection background mixes the host background toward white/black by this
 # ratio (0.0-1.0). Raise for a stronger highlight, lower for a subtler one.
 # selection_mix_ratio = 0.28
@@ -396,7 +403,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Pane border line style: "single", "rounded", "double", or "thick".
 # Applies to borders Herdr draws around split panes.
-# border_style = "single"
+# border_style = "rounded"
 
 # Output color depth for Herdr's own UI colors: "auto", "truecolor", or "256".
 # "auto" follows the host terminal capability detected from COLORTERM/TERM;
@@ -432,9 +439,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"
 
-# Agent status indicators: "dots" preserves the compact color marks; "symbols" uses
-# distinct static glyphs for blocked, working, done, idle, and unknown states.
-# status_indicators = "dots"
+# Agent status indicators: "graphite" draws one glyph per state (◆ needs input,
+# ✕ failed, a spinner while working, ● finished, ○ idle); "dots" keeps compact
+# color marks; "symbols" uses distinct static glyphs.
+# status_indicators = "graphite"
 
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
@@ -467,7 +475,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # herdr = show in-app toasts
 # terminal = ask the outer terminal to show a desktop notification
 # system = ask the OS notification service directly
-# delivery = "off"
+# Notifications only appear for agents you are not currently looking at.
+# delivery = "herdr"
 # delay_seconds = 1
 
 [ui.toast.herdr]

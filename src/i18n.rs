@@ -393,6 +393,7 @@ pub struct SettingsTexts {
     pub lang_en: &'static str,
     pub indicators: &'static str,
     pub indicators_hint: &'static str,
+    pub indicator_graphite: &'static str,
     pub indicator_dots: &'static str,
     pub indicator_symbols: &'static str,
     pub sound: &'static str,

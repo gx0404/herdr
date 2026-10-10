@@ -151,7 +151,7 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
         + usize::from(parent.x.saturating_add(1));
     assert_eq!(
         collapsed.cells[status_cell].fg,
-        crate::protocol::color_to_u32(state.config.palette.red)
+        crate::protocol::color_to_u32(state.config.components.status_input)
     );
 
     let mut next = ClientShellInput::default();

@@ -281,10 +281,10 @@ Choose a built-in theme:
 
 ```toml
 [theme]
-name = "catppuccin"
+name = "graphite"
 ```
 
-Search `theme.name` in the [Config reference](/docs/config-reference/) for every built-in theme. Use `terminal` when you want Herdr UI colors to follow your host terminal's ANSI palette.
+The default `graphite` theme uses neutral graphite surfaces and saves color for agent state: blue while an agent is running, amber when it needs your input, green when it finished and you have not looked yet, red when it failed. It follows the host terminal's light/dark appearance on its own (`graphite-dark` / `graphite-light`), without `auto_switch`; pick `graphite-dark` or `graphite-light` to pin one variant. Search `theme.name` in the [Config reference](/docs/config-reference/) for every built-in theme. Use `terminal` when you want Herdr UI colors to follow your host terminal's ANSI palette.
 
 The `terminal` theme maps Herdr's structural surfaces onto ANSI colors: the subtle surface behind input fields, keycaps, and unfocused tabs is `DarkGray`, the stronger hover/active surface is `Gray`, and text plus panel backgrounds stay at the terminal's own colors. Input fields, hover highlights, and disabled buttons therefore keep a visible boundary instead of collapsing into plain text on 16-color terminals.
 
@@ -300,7 +300,7 @@ light_name = "catppuccin-latte"
 dark_name = "catppuccin"
 ```
 
-`auto_switch` defaults to `false`, so existing theme configs keep manual behavior. If `light_name` or `dark_name` is omitted, Herdr uses the matching built-in sibling for the configured `name` when one exists, such as `tokyo-night`/`tokyo-night-day` or `gruvbox`/`gruvbox-light`. Manual theme selection in Settings disables `auto_switch`.
+`auto_switch` defaults to `false`, so existing theme configs keep manual behavior (the default `graphite` follows the host appearance either way). If `light_name` or `dark_name` is omitted, Herdr uses the matching built-in sibling for the configured `name` when one exists, such as `tokyo-night`/`tokyo-night-day` or `gruvbox`/`gruvbox-light`. Manual theme selection in Settings disables `auto_switch`.
 
 You can override individual colors:
 
@@ -317,7 +317,7 @@ red = "#f38ba8"
 yellow = "#f9e2af"
 ```
 
-`sidebar_bg` optionally gives the desktop sidebar its own background; in the docked layout it colors both the workspace list and the Agents panel. When you do not set it, the default `catppuccin` theme paints the sidebar in its panel color, and the other built-in themes keep the host terminal background. `active_row_bg` changes the active Space and focused Agent row background without affecting separators or scrollbar tracks. `selection_bg` changes the Navigate-mode cursor row background in the sidebar.
+`sidebar_bg` optionally gives the desktop sidebar its own background; in the docked layout it colors both the workspace list and the Agents panel. When you do not set it, the `graphite` themes paint the sidebar one step darker than the panels, `catppuccin` paints it in its panel color, and the other built-in themes keep the host terminal background. `active_row_bg` changes the active Space and focused Agent row background without affecting separators or scrollbar tracks. `selection_bg` changes the Navigate-mode cursor row background in the sidebar.
 
 Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `reset`, `default`, `none`, and `transparent`.
 
@@ -348,7 +348,7 @@ toast_border_error = "#f38ba8"
 selection_mix_ratio = 0.35
 ```
 
-Unset fields keep their semantic fallback: pane borders use `accent`/`overlay0`, the scrollbar thumb uses `overlay1` (focused) or `overlay0`, the scrollbar track uses `overlay0` (focused) or `surface_dim`, toast borders use `green`/`blue`/`red`, the mode bar uses `accent`, and `hover_bg` (the row the pointer hovers in menus and overlay lists) uses the first theme surface that stays visually distinct from the panel background — `surface1` in most themes, a stronger surface in light themes whose `surface1` is nearly identical to `panel_bg`. `selection_mix_ratio` (0.0–1.0, default 0.28) controls how strongly the selection background mixes the host background toward white or black. Selected text keeps its bold, italic, and underline styling; only the cell colors change. Search `theme.components` in the [Config reference](/docs/config-reference/) for the full list.
+Unset fields keep their semantic fallback: pane borders use `accent`/`overlay0`, the scrollbar thumb uses `overlay1` (focused) or `overlay0`, the scrollbar track uses `overlay0` (focused) or `surface_dim`, toast borders use `green`/`blue`/`red`, the mode bar uses `accent`, the agent status colors `status_running` / `status_input` / `status_review` / `status_failed` / `status_idle` use `blue` / `yellow` / `green` / `red` / `overlay1`, and `hover_bg` (the row the pointer hovers in menus and overlay lists) uses the first theme surface that stays visually distinct from the panel background — `surface1` in most themes, a stronger surface in light themes whose `surface1` is nearly identical to `panel_bg`. `selection_mix_ratio` (0.0–1.0, default 0.28) controls how strongly the selection background mixes the host background toward white or black. Selected text keeps its bold, italic, and underline styling; only the cell colors change. Search `theme.components` in the [Config reference](/docs/config-reference/) for the full list.
 
 ## UI and sidebar
 
@@ -356,7 +356,7 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
-`ui.border_style` switches the pane border glyphs between `"single"` (the default), `"rounded"`, `"double"`, and `"thick"`.
+`ui.border_style` switches the border glyphs between `"single"`, `"rounded"` (the default), `"double"`, and `"thick"`. It applies to pane borders and Herdr's own panels and cards.
 
 `ui.color_depth` controls the color depth of Herdr's own UI colors: `"auto"` (the default) follows the host terminal — a `256color` TERM without truecolor evidence, common over SSH or tmux, automatically maps theme RGB colors to the nearest xterm-256 palette entry. Use `"truecolor"` to force 24-bit output or `"256"` to force the downgrade.
 
@@ -401,14 +401,12 @@ The title renders on the Herdr server, so `{hostname}` names the machine the pan
 
 `client.window_title.set` overrides the configured title until `client.window_title.clear` hands it back.
 
-Agent status uses compact colored dots by default. To distinguish blocked, working, done, idle, and unknown states by shape as well as color, choose **distinct symbols** in Settings or configure:
+Agent status uses one glyph per state by default (`status_indicators = "graphite"`): `◆` needs your input, `✕` failed, a spinner while working, `●` finished and not yet seen, `○` idle. The spinner follows `ui.spinner` and `ui.animations`; with either turned off a working agent shows a static `◌`. To keep compact colored dots or distinct static symbols instead, choose them in Settings or configure:
 
 ```toml
 [ui]
 status_indicators = "symbols"
 ```
-
-The symbols are static, so this option does not enable spinner animation.
 
 ### Sidebar row layouts
 
@@ -543,7 +541,7 @@ delay_seconds = 1
 position = "bottom-right"
 ```
 
-Choose `herdr` for an in-app toast, `terminal` for an outer-terminal notification that also works over SSH, `system` for the local OS notification service, or `off` to disable popups. Herdr suppresses popups for the active tab. Search `ui.toast` in the [Config reference](/docs/config-reference/) for positions, delay behavior, and clipboard feedback settings. Banners and toasts name the pane they came from (its display name, falling back to the pane id), so the source stays identifiable at mobile widths.
+`herdr` (the default) shows an in-app notification card; choose `terminal` for an outer-terminal notification that also works over SSH, `system` for the local OS notification service, or `off` to disable popups. Herdr suppresses popups for the active tab, so you are only notified about agents you are not looking at. Search `ui.toast` in the [Config reference](/docs/config-reference/) for positions, delay behavior, and clipboard feedback settings. Banners and toasts name the pane they came from (its display name, falling back to the pane id), so the source stays identifiable at mobile widths.
 
 On macOS, `system` tries `terminal-notifier` first and falls back to `/usr/bin/osascript` when it is unavailable or fails. The fallback appears as Script Editor in Notification Center and cannot activate the hosting terminal. Install `terminal-notifier` with `brew install terminal-notifier`. For a supported, detected terminal, it can activate the terminal app when you click the notification. Alternatively, choose `terminal` to let a supported outer terminal own the notification.
 

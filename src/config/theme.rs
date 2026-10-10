@@ -6,7 +6,17 @@ use super::model::{ColorDepth, ColorDepthConfig};
 /// Default ratio used to mix the selection background toward white/black.
 pub const DEFAULT_SELECTION_MIX_RATIO: f32 = 0.28;
 
+/// 默认主题：自适应的 Graphite（按宿主终端明暗选深 / 浅版本）。
+pub const DEFAULT_THEME_NAME: &str = "graphite";
+/// 自动切换的深色默认。
+pub const DEFAULT_DARK_THEME_NAME: &str = "graphite-dark";
+/// 自动切换的浅色默认。
+pub const DEFAULT_LIGHT_THEME_NAME: &str = "graphite-light";
+
 pub const THEME_NAMES: &[&str] = &[
+    "graphite",
+    "graphite-dark",
+    "graphite-light",
     "catppuccin",
     "catppuccin-latte",
     "terminal",
@@ -29,6 +39,9 @@ pub const THEME_NAMES: &[&str] = &[
 
 pub(crate) fn canonical_theme_name(name: &str) -> Option<&'static str> {
     match name.to_lowercase().replace([' ', '_'], "-").as_str() {
+        "graphite" | "herdr" => Some("graphite"),
+        "graphite-dark" => Some("graphite-dark"),
+        "graphite-light" => Some("graphite-light"),
         "catppuccin" | "catppuccin-mocha" => Some("catppuccin"),
         "catppuccin-latte" | "latte" | "light" => Some("catppuccin-latte"),
         "terminal" => Some("terminal"),
@@ -55,7 +68,7 @@ pub(crate) fn canonical_theme_name(name: &str) -> Option<&'static str> {
 ///
 /// ```toml
 /// [theme]
-/// name = "tokyo-night"  # built-in: catppuccin, terminal, dracula, nord, etc.
+/// name = "tokyo-night"  # built-in: graphite, catppuccin, terminal, dracula, nord, etc.
 ///
 /// [theme.custom]        # override individual tokens on top of the base
 /// accent = "#f5c2e7"
@@ -64,7 +77,7 @@ pub(crate) fn canonical_theme_name(name: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ThemeConfig {
-    /// Built-in theme name. Default: "catppuccin".
+    /// Built-in theme name. Default: "graphite" (follows the host terminal's light/dark appearance).
     pub name: Option<String>,
     /// Follow host terminal light/dark appearance and switch between theme names.
     pub auto_switch: bool,
@@ -82,12 +95,12 @@ impl ThemeConfig {
     pub(crate) fn diagnostics(&self) -> Vec<String> {
         let valid = THEME_NAMES.join(", ");
         let mut diagnostics: Vec<String> = [
-            ("theme.name", self.name.as_deref(), "catppuccin"),
-            ("theme.dark_name", self.dark_name.as_deref(), "catppuccin"),
+            ("theme.name", self.name.as_deref(), DEFAULT_THEME_NAME),
+            ("theme.dark_name", self.dark_name.as_deref(), DEFAULT_DARK_THEME_NAME),
             (
                 "theme.light_name",
                 self.light_name.as_deref(),
-                "catppuccin-latte",
+                DEFAULT_LIGHT_THEME_NAME,
             ),
         ]
         .into_iter()
@@ -217,7 +230,12 @@ fn component_color_fields(components: &ThemeComponentsConfig) -> Vec<(String, &s
         toast_border_success,
         toast_border_info,
         toast_border_error,
-        hover_bg
+        hover_bg,
+        status_running,
+        status_input,
+        status_review,
+        status_failed,
+        status_idle
     )
 }
 
@@ -250,6 +268,16 @@ pub struct ThemeComponentsConfig {
     pub toast_border_error: Option<String>,
     /// Hover background of menu and overlay list rows. Fallback: surface1.
     pub hover_bg: Option<String>,
+    /// Status color of running agents. Fallback: blue.
+    pub status_running: Option<String>,
+    /// Status color of agents waiting for your input. Fallback: yellow.
+    pub status_input: Option<String>,
+    /// Status color of finished agents you have not looked at yet. Fallback: green.
+    pub status_review: Option<String>,
+    /// Status color of failed agents. Fallback: red.
+    pub status_failed: Option<String>,
+    /// Status color of idle agents you have already seen. Fallback: overlay1.
+    pub status_idle: Option<String>,
     /// Selection background mix ratio toward white/black, 0.0..=1.0. Default: 0.28.
     pub selection_mix_ratio: Option<f32>,
 }
@@ -510,15 +538,23 @@ light_name = "lattee"
         let diagnostics = config.theme.diagnostics();
         assert_eq!(diagnostics.len(), 3);
         assert!(diagnostics[0].contains("theme.name = \"catppucin\""));
-        assert!(diagnostics[0].contains("using \"catppuccin\""));
+        assert!(diagnostics[0].contains("using \"graphite\""));
         assert!(diagnostics[1].contains("theme.dark_name = \"tokio-night\""));
+        assert!(diagnostics[1].contains("using \"graphite-dark\""));
         assert!(diagnostics[2].contains("theme.light_name = \"lattee\""));
-        assert!(diagnostics[2].contains("using \"catppuccin-latte\""));
+        assert!(diagnostics[2].contains("using \"graphite-light\""));
     }
 
     #[test]
     fn theme_name_aliases_are_valid() {
-        for name in ["catppuccin-mocha", "tokyonight", "gruvbox-dark", "dawn"] {
+        for name in [
+            "catppuccin-mocha",
+            "tokyonight",
+            "gruvbox-dark",
+            "dawn",
+            "herdr",
+            "Graphite Light",
+        ] {
             assert!(canonical_theme_name(name).is_some(), "alias: {name}");
         }
     }

@@ -61,8 +61,9 @@ fn default_update_channel_for_build(is_windows: bool, is_preview: bool) -> Updat
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ToastDelivery {
-    #[default]
     Off,
+    /// 默认：herdr 内的通知卡片，只在你没有看着该会话时出现。
+    #[default]
     Herdr,
     Terminal,
     System,
@@ -123,7 +124,9 @@ enum LegacyAgentPanelScopeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StatusIndicatorStyle {
+    /// 每个状态一个字形：◆ 需要输入、✕ 失败、转圈 运行中、● 待查看、○ 空闲。
     #[default]
+    Graphite,
     Dots,
     Symbols,
 }
@@ -131,6 +134,7 @@ pub enum StatusIndicatorStyle {
 impl StatusIndicatorStyle {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Graphite => "graphite",
             Self::Dots => "dots",
             Self::Symbols => "symbols",
         }
@@ -952,8 +956,9 @@ pub enum PaneBordersConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BorderStyleConfig {
-    #[default]
     Single,
+    /// 默认：圆角细线，与桌面端卡片的观感一致。
+    #[default]
     Rounded,
     Double,
     Thick,
@@ -1437,7 +1442,7 @@ impl Default for UiConfig {
             pane_outer_borders: true,
             pane_scrollbars: true,
             pane_gaps: true,
-            border_style: BorderStyleConfig::Single,
+            border_style: BorderStyleConfig::default(),
             color_depth: ColorDepthConfig::default(),
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
@@ -1447,7 +1452,7 @@ impl Default for UiConfig {
             window_title: super::window_title::default_window_title(),
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             _legacy_agent_panel_scope: None,
-            status_indicators: StatusIndicatorStyle::Dots,
+            status_indicators: StatusIndicatorStyle::default(),
             sidebar: SidebarConfig::default(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -1483,7 +1488,7 @@ impl UiConfig {
 impl Default for ToastConfig {
     fn default() -> Self {
         Self {
-            delivery: ToastDelivery::Off,
+            delivery: ToastDelivery::default(),
             delay_seconds: 1,
             herdr: HerdrToastConfig::default(),
             clipboard: ClipboardToastConfig::default(),
@@ -1524,9 +1529,11 @@ impl<'de> Deserialize<'de> for ToastConfig {
         }
 
         let raw = RawToastConfig::deserialize(deserializer)?;
+        // 旧键 `enabled`：显式 true / false 照旧映射；两个键都没写时取默认投递方式。
         let legacy_delivery = match raw.enabled {
             Some(true) => ToastDelivery::Herdr,
-            Some(false) | None => ToastDelivery::Off,
+            Some(false) => ToastDelivery::Off,
+            None => ToastDelivery::default(),
         };
         let delivery = raw.delivery.unwrap_or(legacy_delivery);
         let default = Self::default();
@@ -1753,20 +1760,21 @@ agent_panel_scope = "current"
     }
 
     #[test]
-    fn status_indicator_style_defaults_to_dots_and_parses_symbols() {
+    fn status_indicator_style_defaults_to_graphite_and_parses_every_style() {
         assert_eq!(
             Config::default().ui.status_indicators,
-            StatusIndicatorStyle::Dots
+            StatusIndicatorStyle::Graphite
         );
-
-        let config: Config = toml::from_str(
-            r#"
-[ui]
-status_indicators = "symbols"
-"#,
-        )
-        .unwrap();
-        assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Symbols);
+        for (raw, expected) in [
+            ("graphite", StatusIndicatorStyle::Graphite),
+            ("dots", StatusIndicatorStyle::Dots),
+            ("symbols", StatusIndicatorStyle::Symbols),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nstatus_indicators = \"{raw}\"\n")).unwrap();
+            assert_eq!(config.ui.status_indicators, expected, "{raw}");
+            assert_eq!(expected.as_str(), raw);
+        }
     }
 
     #[test]
@@ -1845,9 +1853,9 @@ tab_bar_right_separator = " · "
     }
 
     #[test]
-    fn border_style_defaults_single_and_parses_variants() {
+    fn border_style_defaults_rounded_and_parses_variants() {
         let default_config = Config::default();
-        assert_eq!(default_config.ui.border_style, BorderStyleConfig::Single);
+        assert_eq!(default_config.ui.border_style, BorderStyleConfig::Rounded);
 
         for (value, expected) in [
             ("single", BorderStyleConfig::Single),
@@ -2228,10 +2236,15 @@ position = "top-center"
     }
 
     #[test]
-    fn toast_config_defaults_preserve_existing_behavior_with_delay() {
+    fn toast_config_defaults_to_in_app_cards_with_delay() {
         let config = Config::default();
-        assert_eq!(config.ui.toast.delivery, ToastDelivery::Off);
+        assert_eq!(config.ui.toast.delivery, ToastDelivery::Herdr);
         assert_eq!(config.ui.toast.delay_seconds, 1);
+        // 只写了别的键时同样取默认投递方式；旧键 `enabled = false` 仍是关闭。
+        let partial: Config = toml::from_str("[ui.toast]\ndelay_seconds = 2\n").unwrap();
+        assert_eq!(partial.ui.toast.delivery, ToastDelivery::Herdr);
+        let legacy_off: Config = toml::from_str("[ui.toast]\nenabled = false\n").unwrap();
+        assert_eq!(legacy_off.ui.toast.delivery, ToastDelivery::Off);
         assert_eq!(
             config.ui.toast.herdr.position,
             ToastHerdrPosition::BottomRight

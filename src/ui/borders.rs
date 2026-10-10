@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(set.horizontal_bottom, "═");
         assert_eq!(
             BorderGlyphs::for_style(BorderStyleConfig::default()),
-            BorderGlyphs::SINGLE
+            BorderGlyphs::ROUNDED
         );
     }
 }

@@ -277,10 +277,10 @@ Windows では、カスタムコマンド文字列に `cmd.exe /d /c` が使わ�
 
 ```toml
 [theme]
-name = "catppuccin"
+name = "graphite"
 ```
 
-すべての組み込みテーマは、[設定リファレンス](/docs/config-reference/)で `theme.name` を検索してください。Herdr の UI 色をホストターミナルの ANSI パレットに従わせたいときは `terminal` を使ってください。
+既定の `graphite` テーマはニュートラルなグラファイト色を基調にし、色は Agent の状態を表すときだけに使います: 実行中は青、入力待ちは琥珀色、完了して未確認なら緑、失敗は赤です。`auto_switch` を有効にしなくてもホストターミナルのライト/ダークに追従します（`graphite-dark` / `graphite-light`）。どちらかに固定したい場合は `graphite-dark` または `graphite-light` を選んでください。すべての組み込みテーマは、[設定リファレンス](/docs/config-reference/)で `theme.name` を検索してください。Herdr の UI 色をホストターミナルの ANSI パレットに従わせたいときは `terminal` を使ってください。
 
 `terminal` テーマは Herdr の構造色を ANSI パレットに対応させます: 入力フィールド、キーキャップ、非フォーカスタブが使う弱い構造面は `DarkGray`、より強いホバー / アクティブ面は `Gray`、本文とパネル背景はターミナル自身の色のままです。そのため 16 色ターミナルでも入力フィールド、ホバーのハイライト、無効ボタンの境界が消えず、通常のテキストに溶け込みません。
 
@@ -296,7 +296,7 @@ light_name = "catppuccin-latte"
 dark_name = "catppuccin"
 ```
 
-`auto_switch` のデフォルトは `false` なので、既存のテーマ設定は手動の挙動を保ちます。`light_name` または `dark_name` を省略すると、設定された `name` に対応する組み込みの姉妹テーマが存在する場合はそれを使います。たとえば `tokyo-night`/`tokyo-night-day` や `gruvbox`/`gruvbox-light` です。設定画面でテーマを手動選択すると `auto_switch` は無効になります。
+`auto_switch` のデフォルトは `false` なので、既存のテーマ設定は手動の挙動を保ちます（既定の `graphite` はどちらの場合もホストの明暗に追従します）。`light_name` または `dark_name` を省略すると、設定された `name` に対応する組み込みの姉妹テーマが存在する場合はそれを使います。たとえば `tokyo-night`/`tokyo-night-day` や `gruvbox`/`gruvbox-light` です。設定画面でテーマを手動選択すると `auto_switch` は無効になります。
 
 個々の色を上書きできます:
 
@@ -313,7 +313,7 @@ red = "#f38ba8"
 yellow = "#f9e2af"
 ```
 
-`sidebar_bg` を使うと、デスクトップのサイドバーだけに背景色を設定できます。ドッキングレイアウトではワークスペース一覧と Agents パネルの両方にこの色が使われます。設定しない場合、既定の `catppuccin` テーマはパネル色でサイドバーを塗り、ほかの組み込みテーマはホストターミナルの背景を使います。`active_row_bg` は、区切り線やスクロールバートラックに影響を与えず、アクティブな Space とフォーカス中の Agent 行の背景色を変更します。`selection_bg` は、サイドバーの Navigate モードのカーソル行の背景色を変更します。
+`sidebar_bg` を使うと、デスクトップのサイドバーだけに背景色を設定できます。ドッキングレイアウトではワークスペース一覧と Agents パネルの両方にこの色が使われます。設定しない場合、`graphite` テーマはサイドバーをパネルより一段暗く塗り、`catppuccin` はパネル色でサイドバーを塗り、ほかの組み込みテーマはホストターミナルの背景を使います。`active_row_bg` は、区切り線やスクロールバートラックに影響を与えず、アクティブな Space とフォーカス中の Agent 行の背景色を変更します。`selection_bg` は、サイドバーの Navigate モードのカーソル行の背景色を変更します。
 
 色の値には、hex、名前付きの色、`rgb(r,g,b)`、または `reset`、`default`、`none`、`transparent` のようなリセットエイリアスが使えます。
 
@@ -344,7 +344,7 @@ toast_border_error = "#f38ba8"
 selection_mix_ratio = 0.35
 ```
 
-未設定のフィールドはセマンティックなフォールバックを保持します: ペインの境界線は `accent`/`overlay0`、スクロールバーのつまみは `overlay1`（フォーカス時）または `overlay0`、トラックは `overlay0`（フォーカス時）または `surface_dim`、トーストの境界線は `green`/`blue`/`red`、モードバーは `accent`、`hover_bg`（メニューやオーバーレイ一覧でポインタが乗っている行）はパネル背景とはっきり区別できる最初のサーフェス色を使います。多くのテーマでは `surface1` ですが、`surface1` が `panel_bg` とほぼ同じ明るいテーマでは自動的により強い色に下がります。`selection_mix_ratio`（0.0–1.0、デフォルト 0.28）は、選択背景をホストの背景色から白または黒へどの程度混ぜるかを制御します。選択されたテキストの太字・斜体・下線は保持され、セルの色だけが変わります。全フィールドの一覧は[設定リファレンス](/docs/config-reference/)で `theme.components` を検索してください。
+未設定のフィールドはセマンティックなフォールバックを保持します: ペインの境界線は `accent`/`overlay0`、スクロールバーのつまみは `overlay1`（フォーカス時）または `overlay0`、トラックは `overlay0`（フォーカス時）または `surface_dim`、トーストの境界線は `green`/`blue`/`red`、モードバーは `accent`、Agent の状態色 `status_running` / `status_input` / `status_review` / `status_failed` / `status_idle` はそれぞれ `blue` / `yellow` / `green` / `red` / `overlay1`、`hover_bg`（メニューやオーバーレイ一覧でポインタが乗っている行）はパネル背景とはっきり区別できる最初のサーフェス色を使います。多くのテーマでは `surface1` ですが、`surface1` が `panel_bg` とほぼ同じ明るいテーマでは自動的により強い色に下がります。`selection_mix_ratio`（0.0–1.0、デフォルト 0.28）は、選択背景をホストの背景色から白または黒へどの程度混ぜるかを制御します。選択されたテキストの太字・斜体・下線は保持され、セルの色だけが変わります。全フィールドの一覧は[設定リファレンス](/docs/config-reference/)で `theme.components` を検索してください。
 
 ## UI とサイドバー
 
@@ -352,7 +352,7 @@ selection_mix_ratio = 0.35
 
 `ui.pane_borders` は `"auto"`（デフォルト。分割ペインだけに境界線を表示）、`"always"`（単独ペインにも枠を表示）、`"off"` を受け付けます。単独ペインの辺はすべて外側の辺なので、枠を表示するには `ui.pane_outer_borders = true` も必要です。従来の真偽値も有効で、`true` は `"auto"`、`false` は `"off"` に対応します。
 
-`ui.border_style` はペイン境界線のグリフを `"single"`（デフォルト）、`"rounded"`、`"double"`、`"thick"` から選びます。
+`ui.border_style` は境界線のグリフを `"single"`、`"rounded"`（デフォルト）、`"double"`、`"thick"` から選びます。ペイン境界線と Herdr 自身のパネルやカードに適用されます。
 
 `ui.color_depth` は Herdr 自身の UI 色の出力色深度を制御します: `"auto"`（デフォルト）はホストターミナルに従い、truecolor の証拠がない `256color` 系の TERM（SSH や tmux で一般的）では、テーマの RGB 色が自動的に最も近い xterm-256 パレットエントリにマッピングされます。`"truecolor"` で 24 ビット出力を強制し、`"256"` でダウングレードを強制します。
 
@@ -397,14 +397,12 @@ window_title = "{hostname}: {workspace}"
 
 `client.window_title.set` は設定されたタイトルを上書きし、`client.window_title.clear` がそれを戻します。
 
-Agent の状態は、デフォルトではコンパクトな色付きドットで表示されます。blocked、working、done、idle、unknown を色だけでなく形でも区別するには、設定画面で **distinct symbols** を選ぶか、次のように設定します:
+Agent の状態は、デフォルトでは状態ごとに 1 つのグリフで表示されます（`status_indicators = "graphite"`）: `◆` は入力待ち、`✕` は失敗、実行中はスピナー、`●` は完了して未確認、`○` はアイドルです。スピナーは `ui.spinner` と `ui.animations` に従い、どちらかを無効にすると実行中は静的な `◌` になります。コンパクトな色付きドットや区別しやすい静的シンボルを使いたい場合は、設定画面で選ぶか、次のように設定します:
 
 ```toml
 [ui]
 status_indicators = "symbols"
 ```
-
-これらの記号は静的なので、このオプションでスピナーアニメーションが有効になることはありません。
 
 ### サイドバーの行レイアウト
 
@@ -539,7 +537,7 @@ delay_seconds = 1
 position = "bottom-right"
 ```
 
-アプリ内トーストには `herdr`、SSH 越しでも使いやすい外側のターミナル通知には `terminal`、ローカル OS の通知サービスには `system`、ポップアップを無効にするには `off` を選びます。Herdr はアクティブなタブのポップアップを抑制します。位置、遅延の挙動、クリップボードのフィードバック設定については、[設定リファレンス](/docs/config-reference/)で `ui.toast` を検索してください。 通知バナーとトーストには発信元ペインの表示名（無い場合は pane id）が付くので、モバイル幅でも出所が分かります。
+`herdr`（デフォルト）はアプリ内の通知カードを表示します。SSH 越しでも使いやすい外側のターミナル通知には `terminal`、ローカル OS の通知サービスには `system`、ポップアップを無効にするには `off` を選びます。Herdr はアクティブなタブのポップアップを抑制するため、見ていない Agent についてだけ通知されます。位置、遅延の挙動、クリップボードのフィードバック設定については、[設定リファレンス](/docs/config-reference/)で `ui.toast` を検索してください。 通知バナーとトーストには発信元ペインの表示名（無い場合は pane id）が付くので、モバイル幅でも出所が分かります。
 
 macOS では、`system` は最初に `terminal-notifier` を試し、利用できない場合や失敗した場合は `/usr/bin/osascript` にフォールバックします。このフォールバックは通知センターで Script Editor として表示され、ホストターミナルをアクティブにできません。`brew install terminal-notifier` で `terminal-notifier` をインストールできます。対応するターミナルを Herdr が検出できた場合、通知のクリック時にそのターミナルアプリをアクティブにできます。または、`terminal` を選んで対応する外側のターミナルに通知を送信させてください。
 

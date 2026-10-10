@@ -1104,7 +1104,7 @@ fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     assert_eq!(buffer[(local_toggle.x, local_toggle.y)].symbol(), "▸");
     assert!((local_parent.rect.x..local_parent.rect.right())
-        .any(|x| buffer[(x, local_parent.rect.y)].fg == state.config.palette.red));
+        .any(|x| buffer[(x, local_parent.rect.y)].fg == state.config.components.status_input));
 
     assert!(state.activate_endpoint_projection(&remote_id));
     let mut remote_surface = surface();
@@ -1500,7 +1500,7 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
     assert!(buffer
         .content()
         .iter()
-        .any(|cell| cell.symbol() == "×" && cell.fg == state.config.palette.red));
+        .any(|cell| cell.symbol() == "×" && cell.fg == state.config.components.status_input));
 }
 
 #[test]
@@ -2988,7 +2988,7 @@ fn collapsed_aggregate_workspace_status_uses_its_status_color() {
     let buffer = frame.to_ratatui_buffer().expect("frame buffer");
     assert_eq!(
         buffer[(workspace.x.saturating_add(2), workspace.y)].fg,
-        state.config.palette.red
+        state.config.components.status_input
     );
 }
 
