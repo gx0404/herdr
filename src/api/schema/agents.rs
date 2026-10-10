@@ -322,6 +322,11 @@ pub struct AgentInsight {
     /// 会话里最近一次错误。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `error` 那条会话记录自己的时刻（墙钟毫秒）。只在 server 内部判定错误是否晚于
+    /// 本回合开始（才锁存失败）；不进 JSON，也不进 wire 镜像。
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(crate) error_at_ms: Option<u64>,
     /// 当前回合开始工作的时刻；不在 Working 时省略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_since_ms: Option<u64>,

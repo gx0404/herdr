@@ -1,0 +1,36 @@
+[
+  {
+    "title": 7,
+    "model_id": null,
+    "prompt": "  ",
+    "prompt_at": "soon",
+    "reply": [
+      "x"
+    ],
+    "reply_at": null,
+    "tool": "edit",
+    "tool_call": null,
+    "tool_at": -5,
+    "question": null,
+    "question_count": null,
+    "last_role": null,
+    "error_name": "APIError",
+    "error_message": null,
+    "error_at": 1790150401000,
+    "input_command": null,
+    "input_filePath": "/work/oc/src/app.ts",
+    "input_pattern": null,
+    "input_url": null,
+    "input_query": null,
+    "input_description": null,
+    "input_subagent_type": null,
+    "option_0": null,
+    "option_1": null,
+    "option_2": null,
+    "option_3": null,
+    "option_4": null,
+    "option_5": null,
+    "option_6": null,
+    "option_7": null
+  }
+]

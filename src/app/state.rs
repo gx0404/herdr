@@ -1900,12 +1900,16 @@ const INSIGHT_MAX_OPTIONS: usize = 8;
 const INSIGHT_OPTION_MAX_CHARS: usize = 120;
 
 /// 截断会话洞察：文本压成一行并截到上限，空文本省略，选项最多 8 个。回合计时由
-/// server 记录（`TerminalState`），来源适配器给的计时不落库。
+/// server 记录（`TerminalState`），来源适配器给的计时不落库；错误的时刻随错误保留
+/// （错误被截成空时一并丢掉）。
 fn bounded_insight(insight: crate::api::schema::AgentInsight) -> crate::api::schema::AgentInsight {
     let line = |text: Option<String>, max_chars: usize| {
         text.and_then(|text| crate::harness::text::clean_line(&text, max_chars))
     };
+    let error = line(insight.error, INSIGHT_TEXT_MAX_CHARS);
     crate::api::schema::AgentInsight {
+        error_at_ms: error.as_ref().and(insight.error_at_ms),
+        error,
         session_title: line(insight.session_title, INSIGHT_LABEL_MAX_CHARS),
         model: line(insight.model, INSIGHT_LABEL_MAX_CHARS),
         current_tool: line(insight.current_tool, INSIGHT_LABEL_MAX_CHARS),
@@ -1918,7 +1922,6 @@ fn bounded_insight(insight: crate::api::schema::AgentInsight) -> crate::api::sch
             .filter_map(|option| crate::harness::text::clean_line(option, INSIGHT_OPTION_MAX_CHARS))
             .take(INSIGHT_MAX_OPTIONS)
             .collect(),
-        error: line(insight.error, INSIGHT_TEXT_MAX_CHARS),
         working_since_ms: None,
         last_turn_ms: None,
         state_changed_at_ms: None,

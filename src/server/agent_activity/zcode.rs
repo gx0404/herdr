@@ -30,6 +30,12 @@
 //!   `output.txt`。树以 DB 的 `parent_id` 为准；metadata 缺失、坏 JSON 或字段类型
 //!   不对时只丢那几项，节点照样出现。
 //! - `~/.zcode/cli/agents` 的变化由骨架的低频轮询驱动，本适配器不做 inotify。
+//! - 子进程查询走调度发现的子进程车道（`harness::registry::DiscoveryLane`），慢的
+//!   sqlite3 不拖住读文件的来源。
+//! - 不提供会话洞察（`ActivitySource::insight` 用默认的「没有」）：洞察是 pane 上的
+//!   事实（`AgentInfo.insight`），只在 pane 的调度发现里读；ZCode 不跑在 pane 里，
+//!   外部条目（`ExternalAgentInfo`）没有洞察字段，库里的标题与状态已经进了条目的
+//!   `label` / `agent_status` 与活动树。
 //!
 //! # 映射
 //!
@@ -109,9 +115,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -120,6 +125,10 @@ use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
     AgentStatus, ExternalAgentInfo,
 };
+use crate::harness::status::{self, StatusScope};
+use crate::harness::subprocess::{self, RunError};
+use crate::harness::text::{clip_bytes, clip_chars, compact_count_rounded, first_line};
+use crate::harness::time::rfc3339_ms;
 
 pub(super) struct ZCode;
 
@@ -266,11 +275,7 @@ fn agents_dir(home: &Path) -> PathBuf {
 /// 会话 id / agentId 只允许 ASCII 字母数字与 `-` `_`，拼路径前一律过这道闸，
 /// 杜绝 `..` 与分隔符。
 fn is_safe_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_ID_LEN
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    crate::harness::text::is_plain_identifier(value, MAX_ID_LEN)
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +435,9 @@ struct SqliteOutput {
     stderr: String,
 }
 
+/// 起一次 `sqlite3`，经共用的有界子进程（`harness::subprocess`）：限时 `timeout`，
+/// stdout 限 [`MAX_QUERY_OUTPUT_BYTES`]、stderr 限 [`MAX_STDERR_BYTES`]，超出的照读
+/// 照丢。起不来、等不了或超时都只是暂不可读。
 fn run_sqlite(
     program: &str,
     db: &Path,
@@ -447,83 +455,30 @@ fn run_sqlite(
         .arg("-cmd")
         .arg(format!(".timeout {SQLITE_BUSY_TIMEOUT_MS}"))
         .arg(db)
-        .args(statements)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::platform::configure_background_command(&mut command);
-    let mut child = command.spawn().map_err(|error| {
-        tracing::debug!(%error, program, "zcode: cannot start sqlite3");
-        SourceError::Unavailable
-    })?;
-    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        terminate(&mut child);
-        return Err(SourceError::Unavailable);
-    };
-    // 读线程起不来（系统线程耗尽）同样只是暂不可读：先杀子进程，已起的读线程
-    // 随管道关闭自然结束。
-    let stdout = match spawn_capped_reader(stdout, MAX_QUERY_OUTPUT_BYTES) {
-        Ok(handle) => handle,
-        Err(error) => {
-            tracing::debug!(%error, "zcode: cannot start the sqlite3 reader thread");
-            terminate(&mut child);
-            return Err(SourceError::Unavailable);
-        }
-    };
-    let stderr = match spawn_capped_reader(stderr, MAX_STDERR_BYTES) {
-        Ok(handle) => handle,
-        Err(error) => {
-            tracing::debug!(%error, "zcode: cannot start the sqlite3 reader thread");
-            terminate(&mut child);
-            let _ = join_reader(stdout);
-            return Err(SourceError::Unavailable);
-        }
-    };
-    let deadline = Instant::now() + timeout;
-    let finished = loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break true,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(SQLITE_POLL),
-            Ok(None) | Err(_) => {
-                terminate(&mut child);
-                break false;
+        .args(statements);
+    let output = subprocess::run(
+        command,
+        subprocess::Limits {
+            timeout,
+            poll: SQLITE_POLL,
+            stdout_bytes: MAX_QUERY_OUTPUT_BYTES,
+            stderr_bytes: Some(MAX_STDERR_BYTES),
+        },
+    )
+    .map_err(|error| {
+        match &error {
+            RunError::Spawn(_) => tracing::debug!(%error, program, "zcode: cannot start sqlite3"),
+            RunError::Io(_) | RunError::TimedOut => {
+                tracing::debug!(%error, "zcode: sqlite3 timed out or could not be waited on")
             }
         }
-    };
-    let stdout = join_reader(stdout);
-    let stderr = join_reader(stderr);
-    if !finished {
-        tracing::debug!("zcode: sqlite3 timed out or could not be waited on");
-        return Err(SourceError::Unavailable);
-    }
+        SourceError::Unavailable
+    })?;
     // 非零退出不一定致命：可选语句失败也会非零，交给哨兵判定。
-    Ok(SqliteOutput { stdout, stderr })
-}
-
-fn terminate(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn spawn_capped_reader<R>(reader: R, cap: u64) -> std::io::Result<JoinHandle<Vec<u8>>>
-where
-    R: Read + Send + 'static,
-{
-    std::thread::Builder::new()
-        .name("zcode-sqlite-output".to_string())
-        .spawn(move || {
-            let mut reader = reader;
-            let mut kept = Vec::new();
-            let _ = (&mut reader).take(cap).read_to_end(&mut kept);
-            // 超出上限的部分照读照丢，子进程才不会卡在写满的管道上。
-            let _ = std::io::copy(&mut reader, &mut std::io::sink());
-            kept
-        })
-}
-
-fn join_reader(handle: JoinHandle<Vec<u8>>) -> String {
-    let bytes = handle.join().unwrap_or_default();
-    String::from_utf8_lossy(&bytes).into_owned()
+    Ok(SqliteOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
 
 #[derive(Debug, Default)]
@@ -847,35 +802,21 @@ fn todo_node(todo: &TodoRow, root_id: &str) -> AgentActivityNode {
         label: first_line(&todo.content)
             .map(|content| clip_chars(content, TODO_CHARS))
             .unwrap_or_default(),
-        status: match todo.status.as_str() {
-            "pending" => AgentActivityStatus::Pending,
-            "in_progress" => AgentActivityStatus::Running,
-            "completed" => AgentActivityStatus::Done,
-            _ => AgentActivityStatus::Unknown,
-        },
+        status: status::status_or_unknown(Some(&todo.status), StatusScope::Plan),
         parent_id: (todo.session != root_id).then(|| todo.session.clone()),
         ..AgentActivityNode::default()
     }
 }
 
+/// metadata 的 `status` 走统一归一表（`harness::status`，运行中的工作）：stopped（0.16.9
+/// 后台 agent 被停的写法）、cancelled、killed 都是没做完，按失败呈现、摘要注明原因。
 fn metadata_status(raw: &str) -> AgentActivityStatus {
-    match raw {
-        "running" => AgentActivityStatus::Running,
-        "completed" => AgentActivityStatus::Done,
-        // stopped 是 0.16.9 后台 agent 被停的写法；没做完就按失败呈现，摘要注明原因。
-        "failed" | "stopped" | "cancelled" | "killed" => AgentActivityStatus::Failed,
-        "pending" | "queued" => AgentActivityStatus::Pending,
-        _ => AgentActivityStatus::Unknown,
-    }
+    status::status_or_unknown(Some(raw), StatusScope::Run)
 }
 
+/// 最新一轮 `turn_usage.status`（running / completed / error / cancelled），同一张表。
 fn turn_status(turns: &TurnStats) -> AgentActivityStatus {
-    match turns.last_status.as_deref() {
-        Some("running") => AgentActivityStatus::Running,
-        Some("completed") => AgentActivityStatus::Done,
-        Some("error" | "cancelled") => AgentActivityStatus::Failed,
-        _ => AgentActivityStatus::Unknown,
-    }
+    status::status_or_unknown(turns.last_status.as_deref(), StatusScope::Run)
 }
 
 /// `agents/<父会话 id>/<agentId>/`；id 不合规则时没有目录可找。
@@ -941,12 +882,7 @@ fn parse_metadata(value: &Value) -> AgentMetadata {
             .map(str::to_string)
     };
     let number = |key: &str| value.get(key).and_then(Value::as_u64);
-    let time = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .and_then(parse_rfc3339_ms)
-    };
+    let time = |key: &str| value.get(key).and_then(Value::as_str).and_then(rfc3339_ms);
     let profile = value.get("profileSnapshot");
     AgentMetadata {
         status: text("status"),
@@ -979,12 +915,6 @@ fn parse_metadata(value: &Value) -> AgentMetadata {
     }
 }
 
-fn parse_rfc3339_ms(text: &str) -> Option<u64> {
-    let time =
-        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()?;
-    u64::try_from(time.unix_timestamp_nanos() / 1_000_000).ok()
-}
-
 fn subagent_summary(meta: &AgentMetadata) -> Option<String> {
     match meta.status.as_deref() {
         Some("failed") => {
@@ -999,7 +929,7 @@ fn subagent_summary(meta: &AgentMetadata) -> Option<String> {
     }
     let mut parts = Vec::new();
     if let Some(tokens) = meta.total_tokens {
-        parts.push(format!("{} tokens", format_count(tokens)));
+        parts.push(format!("{} tokens", compact_count_rounded(tokens)));
     }
     if let Some(tools) = meta.tool_uses {
         parts.push(format!("{tools} tools"));
@@ -1010,14 +940,6 @@ fn subagent_summary(meta: &AgentMetadata) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-fn format_count(value: u64) -> String {
-    match value {
-        0..=999 => value.to_string(),
-        1_000..=999_999 => format!("{:.1}k", value as f64 / 1_000.0),
-        _ => format!("{:.1}M", value as f64 / 1_000_000.0),
-    }
-}
-
 fn format_duration(ms: u64) -> String {
     let seconds = ms / 1_000;
     match seconds {
@@ -1025,17 +947,6 @@ fn format_duration(ms: u64) -> String {
         1..=59 => format!("{seconds}s"),
         60..=3_599 => format!("{}m {}s", seconds / 60, seconds % 60),
         _ => format!("{}h {}m", seconds / 3_600, (seconds % 3_600) / 60),
-    }
-}
-
-fn first_line(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).find(|line| !line.is_empty())
-}
-
-fn clip_chars(text: &str, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((cut, _)) => format!("{}…", &text[..cut]),
-        None => text.to_string(),
     }
 }
 
@@ -1057,7 +968,7 @@ fn parse_cursor(cursor: Option<&str>) -> Result<Cursor, SourceError> {
     };
     let malformed = || SourceError::Malformed(format!("unrecognized zcode cursor: {cursor}"));
     let (tag, offset) = cursor.split_once(':').ok_or_else(malformed)?;
-    let offset = offset.parse::<u64>().map_err(|_| malformed())?;
+    let offset = crate::harness::text::parse_offset(offset).ok_or_else(malformed)?;
     match tag {
         "t" => Ok(Cursor::Transcript(offset)),
         "o" => Ok(Cursor::Output(offset)),
@@ -1423,17 +1334,6 @@ fn tool_detail(input: Option<&Value>) -> Option<String> {
     }
 }
 
-fn clip_bytes(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut cut = max_bytes;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    &text[..cut]
-}
-
 /// output.txt 按字节分页，切口落在 UTF-8 字符边界上。
 fn read_text_page(path: &Path, offset: u64, budget: usize) -> Result<ContentChunk, SourceError> {
     let (mut file, len) = open_content(path)?;
@@ -1705,6 +1605,7 @@ mod tests {
     fn context<'a>(home: &'a Path, session: Option<&'a AgentSessionRef>) -> SourceContext<'a> {
         SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent: "zcode",
             session,
             cwd: None,
@@ -2045,6 +1946,7 @@ mod tests {
     #[test]
     fn a_hung_sqlite3_is_killed_at_the_deadline() {
         use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
 
         let dir = TempDir::new("hung");
         let program = dir.path().join("fake-sqlite3");
@@ -2888,9 +2790,9 @@ mod tests {
 
     #[test]
     fn helpers_format_and_map_consistently() {
-        assert_eq!(format_count(999), "999");
-        assert_eq!(format_count(12_345), "12.3k");
-        assert_eq!(format_count(2_500_000), "2.5M");
+        assert_eq!(compact_count_rounded(999), "999");
+        assert_eq!(compact_count_rounded(12_345), "12.3k");
+        assert_eq!(compact_count_rounded(2_500_000), "2.5M");
         assert_eq!(format_duration(250), "250ms");
         assert_eq!(format_duration(45_000), "45s");
         assert_eq!(format_duration(3_723_000), "1h 2m");
@@ -2902,8 +2804,8 @@ mod tests {
             Some(22)
         );
         assert_eq!(migration_number("garbage"), None);
-        assert_eq!(parse_rfc3339_ms("2026-09-21T14:13:20.000Z"), Some(NOW));
-        assert_eq!(parse_rfc3339_ms("yesterday"), None);
+        assert_eq!(rfc3339_ms("2026-09-21T14:13:20.000Z"), Some(NOW));
+        assert_eq!(rfc3339_ms("yesterday"), None);
         assert_eq!(metadata_status("stopped"), AgentActivityStatus::Failed);
         assert_eq!(metadata_status("brand-new"), AgentActivityStatus::Unknown);
         assert_eq!(

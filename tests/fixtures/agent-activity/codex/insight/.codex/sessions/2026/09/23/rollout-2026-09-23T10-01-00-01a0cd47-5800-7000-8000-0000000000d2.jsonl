@@ -1,0 +1,6 @@
+{"ordinal":0,"timestamp":"2026-09-23T08:00:00.000Z","type":"session_meta","payload":{"id":"01a0cd47-5800-7000-8000-0000000000d2","timestamp":"2026-09-23T08:00:00.000Z","cwd":"/work/insight","originator":"codex_cli_rs","cli_version":"0.999.0","source":"cli","model_provider":"openai","base_instructions":{"text":"synthetic base instructions"}}}
+{"ordinal":1,"timestamp":"2026-09-23T08:00:01.000Z","type":"turn_context","payload":{"cwd":"/work/insight","approval_policy":"on-request","model":"gpt-test","effort":"medium"}}
+{"ordinal":2,"timestamp":"2026-09-23T08:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Deploy the staging build"}]}}
+{"ordinal":3,"timestamp":"2026-09-23T08:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","started_at":1790150402}}
+{"ordinal":4,"timestamp":"2026-09-23T08:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Building the image."}]}}
+{"ordinal":5,"timestamp":"2026-09-23T08:00:09.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","started_at":1790150402,"completed_at":1790150409,"duration_ms":7000,"error":{"message":"stream disconnected before completion"},"last_agent_message":null}}

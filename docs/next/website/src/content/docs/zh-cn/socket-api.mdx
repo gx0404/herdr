@@ -673,9 +673,9 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 }
 ```
 
-智能体受阻时,`attention.kind` 是 `needs_input`,其 `detail` 来自最近一次 `needs_input` 上报,或完整生命周期集成上报受阻时 `pane.report_agent` 携带的 `message`。其余时候,有已锁存且尚未被看过的失败时 `kind` 是 `failed`。失败来自 `failed` 上报、晚于当前回合开始的会话错误,或智能体进程在工作中退出。智能体工作期间锁存的失败在这一回合结束时才露面。智能体重新开始工作、失败已通知后用户看到该窗格所在的标签页、智能体被释放或替换、或收到 `clear` 上报时,锁存清除。未知的 `kind` 值解码为 `unknown`。
+智能体受阻时,`attention.kind` 是 `needs_input`,其 `detail` 来自最近一次 `needs_input` 上报,或完整生命周期集成上报受阻时 `pane.report_agent` 携带的 `message`。其余时候,有已锁存且尚未被看过的失败时 `kind` 是 `failed`。失败来自 `failed` 上报、自身时刻不早于当前回合开始的会话错误,或智能体进程在工作中退出;更早回合留下的会话错误、或没有时刻的会话错误,从不锁存。智能体工作期间锁存的失败在这一回合结束时才露面。智能体重新开始工作、失败已通知后用户看到该窗格所在的标签页、智能体被释放或替换、或收到 `clear` 上报时,锁存清除。未知的 `kind` 值解码为 `unknown`。
 
-`AgentInfo.insight` 携带会话洞察:`session_title`、`model`、`current_tool`、`last_message`、`last_prompt`、`question`、`options` 和 `error` 在智能体的来源适配器提供时填入;`working_since_ms`(只在工作时)、`last_turn_ms`(上一个工作回合的时长)和 `state_changed_at_ms` 由服务器记录。时间是 Unix 毫秒。文本字段是单行,最多 500 个字符(名称类 200 个字符),选项最多 8 个。空字段省略,什么都不知道时整个对象省略。
+`AgentInfo.insight` 携带会话洞察:`session_title`、`model`、`current_tool`、`last_message`、`last_prompt`、`question`、`options` 和 `error` 由智能体的来源适配器从智能体自己的会话数据读出,在它提供时填入(各智能体提供哪些见[会话洞察](/zh-cn/docs/agents/#会话洞察))。`error` 只反映最近一个回合,之后的提示或正常回复会把它清掉。`updated_at_ms` 是适配器用到的最新会话记录的时刻,不是读取的时刻,所以会话没有变化时洞察完全相同。`working_since_ms`(只在工作时)、`last_turn_ms`(上一个工作回合的时长)和 `state_changed_at_ms` 由服务器记录。时间是 Unix 毫秒。文本字段是单行,最多 500 个字符(名称类 200 个字符),选项最多 8 个;内置适配器把 `last_prompt`、`last_message`、`question` 和 `error` 限制在 220 个字符以内,把 `session_title`、`model`、`current_tool` 和每个选项限制在 120 个字符以内。空字段省略,什么都不知道时整个对象省略。
 
 智能体通知遵循同一套策略。受阻时通知「需要关注」,即使在当前标签页也播放请求音。一回合结束时通知「已完成」,但标签页正被查看时,或用户在进入空闲前 1.5 秒内单独按下 Ctrl-C 或 Esc 中断了这一回合时不通知。新锁存的失败以请求音通知「运行失败」。发给客户端 shell 的通知正文是窗格上下文,有问题、失败原因或最后一条消息时,后面接一行不超过 220 个字符的摘要。
 
@@ -683,7 +683,11 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 
 智能体的活动树(子智能体、任务、待办、后台进程)是服务器拥有的事实。服务器在
 后台线程里通过每种智能体各自的来源适配器读取它;钩子只负责发出「可能变了」的
-信号。
+信号。定时发现用两个这样的线程,各带一条容量 64 的队列:一个给读会话文件的适配器
+(Claude Code、Codex、Kimi Code,以及 Pi 上报的快照),一个给起查询程序的适配器
+(OpenCode 的 `opencode db`、ZCode 的 `sqlite3`),所以慢查询不会拖住文件读取。
+每个窗格同时仍最多只有一次发现在途。窗格的发现还会顺带读取上文所述的会话洞察,
+智能体的会话数据不可用时跳过。
 
 读取智能体自身会话文件的适配器(Claude Code、Codex、Kimi Code)起初按 Herdr
 服务器环境中的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或 `KIMI_CODE_HOME` 定位配置目录,
@@ -747,7 +751,10 @@ JSON 文档上报的,因为 Pi 不在磁盘上保留任何活动记录。服务�
 树,为空时省略。每个节点带 `id`、`kind`(`subagent`、`task`、`todo`、`background`、
 `unknown`)、`label`、`status`(`pending`、`running`、`blocked`、`done`、`failed`、
 `unknown`),以及可选的 `parent_id`、`agent_type`、`started_at_ms`、`ended_at_ms`、
-`content_ref` 和 `summary`。未知枚举值解码为 `unknown`。
+`content_ref` 和 `summary`。未知枚举值解码为 `unknown`。各适配器用同一张表把
+智能体自己的状态值映射到 `status`(见[活动状态](/zh-cn/docs/agents/#活动状态)):
+被取消的待办是 `done`,被杀、被停、中止、打断、超时或被取消的运行中工作是
+`failed`,`summary` 通常会写明原因。
 `AgentInfo.activity_running`、`activity_total` 和 `activity_truncated` 描述的是
 来源报出的、截断前的那棵树;三者各自在为 0 或 false 时省略,所以智能体没有活动时
 三者都不出现。`activity_truncated`

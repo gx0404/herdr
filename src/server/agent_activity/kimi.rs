@@ -52,9 +52,10 @@
 //!   `output.log`（`Text`）。
 //! - `todo:<agentId>:<序号>`：待办（`Todo`），没有可读内容。
 //!
-//! 状态映射：`running` → Running；`completed` → Done；`failed`/`timed_out` →
-//! Failed；`killed` 与取消/中止 → Done（摘要注明，实测多为主动收尾而非出错）；`lost`
-//! 与未知取值 → Unknown。
+//! 状态映射走统一归一表（`harness::status`，见 `docs/next` 的 agents 页）：`running` →
+//! Running（运行中的提问任务 → Blocked）；`completed` → Done；`failed` / `timed_out` /
+//! `killed` 与运行中被取消、中止的回合 → Failed（摘要注明原因；实测 `killed` 多为主动
+//! 收尾，但工作确实没有做完）；待办被取消 → Done；`lost` 与未知取值 → Unknown。
 //!
 //! # 读取与游标
 //!
@@ -89,7 +90,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -98,7 +99,15 @@ use super::{ActivitySource, ContentChunk, SourceContext, SourceError};
 use crate::agent_resume::AgentSessionRefKind;
 use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
+    AgentInsight,
 };
+use crate::harness::insight::InsightScan;
+use crate::harness::json::{non_negative_integer, str_field};
+use crate::harness::status::{self, StatusScope};
+use crate::harness::tail::Tail;
+use crate::harness::text::{first_line, fit_chars};
+use crate::harness::time::modified_ms;
+use crate::harness::tool_display::{self, ToolKind};
 
 pub(super) struct Kimi;
 
@@ -165,6 +174,27 @@ impl ActivitySource for Kimi {
 
     fn discover(&self, cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError> {
         discover_in(&kimi_root(cx), cx)
+    }
+
+    fn insight(&self, cx: &SourceContext<'_>) -> Result<Option<AgentInsight>, SourceError> {
+        let Some(session_dir) = locate_session(&kimi_root(cx), cx)? else {
+            return Ok(None);
+        };
+        let state = session_dir.join("state.json");
+        let wire = session_dir
+            .join("agents")
+            .join(DEFAULT_ROOT_AGENT_ID)
+            .join("wire.jsonl");
+        let reported_path = cx
+            .session
+            .is_some_and(|session| session.kind == AgentSessionRefKind::Path);
+        let fallback_cwd = cx.cwd.and_then(Path::to_str);
+        Ok(crate::harness::tail::cached(
+            cx.insight_cache,
+            &wire,
+            &[&wire, &state],
+            || read_insight(&session_dir, reported_path, fallback_cwd),
+        ))
     }
 
     fn read(
@@ -281,11 +311,7 @@ fn todo_node_id(agent_id: &str, index: usize) -> String {
 }
 
 fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_ID_LEN
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    crate::harness::text::is_plain_identifier(id, MAX_ID_LEN)
 }
 
 // ---------------------------------------------------------------------------
@@ -889,22 +915,25 @@ fn task_node(task: &TaskMeta, parent_id: Option<String>) -> AgentActivityNode {
     }
 }
 
+/// 任务状态按统一归一表（`harness::status`）：`killed` / `timed_out` 落 Failed、`lost`
+/// 落 Unknown，摘要注明原因；运行中的提问任务是在等用户（Blocked）；表里没有的取值
+/// 落 Unknown 并在摘要里原样给出。
 fn task_status(task: &TaskMeta) -> (AgentActivityStatus, Option<String>) {
     let raw = task.status.as_deref();
-    let (status, mut summary) = match raw {
-        Some("running") if task.kind == TaskKind::Question => (AgentActivityStatus::Blocked, None),
-        Some("running") => (AgentActivityStatus::Running, None),
-        Some("pending" | "queued") => (AgentActivityStatus::Pending, None),
-        Some("completed") => (AgentActivityStatus::Done, None),
-        Some("failed") => (AgentActivityStatus::Failed, None),
-        Some("timed_out") => (AgentActivityStatus::Failed, Some("timed out".to_string())),
-        Some("killed") => (AgentActivityStatus::Done, Some("killed".to_string())),
-        Some("lost") => (AgentActivityStatus::Unknown, Some("lost".to_string())),
-        Some(other) => (
+    let normalized = raw.and_then(|raw| status::normalize(raw, StatusScope::Run));
+    let (status, mut summary) = match (raw, normalized) {
+        (_, Some(normalized))
+            if normalized.status == AgentActivityStatus::Running
+                && task.kind == TaskKind::Question =>
+        {
+            (AgentActivityStatus::Blocked, None)
+        }
+        (_, Some(normalized)) => (normalized.status, normalized.note.map(str::to_string)),
+        (Some(other), None) => (
             AgentActivityStatus::Unknown,
             one_line(other, MAX_LABEL_CHARS).map(|other| format!("status {other}")),
         ),
-        None => (AgentActivityStatus::Unknown, None),
+        (None, None) => (AgentActivityStatus::Unknown, None),
     };
     if matches!(raw, Some("completed" | "failed")) {
         if let Some(code) = task.exit_code.filter(|code| *code != 0) {
@@ -928,7 +957,7 @@ fn task_status(task: &TaskMeta) -> (AgentActivityStatus, Option<String>) {
     }
     (
         status,
-        summary.map(|summary| truncate_chars(&summary, MAX_SUMMARY_CHARS)),
+        summary.map(|summary| fit_chars(&summary, MAX_SUMMARY_CHARS)),
     )
 }
 
@@ -945,12 +974,7 @@ fn todo_nodes(
         .take(MAX_TODOS_PER_AGENT)
         .enumerate()
         .map(|(index, todo)| {
-            let status = match todo.status.as_deref() {
-                Some("pending") => AgentActivityStatus::Pending,
-                Some("in_progress") => AgentActivityStatus::Running,
-                Some("done" | "completed") => AgentActivityStatus::Done,
-                _ => AgentActivityStatus::Unknown,
-            };
+            let status = status::status_or_unknown(todo.status.as_deref(), StatusScope::Plan);
             let node = AgentActivityNode {
                 id: todo_node_id(agent_id, index),
                 kind: AgentActivityKind::Todo,
@@ -1148,20 +1172,18 @@ fn parse_lifecycle(record: &str, line: &[u8], activity_after: bool) -> Option<Li
     })
 }
 
+/// 结束类记录的结局，按统一归一表（`harness::status`，运行中的工作）：中止与取消
+/// 都是没做完，落 Failed 并注明原因。
 fn lifecycle_end(record: &str, value: &Value) -> (AgentActivityStatus, Option<&'static str>) {
-    match record {
-        "prompt.aborted" => return (AgentActivityStatus::Done, Some("aborted")),
-        "turn.cancel" => return (AgentActivityStatus::Done, Some("cancelled")),
-        _ => {}
-    }
-    let reason = str_field(value, "reason").or_else(|| str_field(value, "outcome"));
-    match reason {
-        Some("completed" | "done") => (AgentActivityStatus::Done, None),
-        Some("failed" | "error") => (AgentActivityStatus::Failed, None),
-        Some("cancelled" | "user_cancelled") => (AgentActivityStatus::Done, Some("cancelled")),
-        Some("aborted") => (AgentActivityStatus::Done, Some("aborted")),
-        _ => (AgentActivityStatus::Unknown, None),
-    }
+    let raw = match record {
+        "prompt.aborted" => Some("aborted"),
+        "turn.cancel" => Some("cancelled"),
+        _ => str_field(value, "reason").or_else(|| str_field(value, "outcome")),
+    };
+    raw.and_then(|raw| status::normalize(raw, StatusScope::Run))
+        .map_or((AgentActivityStatus::Unknown, None), |normalized| {
+            (normalized.status, normalized.note)
+        })
 }
 
 fn parse_todo_store(line: &[u8]) -> Option<Vec<TodoItem>> {
@@ -1185,12 +1207,263 @@ fn parse_todo_store(line: &[u8]) -> Option<Vec<TodoItem>> {
 }
 
 // ---------------------------------------------------------------------------
+// 会话洞察
+
+/// 洞察只读主 agent wire 尾部这么多字节（与找待办的窗口一致）。
+const INSIGHT_TAIL_BYTES: u64 = ROOT_TAIL_BYTES;
+/// 单行超过这么多字节就不解析（带图片的工具结果可达数 MB）；洞察要的记录都远小于它。
+const INSIGHT_LINE_BYTES: usize = 256 * 1024;
+/// 洞察读的 wire 记录类型；其余只按行首探测到的类型跳过，不解析。
+const INSIGHT_RECORDS: [&str; 12] = [
+    "turn.prompt",
+    "turn.steer",
+    "llm.request",
+    "agent.message.appended",
+    "context.append_loop_event",
+    "interaction.request",
+    "interaction.resolved",
+    "turn.ended",
+    "agent.turn.ended",
+    "prompt.completed",
+    "prompt.aborted",
+    "turn.cancel",
+];
+
+/// 读会话洞察：`state.json` 的标题与最后提示，主 agent `wire.jsonl` 尾部的提示、回复、
+/// 模型、工具调用、待答问题与回合错误。读不动按没有洞察处理。
+///
+/// 本机取证（Kimi Code 0.41，13 个工作目录、67 份主 agent wire，只看 `type`、键名与
+/// 枚举取值，不读正文）：
+///
+/// - `state.json`：`title`（`titleKind` 为 generated / replaceable）、`lastPrompt`、
+///   `lastTurnReason`（completed / cancelled / failed）、`updatedAt`（毫秒）、`cwd`。
+/// - 提示：`turn.prompt {input: [{type: text, text}], origin: {kind}}`，`origin.kind`
+///   为 `user` 的才是用户提示（`task` 是后台任务通知）；回合中途的
+///   `turn.steer`（`origin.kind` 为 `user`，`skill_activation` 跳过）只更新最后提示。
+/// - 模型：`llm.request {model, modelAlias, provider, kind}`，取 `kind: loop` 的
+///   `model`（压缩用的请求跳过）。
+/// - 回复：`agent.message.appended` 的 `message.message`（`role: assistant`，`text`
+///   块）与 `context.append_loop_event` 的 `content.part`（`part.type: text`，实测与
+///   前者的文本块逐字相同）。
+/// - 工具：`context.append_loop_event` 的 `tool.call {name, args, toolCallId}` 与
+///   `tool.result {toolCallId}`；工具名与参数形状同 Claude（`Bash` / `Read` / `Edit` /
+///   `AskUserQuestion` 等）。
+/// - 待答问题：`interaction.request {id, kind: question, request: {questions,
+///   toolCallId}}`，`questions` 形状同 `AskUserQuestion`；`kind: approval` 是权限确认，
+///   等待中的工具已是当前工具，不另作问题。回答后对应工具有了结果，问题作废。
+/// - 回合结束：`turn.ended {reason, error: {name, message, …}}`（`failed` 时 `error`
+///   是失败原因）、`agent.turn.ended {outcome, errorMessage}`、`prompt.completed`、
+///   `prompt.aborted`、`turn.cancel`；`turn.step.retrying` 是重试中的中间状态，不算。
+fn read_insight(
+    session_dir: &Path,
+    reported_path: bool,
+    fallback_cwd: Option<&str>,
+) -> Option<AgentInsight> {
+    let state = read_json_file(&session_dir.join("state.json"), MAX_STATE_BYTES);
+    if reported_path && !session_metadata_matches(session_dir, state.as_ref()) {
+        return None;
+    }
+    let root = root_agent_id(&read_state_agents(state.as_ref()));
+    let mut insight = KimiInsight {
+        cwd: state
+            .as_ref()
+            .and_then(|state| str_field(state, "cwd"))
+            .or(fallback_cwd)
+            .map(str::to_owned),
+        ..KimiInsight::default()
+    };
+    let wire = session_dir.join("agents").join(&root).join("wire.jsonl");
+    if let Ok(tail) = Tail::read(&wire, INSIGHT_TAIL_BYTES) {
+        for line in tail.lines() {
+            insight.line(line);
+        }
+    }
+    if let Some(state) = &state {
+        if let Some(title) = str_field(state, "title") {
+            insight.scan.title(title);
+        }
+        if !insight.scan.has_prompt() {
+            if let Some(prompt) = str_field(state, "lastPrompt") {
+                insight.scan.steer(prompt, None);
+            }
+        }
+    }
+    insight.scan.finish()
+}
+
+#[derive(Default)]
+struct KimiInsight {
+    scan: InsightScan,
+    cwd: Option<String>,
+}
+
+impl KimiInsight {
+    fn line(&mut self, line: &[u8]) {
+        if line.len() > INSIGHT_LINE_BYTES {
+            return;
+        }
+        let Some(record) = record_type(line) else {
+            return;
+        };
+        if !INSIGHT_RECORDS.contains(&record.as_str()) {
+            return;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            return;
+        };
+        // 行首探测可能命中嵌套对象里的 `type`，以完整解析的顶层为准。
+        if str_field(&value, "type") != Some(record.as_str()) {
+            return;
+        }
+        let at_ms = ms_field(&value, "time");
+        match record.as_str() {
+            "turn.prompt" => {
+                if from_user(&value) {
+                    if let Some(prompt) = input_text(&value) {
+                        self.scan.prompt(&prompt, at_ms);
+                    }
+                }
+            }
+            "turn.steer" => {
+                if from_user(&value) {
+                    if let Some(prompt) = input_text(&value) {
+                        self.scan.steer(&prompt, at_ms);
+                    }
+                }
+            }
+            "llm.request" => {
+                if str_field(&value, "kind").is_none_or(|kind| kind == "loop") {
+                    if let Some(model) =
+                        str_field(&value, "model").or_else(|| str_field(&value, "modelAlias"))
+                    {
+                        self.scan.model(model);
+                    }
+                }
+            }
+            "agent.message.appended" => {
+                let message = value
+                    .get("message")
+                    .and_then(|message| message.get("message"));
+                if let Some(message) =
+                    message.filter(|message| str_field(message, "role") == Some("assistant"))
+                {
+                    if let Some(text) = message
+                        .get("content")
+                        .and_then(|content| crate::harness::json::text_content(content, &["text"]))
+                    {
+                        self.scan.message(&text, at_ms);
+                    }
+                }
+            }
+            "context.append_loop_event" => {
+                if let Some(event) = value.get("event") {
+                    self.loop_event(event, at_ms);
+                }
+            }
+            "interaction.request" => {
+                let request = value.get("request");
+                let questions = request.filter(|_| str_field(&value, "kind") == Some("question"));
+                if let Some(question) = questions.and_then(tool_display::question) {
+                    let call_id = request
+                        .and_then(|request| str_field(request, "toolCallId"))
+                        .or_else(|| str_field(&value, "toolCallId"))
+                        .or_else(|| str_field(&value, "id"));
+                    self.scan
+                        .question(call_id, &question.text, &question.options, at_ms);
+                }
+            }
+            "interaction.resolved" => {
+                if let Some(id) = str_field(&value, "id") {
+                    self.scan.question_answered(id, at_ms);
+                }
+            }
+            "turn.ended" => {
+                if str_field(&value, "reason") == Some("failed") {
+                    let error = value.get("error");
+                    let text = error.and_then(|error| {
+                        str_field(error, "message")
+                            .or_else(|| str_field(error, "name"))
+                            .or_else(|| str_field(error, "code"))
+                    });
+                    if let Some(text) = text {
+                        self.scan.error(text, at_ms);
+                    }
+                }
+                self.scan.turn_ended(at_ms);
+            }
+            "agent.turn.ended" => {
+                if str_field(&value, "outcome") == Some("failed") {
+                    if let Some(text) = str_field(&value, "errorMessage") {
+                        self.scan.error(text, at_ms);
+                    }
+                }
+                self.scan.turn_ended(at_ms);
+            }
+            // prompt.completed / prompt.aborted / turn.cancel
+            _ => self.scan.turn_ended(at_ms),
+        }
+    }
+
+    fn loop_event(&mut self, event: &Value, at_ms: Option<u64>) {
+        match str_field(event, "type") {
+            Some("tool.call") => {
+                let (Some(call_id), Some(name)) =
+                    (str_field(event, "toolCallId"), str_field(event, "name"))
+                else {
+                    return;
+                };
+                let args = event.get("args");
+                let display = tool_display::display(name, args, self.cwd.as_deref());
+                self.scan.tool_started(call_id, &display, at_ms);
+                if display.kind == ToolKind::Question {
+                    if let Some(question) = args.and_then(tool_display::question) {
+                        self.scan
+                            .question(Some(call_id), &question.text, &question.options, at_ms);
+                    }
+                }
+            }
+            Some("tool.result") => {
+                if let Some(call_id) = str_field(event, "toolCallId") {
+                    self.scan.tool_finished(call_id, at_ms);
+                }
+            }
+            Some("content.part") => {
+                let part = event.get("part");
+                if part.and_then(|part| str_field(part, "type")) == Some("text") {
+                    if let Some(text) = part
+                        .and_then(|part| part.get("text"))
+                        .and_then(Value::as_str)
+                    {
+                        self.scan.message(text, at_ms);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `origin.kind` 缺省或为 `user` 的才是用户自己的输入。
+fn from_user(value: &Value) -> bool {
+    value
+        .get("origin")
+        .and_then(|origin| str_field(origin, "kind"))
+        .is_none_or(|kind| kind == "user")
+}
+
+fn input_text(value: &Value) -> Option<String> {
+    value
+        .get("input")
+        .and_then(|input| crate::harness::json::text_content(input, &["text"]))
+}
+
+// ---------------------------------------------------------------------------
 // 内容分页
 
 fn parse_cursor(cursor: Option<&str>) -> Result<u64, SourceError> {
     match cursor {
         None => Ok(0),
-        Some(cursor) => cursor.trim().parse::<u64>().map_err(|_| {
+        Some(cursor) => crate::harness::text::parse_offset(cursor).ok_or_else(|| {
             SourceError::Malformed(format!("invalid kimi activity cursor {cursor:?}"))
         }),
     }
@@ -1441,55 +1714,27 @@ fn list_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
     dirs
 }
 
-fn modified_ms(meta: &fs::Metadata) -> Option<u64> {
-    let modified = meta.modified().ok()?;
-    let since_epoch = modified.duration_since(UNIX_EPOCH).ok()?;
-    u64::try_from(since_epoch.as_millis()).ok()
-}
-
-fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value
-        .get(key)?
-        .as_str()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-}
-
 /// 毫秒时间戳字段：只认非负数字（整数或有限浮点）。
 fn ms_field(value: &Value, key: &str) -> Option<u64> {
-    let number = value.get(key)?.as_number()?;
-    number.as_u64().or_else(|| {
-        number
-            .as_f64()
-            .filter(|float| float.is_finite() && *float >= 0.0)
-            .map(|float| float as u64)
-    })
+    value.get(key).and_then(non_negative_integer)
 }
 
 /// 第一行非空文本，控制字符换成空格（防止终端转义序列混进标签），按字符数截断。
 fn one_line(text: &str, max_chars: usize) -> Option<String> {
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let line = first_line(text)?;
     let cleaned: String = line
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
     let cleaned = cleaned.trim();
-    (!cleaned.is_empty()).then(|| truncate_chars(cleaned, max_chars))
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
-    truncated.push('…');
-    truncated
+    (!cleaned.is_empty()).then(|| fit_chars(cleaned, max_chars))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent_resume::AgentSessionRef;
+    use std::time::UNIX_EPOCH;
 
     const SESSION_ID: &str = "session_0f0f0f0f-1111-4222-8333-444455556666";
     const BROKEN_SESSION_ID: &str = "session_0b0b0b0b-aaaa-4bbb-8ccc-ddddeeeeffff";
@@ -1515,6 +1760,7 @@ mod tests {
     ) -> SourceContext<'a> {
         SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent: "kimi",
             session,
             cwd,
@@ -1725,11 +1971,12 @@ mod tests {
         assert_eq!(deeper.status, AgentActivityStatus::Failed);
         assert_eq!(deeper.ended_at_ms, Some(1_790_000_731_000));
 
-        // 只有 labels 的父、swarmItem 作标签、`type` 不是首键的结束记录。
+        // 只有 labels 的父、swarmItem 作标签、`type` 不是首键的结束记录。被中止的回合
+        // 按统一归一表落 Failed（没做完），摘要注明 aborted。
         let swarm = node(&nodes, "agent:agent-5");
         assert_eq!(swarm.parent_id, None);
         assert_eq!(swarm.label, "Check the parser module");
-        assert_eq!(swarm.status, AgentActivityStatus::Done);
+        assert_eq!(swarm.status, AgentActivityStatus::Failed);
         assert_eq!(swarm.summary.as_deref(), Some("aborted"));
 
         // 父不存在、字段类型错、只有目录：都挂顶层，状态未知，不丢节点。
@@ -1764,8 +2011,9 @@ mod tests {
         assert_eq!(dev.label, "npm run dev");
         assert_eq!(dev.content_ref, None);
 
+        // 被杀的任务按统一归一表落 Failed，摘要注明 killed 与停止原因。
         let killed = node(&nodes, "task:bash-cccc3333");
-        assert_eq!(killed.status, AgentActivityStatus::Done);
+        assert_eq!(killed.status, AgentActivityStatus::Failed);
         assert_eq!(
             killed.summary.as_deref(),
             Some("killed: verification finished")
@@ -2311,7 +2559,7 @@ mod tests {
             ("running", AgentActivityStatus::Running, None),
             ("completed", AgentActivityStatus::Done, None),
             ("failed", AgentActivityStatus::Failed, None),
-            ("killed", AgentActivityStatus::Done, Some("killed")),
+            ("killed", AgentActivityStatus::Failed, Some("killed")),
             ("timed_out", AgentActivityStatus::Failed, Some("timed out")),
             ("lost", AgentActivityStatus::Unknown, Some("lost")),
         ];
@@ -2369,6 +2617,7 @@ mod tests {
 
         let relocated = SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent_config_dir: Some(&root),
             ..context(empty_home.path(), Some(&session), None, FAR_FUTURE_MS)
         };
@@ -2393,6 +2642,7 @@ mod tests {
         let nowhere = empty_home.path().join("nowhere");
         let pinned = SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent_config_dir: Some(&nowhere),
             ..context(&fixture_home, Some(&session), None, FAR_FUTURE_MS)
         };
@@ -2404,5 +2654,154 @@ mod tests {
         // 夹具桶名由 `sha256("/work/demo")[:12]` 独立算出（Python hashlib）。
         assert_eq!(work_dir_hash("/work/demo"), "111b1182b4b0");
         assert_eq!(work_dir_hash("/work/broken"), "df7dd69c03fc");
+    }
+
+    // -----------------------------------------------------------------------
+    // 会话洞察（夹具：tests/fixtures/agent-activity/kimi/insight，全是合成内容）
+
+    /// 夹具时间基准：2026-09-23T08:00:00.000Z。
+    const INSIGHT_BASE_MS: u64 = 1_790_150_400_000;
+
+    fn insight_home() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-activity/kimi/insight")
+    }
+
+    fn insight_of(uuid: &str) -> Option<AgentInsight> {
+        let home = insight_home();
+        let session = AgentSessionRef::id(format!("session_{uuid}")).expect("合法会话 id");
+        Kimi.insight(&context(&home, Some(&session), None, INSIGHT_BASE_MS))
+            .expect("夹具会话可读")
+    }
+
+    #[test]
+    fn insight_reads_state_and_the_main_wire_tail() {
+        let at = |seconds: u64| Some(INSIGHT_BASE_MS + seconds * 1000);
+        // (会话, 标题, 模型, 提示, 回复, 当前工具, 错误, 错误时刻, 更新时刻)
+        let cases = [
+            // 后台任务通知不算提示；压缩请求的模型不算；当前工具路径相对 state 的 cwd；
+            // 不是 JSON 的行跳过。
+            (
+                "0f0f0f0f-aaaa-4bbb-8ccc-0000000000e1",
+                Some("Tidy the CLI flags"),
+                Some("k-test"),
+                Some("Rename the --quiet flag"),
+                Some("Found three uses."),
+                Some("Edit src/cli.rs"),
+                None,
+                None,
+                at(8),
+            ),
+            // 回合失败：`turn.ended` 的错误说明带它自己的时刻；重试中的记录不算。
+            (
+                "0f0f0f0f-aaaa-4bbb-8ccc-0000000000e2",
+                Some("Publish the release"),
+                Some("k-test"),
+                Some("Publish 1.2.3"),
+                None,
+                None,
+                Some("rate limited by the provider"),
+                at(4),
+                at(4),
+            ),
+            // 回合中途补充的用户输入只更新最后提示，正在跑的工具仍是当前工具；技能
+            // 注入的 steer 不算。
+            (
+                "0f0f0f0f-aaaa-4bbb-8ccc-0000000000e4",
+                Some("Steer while running"),
+                None,
+                Some("also add a rollback"),
+                None,
+                Some("Shell make migrate"),
+                None,
+                None,
+                at(3),
+            ),
+            // 只有 state.json：标题与 state 里的最后提示。
+            (
+                "0f0f0f0f-aaaa-4bbb-8ccc-0000000000e5",
+                Some("State only"),
+                None,
+                Some("prompt kept in state.json"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        ];
+        for (uuid, title, model, prompt, message, tool, error, error_at, updated_at) in cases {
+            let insight = insight_of(uuid).expect("有洞察");
+            assert_eq!(insight.session_title.as_deref(), title, "{uuid}");
+            assert_eq!(insight.model.as_deref(), model, "{uuid}");
+            assert_eq!(insight.last_prompt.as_deref(), prompt, "{uuid}");
+            assert_eq!(insight.last_message.as_deref(), message, "{uuid}");
+            assert_eq!(insight.current_tool.as_deref(), tool, "{uuid}");
+            assert_eq!(insight.error.as_deref(), error, "{uuid}");
+            assert_eq!(insight.error_at_ms, error_at, "{uuid}");
+            assert_eq!(insight.updated_at_ms, updated_at, "{uuid}");
+            assert_eq!(insight_of(uuid), Some(insight), "读两次逐字节相同：{uuid}");
+        }
+    }
+
+    #[test]
+    fn a_question_interaction_is_the_pending_question() {
+        let insight = insight_of("0f0f0f0f-aaaa-4bbb-8ccc-0000000000e3").expect("有洞察");
+        assert_eq!(insight.question.as_deref(), Some("Which platform first?"));
+        assert_eq!(insight.options, ["Linux", "Windows"]);
+        assert_eq!(
+            insight.current_tool.as_deref(),
+            Some("Ask Which platform first?")
+        );
+    }
+
+    #[test]
+    fn insight_degrades_on_missing_or_foreign_sessions_and_caches_by_fingerprint() {
+        let home = insight_home();
+        let missing = AgentSessionRef::id("session_0f0f0f0f-aaaa-4bbb-8ccc-00000000ffff")
+            .expect("合法会话 id");
+        assert_eq!(
+            Kimi.insight(&context(&home, Some(&missing), None, INSIGHT_BASE_MS))
+                .expect("找不到会话不报错"),
+            None
+        );
+        let empty = std::env::temp_dir().join(format!(
+            "herdr-kimi-insight-none-{}",
+            crate::config::test_dirs::unique_id()
+        ));
+        assert!(matches!(
+            Kimi.insight(&context(&empty, None, None, INSIGHT_BASE_MS)),
+            Err(SourceError::Unsupported)
+        ));
+
+        // 复制一份会话：缓存命中时不再读；wire 追加后重新读。
+        let temp = TempDir::new("insight-cache");
+        let bucket = temp.path().join(".kimi-code/sessions/wd_kimi_0123456789ab");
+        let session_dir = bucket.join("session_0f0f0f0f-aaaa-4bbb-8ccc-0000000000e2");
+        let source = home
+            .join(".kimi-code/sessions/wd_kimi_0123456789ab")
+            .join("session_0f0f0f0f-aaaa-4bbb-8ccc-0000000000e2");
+        std::fs::create_dir_all(session_dir.join("agents/main")).expect("建会话目录");
+        std::fs::copy(source.join("state.json"), session_dir.join("state.json"))
+            .expect("复制 state");
+        let wire = session_dir.join("agents/main/wire.jsonl");
+        std::fs::copy(source.join("agents/main/wire.jsonl"), &wire).expect("复制 wire");
+        let session = AgentSessionRef::id("session_0f0f0f0f-aaaa-4bbb-8ccc-0000000000e2")
+            .expect("合法会话 id");
+        let cache = std::sync::Mutex::new(super::super::InsightCache::default());
+        let cx = SourceContext {
+            insight_cache: Some(&cache),
+            ..context(temp.path(), Some(&session), None, INSIGHT_BASE_MS)
+        };
+        let first = Kimi.insight(&cx).expect("可读");
+        assert_eq!(Kimi.insight(&cx).expect("可读"), first, "缓存命中");
+        let mut text = std::fs::read_to_string(&wire).expect("读 wire");
+        text.push_str(
+            r#"{"type":"turn.prompt","time":1790150460000,"input":[{"type":"text","text":"retry the publish"}],"origin":{"kind":"user"}}"#,
+        );
+        text.push('\n');
+        std::fs::write(&wire, text).expect("追加 wire");
+        let refreshed = Kimi.insight(&cx).expect("可读").expect("有洞察");
+        assert_eq!(refreshed.last_prompt.as_deref(), Some("retry the publish"));
+        assert_eq!(refreshed.error, None, "新提示之后旧错误作废");
     }
 }

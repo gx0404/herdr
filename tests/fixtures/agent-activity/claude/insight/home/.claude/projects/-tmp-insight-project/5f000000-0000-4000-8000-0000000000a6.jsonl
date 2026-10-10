@@ -1,0 +1,8 @@
+{ broken line
+{"parentUuid": null, "isSidechain": false, "type": "assistant", "uuid": "a6-assistant-0", "timestamp": "2026-09-23T08:00:00.000Z", "userType": "external", "cwd": "/tmp/insight-project", "sessionId": "5f000000-0000-4000-8000-0000000000a6", "version": "2.1.999", "message": 5}
+{"parentUuid": null, "isSidechain": false, "type": "assistant", "uuid": "a6-assistant-1", "timestamp": "2026-09-23T08:00:01.000Z", "userType": "external", "cwd": "/tmp/insight-project", "sessionId": "5f000000-0000-4000-8000-0000000000a6", "version": "2.1.999", "message": {"id": "msg_51", "content": 7, "model": 42}}
+{"parentUuid": null, "isSidechain": false, "type": "assistant", "uuid": "a6-assistant-2", "timestamp": "2026-09-23T08:00:02.000Z", "userType": "external", "cwd": "/tmp/insight-project", "sessionId": "5f000000-0000-4000-8000-0000000000a6", "version": "2.1.999", "message": {"id": "msg_52", "content": [{"type": "tool_use", "name": "Bash"}, "oops", {"type": "text", "text": 9}]}}
+{"parentUuid": null, "isSidechain": false, "type": "user", "uuid": "a6-user-3", "timestamp": "2026-09-23T08:00:03.000Z", "userType": "external", "cwd": "/tmp/insight-project", "sessionId": "5f000000-0000-4000-8000-0000000000a6", "version": "2.1.999", "message": {"role": "user", "content": null}}
+{"parentUuid": null, "isSidechain": false, "type": "user", "uuid": "a6-user-4", "timestamp": "not-a-time", "userType": "external", "cwd": "/tmp/insight-project", "sessionId": "5f000000-0000-4000-8000-0000000000a6", "version": "2.1.999", "message": {"role": "user", "content": "still readable"}}
+[1, 2, 3]
+{"type":"assistant","message":{"content":[{"type":"text","text":"half written

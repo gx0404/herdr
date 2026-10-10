@@ -65,9 +65,9 @@
 //!
 //! 上面的列名、别名与 json 路径是版本相关事实，单测喂的是「SQL 跑完之后」的行
 //! JSON，覆盖不到 SQL 本身。升级 opencode 后（或怀疑键名漂移时）在装有 opencode
-//! 的机器上跑只读探针，它把 [`tree_sql`] / [`todo_sql`] / [`parts_sql`] 原样打到
-//! 本机库上，核对别名全集与各 json 路径仍能解析，并逐行核对 `model` 非空的会话都
-//! 取得出模型名：
+//! 的机器上跑只读探针，它把 [`tree_sql`] / [`todo_sql`] / [`parts_sql`] /
+//! [`insight_sql`] 原样打到本机库上，核对别名全集与各 json 路径仍能解析，并逐行核对
+//! `model` 非空的会话都取得出模型名：
 //!
 //! ```text
 //! cargo nextest run --run-ignored only -E 'test(live_schema_probe)'
@@ -96,8 +96,20 @@
 //!   `SessionPrompt.getModel` 只经 Bus 发不落库的 `session.error`（没有 `durable`
 //!   标记，不进 `event` 表），随即在建 assistant 消息之前退出——库里最后一条仍是 user
 //!   消息、没有任何错误字段，节点只能按上面的时间规则从 Running 降为 Unknown。
-//! - `todo:<会话 id>:<position>`：待办（`Todo`），没有可读内容；`pending` → Pending、
-//!   `in_progress` → Running、`completed` / `cancelled` → Done（摘要注明 cancelled）。
+//! - `todo:<会话 id>:<position>`：待办（`Todo`），没有可读内容；状态走统一归一表
+//!   （`harness::status`，计划条目）：`pending` → Pending、`in_progress` → Running、
+//!   `completed` / `cancelled` → Done（摘要注明 cancelled）。
+//!
+//! # 会话洞察
+//!
+//! 根会话一行查询（[`insight_sql`]）：`session.title` 与模型；最后一条用户文本部件
+//! （跳过 `synthetic` / `ignored` 的附件说明与压缩摘要）是最后提示；最后一条助手文本
+//! 部件是最后回复；最近一个 `pending` / `running` 的工具部件是当前工具，`question`
+//! 工具入参 `{questions: [{question, header, options: [{label}]}]}`（形状按 Paseo 对
+//! `question.asked` 的解析口径，本机没装 opencode、未经真机取证）的第一个问题是待答
+//! 问题；最后一条消息是带 `error` 的助手消息时，`错误名: 说明` 是错误（用户中止的
+//! `MessageAbortedError` 不算）。待批准的权限请求只在 OpenCode 进程内存里，不落库，
+//! 读不到。查询按库文件与 `-wal` 的指纹缓存。
 //!
 //! # 读取与游标
 //!
@@ -120,17 +132,21 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde_json::{Map, Value};
 
 use super::{ActivitySource, ContentChunk, SourceContext, SourceError};
 use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
+    AgentInsight,
 };
+use crate::harness::json::non_negative_integer;
+use crate::harness::status::{self, StatusScope};
+use crate::harness::subprocess::{self, RunError};
+use crate::harness::text::{compact_count_rounded, keep_line_breaks};
 
 pub(super) struct OpenCode;
 
@@ -207,6 +223,10 @@ impl ActivitySource for OpenCode {
         discover_with(cx, &OfficialCli, xdg_data_home())
     }
 
+    fn insight(&self, cx: &SourceContext<'_>) -> Result<Option<AgentInsight>, SourceError> {
+        insight_with(cx, &OfficialCli, xdg_data_home())
+    }
+
     fn read(
         &self,
         cx: &SourceContext<'_>,
@@ -276,11 +296,7 @@ fn root_session_id(cx: &SourceContext<'_>) -> Result<String, SourceError> {
 }
 
 fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_ID_LEN
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    crate::harness::text::is_plain_identifier(id, MAX_ID_LEN)
 }
 
 // ---------------------------------------------------------------------------
@@ -662,14 +678,14 @@ fn session_summary(session: &SessionRow, status: AgentActivityStatus) -> Option<
     if session.tokens_input > 0 || session.tokens_output > 0 {
         parts.push(format!(
             "{} in · {} out",
-            format_tokens(session.tokens_input),
-            format_tokens(session.tokens_output)
+            compact_count_rounded(session.tokens_input),
+            compact_count_rounded(session.tokens_output)
         ));
     }
     if session.tokens_reasoning > 0 {
         parts.push(format!(
             "{} reasoning",
-            format_tokens(session.tokens_reasoning)
+            compact_count_rounded(session.tokens_reasoning)
         ));
     }
     if status == AgentActivityStatus::Done && session.time_archived.is_some() {
@@ -710,25 +726,15 @@ fn error_summary(session: &SessionRow) -> Option<String> {
     }
 }
 
-fn format_tokens(count: u64) -> String {
-    if count < 1_000 {
-        count.to_string()
-    } else if count < 1_000_000 {
-        format!("{:.1}k", count as f64 / 1_000.0)
-    } else {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    }
-}
-
 fn todo_node(todo: &TodoRow, parent_id: Option<String>) -> AgentActivityNode {
     let id = format!("{TODO_NODE_PREFIX}{}:{}", todo.session_id, todo.position);
-    let (status, cancelled) = match todo.status.as_deref() {
-        Some("pending") => (AgentActivityStatus::Pending, false),
-        Some("in_progress") => (AgentActivityStatus::Running, false),
-        Some("completed") => (AgentActivityStatus::Done, false),
-        Some("cancelled") => (AgentActivityStatus::Done, true),
-        _ => (AgentActivityStatus::Unknown, false),
-    };
+    // 统一归一表（`harness::status`，计划条目）：被取消的待办算结束，摘要注明。
+    let normalized = todo
+        .status
+        .as_deref()
+        .and_then(|raw| status::normalize(raw, StatusScope::Plan));
+    let status = normalized.map_or(AgentActivityStatus::Unknown, |normalized| normalized.status);
+    let cancelled = normalized.is_some_and(|normalized| normalized.note == Some("cancelled"));
     let mut label = todo
         .content
         .as_deref()
@@ -765,6 +771,215 @@ fn todo_node(todo: &TodoRow, parent_id: Option<String>) -> AgentActivityNode {
             .flatten(),
         id,
     }
+}
+
+// ---------------------------------------------------------------------------
+// 会话洞察
+// ---------------------------------------------------------------------------
+
+/// 洞察里提示 / 回复正文在 SQL 里先截到这么多字符，再由 `harness::insight` 截到展示
+/// 上限。
+const SQL_MESSAGE_CHARS: usize = 600;
+/// 运行中工具的参数、待答问题在 SQL 里先截到这么多字符。
+const SQL_ARGUMENT_CHARS: usize = 300;
+/// 待答问题最多取这么多个选项。
+const QUESTION_OPTIONS: usize = 8;
+/// 运行中工具参数里拿来做展示摘要的键（与 `harness::tool_display` 认的键一致）。
+const TOOL_INPUT_KEYS: [&str; 7] = [
+    "command",
+    "filePath",
+    "pattern",
+    "url",
+    "query",
+    "description",
+    "subagent_type",
+];
+
+/// 根会话的洞察：一次只读查询取一行（[`insight_sql`]），按库文件（含 `-wal`）的指纹
+/// 缓存——库没变就不再起子进程。没有会话引用 → `Unsupported`；库或会话还不存在 →
+/// 没有洞察。
+///
+/// 待批准的权限请求只在 OpenCode 进程内存里（`permission.asked` 事件），不落库，这里
+/// 拿不到；`question` 工具运行中时，它入参里的第一个问题就是待答问题。
+fn insight_with(
+    cx: &SourceContext<'_>,
+    db: &dyn DbQuery,
+    xdg_data_home: Option<OsString>,
+) -> Result<Option<AgentInsight>, SourceError> {
+    let root = root_session_id(cx)?;
+    let database = data_dir(cx.home, xdg_data_home).join(DATABASE_FILE);
+    if !database.is_file() {
+        return Ok(None);
+    }
+    let mut wal = database.clone().into_os_string();
+    wal.push("-wal");
+    let wal = PathBuf::from(wal);
+    let key = database.join(&root);
+    let cwd = cx.cwd.and_then(Path::to_str);
+    crate::harness::tail::try_cached(cx.insight_cache, &key, &[&database, &wal], || {
+        let rows = parse_rows(&db.query(&insight_sql(&root))?)?;
+        Ok(rows.first().and_then(|row| insight_from_row(row, cwd)))
+    })
+}
+
+/// 一行：根会话的标题与模型、最后一条用户文本部件、最后一条助手文本部件、最近一个
+/// 运行中（`pending` / `running`）的工具部件（只取展示要用的参数与第一个问题）、最后
+/// 一条消息的角色与错误。长文本都在 SQL 里截断，整行远小于管道截断阈值。合成的用户
+/// 文本部件（`synthetic` / `ignored`，附件说明与压缩摘要）不算提示。
+fn insight_sql(root: &str) -> String {
+    let model_id = model_id_sql("s.model");
+    let text_part = |role: &str| {
+        format!(
+            "SELECT p.data AS data, p.time_created AS at FROM part p \
+             JOIN message m ON m.id = p.message_id \
+             WHERE p.session_id = '{root}' AND json_valid(p.data) AND json_valid(m.data) \
+             AND json_extract(m.data, '$.role') = '{role}' \
+             AND json_extract(p.data, '$.type') = 'text' \
+             AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0 \
+             AND COALESCE(json_extract(p.data, '$.ignored'), 0) = 0 \
+             ORDER BY p.time_created DESC, p.id DESC LIMIT 1"
+        )
+    };
+    let tool_inputs = TOOL_INPUT_KEYS
+        .iter()
+        .map(|key| {
+            format!(
+                "substr(json_extract(t.data, '$.state.input.{key}'), 1, {SQL_ARGUMENT_CHARS}) AS input_{key}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let options = (0..QUESTION_OPTIONS)
+        .map(|index| {
+            format!(
+                "substr(json_extract(t.data, '$.state.input.questions[0].options[{index}].label'), \
+                 1, {SQL_TITLE_CHARS}) AS option_{index}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "WITH prompt AS ({prompt}), reply AS ({reply}), \
+         t AS (SELECT p.data AS data, p.time_created AS at FROM part p \
+           WHERE p.session_id = '{root}' AND json_valid(p.data) \
+           AND json_extract(p.data, '$.type') = 'tool' \
+           AND json_extract(p.data, '$.state.status') IN ('pending', 'running') \
+           ORDER BY p.time_created DESC, p.id DESC LIMIT 1), \
+         lm AS (SELECT m.data AS data, m.time_created AS at FROM message m \
+           WHERE m.session_id = '{root}' AND json_valid(m.data) \
+           ORDER BY m.time_created DESC, m.id DESC LIMIT 1) \
+         SELECT substr(s.title, 1, {SQL_TITLE_CHARS}) AS title, {model_id} AS model_id, \
+           substr(json_extract(prompt.data, '$.text'), 1, {SQL_MESSAGE_CHARS}) AS prompt, \
+           prompt.at AS prompt_at, \
+           substr(json_extract(reply.data, '$.text'), 1, {SQL_MESSAGE_CHARS}) AS reply, \
+           reply.at AS reply_at, \
+           json_extract(t.data, '$.tool') AS tool, json_extract(t.data, '$.callID') AS tool_call, \
+           t.at AS tool_at, {tool_inputs}, \
+           substr(json_extract(t.data, '$.state.input.questions[0].question'), 1, {SQL_ARGUMENT_CHARS}) AS question, \
+           json_array_length(t.data, '$.state.input.questions') AS question_count, {options}, \
+           json_extract(lm.data, '$.role') AS last_role, \
+           substr(json_extract(lm.data, '$.error.name'), 1, {SQL_TITLE_CHARS}) AS error_name, \
+           substr(json_extract(lm.data, '$.error.data.message'), 1, {SQL_ARGUMENT_CHARS}) AS error_message, \
+           COALESCE(json_extract(lm.data, '$.time.completed'), json_extract(lm.data, '$.time.created'), lm.at) AS error_at \
+         FROM session s LEFT JOIN prompt ON 1 LEFT JOIN reply ON 1 LEFT JOIN t ON 1 \
+         LEFT JOIN lm ON 1 WHERE s.id = '{root}'",
+        prompt = text_part("user"),
+        reply = text_part("assistant"),
+    )
+}
+
+/// 一行查询结果 → 洞察。提示、回复、工具与错误按各自的时刻依次喂给
+/// `harness::insight`，规则（新提示作废旧错误等）与其余来源一致。用户中止
+/// （`MessageAbortedError`）不算错误。
+fn insight_from_row(row: &Map<String, Value>, cwd: Option<&str>) -> Option<AgentInsight> {
+    use crate::harness::tool_display::{self, ToolKind};
+
+    let mut scan = crate::harness::insight::InsightScan::default();
+    if let Some(title) = text_field(row, "title") {
+        scan.title(&title);
+    }
+    if let Some(model) = text_field(row, "model_id") {
+        scan.model(&model);
+    }
+    let time = |key: &str| row.get(key).and_then(non_negative_integer);
+
+    enum Event {
+        Prompt(String),
+        Reply(String),
+        Tool(String, String),
+        Error(String),
+    }
+    let mut events: Vec<(Option<u64>, Event)> = Vec::new();
+    if let Some(prompt) = text_field(row, "prompt") {
+        events.push((time("prompt_at"), Event::Prompt(prompt)));
+    }
+    if let Some(reply) = text_field(row, "reply") {
+        events.push((time("reply_at"), Event::Reply(reply)));
+    }
+    if let Some(tool) = text_field(row, "tool") {
+        let call = text_field(row, "tool_call").unwrap_or_else(|| tool.clone());
+        events.push((time("tool_at"), Event::Tool(tool, call)));
+    }
+    let error_name = text_field(row, "error_name");
+    let aborted = error_name.as_deref() == Some("MessageAbortedError");
+    if text_field(row, "last_role").as_deref() == Some("assistant") && !aborted {
+        let error = match (error_name, text_field(row, "error_message")) {
+            (Some(name), Some(message)) => Some(format!("{name}: {message}")),
+            (name, message) => name.or(message),
+        };
+        if let Some(error) = error {
+            events.push((time("error_at"), Event::Error(error)));
+        }
+    }
+    // 同一时刻按提示、回复、工具、错误的先后。
+    events.sort_by_key(|(at, event)| {
+        let rank = match event {
+            Event::Prompt(_) => 0,
+            Event::Reply(_) => 1,
+            Event::Tool(..) => 2,
+            Event::Error(_) => 3,
+        };
+        (at.unwrap_or(0), rank)
+    });
+    for (at, event) in events {
+        match event {
+            Event::Prompt(prompt) => scan.prompt(&prompt, at),
+            Event::Reply(reply) => scan.message(&reply, at),
+            Event::Error(error) => scan.error(&error, at),
+            Event::Tool(tool, call) => {
+                let mut input = Map::new();
+                for key in TOOL_INPUT_KEYS {
+                    if let Some(value) = text_field(row, &format!("input_{key}")) {
+                        input.insert(key.to_owned(), Value::String(value));
+                    }
+                }
+                let input = Value::Object(input);
+                let mut display = tool_display::display(&tool, Some(&input), cwd);
+                let question = (display.kind == ToolKind::Question)
+                    .then(|| text_field(row, "question"))
+                    .flatten()
+                    .map(|question| {
+                        match row.get("question_count").and_then(non_negative_integer) {
+                            Some(count) if count > 1 => format!("{question} (+{})", count - 1),
+                            _ => question,
+                        }
+                    });
+                if let Some(question) = &question {
+                    // 查询只取了第一个问题的正文与选项，展示按 `harness::tool_display`
+                    // 的提问口径补上。
+                    display.summary = Some(question.clone());
+                }
+                scan.tool_started(&call, &display, at);
+                if let Some(question) = question {
+                    let options: Vec<String> = (0..QUESTION_OPTIONS)
+                        .filter_map(|index| text_field(row, &format!("option_{index}")))
+                        .collect();
+                    scan.question(Some(&call), &question, &options, at);
+                }
+            }
+        }
+    }
+    scan.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -808,10 +1023,8 @@ fn read_with(
 }
 
 fn parse_cursor(cursor: &str) -> Result<u64, SourceError> {
-    cursor
-        .trim()
-        .parse()
-        .map_err(|_| SourceError::Malformed(format!("cursor is not a row offset: {cursor}")))
+    crate::harness::text::parse_offset(cursor)
+        .ok_or_else(|| SourceError::Malformed(format!("cursor is not a row offset: {cursor}")))
 }
 
 fn parts_sql(session_id: &str, offset: u64, limit: usize) -> String {
@@ -915,7 +1128,7 @@ impl PartRow {
         let kind = self.kind.as_deref()?;
         match kind {
             "text" => {
-                let text = self.text.as_deref().map(clean_content)?;
+                let text = self.text.as_deref().map(keep_line_breaks)?;
                 let text = with_ellipsis(text, self.text_clipped);
                 Some(if self.role.as_deref() == Some("user") {
                     format!("user: {text}")
@@ -924,7 +1137,7 @@ impl PartRow {
                 })
             }
             "reasoning" => {
-                let text = self.text.as_deref().map(clean_content)?;
+                let text = self.text.as_deref().map(keep_line_breaks)?;
                 Some(format!(
                     "(thinking) {}",
                     with_ellipsis(text, self.text_clipped)
@@ -956,7 +1169,7 @@ impl PartRow {
                 if let Some(output) = self
                     .tool_output
                     .as_deref()
-                    .map(clean_content)
+                    .map(keep_line_breaks)
                     .filter(|output| !output.trim().is_empty())
                 {
                     line.push('\n');
@@ -1033,65 +1246,42 @@ fn render_page(parts: &[PartRow], offset: u64, per_page: usize, budget: usize) -
 // CLI 与解析
 // ---------------------------------------------------------------------------
 
-/// 运行 `opencode db <sql> --format json --pure`（不加载外部插件，含 herdr 自己的）。
-/// 找不到 CLI → `Io`；超时、非零退出、输出超限 → `Unavailable`。
+/// 运行 `opencode db <sql> --format json --pure`（不加载外部插件，含 herdr 自己的），
+/// 经共用的有界子进程（`harness::subprocess`）：限时 [`CLI_TIMEOUT`]、stdout 限
+/// [`MAX_CLI_OUTPUT_BYTES`]。找不到 CLI → `Io`；超时、非零退出、输出超限 →
+/// `Unavailable`。
 fn run_db_query(sql: &str) -> Result<String, SourceError> {
     let mut command = Command::new(OPENCODE_COMMAND);
-    crate::platform::configure_background_command(&mut command);
     command
         .args(["db", sql, "--format", "json", "--pure"])
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .env("NO_COLOR", "1");
     for variable in PANE_ENV_VARS {
         command.env_remove(variable);
     }
-    let mut child = command.spawn().map_err(SourceError::Io)?;
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(SourceError::Unavailable);
-    };
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout
-            .take(MAX_CLI_OUTPUT_BYTES as u64 + 1)
-            .read_to_end(&mut bytes);
-        result.map(|_| bytes)
-    });
-    let deadline = Instant::now() + CLI_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(SourceError::Io(error));
-            }
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+    let output = subprocess::run(
+        command,
+        subprocess::Limits {
+            timeout: CLI_TIMEOUT,
+            poll: CLI_POLL_INTERVAL,
+            stdout_bytes: MAX_CLI_OUTPUT_BYTES as u64,
+            stderr_bytes: None,
+        },
+    )
+    .map_err(|error| match error {
+        RunError::Spawn(error) | RunError::Io(error) => SourceError::Io(error),
+        RunError::TimedOut => {
             tracing::debug!("opencode db query timed out after {:?}", CLI_TIMEOUT);
-            return Err(SourceError::Unavailable);
+            SourceError::Unavailable
         }
-        std::thread::sleep(CLI_POLL_INTERVAL);
-    };
-    let bytes = match reader.join() {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(error)) => return Err(SourceError::Io(error)),
-        Err(_) => return Err(SourceError::Unavailable),
-    };
-    if !status.success() {
-        tracing::debug!(?status, "opencode db query failed");
+    })?;
+    if !output.status.success() {
+        tracing::debug!(status = ?output.status, "opencode db query failed");
         return Err(SourceError::Unavailable);
     }
-    if bytes.len() > MAX_CLI_OUTPUT_BYTES {
+    if output.stdout_truncated {
         return Err(SourceError::Unavailable);
     }
-    String::from_utf8(bytes)
+    String::from_utf8(output.stdout)
         .map_err(|_| SourceError::Malformed("opencode db output is not UTF-8".into()))
 }
 
@@ -1133,16 +1323,6 @@ fn text_field(row: &Map<String, Value>, key: &str) -> Option<String> {
 fn identifier(value: Option<&Value>) -> Option<String> {
     let text = value?.as_str()?.trim();
     valid_id(text).then(|| text.to_owned())
-}
-
-/// 毫秒时间戳与计数：接受非负整数与非负有限浮点（截断）。
-fn non_negative_integer(value: &Value) -> Option<u64> {
-    value.as_u64().or_else(|| {
-        value
-            .as_f64()
-            .filter(|number| number.is_finite() && *number >= 0.0)
-            .map(|number| number as u64)
-    })
 }
 
 /// 单行展示文本：控制字符与连续空白压成一个空格，超长截断并以省略号结尾。
@@ -1199,13 +1379,6 @@ fn clipped_line(line: String, max_chars: usize) -> String {
     let mut clipped: String = line.chars().take(max_chars.saturating_sub(1)).collect();
     clipped.push('…');
     clipped
-}
-
-/// 内容片段只保留换行与制表符两种控制字符。
-fn clean_content(text: &str) -> String {
-    text.chars()
-        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
-        .collect()
 }
 
 #[cfg(test)]
@@ -1304,6 +1477,7 @@ mod tests {
     fn context<'a>(home: &'a Path, session: Option<&'a AgentSessionRef>) -> SourceContext<'a> {
         SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent: "opencode",
             session,
             cwd: None,
@@ -1354,6 +1528,170 @@ mod tests {
             .iter()
             .find(|node| node.id == id)
             .unwrap_or_else(|| panic!("缺节点 {id}"))
+    }
+
+    // -----------------------------------------------------------------------
+    // 会话洞察（夹具：tests/fixtures/agent-activity/opencode/insight-*.json，SQL 跑完
+    // 之后的行 JSON，全是合成内容）
+    // -----------------------------------------------------------------------
+
+    /// 夹具时间基准：2026-09-23T08:00:00.000Z。
+    const INSIGHT_BASE_MS: u64 = 1_790_150_400_000;
+
+    fn insight_db(name: &str) -> FakeDb {
+        FakeDb::new(vec![("WITH prompt AS", Ok(fixture(name)))])
+    }
+
+    fn insight_from(db: &FakeDb) -> Result<Option<AgentInsight>, SourceError> {
+        let home = Home::with_database();
+        let session = AgentSessionRef::id(ROOT).expect("合法会话 id");
+        let cwd = Path::new("/work/oc");
+        let cx = SourceContext {
+            cwd: Some(cwd),
+            ..context(&home.path, Some(&session))
+        };
+        insight_with(&cx, db, None)
+    }
+
+    #[test]
+    fn insight_rows_become_title_model_prompt_reply_tool_and_error() {
+        let at = |seconds: u64| Some(INSIGHT_BASE_MS + seconds * 1000);
+        // (夹具, 提示, 回复, 当前工具, 错误, 错误时刻, 更新时刻)
+        let cases = [
+            (
+                "insight-working.json",
+                Some("Make the login test stable"),
+                Some("Running the suite to reproduce."),
+                Some("Shell npm test -- login"),
+                None,
+                None,
+                at(3),
+            ),
+            // 最后一条是带错误的助手消息：`错误名: 说明`，带错误自己的时刻。
+            (
+                "insight-error.json",
+                Some("Summarise the diff"),
+                Some("Looking at the diff."),
+                None,
+                Some("APIError: Overloaded retry later"),
+                at(4),
+                at(4),
+            ),
+            // 用户中止不算错误。
+            (
+                "insight-aborted.json",
+                Some("Summarise the diff"),
+                None,
+                None,
+                None,
+                None,
+                at(1),
+            ),
+            // 错误早于最后提示（新回合已开始）：旧错误作废。
+            (
+                "insight-stale-error.json",
+                Some("newer prompt"),
+                None,
+                None,
+                None,
+                None,
+                at(9),
+            ),
+        ];
+        for (name, prompt, reply, tool, error, error_at, updated_at) in cases {
+            let insight = insight_from(&insight_db(name))
+                .expect("行可解析")
+                .expect("有洞察");
+            assert_eq!(
+                insight.session_title.as_deref(),
+                Some("Fix flaky tests"),
+                "{name}"
+            );
+            assert_eq!(insight.model.as_deref(), Some("oc-test-model"), "{name}");
+            assert_eq!(insight.last_prompt.as_deref(), prompt, "{name}");
+            assert_eq!(insight.last_message.as_deref(), reply, "{name}");
+            assert_eq!(insight.current_tool.as_deref(), tool, "{name}");
+            assert_eq!(insight.error.as_deref(), error, "{name}");
+            assert_eq!(insight.error_at_ms, error_at, "{name}");
+            assert_eq!(insight.updated_at_ms, updated_at, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_running_question_tool_is_the_pending_question() {
+        let insight = insight_from(&insight_db("insight-question.json"))
+            .expect("行可解析")
+            .expect("有洞察");
+        assert_eq!(
+            insight.question.as_deref(),
+            Some("Cache in memory or on disk? (+1)")
+        );
+        assert_eq!(insight.options, ["Memory", "Disk"]);
+        assert_eq!(
+            insight.current_tool.as_deref(),
+            Some("Ask Cache in memory or on disk? (+1)")
+        );
+    }
+
+    #[test]
+    fn odd_values_empty_results_and_truncated_output_degrade() {
+        // 类型不对的列只丢自己：标题不是字符串、提示全是空白、时刻是负数。工具路径相对
+        // pane cwd；没有最后消息角色时不认错误。
+        let insight = insight_from(&insight_db("insight-odd-values.json"))
+            .expect("行可解析")
+            .expect("有洞察");
+        assert_eq!(insight.session_title, None);
+        assert_eq!(insight.last_prompt, None);
+        assert_eq!(insight.last_message, None);
+        assert_eq!(insight.current_tool.as_deref(), Some("Edit src/app.ts"));
+        assert_eq!(insight.error, None);
+
+        let empty = FakeDb::new(vec![("WITH prompt AS", Ok("[]".to_owned()))]);
+        assert_eq!(insight_from(&empty).expect("空结果可解析"), None);
+        let truncated = FakeDb::new(vec![("WITH prompt AS", Ok(fixture("db-truncated.txt")))]);
+        assert!(matches!(
+            insight_from(&truncated),
+            Err(SourceError::Unavailable)
+        ));
+
+        let home = Home::empty();
+        let session = AgentSessionRef::id(ROOT).expect("合法会话 id");
+        let db = insight_db("insight-working.json");
+        assert_eq!(
+            insight_with(&context(&home.path, Some(&session)), &db, None).expect("没有库不报错"),
+            None
+        );
+        assert!(db.queries().is_empty(), "没有库就不起子进程");
+        assert!(matches!(
+            insight_with(&context(&home.path, None), &db, None),
+            Err(SourceError::Unsupported)
+        ));
+    }
+
+    /// 库文件（含 `-wal`）没变就不再查询；变了重新查；查询失败不进缓存。
+    #[test]
+    fn insight_queries_are_cached_by_the_database_fingerprint() {
+        let home = Home::with_database();
+        let session = AgentSessionRef::id(ROOT).expect("合法会话 id");
+        let cache = std::sync::Mutex::new(super::super::InsightCache::default());
+        let cx = SourceContext {
+            insight_cache: Some(&cache),
+            ..context(&home.path, Some(&session))
+        };
+        let failing = FakeDb::new(vec![("WITH prompt AS", Err("unavailable"))]);
+        assert!(matches!(
+            insight_with(&cx, &failing, None),
+            Err(SourceError::Unavailable)
+        ));
+        let db = insight_db("insight-working.json");
+        let first = insight_with(&cx, &db, None).expect("可读");
+        assert!(first.is_some());
+        assert_eq!(insight_with(&cx, &db, None).expect("可读"), first);
+        assert_eq!(db.queries().len(), 1, "库没变不再查询");
+        let database = data_dir(&home.path, None).join(DATABASE_FILE);
+        fs::write(database.with_extension("db-wal"), b"changed").expect("写 wal");
+        insight_with(&cx, &db, None).expect("可读");
+        assert_eq!(db.queries().len(), 2, "wal 变了重新查询");
     }
 
     #[test]
@@ -2171,6 +2509,39 @@ mod tests {
         "type",
     ];
 
+    const INSIGHT_PROBE_COLUMNS: &[&str] = &[
+        "error_at",
+        "error_message",
+        "error_name",
+        "input_command",
+        "input_description",
+        "input_filePath",
+        "input_pattern",
+        "input_query",
+        "input_subagent_type",
+        "input_url",
+        "last_role",
+        "model_id",
+        "option_0",
+        "option_1",
+        "option_2",
+        "option_3",
+        "option_4",
+        "option_5",
+        "option_6",
+        "option_7",
+        "prompt",
+        "prompt_at",
+        "question",
+        "question_count",
+        "reply",
+        "reply_at",
+        "title",
+        "tool",
+        "tool_at",
+        "tool_call",
+    ];
+
     /// 校验真实列名全集；只返回常量零与计数，源行值不离开数据库。
     fn alias_set(db: &dyn DbQuery, sql: &str, columns: &[&str]) -> Option<Vec<String>> {
         // 左侧不返回数据，只提供真实列名（含大小写）；右侧仅返回常量零，
@@ -2439,6 +2810,22 @@ mod tests {
             assert!(
                 count_of(&counts, column) > 0,
                 "{column} 在整段会话里全为 null：对应的 json 路径漂移了"
+            );
+        }
+
+        // 洞察：同一个会话一行，别名与提示 / 回复 / 最后消息角色的路径在真实数据上要解析
+        // 得出来（运行中的工具与错误取决于会话当时的状态，只核对查询能跑）。
+        let insight = insight_sql(&chatty);
+        assert_eq!(
+            alias_set(&db, &insight, INSIGHT_PROBE_COLUMNS).expect("会话存在就有一行"),
+            INSIGHT_PROBE_COLUMNS,
+            "洞察查询的列别名漂移了"
+        );
+        let counts = non_null_counts(&db, &insight, &["prompt", "reply", "last_role"]);
+        for column in ["prompt", "reply", "last_role"] {
+            assert!(
+                count_of(&counts, column) > 0,
+                "洞察的 {column} 为 null：消息 / 部件的 json 路径漂移了"
             );
         }
     }

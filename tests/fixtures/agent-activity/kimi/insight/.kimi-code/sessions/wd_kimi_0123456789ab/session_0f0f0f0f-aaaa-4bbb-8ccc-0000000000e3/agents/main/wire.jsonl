@@ -1,0 +1,4 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1790150400000}
+{"type":"turn.prompt","time":1790150401000,"agentId":"main","input":[{"type":"text","text":"Port the installer"}],"origin":{"kind":"user"}}
+{"type":"context.append_loop_event","time":1790150402000,"agentId":"main","event":{"type":"tool.call","name":"AskUserQuestion","toolCallId":"tc_q","args":{"questions":[{"header":"Target","question":"Which platform first?","options":[{"label":"Linux","description":"x86_64"},{"label":"Windows","description":"msvc"}]}]}}}
+{"type":"interaction.request","time":1790150402000,"agentId":"main","id":"ir_1","kind":"question","request":{"questions":[{"header":"Target","question":"Which platform first?","options":[{"label":"Linux","description":"x86_64"},{"label":"Windows","description":"msvc"}]}],"toolCallId":"tc_q","turnId":"t1"}}

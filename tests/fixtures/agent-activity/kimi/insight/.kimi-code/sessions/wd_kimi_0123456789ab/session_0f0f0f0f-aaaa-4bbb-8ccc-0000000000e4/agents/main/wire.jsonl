@@ -1,0 +1,5 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1790150400000}
+{"type":"turn.prompt","time":1790150401000,"agentId":"main","input":[{"type":"text","text":"Write the migration"}],"origin":{"kind":"user"}}
+{"type":"context.append_loop_event","time":1790150402000,"agentId":"main","event":{"type":"tool.call","name":"Bash","toolCallId":"tc_b","args":{"command":"make migrate","cwd":"/work/kimi"}}}
+{"type":"turn.steer","time":1790150403000,"agentId":"main","input":[{"type":"text","text":"also add a rollback"}],"origin":{"kind":"user","inTurn":true}}
+{"type":"turn.steer","time":1790150404000,"agentId":"main","input":[{"type":"text","text":"skill body"}],"origin":{"kind":"skill_activation","skillName":"x"}}

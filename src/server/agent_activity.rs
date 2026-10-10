@@ -5,12 +5,14 @@
 //!
 //! 数据流：钩子经 `pane.report_agent_activity` 把提示放进 `AppState` 的收件箱 →
 //! [`Service::tick`]（server 主循环每轮调用，内部按 [`SCHEDULER_PASS_INTERVAL`]
-//! 限流）取走提示并按触发条件挑出到期的 pane → 后台线程调适配器 → 结果经
-//! `AppEvent::{AgentActivityRefreshedFor, ExternalAgentsRefreshed}` 回主线程落库。
-//! `agent.activity.read` / `agent.external.list` 也在同一后台线程执行，响应异步
-//! 返回（JSON API 走请求自带的应答通道，客户端端点走 `ServerEvent`）。pane 任务携带
-//! 入队时的终端、agent、来源、会话与身份代次；应用前先拒绝过期身份。有效身份的树
-//! 与同一外部来源的列表仍按 worker 真正开始读取时的 `Tickets` 排序落库。
+//! 限流）取走提示并按触发条件挑出到期的 pane → 后台线程调适配器（同一次发现读活动树
+//! 与会话洞察）→ 结果经 `AppEvent::{AgentActivityRefreshedFor, ExternalAgentsRefreshed}`
+//! 回主线程落库。调度发现按来源的读法分两条车道（[`Runtime`]）：读文件的来源与起子
+//! 进程的来源各用一条线程，慢的 `opencode db` 不拖住别的 pane。
+//! `agent.activity.read` / `agent.external.list` 走第三条线程，响应异步返回（JSON API
+//! 走请求自带的应答通道，客户端端点走 `ServerEvent`）。pane 任务携带入队时的终端、
+//! agent、来源、会话与身份代次；应用前先拒绝过期身份。有效身份的树与同一外部来源的
+//! 列表仍按 worker 真正开始读取时的 `Tickets` 排序落库。
 
 mod claude;
 mod codex;
@@ -34,11 +36,17 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::server::client_transport::ServerEvent;
 
+/// 会话洞察的派生缓存：键是会话文件（或会话库加会话 id），输入文件的指纹没变就不再
+/// 读（`harness::tail::cached`）。runtime 持有，几条 worker 线程共用。
+pub(crate) type InsightCache = crate::harness::tail::TailCache<Option<AgentInsight>>;
+
 /// 一次发现 / 读取的上下文。`home` 由调用方注入，测试传临时目录；其余路径类字段
 /// 由 runtime 解析，适配器只读。
 pub(crate) struct SourceContext<'a> {
     /// Shared bounded rollout cache owned by the runtime, never by the renderer.
     pub codex_cache: Option<&'a std::sync::Mutex<codex::RolloutCache>>,
+    /// runtime 持有的洞察缓存；`None`（外部来源、单测）时每次都读。
+    pub insight_cache: Option<&'a std::sync::Mutex<InsightCache>>,
     /// 规范化的 agent 名：`"claude"`、`"codex"` 等。
     pub agent: &'a str,
     pub session: Option<&'a crate::agent_resume::AgentSessionRef>,
@@ -122,7 +130,10 @@ pub(crate) trait ActivitySource: Send + Sync {
     fn discover(&self, cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError>;
 
     /// 该会话的洞察（会话标题、模型、当前工具、最后回复 / 提示、待答问题、最近错误），
-    /// 与 [`Self::discover`] 在同一次调度发现里读取。默认没有；各家适配器在阶段 2b 接入。
+    /// 与 [`Self::discover`] 在同一次调度发现里读取（发现报 `Unavailable` 时这一轮不读）。
+    /// 统一规则见 `harness::insight`；结果必须只由会话数据决定（不含读取时刻），会话
+    /// 没变时逐字节相同，快照才不会白白重建。读取有界，按输入文件指纹缓存
+    /// （[`SourceContext::insight_cache`]）。默认没有（外部来源 ZCode 不在 pane 里）；
     /// 失败只记 debug 日志并按没有洞察处理。
     fn insight(&self, _cx: &SourceContext<'_>) -> Result<Option<AgentInsight>, SourceError> {
         Ok(None)
@@ -274,8 +285,8 @@ pub(crate) const FOLLOW_TTL: Duration = Duration::from_secs(10);
 /// 外部来源的轮询间隔（只在有客户端连接时轮询）。
 pub(crate) const EXTERNAL_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// 后台发现的结果迟迟不回（事件丢失）时，视为已结束的超时。计时从 worker **取走**
-/// 任务的时刻算起，不含排队：发现线程串行执行，一次冷缓存发现可达 10 s 量级，按
-/// 投递时刻计时会把正常排队误判成超时，于是重复投递、把队列压满。
+/// 任务的时刻算起，不含排队：每条发现车道串行执行，一次冷缓存发现可达 10 s 量级，
+/// 按投递时刻计时会把正常排队误判成超时，于是重复投递、把队列压满。
 pub(crate) const IN_FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 调度遍历 pane 的最小间隔；有新提示或被推迟的提示到期时提前。
 pub(crate) const SCHEDULER_PASS_INTERVAL: Duration = Duration::from_secs(1);
@@ -283,8 +294,8 @@ pub(crate) const SCHEDULER_PASS_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const DEFAULT_READ_BYTES: usize = 64 * 1024;
 /// `agent.activity.read` 的内容上限（大于它的 `max_bytes` 被压到它）。
 pub(crate) const MAX_READ_BYTES: usize = 512 * 1024;
-/// 调度发现的队列深度。同一 pane 同时只有一个在途任务，所以它也是同时待发现的
-/// pane 数的上限。
+/// 每条发现车道（读文件 / 起子进程，见 [`Runtime`]）的队列深度。同一 pane 同时只有
+/// 一个在途任务，所以它也是该车道同时待发现的 pane 数的上限。
 const DISCOVERY_QUEUE_CAPACITY: usize = 64;
 /// 用户发起的读取（`agent.activity.read` / `agent.external.list`）的队列深度。它们
 /// 走自己的线程，不排在轮询发现后面。
@@ -299,7 +310,7 @@ type JobStarted = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 /// 后台读取的开始顺序号：worker 开始读一个 pane 的活动树或一个外部来源的列表之前
 /// 取一个号，结果事件带着它回主线程（`AppEvent::AgentActivityRefreshedFor` 等的
-/// `ticket`）。两条 worker 线程共用同一个计数；主线程先校验 pane 身份，再只落库
+/// `ticket`）。所有 worker 线程共用同一个计数；主线程先校验 pane 身份，再只落库
 /// 比已落库那份号更大的结果（[`Scheduler::accept_pane`] /
 /// [`Scheduler::accept_external`]）。调度发现与交互读取谁先开始谁算旧，与谁先回来、
 /// 发现当时是否还在排队（排队的任务开始时才取号）都无关。
@@ -744,10 +755,43 @@ enum Job {
     },
 }
 
+/// 任务交给哪条队列（见 [`Runtime`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Queue {
+    /// 读文件的来源的调度发现（claude、codex、kimi、pi）。
+    FileDiscovery,
+    /// 起子进程的来源的调度发现（opencode、zcode）。
+    SubprocessDiscovery,
+    /// 用户发起的读取。
+    Requests,
+}
+
+fn discovery_queue(source: &dyn ActivitySource) -> Queue {
+    match crate::harness::registry::discovery_lane(source.id()) {
+        crate::harness::registry::DiscoveryLane::Files => Queue::FileDiscovery,
+        crate::harness::registry::DiscoveryLane::Subprocess => Queue::SubprocessDiscovery,
+    }
+}
+
 impl Job {
-    /// 用户发起的请求走 [`Runtime::requests`]，调度发现走 [`Runtime::discovery`]。
-    fn interactive(&self) -> bool {
-        matches!(self, Self::Read(_) | Self::ExternalList { .. })
+    /// 用户发起的请求走 [`Runtime::requests`]；调度发现按来源的读法
+    /// （`harness::registry::DiscoveryLane`）分车道。外部轮询只要有一个来源起子进程
+    /// 就整批走子进程车道。
+    fn queue(&self) -> Queue {
+        match self {
+            Self::Read(_) | Self::ExternalList { .. } => Queue::Requests,
+            Self::Discover { source, .. } => discovery_queue(*source),
+            Self::DiscoverExternal { sources, .. } => {
+                if sources
+                    .iter()
+                    .any(|source| discovery_queue(*source) == Queue::SubprocessDiscovery)
+                {
+                    Queue::SubprocessDiscovery
+                } else {
+                    Queue::FileDiscovery
+                }
+            }
+        }
     }
 
     /// worker 取走任务：置位开始标记，让调度的在途超时从真正开始执行算起。
@@ -758,10 +802,19 @@ impl Job {
     }
 }
 
-/// 两条独立的队列 + 各自一个线程：调度发现是串行且可能很慢（冷缓存发现可达 10 s
-/// 量级），交互式读取不得排在它后面。
+/// 三条独立的有界队列，各自一个线程：
+///
+/// - 读文件的来源的调度发现（单次有界，毫秒到百毫秒量级）；
+/// - 起子进程的来源的调度发现（`opencode db` 单次可达数秒，超时 20 s）：慢的子进程
+///   只拖住同车道的来源，不拖住读文件的 pane；
+/// - 用户发起的读取：不排在任何轮询发现后面。
+///
+/// 同一 pane 同时只有一个在途发现（[`Scheduler`]），所以车道拆分不会让一个 pane 并发
+/// 发现；各车道的结果仍按共用的开始顺序号（[`Tickets`]）落库。`Runtime` 被丢弃时三个
+/// 发送端一起关闭，各线程取完队列里剩下的任务后退出。
 struct Runtime {
     discovery: mpsc::SyncSender<Job>,
+    subprocess_discovery: mpsc::SyncSender<Job>,
     requests: mpsc::SyncSender<Job>,
 }
 
@@ -773,28 +826,28 @@ impl Runtime {
         let tickets = Tickets::default();
         let codex_cache =
             std::sync::Arc::new(std::sync::Mutex::new(codex::RolloutCache::default()));
-        let discovery = Self::spawn(
-            "herdr-agent-activity",
+        let insight_cache = std::sync::Arc::new(std::sync::Mutex::new(InsightCache::default()));
+        let worker = || Worker {
+            codex_cache: codex_cache.clone(),
+            insight_cache: insight_cache.clone(),
+            events: events.clone(),
+            home: home.clone(),
+            tickets: tickets.clone(),
+        };
+        let discovery = Self::spawn("herdr-agent-activity", DISCOVERY_QUEUE_CAPACITY, worker())?;
+        let subprocess_discovery = Self::spawn(
+            "herdr-agent-activity-proc",
             DISCOVERY_QUEUE_CAPACITY,
-            Worker {
-                codex_cache: codex_cache.clone(),
-                events: events.clone(),
-                home: home.clone(),
-                tickets: tickets.clone(),
-            },
+            worker(),
         )?;
         let requests = Self::spawn(
             "herdr-agent-activity-read",
             REQUEST_QUEUE_CAPACITY,
-            Worker {
-                codex_cache: codex_cache.clone(),
-                events,
-                home,
-                tickets,
-            },
+            worker(),
         )?;
         Ok(Self {
             discovery,
+            subprocess_discovery,
             requests,
         })
     }
@@ -820,10 +873,10 @@ impl Runtime {
 
     /// 队列满或线程已退出时任务（连同其 `reply`）被丢弃，由调用方同步答错误。
     fn submit(&self, job: Job) -> Result<(), SubmitError> {
-        let queue = if job.interactive() {
-            &self.requests
-        } else {
-            &self.discovery
+        let queue = match job.queue() {
+            Queue::FileDiscovery => &self.discovery,
+            Queue::SubprocessDiscovery => &self.subprocess_discovery,
+            Queue::Requests => &self.requests,
         };
         queue.try_send(job).map_err(|error| match error {
             mpsc::TrySendError::Full(_) => {
@@ -839,10 +892,11 @@ impl Runtime {
 
 struct Worker {
     codex_cache: std::sync::Arc<std::sync::Mutex<codex::RolloutCache>>,
+    insight_cache: std::sync::Arc<std::sync::Mutex<InsightCache>>,
     events: tokio::sync::mpsc::Sender<AppEvent>,
     /// `None` = 取系统 home；测试注入临时目录。
     home: Option<PathBuf>,
-    /// 与另一条 worker 线程共用的开始顺序号。
+    /// 与其余 worker 线程共用的开始顺序号。
     tickets: Tickets,
 }
 
@@ -867,16 +921,21 @@ impl Worker {
                     config_dir.as_deref(),
                     now_ms,
                     &self.codex_cache,
+                    &self.insight_cache,
                 );
                 let ticket = self.tickets.take();
-                let result = discover_nodes(source, &cx).map_err(|error| error.to_string());
-                let insight = source
-                    .insight(&cx)
-                    .unwrap_or_else(|error| {
+                let discovered = discover_nodes(source, &cx);
+                // 来源此刻不可读（库被锁、子进程超时）时不再读洞察：同一来源多半同样不可
+                // 读，白等一轮会把在途任务拖过 `IN_FLIGHT_TIMEOUT`。
+                let insight = match &discovered {
+                    Err(SourceError::Unavailable) => None,
+                    _ => source.insight(&cx).unwrap_or_else(|error| {
                         tracing::debug!(?pane_id, agent = %subject.agent, %error, "agent insight read failed");
                         None
-                    })
-                    .map(Box::new);
+                    }),
+                }
+                .map(Box::new);
+                let result = discovered.map_err(|error| error.to_string());
                 self.send_event(AppEvent::AgentActivityRefreshedFor {
                     pane_id,
                     identity: subject.identity,
@@ -1023,9 +1082,11 @@ impl Worker {
                 config_dir.as_deref(),
                 now_ms,
                 &self.codex_cache,
+                &self.insight_cache,
             ),
             ReadTarget::External { session, .. } => SourceContext {
                 codex_cache: None,
+                insight_cache: None,
                 agent: external_agent,
                 session: Some(session),
                 cwd: None,
@@ -1132,9 +1193,11 @@ fn pane_context<'a>(
     agent_config_dir: Option<&'a Path>,
     now_ms: u64,
     codex_cache: &'a std::sync::Mutex<codex::RolloutCache>,
+    insight_cache: &'a std::sync::Mutex<InsightCache>,
 ) -> SourceContext<'a> {
     SourceContext {
         codex_cache: Some(codex_cache),
+        insight_cache: Some(insight_cache),
         agent: &subject.agent,
         session: subject.session.as_ref(),
         cwd: subject.cwd.as_deref(),
@@ -1485,12 +1548,16 @@ pub(crate) mod test_support {
     use super::*;
 
     pub(crate) enum Lane {
+        /// 读文件的来源的调度发现。
         Discovery,
+        /// 起子进程的来源的调度发现。
+        SubprocessDiscovery,
         Requests,
     }
 
     pub(crate) struct ControlledWorkers {
         discovery: (Worker, mpsc::Receiver<Job>),
+        subprocess_discovery: (Worker, mpsc::Receiver<Job>),
         requests: (Worker, mpsc::Receiver<Job>),
     }
 
@@ -1501,33 +1568,44 @@ pub(crate) mod test_support {
             home: PathBuf,
         ) -> (Service, Self) {
             let (discovery, discovery_jobs) = mpsc::sync_channel(DISCOVERY_QUEUE_CAPACITY);
+            let (subprocess_discovery, subprocess_jobs) =
+                mpsc::sync_channel(DISCOVERY_QUEUE_CAPACITY);
             let (requests, request_jobs) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
             let tickets = Tickets::default();
             let codex_cache =
                 std::sync::Arc::new(std::sync::Mutex::new(codex::RolloutCache::default()));
+            let insight_cache = std::sync::Arc::new(std::sync::Mutex::new(InsightCache::default()));
             let worker = || Worker {
                 codex_cache: codex_cache.clone(),
+                insight_cache: insight_cache.clone(),
                 events: events.clone(),
                 home: Some(home.clone()),
                 tickets: tickets.clone(),
             };
             let workers = Self {
                 discovery: (worker(), discovery_jobs),
+                subprocess_discovery: (worker(), subprocess_jobs),
                 requests: (worker(), request_jobs),
             };
             let mut service = Service::with_sources(events, sources, Some(home));
             service.runtime = Some(Runtime {
                 discovery,
+                subprocess_discovery,
                 requests,
             });
             (service, workers)
         }
 
-        pub(crate) fn assert_empty(&self, lane: Lane) {
-            let (_, jobs) = match lane {
+        fn lane(&self, lane: Lane) -> &(Worker, mpsc::Receiver<Job>) {
+            match lane {
                 Lane::Discovery => &self.discovery,
+                Lane::SubprocessDiscovery => &self.subprocess_discovery,
                 Lane::Requests => &self.requests,
-            };
+            }
+        }
+
+        pub(crate) fn assert_empty(&self, lane: Lane) {
+            let (_, jobs) = self.lane(lane);
             assert!(
                 matches!(jobs.try_recv(), Err(mpsc::TryRecvError::Empty)),
                 "指定车道不应有重复提交的任务"
@@ -1538,10 +1616,7 @@ pub(crate) mod test_support {
             tokio::time::timeout(
                 Duration::from_secs(5),
                 tokio::task::spawn_blocking(move || {
-                    let (worker, jobs) = match lane {
-                        Lane::Discovery => &self.discovery,
-                        Lane::Requests => &self.requests,
-                    };
+                    let (worker, jobs) = self.lane(lane);
                     let job = jobs.try_recv().expect("指定车道已有待执行任务");
                     job.mark_started();
                     assert!(worker.run(job), "活动事件通道保持打开");
@@ -1584,6 +1659,7 @@ mod tests {
             let source = source_for(agent).expect("已预注册的来源");
             let cx = SourceContext {
                 codex_cache: None,
+                insight_cache: None,
                 agent,
                 session: None,
                 cwd: None,
@@ -2190,7 +2266,7 @@ mod tests {
             .is_some());
     }
 
-    /// 开始顺序号由 worker 在读来源之前取，两条 worker 线程共用一个计数，结果事件带着
+    /// 开始顺序号由 worker 在读来源之前取，所有 worker 线程共用一个计数，结果事件带着
     /// 它回主线程。手动驱动 worker（不起线程）：先开始的读树拿到小号，后开始的调度
     /// 发现拿到大号；外部轮询每个来源各取一个号。
     #[test]
@@ -2200,14 +2276,17 @@ mod tests {
         let codex_cache =
             std::sync::Arc::new(std::sync::Mutex::new(codex::RolloutCache::default()));
         let home = std::env::temp_dir();
+        let insight_cache = std::sync::Arc::new(std::sync::Mutex::new(InsightCache::default()));
         let reader = Worker {
             codex_cache: codex_cache.clone(),
+            insight_cache: insight_cache.clone(),
             events: events.clone(),
             home: Some(home.clone()),
             tickets: tickets.clone(),
         };
         let discoverer = Worker {
             codex_cache: codex_cache.clone(),
+            insight_cache,
             events,
             home: Some(home),
             tickets,
@@ -4103,5 +4182,329 @@ mod tests {
         assert_eq!(response.ticket.identity.request_id, "req-1");
         let response: serde_json::Value = serde_json::from_slice(&response.body).expect("JSON");
         assert_eq!(response["result"]["content"]["node_id"], "a");
+    }
+
+    // -----------------------------------------------------------------------
+    // 发现车道与洞察
+    // -----------------------------------------------------------------------
+
+    /// 每个 pane 一个工作区、各持一个 agent（空闲），按给定顺序。
+    fn agent_panes(agents: &[Agent]) -> (crate::app::state::AppState, Vec<PaneId>) {
+        let mut state = crate::app::state::AppState::test_new();
+        let mut panes = Vec::new();
+        for _ in agents {
+            let workspace = crate::workspace::Workspace::test_new("lanes");
+            panes.push(workspace.tabs[0].root_pane);
+            state.workspaces.push(workspace);
+        }
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        for (pane_id, agent) in panes.iter().zip(agents) {
+            let terminal_id = state
+                .workspaces
+                .iter()
+                .find_map(|workspace| workspace.pane_state(*pane_id))
+                .map(|pane| pane.attached_terminal_id.clone())
+                .expect("pane 挂着终端");
+            let terminal = state.terminals.get_mut(&terminal_id).expect("终端存在");
+            terminal.detected_agent = Some(*agent);
+            terminal.state = AgentState::Idle;
+        }
+        (state, panes)
+    }
+
+    /// 带洞察的假来源；`id` 决定它的发现车道（查 `harness::registry`）。
+    struct LaneSource {
+        id: &'static str,
+        discover: fn() -> Result<Vec<AgentActivityNode>, SourceError>,
+        insight_calls: &'static std::sync::atomic::AtomicUsize,
+    }
+
+    impl ActivitySource for LaneSource {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn discover(&self, _cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError> {
+            (self.discover)()
+        }
+
+        fn insight(&self, _cx: &SourceContext<'_>) -> Result<Option<AgentInsight>, SourceError> {
+            self.insight_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Some(AgentInsight {
+                current_tool: Some(format!("{} tool", self.id)),
+                ..AgentInsight::default()
+            }))
+        }
+
+        fn read(
+            &self,
+            _cx: &SourceContext<'_>,
+            _node_id: &str,
+            _cursor: Option<&str>,
+            _max_bytes: usize,
+        ) -> Result<ContentChunk, SourceError> {
+            Err(SourceError::Unsupported)
+        }
+    }
+
+    static INSIGHT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn one_node() -> Result<Vec<AgentActivityNode>, SourceError> {
+        Ok(vec![node("n", None, AgentActivityStatus::Done)])
+    }
+
+    fn unavailable() -> Result<Vec<AgentActivityNode>, SourceError> {
+        Err(SourceError::Unavailable)
+    }
+
+    static FILE_SOURCE: LaneSource = LaneSource {
+        id: "claude",
+        discover: one_node,
+        insight_calls: &INSIGHT_CALLS,
+    };
+    static PROC_SOURCE: LaneSource = LaneSource {
+        id: "opencode",
+        discover: one_node,
+        insight_calls: &INSIGHT_CALLS,
+    };
+
+    fn lane_sources(agent: &str) -> Option<&'static dyn ActivitySource> {
+        match agent {
+            "claude" => Some(&FILE_SOURCE),
+            "opencode" => Some(&PROC_SOURCE),
+            _ => None,
+        }
+    }
+
+    fn lane_external() -> &'static [&'static dyn ActivitySource] {
+        &[&FakeExternal]
+    }
+
+    /// 读文件的来源与起子进程的来源（以及外部轮询）各进各的发现车道；同一 pane 仍只有
+    /// 一个在途任务；洞察随同一次发现回主线程。
+    #[tokio::test]
+    async fn discovery_jobs_take_the_lane_of_their_source() {
+        use test_support::Lane;
+
+        let home = crate::config::test_dirs::TempDir::new("activity-lanes");
+        let (mut state, panes) = agent_panes(&[Agent::Claude, Agent::OpenCode]);
+        let (events, mut received) = tokio::sync::mpsc::channel(8);
+        let (mut service, mut workers) = test_support::ControlledWorkers::service(
+            events,
+            Sources {
+                source_for: lane_sources,
+                external: lane_external,
+            },
+            home.path().to_path_buf(),
+        );
+        let t0 = Instant::now();
+        service.tick(&mut state, t0, true);
+        assert!(panes.iter().all(|pane| service.discovery_in_flight(*pane)));
+
+        workers = workers.run_next(Lane::Discovery).await;
+        workers.assert_empty(Lane::Discovery);
+        let AppEvent::AgentActivityRefreshedFor {
+            pane_id, insight, ..
+        } = received.try_recv().expect("读文件车道的结果")
+        else {
+            panic!("应为 pane 发现结果");
+        };
+        assert_eq!(pane_id, panes[0]);
+        assert_eq!(
+            insight.and_then(|insight| insight.current_tool).as_deref(),
+            Some("claude tool")
+        );
+
+        workers = workers.run_next(Lane::SubprocessDiscovery).await;
+        let AppEvent::AgentActivityRefreshedFor {
+            pane_id, insight, ..
+        } = received.try_recv().expect("子进程车道的结果")
+        else {
+            panic!("应为 pane 发现结果");
+        };
+        assert_eq!(pane_id, panes[1]);
+        assert_eq!(
+            insight.and_then(|insight| insight.current_tool).as_deref(),
+            Some("opencode tool")
+        );
+
+        // 外部轮询（ZCode 起 sqlite3）同样走子进程车道。
+        workers = workers.run_next(Lane::SubprocessDiscovery).await;
+        assert!(matches!(
+            received.try_recv(),
+            Ok(AppEvent::ExternalAgentsRefreshed { .. })
+        ));
+        workers.assert_empty(Lane::Discovery);
+        workers.assert_empty(Lane::SubprocessDiscovery);
+        workers.assert_empty(Lane::Requests);
+    }
+
+    /// 发现报 `Unavailable`（库被锁、子进程超时）时这一轮不再读洞察，免得同一个慢来源
+    /// 把在途任务拖过超时。
+    #[tokio::test]
+    async fn an_unavailable_source_skips_the_insight_read() {
+        use test_support::Lane;
+
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        static UNAVAILABLE: LaneSource = LaneSource {
+            id: "opencode",
+            discover: unavailable,
+            insight_calls: &CALLS,
+        };
+        let home = crate::config::test_dirs::TempDir::new("activity-unavailable");
+        let (mut state, _) = agent_panes(&[Agent::OpenCode]);
+        let (events, mut received) = tokio::sync::mpsc::channel(8);
+        let (mut service, workers) = test_support::ControlledWorkers::service(
+            events,
+            Sources {
+                source_for: |agent| {
+                    (agent == "opencode").then_some(&UNAVAILABLE as &dyn ActivitySource)
+                },
+                external: || &[],
+            },
+            home.path().to_path_buf(),
+        );
+        service.tick(&mut state, Instant::now(), false);
+        let _workers = workers.run_next(Lane::SubprocessDiscovery).await;
+        let AppEvent::AgentActivityRefreshedFor {
+            result, insight, ..
+        } = received.try_recv().expect("发现结果")
+        else {
+            panic!("应为 pane 发现结果");
+        };
+        assert!(result.is_err());
+        assert!(insight.is_none());
+        assert_eq!(
+            CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "不可读时不读洞察"
+        );
+    }
+
+    /// 真线程：子进程车道上的一次慢发现（`opencode db` 卡住）不拖住读文件的 pane——
+    /// 后者的结果照常先回来；放行后慢的那次也回来。
+    static SLOW_ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static SLOW_GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn slow_discover() -> Result<Vec<AgentActivityNode>, SourceError> {
+        use std::sync::atomic::Ordering;
+        SLOW_ENTERED.store(true, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !SLOW_GATE.load(Ordering::Relaxed) {
+            if Instant::now() >= deadline {
+                return Err(SourceError::Unavailable);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        one_node()
+    }
+
+    #[test]
+    fn a_slow_subprocess_discovery_does_not_delay_file_sources() {
+        use std::sync::atomic::Ordering;
+
+        static SLOW: LaneSource = LaneSource {
+            id: "opencode",
+            discover: slow_discover,
+            insight_calls: &INSIGHT_CALLS,
+        };
+        let home = crate::config::test_dirs::TempDir::new("activity-slow-lane");
+        let (mut state, panes) = agent_panes(&[Agent::OpenCode, Agent::Claude]);
+        let (events, mut received) = tokio::sync::mpsc::channel(8);
+        let mut service = Service::with_sources(
+            events,
+            Sources {
+                source_for: |agent| match agent {
+                    "opencode" => Some(&SLOW as &dyn ActivitySource),
+                    "claude" => Some(&FILE_SOURCE),
+                    _ => None,
+                },
+                external: || &[],
+            },
+            Some(home.path().to_path_buf()),
+        );
+        service.tick(&mut state, Instant::now(), false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !SLOW_ENTERED.load(Ordering::Relaxed) {
+            assert!(Instant::now() < deadline, "慢发现没有开始");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // 慢发现还卡着：读文件的 pane 照样拿到结果。
+        assert!(matches!(
+            recv_event(&mut received),
+            AppEvent::AgentActivityRefreshedFor { pane_id, result: Ok(_), .. } if pane_id == panes[1]
+        ));
+        assert!(!SLOW_GATE.load(Ordering::Relaxed));
+
+        SLOW_GATE.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            recv_event(&mut received),
+            AppEvent::AgentActivityRefreshedFor { pane_id, result: Ok(_), .. } if pane_id == panes[0]
+        ));
+    }
+
+    /// 同一份洞察再落库不算变化（快照不重建）；错误按它自己的时刻判定是否属于本回合：
+    /// 早于本回合开始、或没有时刻的错误绝不锁存失败。
+    #[test]
+    fn stored_insight_changes_and_stale_errors_follow_their_own_rules() {
+        let (mut app, pane_id, _) = app_with_agent_in(Some(Agent::Codex), AgentState::Working);
+        app.handle_internal_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Codex),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        let turn_start = crate::server::observability::now_ms().saturating_sub(60_000);
+        let stale = AgentInsight {
+            last_message: Some("earlier reply".into()),
+            error: Some("stream disconnected".into()),
+            error_at_ms: Some(turn_start.saturating_sub(3_600_000)),
+            updated_at_ms: Some(crate::server::observability::now_ms()),
+            ..AgentInsight::default()
+        };
+        let epoch = app.state.projection_epoch;
+        let (changed, update) = app.state.apply_agent_insight(pane_id, Some(stale.clone()));
+        assert!(changed);
+        assert!(
+            update.is_none(),
+            "早于本回合开始的错误不锁存，哪怕会话之后又有新记录"
+        );
+        assert_ne!(app.state.projection_epoch, epoch);
+        let epoch = app.state.projection_epoch;
+        let (changed, update) = app.state.apply_agent_insight(pane_id, Some(stale));
+        assert!(!changed, "同一份洞察不算变化");
+        assert!(update.is_none());
+        assert_eq!(app.state.projection_epoch, epoch, "快照不重建");
+
+        let untimed = AgentInsight {
+            error: Some("no timestamp".into()),
+            ..AgentInsight::default()
+        };
+        assert!(
+            app.state
+                .apply_agent_insight(pane_id, Some(untimed))
+                .1
+                .is_none(),
+            "没有时刻的错误只展示、不锁存"
+        );
+
+        let current = AgentInsight {
+            error: Some("rate limited".into()),
+            error_at_ms: Some(crate::server::observability::now_ms()),
+            ..AgentInsight::default()
+        };
+        assert!(
+            app.state
+                .apply_agent_insight(pane_id, Some(current))
+                .1
+                .is_some(),
+            "本回合里的错误锁存失败"
+        );
     }
 }

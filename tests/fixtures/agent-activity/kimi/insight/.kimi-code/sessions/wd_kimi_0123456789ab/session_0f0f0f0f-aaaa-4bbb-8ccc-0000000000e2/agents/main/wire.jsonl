@@ -1,0 +1,7 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1790150400000}
+{"type":"turn.prompt","time":1790150401000,"agentId":"main","input":[{"type":"text","text":"Publish 1.2.3"}],"origin":{"kind":"user"}}
+{"type":"llm.request","time":1790150402000,"agentId":"main","model":"k-test","kind":"loop"}
+{"type":"turn.step.retrying","time":1790150403000,"agentId":"main","errorMessage":"temporary","errorName":"APIError","statusCode":429}
+{"type":"turn.ended","time":1790150404000,"agentId":"main","reason":"failed","error":{"name":"APIError","message":"rate limited by the provider","code":"rate_limit"},"durationMs":3000,"turnId":"t1"}
+{"type":"agent.turn.ended","time":1790150404000,"agentId":"main","kind":"event","outcome":"failed","errorMessage":"rate limited by the provider","turnId":"t1"}
+{"type":"prompt.completed","time":1790150404000,"agentId":"main","reason":"failed","promptId":"p1"}

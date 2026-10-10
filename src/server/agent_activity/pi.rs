@@ -70,7 +70,8 @@
 //! （trait 的 `discover` / `read` 如实回 `Unsupported`），直接调
 //! [`discover_from_hint`] / [`read_from_hint`]；还没有 hint 时发现回空树、读取回
 //! `Unavailable`（`agent_activity::discover_nodes` / `read_node`）。解析失败时由
-//! 调用方保留上一份树。
+//! 调用方保留上一份树。会话洞察经 trait 的 `insight` 读同一份 hint
+//! （[`insight_from_hint`]）：快照只有扩展类工具的执行，洞察只有当前工具。
 
 use std::collections::{HashMap, HashSet};
 
@@ -79,8 +80,13 @@ use serde_json::{Map, Value};
 
 use super::{ActivitySource, ContentChunk, SourceContext, SourceError};
 use crate::agent_resume::{AgentSessionRef, AgentSessionRefKind};
-use crate::api::schema::AgentActivityContentFormat;
-use crate::api::schema::AgentActivityNode;
+use crate::api::schema::{
+    AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
+    AgentInsight,
+};
+use crate::harness::json::non_negative_integer;
+use crate::harness::status::{self, StatusScope};
+use crate::harness::text::keep_line_breaks;
 
 /// 快照的类型标记，与扩展侧 `ACTIVITY_HINT_TYPE` 一致。
 const HINT_TYPE: &str = "herdr.activity.snapshot";
@@ -117,6 +123,49 @@ impl ActivitySource for Pi {
     ) -> Result<ContentChunk, SourceError> {
         Err(SourceError::Unsupported)
     }
+
+    /// 洞察同样只来自最近一份快照（[`insight_from_hint`]）；还没有快照时没有洞察。
+    fn insight(&self, cx: &SourceContext<'_>) -> Result<Option<AgentInsight>, SourceError> {
+        match cx.latest_hint {
+            Some(hint) => insight_from_hint(cx, hint),
+            None => Ok(None),
+        }
+    }
+}
+
+/// 快照能给的洞察：herdr 扩展只上报扩展类工具的执行（子 agent、web 搜索等），不带
+/// 会话标题、模型与消息，所以只有当前工具——正在跑（或在等用户）的根节点里最近开始
+/// 的一个，按快照里的显示名。快照属于别的会话时没有洞察；不是本格式时回 `Malformed`。
+pub(super) fn insight_from_hint(
+    cx: &SourceContext<'_>,
+    hint: &str,
+) -> Result<Option<AgentInsight>, SourceError> {
+    let snapshot = parse_snapshot(hint)?;
+    if !snapshot.belongs_to(cx.session) {
+        return Ok(None);
+    }
+    let mut scan = crate::harness::insight::InsightScan::default();
+    let current = snapshot
+        .nodes
+        .iter()
+        .map(|entry| &entry.node)
+        .filter(|node| {
+            node.parent_id.is_none()
+                && matches!(
+                    node.status,
+                    AgentActivityStatus::Running | AgentActivityStatus::Blocked
+                )
+        })
+        .max_by_key(|node| node.started_at_ms);
+    if let Some(node) = current {
+        let display = crate::harness::tool_display::ToolDisplay {
+            kind: crate::harness::tool_display::ToolKind::Other,
+            name: node.label.clone(),
+            summary: None,
+        };
+        scan.tool_started(&node.id, &display, node.started_at_ms);
+    }
+    Ok(scan.finish())
 }
 
 /// 由一次 hint 快照发现活动节点，按父先子后排列。快照属于别的会话时回空树；
@@ -266,10 +315,18 @@ fn parse_node(raw: &Value) -> Option<SnapshotNode> {
         .get("output")
         .and_then(Value::as_object)
         .map(parse_output);
+    let kind: AgentActivityKind = enum_field(object, "kind");
+    // 状态走统一归一表（`harness::status`）：扩展写的是 herdr 自己的取值，别的写法
+    // （`completed`、`error` 等）同样认得；待办按计划条目、其余按运行中的工作。
+    let scope = if kind == AgentActivityKind::Todo {
+        StatusScope::Plan
+    } else {
+        StatusScope::Run
+    };
     let node = AgentActivityNode {
         label: clean_line(object.get("label"), MAX_LABEL_CHARS).unwrap_or_else(|| id.clone()),
-        kind: enum_field(object, "kind"),
-        status: enum_field(object, "status"),
+        kind,
+        status: status::status_or_unknown(object.get("status").and_then(Value::as_str), scope),
         parent_id: identifier(object.get("parent_id")),
         agent_type: clean_line(object.get("agent_type"), MAX_TEXT_FIELD_CHARS),
         content_ref: output.as_ref().map(|_| id.clone()),
@@ -319,47 +376,9 @@ fn identifier(value: Option<&Value>) -> Option<String> {
     .then(|| text.to_owned())
 }
 
-/// 毫秒时间戳与字节偏移：接受非负整数与非负有限浮点（截断）。
-fn non_negative_integer(value: &Value) -> Option<u64> {
-    value.as_u64().or_else(|| {
-        value
-            .as_f64()
-            .filter(|number| number.is_finite() && *number >= 0.0)
-            .map(|number| number as u64)
-    })
-}
-
 /// 单行展示文本：控制字符与连续空白压成一个空格，超长截断并以省略号结尾。
 fn clean_line(value: Option<&Value>, max_chars: usize) -> Option<String> {
-    let mut line = String::new();
-    let mut pending_space = false;
-    for ch in value?.as_str()?.chars() {
-        if ch.is_control() || ch.is_whitespace() {
-            pending_space = !line.is_empty();
-            continue;
-        }
-        if pending_space {
-            line.push(' ');
-            pending_space = false;
-        }
-        line.push(ch);
-    }
-    if line.is_empty() {
-        return None;
-    }
-    if line.chars().count() > max_chars {
-        let mut clipped: String = line.chars().take(max_chars.saturating_sub(1)).collect();
-        clipped.push('…');
-        return Some(clipped);
-    }
-    Some(line)
-}
-
-/// 内容片段只保留换行与制表符两种控制字符；游标按原始字节计，不受影响。
-fn clean_content(text: &str) -> String {
-    text.chars()
-        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
-        .collect()
+    crate::harness::text::clean_line(value?.as_str()?, max_chars)
 }
 
 /// 修复父子关系并排成父先子后：父节点缺失或指向自己的挂到根；环上最先出现的
@@ -476,10 +495,8 @@ fn cycle_head(
 }
 
 fn parse_cursor(cursor: &str) -> Result<u64, SourceError> {
-    cursor
-        .trim()
-        .parse()
-        .map_err(|_| SourceError::Malformed(format!("cursor is not an offset: {cursor}")))
+    crate::harness::text::parse_offset(cursor)
+        .ok_or_else(|| SourceError::Malformed(format!("cursor is not an offset: {cursor}")))
 }
 
 fn read_output(output: &NodeOutput, requested: Option<u64>, max_bytes: usize) -> ContentChunk {
@@ -510,7 +527,8 @@ fn read_output(output: &NodeOutput, requested: Option<u64>, max_bytes: usize) ->
     let eof = next >= end;
     ContentChunk {
         format: output.format,
-        text: clean_content(&text[from..to]),
+        // 只保留换行与制表符两种控制字符；游标按原始字节计，不受影响。
+        text: keep_line_breaks(&text[from..to]),
         next_cursor: (!eof).then(|| next.to_string()),
         eof,
         truncated,
@@ -542,6 +560,7 @@ mod tests {
     fn context<'a>(home: &'a Path, session: Option<&'a AgentSessionRef>) -> SourceContext<'a> {
         SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent: "pi",
             session,
             cwd: None,
@@ -1116,5 +1135,82 @@ mod tests {
             discover_from_hint(&cx, ""),
             Err(SourceError::Malformed(_))
         ));
+    }
+
+    /// 快照只有扩展类工具：洞察只有当前工具，取正在跑的根节点里最近开始的一个。
+    #[test]
+    fn insight_is_the_latest_running_root_node_of_the_snapshot() {
+        let hint = fixture("snapshot-extension.json");
+        let home = home();
+        let insight = insight_from_hint(&context(&home, None), &hint)
+            .expect("快照可解析")
+            .expect("有正在跑的根节点");
+        let nodes = discover(&hint);
+        assert_eq!(
+            insight.current_tool.as_deref(),
+            Some(node(&nodes, "call_notes").label.as_str())
+        );
+        assert_eq!(insight.updated_at_ms, Some(5000));
+        assert_eq!(
+            (insight.session_title, insight.model, insight.last_message),
+            (None, None, None),
+            "快照不带会话标题、模型与消息"
+        );
+
+        // trait 入口读 server 缓存的最近一份 hint；还没有 hint 时没有洞察。
+        let with_hint = SourceContext {
+            latest_hint: Some(&hint),
+            ..context(&home, None)
+        };
+        assert!(Pi
+            .insight(&with_hint)
+            .expect("快照可解析")
+            .is_some_and(|found| found.current_tool == insight.current_tool));
+        assert_eq!(Pi.insight(&context(&home, None)).expect("没有 hint"), None);
+
+        // 属于别的会话的快照、没有在跑的根节点：没有洞察；坏快照报 Malformed。
+        let other = AgentSessionRef::id("5f000000-0000-4000-8000-0000000000ff").expect("合法 id");
+        assert_eq!(
+            insight_from_hint(&context(&home, Some(&other)), &hint).expect("快照可解析"),
+            None
+        );
+        let finished = r#"{"type":"herdr.activity.snapshot","version":1,"nodes":[
+            {"id":"a","kind":"task","label":"done task","status":"done","started_at_ms":1}]}"#;
+        assert_eq!(
+            insight_from_hint(&context(&home, None), finished).expect("快照可解析"),
+            None
+        );
+        assert!(matches!(
+            insight_from_hint(&context(&home, None), "not json"),
+            Err(SourceError::Malformed(_))
+        ));
+    }
+
+    /// 节点状态走统一归一表：扩展之外的写法同样认得，待办被取消算结束。
+    #[test]
+    fn snapshot_statuses_follow_the_normalisation_table() {
+        let hint = r#"{"type":"herdr.activity.snapshot","version":1,"nodes":[
+            {"id":"a","kind":"task","label":"a","status":"completed"},
+            {"id":"b","kind":"task","label":"b","status":"error"},
+            {"id":"c","kind":"subagent","label":"c","status":"killed"},
+            {"id":"d","kind":"todo","label":"d","status":"cancelled"},
+            {"id":"e","kind":"task","label":"e","status":"cancelled"},
+            {"id":"f","kind":"task","label":"f","status":"paused"}]}"#;
+        let nodes = discover(hint);
+        let statuses: Vec<(&str, AgentActivityStatus)> = nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.status))
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                ("a", AgentActivityStatus::Done),
+                ("b", AgentActivityStatus::Failed),
+                ("c", AgentActivityStatus::Failed),
+                ("d", AgentActivityStatus::Done),
+                ("e", AgentActivityStatus::Failed),
+                ("f", AgentActivityStatus::Unknown),
+            ]
+        );
     }
 }

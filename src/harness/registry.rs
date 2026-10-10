@@ -18,6 +18,16 @@ pub enum HookAuthority {
     FullLifecycle,
 }
 
+/// 活动来源读数据的方式，决定调度发现走哪条后台车道：慢的子进程不得拖住读文件的
+/// 来源（`server::agent_activity` 的发现车道）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryLane {
+    /// 读会话文件或内存里的快照，单次有界且快。
+    Files,
+    /// 起子进程查询（`opencode db`、`sqlite3`），单次可达数秒。
+    Subprocess,
+}
+
 /// 会话恢复时会话引用的形状。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeRef {
@@ -33,7 +43,7 @@ pub struct HarnessSpec {
     /// 规范化 agent 名（与检测、活动适配器一致）。
     pub id: &'static str,
     /// 面向用户的名称。
-    #[allow(dead_code)] // 会话洞察适配器（阶段 2b）接入
+    #[allow(dead_code)] // 客户端 Inspector / 总览展示 harness 名称时接入（阶段 5）
     pub display_name: &'static str,
     /// 官方集成上报时用的来源标签。
     pub source: &'static str,
@@ -48,6 +58,8 @@ pub struct HarnessSpec {
     pub config_default: &'static [&'static str],
     /// 恢复命令：程序名与会话参数（`None` 表示不支持恢复）。
     pub resume: Option<(&'static str, &'static [&'static str], ResumeRef)>,
+    /// 活动来源的发现车道。
+    pub discovery: DiscoveryLane,
 }
 
 /// 六家官方 harness。顺序即展示顺序。
@@ -62,6 +74,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_env: Some("CLAUDE_CONFIG_DIR"),
         config_default: &[".claude"],
         resume: Some(("claude", &["--resume"], ResumeRef::Id)),
+        discovery: DiscoveryLane::Files,
     },
     HarnessSpec {
         id: "codex",
@@ -73,6 +86,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_env: Some("CODEX_HOME"),
         config_default: &[".codex"],
         resume: Some(("codex", &["resume"], ResumeRef::Id)),
+        discovery: DiscoveryLane::Files,
     },
     HarnessSpec {
         id: "kimi",
@@ -84,6 +98,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_env: Some("KIMI_CODE_HOME"),
         config_default: &[".kimi-code"],
         resume: Some(("kimi", &["--session"], ResumeRef::Id)),
+        discovery: DiscoveryLane::Files,
     },
     HarnessSpec {
         id: "opencode",
@@ -95,6 +110,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_env: None,
         config_default: &[".config", "opencode"],
         resume: Some(("opencode", &["--session"], ResumeRef::Id)),
+        discovery: DiscoveryLane::Subprocess,
     },
     HarnessSpec {
         id: "pi",
@@ -106,6 +122,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_env: Some("PI_CODING_AGENT_DIR"),
         config_default: &[".pi", "agent"],
         resume: Some(("pi", &["--session"], ResumeRef::PathOrId)),
+        discovery: DiscoveryLane::Files,
     },
     HarnessSpec {
         id: "zcode",
@@ -117,6 +134,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_env: None,
         config_default: &[".zcode", "cli"],
         resume: None,
+        discovery: DiscoveryLane::Subprocess,
     },
 ];
 
@@ -149,6 +167,11 @@ pub fn reserves_native_state(source: &str, agent: &str) -> bool {
 /// 官方集成是否随会话上报转录路径。
 pub fn reports_transcript(source: &str, agent: &str) -> bool {
     official(source, agent).is_some_and(|spec| spec.reports_transcript)
+}
+
+/// 活动来源的发现车道；不在表里的来源按读文件处理。
+pub fn discovery_lane(id: &str) -> DiscoveryLane {
+    by_id(id).map_or(DiscoveryLane::Files, |spec| spec.discovery)
 }
 
 /// 该 harness 的配置目录：环境变量覆盖优先（支持 `~` 前缀），否则 `home` 下的默认目录。
@@ -219,6 +242,16 @@ mod tests {
         assert!(!has_full_lifecycle_authority("herdr:codex", "codex"));
         assert!(reports_transcript("herdr:kimi", "kimi"));
         assert!(!reports_transcript("herdr:pi", "pi"));
+    }
+
+    #[test]
+    fn subprocess_sources_get_their_own_discovery_lane() {
+        for id in ["claude", "codex", "kimi", "pi", "unknown"] {
+            assert_eq!(discovery_lane(id), DiscoveryLane::Files, "{id}");
+        }
+        for id in ["opencode", "zcode"] {
+            assert_eq!(discovery_lane(id), DiscoveryLane::Subprocess, "{id}");
+        }
     }
 
     #[test]

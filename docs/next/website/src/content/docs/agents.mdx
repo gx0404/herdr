@@ -29,7 +29,7 @@ These five are the only agents this fork detects and ships integrations for; see
 
 ZCode appears as a read-only external source only while a recent root session is running. When no session is running, its External group disappears. A session that has ended can still be read by its external ID while it remains unarchived and within the 72-hour recent window.
 
-Activity-tree discovery uses a bounded background queue. A refresh rejected by a full queue remains eligible for retry under the normal throttle, including an idle pane's first discovery. ZCode transcript reads scan at most 8 MiB per call, skipping oversized lines in bounded pieces without interpreting their suffix as a new record. Pass returned cursors back unchanged to continue reading; a short unfinished transcript line waits for its terminating newline.
+Activity-tree discovery uses bounded background queues. Sources that read session files (Claude Code, Codex, Kimi Code CLI, and Pi's reported snapshot) and sources that run a query program (OpenCode's `opencode db` and ZCode's `sqlite3`) each have their own queue and worker, so a slow query never delays discovery for the other panes. A pane still has at most one discovery in flight. A refresh rejected by a full queue remains eligible for retry under the normal throttle, including an idle pane's first discovery. ZCode transcript reads scan at most 8 MiB per call, skipping oversized lines in bounded pieces without interpreting their suffix as a new record. Pass returned cursors back unchanged to continue reading; a short unfinished transcript line waits for its terminating newline.
 
 These agents report their own state to Herdr. There is nothing to install; run them in a Herdr pane.
 
@@ -72,11 +72,36 @@ Besides its state, an agent can carry one item that needs you. `herdr agent get`
 
 While an agent is `blocked`, the item is the question it is asking. The question and its answer options come from an integration's `herdr pane report-agent-attention --kind needs_input` report, or from the message a full-lifecycle integration sends with its `blocked` report. When Herdr already knows the question as the agent becomes `blocked`, the question is also the body of the needs-input notification. It is dropped as soon as the agent stops being `blocked`.
 
-When a turn fails, Herdr keeps the failure until you have seen it. A failure comes from an integration's `--kind failed` report, from an error in the agent's session that is newer than the current turn (when Herdr reads that session), or from the agent process exiting while it was `working`. Herdr announces it with a "failed" notification and the needs-input sound; a failure recorded while the agent is still working is announced when that turn ends. The failure clears when the agent starts working again, when you view the pane's tab after the notification, when the agent is released or replaced by another agent, or on a `--kind clear` report.
+When a turn fails, Herdr keeps the failure until you have seen it. A failure comes from an integration's `--kind failed` report, from an error in the agent's session (see [Session insight](#session-insight)) whose own timestamp is not earlier than the start of the current turn, or from the agent process exiting while it was `working`. An error left over from an earlier turn, or one without a timestamp, is shown in the insight but never counts as a failure. Herdr announces it with a "failed" notification and the needs-input sound; a failure recorded while the agent is still working is announced when that turn ends. The failure clears when the agent starts working again, when you view the pane's tab after the notification, when the agent is released or replaced by another agent, or on a `--kind clear` report.
 
 Pressing `ctrl+c` or `esc` on its own counts as interrupting the agent. If the agent goes `idle` within 1.5 seconds of that key, Herdr sends no finished notification or sound, and an agent process that exits in that window is not counted as a failure. This covers keys typed in the Herdr client and in `herdr agent attach`; keys sent through the CLI or socket API do not count.
 
 Herdr also times each turn. `insight.working_since_ms` is when the current turn started and is set only while the agent works, `insight.state_changed_at_ms` is when the state last changed, and `insight.last_turn_ms` is how long the last working turn took. The first two are Unix milliseconds; the last is a duration in milliseconds.
+
+## Session insight
+
+Herdr also reads a short summary of each agent's session, returned as `insight` by `herdr agent get`, `herdr agent list`, and the socket API (see [Agent attention and insight](/docs/socket-api/#agent-attention-and-insight) for the fields). It is read from the agent's own session data together with the activity tree, on the same schedule: every 5 seconds while the agent works, after a hook signal, and once more when work ends. Reads are bounded, and Herdr does not read again until the session's files change.
+
+| Agent | Read from | Provides |
+| --- | --- | --- |
+| Claude Code | the last 1 MiB of the session transcript | title (your custom title, otherwise the AI title), model, last prompt, last reply, current tool, an open `AskUserQuestion` with its options, API errors |
+| Codex | the last 1 MiB of the thread's rollout, plus `session_index.jsonl` for the thread name | thread name, model, last prompt, last reply, current tool, an open `request_user_input` with its options, a failed turn's error |
+| Kimi Code CLI | `state.json` and the last 1 MiB of the main agent's `wire.jsonl` | title, model, last prompt, last reply, current tool, a pending question with its options, a failed turn's error |
+| OpenCode | one read-only `opencode db` query, repeated only when the database changes | title, model, last prompt, last reply, current tool, a running `question` tool with its options, the error of the last reply (an abort you pressed is not an error) |
+| Pi | the activity snapshot Herdr's Pi extension reports | the current extension tool only; the extension does not report messages or the model |
+
+ZCode runs outside Herdr panes, so its external entries carry no insight. OpenCode keeps pending permission requests only in memory, so they never appear as a question.
+
+Texts are single lines with Markdown removed; the last prompt, last reply, question, and error keep at most 220 characters. Slash-command output, system reminders, task notifications, and injected context such as `AGENTS.md` are not prompts. The current tool is the latest call that has no result yet, shown as a verb and its target, for example `Shell cargo test` or `Edit src/app.rs` with paths relative to the agent's working directory; it clears when the turn ends or is interrupted. `error` only covers the latest turn: a new prompt or a normal reply clears it. `updated_at_ms` is the time of the newest session record Herdr used, not the time it read the session, so an unchanged session yields an identical insight and clients are not sent a new snapshot.
+
+## Activity status
+
+Each activity-tree node has one of the statuses `pending`, `running`, `blocked`, `done`, `failed`, or `unknown`. Herdr maps every source's own status values onto them with one table:
+
+- Waiting or queued work is `pending`; running or in-progress work is `running`; running work that waits for you (such as a Kimi Code CLI question task) is `blocked`.
+- Completed work is `done`. A cancelled plan item, such as a todo the agent dropped, is also `done`, because the plan changed rather than failed.
+- Errors, failures, kills, stops, aborts, interrupts, timeouts, and cancelled running work (sub-agents, tasks, background processes, turns) are `failed`, because the work did not finish. The node summary usually names the reason, for example `killed` or `timed out`.
+- Lost and unrecognized values are `unknown`.
 
 ## Detection manifests
 

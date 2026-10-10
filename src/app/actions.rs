@@ -1819,8 +1819,10 @@ impl AppState {
     }
 
     /// 一次发现读到的会话洞察：落库；洞察带的错误晚于本回合开始且 agent 不在工作时
-    /// 锁存一次失败。返回（投影是否变化，锁存失败时该 pane 的状态更新——要发「失败」
-    /// 通知）。
+    /// 锁存一次失败。判定用错误记录自己的时刻（`AgentInsight::error_at_ms`），不用
+    /// 会话的更新时刻：会话在旧错误之后又写了别的记录，旧错误也不会因此算进本回合；
+    /// 没有时刻的错误只展示、不锁存。返回（投影是否变化，锁存失败时该 pane 的状态
+    /// 更新——要发「失败」通知）。
     pub(crate) fn apply_agent_insight(
         &mut self,
         pane_id: PaneId,
@@ -1830,7 +1832,7 @@ impl AppState {
         let error = self
             .agent_activity
             .insight(pane_id)
-            .and_then(|insight| Some((insight.error.clone()?, insight.updated_at_ms)));
+            .and_then(|insight| Some((insight.error.clone()?, insight.error_at_ms)));
         let update = error.and_then(|(error, at_ms)| {
             self.update_terminal_state(pane_id, |terminal| {
                 terminal

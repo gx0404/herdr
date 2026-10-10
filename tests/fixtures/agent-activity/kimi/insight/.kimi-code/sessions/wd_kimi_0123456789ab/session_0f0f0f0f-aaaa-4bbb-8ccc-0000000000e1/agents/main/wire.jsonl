@@ -1,0 +1,12 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1790150400000}
+{"type":"turn.prompt","time":1790150401000,"agentId":"main","input":[{"type":"text","text":"Rename the `--quiet` flag"}],"origin":{"kind":"user"},"promptId":"p1","turnId":"t1"}
+{"type":"agent.turn.started","time":1790150401000,"agentId":"main","kind":"event","turnId":"t1"}
+{"type":"llm.request","time":1790150402000,"agentId":"main","model":"k-test","modelAlias":"kimi-code/k-test","provider":"openai","kind":"loop"}
+{"type":"llm.request","time":1790150402000,"agentId":"main","model":"compactor","modelAlias":"compactor","provider":"openai","kind":"compaction"}
+{"type":"context.append_loop_event","time":1790150403000,"agentId":"main","event":{"type":"content.part","part":{"type":"text","text":"Searching for the flag."},"turnId":"t1","step":1}}
+{"type":"context.append_loop_event","time":1790150404000,"agentId":"main","event":{"type":"tool.call","name":"Grep","toolCallId":"tc1","args":{"pattern":"--quiet","path":"/work/kimi/src"},"turnId":"t1"}}
+{"type":"context.append_loop_event","time":1790150405000,"agentId":"main","event":{"type":"tool.result","toolCallId":"tc1","result":{"output":"3 matches","durationMs":12}}}
+{"type":"agent.message.appended","time":1790150406000,"agentId":"main","kind":"event","message":{"message":{"role":"assistant","content":[{"type":"think","think":"","encrypted":"opaque"},{"type":"text","text":"Found three uses."}],"toolCalls":[]},"meta":{"model":"k-test","source":"llm"}}}
+{"type":"turn.prompt","time":1790150407000,"agentId":"main","input":[{"type":"text","text":"background task finished"}],"origin":{"kind":"task","taskId":"bash-x"}}
+{"type":"context.append_loop_event","time":1790150408000,"agentId":"main","event":{"type":"tool.call","name":"Edit","toolCallId":"tc2","args":{"path":"/work/kimi/src/cli.rs","old_string":"quiet","new_string":"silent"},"turnId":"t1"}}
+not json at all

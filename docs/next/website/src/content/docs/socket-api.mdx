@@ -836,9 +836,9 @@ Integrations report what an agent needs from the user with `pane.report_agent_at
 }
 ```
 
-While the agent is blocked, `attention.kind` is `needs_input`. Its `detail` comes from the latest `needs_input` report, or from the `message` of a full-lifecycle integration's blocked `pane.report_agent` report. Otherwise `kind` is `failed` when a failure is latched and not yet seen. Failures come from a `failed` report, a session error newer than the current turn, or the agent process exiting while working. A failure latched while the agent works surfaces when that turn ends. The latch clears when the agent starts working again, when the user views the pane's tab after the failure was notified, when the agent is released or replaced, or on a `clear` report. Unknown `kind` values decode as `unknown`.
+While the agent is blocked, `attention.kind` is `needs_input`. Its `detail` comes from the latest `needs_input` report, or from the `message` of a full-lifecycle integration's blocked `pane.report_agent` report. Otherwise `kind` is `failed` when a failure is latched and not yet seen. Failures come from a `failed` report, a session error whose own timestamp is not earlier than the start of the current turn, or the agent process exiting while working; a session error from an earlier turn, or one without a timestamp, never latches. A failure latched while the agent works surfaces when that turn ends. The latch clears when the agent starts working again, when the user views the pane's tab after the failure was notified, when the agent is released or replaced, or on a `clear` report. Unknown `kind` values decode as `unknown`.
 
-`AgentInfo.insight` carries the session insight: `session_title`, `model`, `current_tool`, `last_message`, `last_prompt`, `question`, `options`, and `error` come from the agent's source adapter when it provides them. `working_since_ms` (only while working), `last_turn_ms` (the duration of the last working turn), and `state_changed_at_ms` are recorded by the server. Times are Unix milliseconds. Text fields are single lines capped at 500 characters (200 for names), with at most 8 options. Empty fields are omitted, and the whole object is omitted when nothing is known.
+`AgentInfo.insight` carries the session insight: `session_title`, `model`, `current_tool`, `last_message`, `last_prompt`, `question`, `options`, and `error` come from the agent's source adapter, which reads them from the agent's own session data when it provides them (see [Session insight](/docs/agents/#session-insight) for what each agent provides). `error` covers only the latest turn; a later prompt or a normal reply clears it. `updated_at_ms` is the time of the newest session record the adapter used, not the time of the read, so an unchanged session yields an identical insight. `working_since_ms` (only while working), `last_turn_ms` (the duration of the last working turn), and `state_changed_at_ms` are recorded by the server. Times are Unix milliseconds. Text fields are single lines capped at 500 characters (200 for names), with at most 8 options; the built-in adapters keep `last_prompt`, `last_message`, `question`, and `error` to 220 characters, and `session_title`, `model`, `current_tool`, and each option to 120. Empty fields are omitted, and the whole object is omitted when nothing is known.
 
 Agent notifications follow one policy. Blocking notifies "needs attention" and plays the request sound even in the active tab. A finished turn notifies "finished" unless the tab is in view or the user interrupted the turn with a lone Ctrl-C or Esc in the 1.5 seconds before it went idle. A newly latched failure notifies "failed" with the request sound. Notifications sent to client shells carry the pane context in their body, followed by a one-line summary of up to 220 characters of the question, failure reason, or last message when available.
 
@@ -847,6 +847,13 @@ Agent notifications follow one policy. Blocking notifies "needs attention" and p
 An agent's activity tree (subagents, tasks, todos, background processes) is a
 server-owned fact. The server reads it from a per-agent source adapter on a
 background thread; hooks only signal that something may have changed.
+Scheduled discovery uses two such threads, each with a queue of 64 refreshes:
+one for adapters that read session files (Claude Code, Codex, Kimi Code, and
+Pi's reported snapshot) and one for adapters that run a query program
+(OpenCode's `opencode db`, ZCode's `sqlite3`), so a slow query never holds up
+file reads. A pane still has at most one discovery in flight. A pane's
+discovery also reads the session insight described above, unless the agent's
+session data is unavailable.
 
 Adapters that read an agent's own session files (Claude Code, Codex, Kimi Code)
 initially resolve the configuration directory from the Herdr server's environment:
@@ -927,7 +934,11 @@ tree was before truncation.
 (`subagent`, `task`, `todo`, `background`, `unknown`), `label`, `status`
 (`pending`, `running`, `blocked`, `done`, `failed`, `unknown`), and optional
 `parent_id`, `agent_type`, `started_at_ms`, `ended_at_ms`, `content_ref`, and
-`summary`. Unknown enum values decode as `unknown`. `AgentInfo.activity_running`,
+`summary`. Unknown enum values decode as `unknown`. Every adapter maps its
+agent's own status values onto `status` with one shared table (see
+[Activity status](/docs/agents/#activity-status)): a cancelled todo is `done`,
+while killed, stopped, aborted, interrupted, timed-out, or cancelled running
+work is `failed`, usually with the reason in `summary`. `AgentInfo.activity_running`,
 `activity_total`, and `activity_truncated` describe the tree as the source
 reported it, before truncation; each is omitted when zero or false, so all three
 are absent when the agent has no activity. When `activity_truncated` is set, `activity` holds at most 32 nodes in source

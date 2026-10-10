@@ -133,8 +133,15 @@ use super::{ActivitySource, ContentChunk, SourceContext, SourceError};
 use crate::agent_resume::AgentSessionRefKind;
 use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
-    ACTIVITY_GROUP_PHASE, ACTIVITY_GROUP_WORKFLOW,
+    AgentInsight, ACTIVITY_GROUP_PHASE, ACTIVITY_GROUP_WORKFLOW,
 };
+use crate::harness::insight::InsightScan;
+use crate::harness::json;
+use crate::harness::status::{self, StatusScope};
+use crate::harness::tail::Tail;
+use crate::harness::text::{clean_output, clip_bytes, clip_chars, collapse, compact_count};
+use crate::harness::time::rfc3339_value_ms;
+use crate::harness::tool_display::{self, ToolKind};
 
 /// 一次 discover 最多收录的子 agent 数；超出后保留最近修改的那批（分组与待办
 /// 节点另计，各自有界）。
@@ -201,6 +208,22 @@ impl ActivitySource for Claude {
         }
     }
 
+    fn insight(&self, cx: &SourceContext<'_>) -> Result<Option<AgentInsight>, SourceError> {
+        let Some(session) = cx.session else {
+            return Err(SourceError::Unsupported);
+        };
+        let Some(transcript) = locate_transcript(cx, session) else {
+            return Ok(None);
+        };
+        let fallback_cwd = cx.cwd.and_then(Path::to_str);
+        Ok(crate::harness::tail::cached(
+            cx.insight_cache,
+            &transcript,
+            &[&transcript],
+            || read_insight(&transcript, fallback_cwd),
+        ))
+    }
+
     fn read(
         &self,
         cx: &SourceContext<'_>,
@@ -218,7 +241,7 @@ impl ActivitySource for Claude {
             return Err(SourceError::Unavailable);
         };
         let offset = match cursor {
-            Some(cursor) => cursor.parse::<u64>().map_err(|_| {
+            Some(cursor) => crate::harness::text::parse_offset(cursor).ok_or_else(|| {
                 SourceError::Malformed(format!("cursor is not an offset: {cursor}"))
             })?,
             None => 0,
@@ -532,13 +555,12 @@ fn read_workflow_state(session_dir: &Path, workflow: &str) -> Option<WorkflowSta
     let duration_ms = value.get("durationMs").and_then(Value::as_u64);
     Some(WorkflowState {
         name: trimmed_string(value.get("workflowName")),
-        status: match value.get("status").and_then(Value::as_str) {
-            Some("completed") => Some(AgentActivityStatus::Done),
-            Some("killed" | "failed" | "error") => Some(AgentActivityStatus::Failed),
-            Some("running") => Some(AgentActivityStatus::Running),
-            // 未知取值不猜，交给子节点统计。
-            _ => None,
-        },
+        // 按统一归一表（`harness::status`）；未知取值不猜，交给子节点统计。
+        status: value
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(|raw| status::normalize(raw, StatusScope::Run))
+            .map(|normalized| normalized.status),
         started_at_ms,
         ended_at_ms: started_at_ms
             .zip(duration_ms)
@@ -563,13 +585,20 @@ enum NotifiedStatus {
 }
 
 impl NotifiedStatus {
+    /// 按统一归一表（`harness::status`）分类：完成、受阻、失败；失败里被停掉的（归一表
+    /// 注明 `killed` / `stopped`）另记，摘要要写明。运行中等非结局取值与未知取值不猜，
+    /// 交给时间窗。
     fn parse(raw: &str) -> Option<Self> {
-        match raw.trim() {
-            "completed" => Some(Self::Completed),
-            "failed" => Some(Self::Failed),
-            "killed" | "stopped" => Some(Self::Stopped),
-            "blocked" => Some(Self::Blocked),
-            // 未知取值不猜，交给时间窗。
+        let normalized = status::normalize(raw, StatusScope::Run)?;
+        match normalized.status {
+            AgentActivityStatus::Done => Some(Self::Completed),
+            AgentActivityStatus::Blocked => Some(Self::Blocked),
+            AgentActivityStatus::Failed
+                if matches!(normalized.note, Some("killed" | "stopped")) =>
+            {
+                Some(Self::Stopped)
+            }
+            AgentActivityStatus::Failed => Some(Self::Failed),
             _ => None,
         }
     }
@@ -687,7 +716,7 @@ fn read_notifications(session_dir: &Path, window: u64, known: &HashSet<&str>) ->
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        let Some(stamp) = rfc3339_ms(value.get("timestamp")) else {
+        let Some(stamp) = rfc3339_value_ms(value.get("timestamp")) else {
             continue;
         };
         collect_notifications(&value, stamp, &mut |id, notification| {
@@ -946,7 +975,7 @@ fn scan_transcript(path: &Path, modified_ms: Option<u64>, budget: &mut u64) -> T
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if let Some(stamp) = rfc3339_ms(value.get("timestamp")) {
+        if let Some(stamp) = rfc3339_value_ms(value.get("timestamp")) {
             scan.started_at_ms.get_or_insert(stamp);
             scan.last_at_ms = Some(stamp);
             collect_notifications(&value, stamp, &mut |id, notification| {
@@ -1339,16 +1368,12 @@ fn read_todos(session_dir: &Path) -> Vec<AgentActivityNode> {
     let Some(path) = main_transcript_path(session_dir) else {
         return Vec::new();
     };
-    let Some(text) = read_tail(&path, MAX_MAIN_TAIL_BYTES) else {
+    let Ok(tail) = Tail::read(&path, MAX_MAIN_TAIL_BYTES) else {
         return Vec::new();
     };
     let mut latest: Option<Vec<Value>> = None;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+    for line in tail.lines() {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
         let Some(blocks) = value
@@ -1395,18 +1420,357 @@ fn read_todos(session_dir: &Path) -> Vec<AgentActivityNode> {
 }
 
 fn todo_status(value: Option<&str>) -> AgentActivityStatus {
-    match value {
-        Some("completed") => AgentActivityStatus::Done,
-        Some("in_progress") => AgentActivityStatus::Running,
-        Some("pending") => AgentActivityStatus::Pending,
-        _ => AgentActivityStatus::Unknown,
-    }
+    status::status_or_unknown(value, StatusScope::Plan)
 }
 
 fn main_transcript_path(session_dir: &Path) -> Option<PathBuf> {
     let parent = session_dir.parent()?;
     let name = session_dir.file_name()?.to_str()?;
     Some(parent.join(format!("{name}.jsonl")))
+}
+
+// ---------------------------------------------------------------------------
+// 会话洞察（主转录尾部）
+// ---------------------------------------------------------------------------
+
+/// 洞察只读主转录尾部这么多字节（一次工具结果可达数百 KB，窗口要能容下一个回合）。
+const INSIGHT_TAIL_BYTES: u64 = 1024 * 1024;
+/// 尾部窗口里没有会话标题时，再读头部这么多字节找标题。
+const INSIGHT_HEAD_BYTES: u64 = 64 * 1024;
+
+/// 主转录文件：`Path` 引用就是它本身（只认存在的 `.jsonl` 文件）；`Id` 引用在各项目
+/// 目录下找 `<id>.jsonl`。与 [`locate_session`] 不同，不要求同名会话目录存在（没有
+/// 子 agent 的会话没有这个目录）。
+fn locate_transcript(
+    cx: &SourceContext<'_>,
+    session: &crate::agent_resume::AgentSessionRef,
+) -> Option<PathBuf> {
+    match session.kind {
+        AgentSessionRefKind::Path => {
+            let path = PathBuf::from(&session.value);
+            (path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+                && path.is_file())
+            .then_some(path)
+        }
+        AgentSessionRefKind::Id => find_transcript_by_id(&projects_root(cx), &session.value),
+    }
+}
+
+fn find_transcript_by_id(projects: &Path, session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.contains("..") {
+        return None;
+    }
+    let mut matches: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(projects).ok()?.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let candidate = entry.path().join(format!("{session_id}.jsonl"));
+        if candidate.is_file() {
+            matches.push(candidate);
+        }
+    }
+    // 与 `find_session_dir_by_id` 同一口径：多份时取字典序最小的。
+    matches.sort();
+    matches.into_iter().next()
+}
+
+/// 读主转录尾部的洞察（取证与规则见下）。读不动按没有洞察处理。
+///
+/// 本机取证（claude 2.1.x，15 份主转录与 19 份子 agent 转录，只看 `type`、键名与
+/// 枚举取值，不读正文）：
+///
+/// - 会话标题：`custom-title {customTitle}`（随会话反复追加，15 份里 289 条，没有
+///   时间戳）；Paseo 另认 `ai-title {aiTitle}`，老版本有 `summary {summary}`。优先级
+///   custom > ai > summary，同类取最后一条。尾部窗口里没有时再读头部。
+/// - 模型：最近一条 `assistant` 的 `message.model`；API 报错行的模型是 `<synthetic>`，
+///   跳过。
+/// - 用户提示：`user` 行的 `message.content`（字符串或 `text` 块）。跳过工具结果
+///   （`tool_result` 块 / `toolUseResult`）、`isMeta`、`isCompactSummary`、
+///   `origin.kind` 不是 `human` 的（`task-notification` 等系统投递），以及整段被
+///   `<tag>…</tag>` 包着的内部消息（`<local-command-stdout>`、`<system-reminder>`、
+///   `<task-notification>`、`<bash-stdout>` 等）；斜杠命令按用户敲的样子显示
+///   `/名字 参数`（`<command-name>` / `<command-args>`，同 Paseo）。
+///   `[Request interrupted by user…]` 是中断标记：回合结束，不算提示。尾部窗口里没有
+///   提示时退回 `last-prompt {lastPrompt}` 记录。
+/// - 回复与工具：`assistant` 的 `text` 块是回复；`tool_use` 块是工具调用，
+///   `user` 行里同 `tool_use_id` 的 `tool_result` 是结果。同一次 API 响应拆成多行、
+///   共用 `message.id`；出现新的 `message.id` 说明之前的工具都已有结果（agent 只在
+///   全部结果回来后才发下一次请求），所以即使结果行太大没进窗口，当前工具也不会
+///   卡住。`stop_reason` 为 `end_turn` / `stop_sequence` 时回合结束。
+///   `AskUserQuestion` 的入参 `{questions: [{question, header, options: [{label,
+///   description}], multiSelect}]}` 是待答问题。
+/// - 错误：`assistant` 行带 `isApiErrorMessage: true`（另有 `error` 种类与
+///   `apiErrorStatus`），正文是 Claude 自己显示的报错文本；`system` 行的
+///   `subtype: api_error` 是重试中的中间状态，不算。
+fn read_insight(path: &Path, fallback_cwd: Option<&str>) -> Option<AgentInsight> {
+    let tail = Tail::read(path, INSIGHT_TAIL_BYTES).ok()?;
+    let mut reader = InsightReader::default();
+    for line in tail.lines() {
+        if let Ok(value) = serde_json::from_slice::<Value>(line) {
+            reader.record(&value, fallback_cwd);
+        }
+    }
+    if !reader.has_title() && !tail.whole_file() {
+        if let Some(head) = read_capped(path, INSIGHT_HEAD_BYTES) {
+            for line in head.lines() {
+                if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                    reader.title_record(&value);
+                }
+            }
+        }
+    }
+    reader.finish()
+}
+
+#[derive(Default)]
+struct InsightReader {
+    scan: InsightScan,
+    custom_title: Option<String>,
+    ai_title: Option<String>,
+    summary_title: Option<String>,
+    last_prompt_record: Option<String>,
+    /// 最近一次 API 响应的 `message.id`。
+    response_id: Option<String>,
+    /// 会话自己的工作目录（工具展示里的相对路径以它为准）。
+    cwd: Option<String>,
+}
+
+impl InsightReader {
+    fn has_title(&self) -> bool {
+        self.custom_title.is_some() || self.ai_title.is_some() || self.summary_title.is_some()
+    }
+
+    fn record(&mut self, value: &Value, fallback_cwd: Option<&str>) {
+        if value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
+        if self.title_record(value) {
+            return;
+        }
+        if let Some(cwd) = json::str_field(value, "cwd") {
+            self.cwd = Some(cwd.to_owned());
+        } else if self.cwd.is_none() {
+            self.cwd = fallback_cwd.map(str::to_owned);
+        }
+        let at_ms = rfc3339_value_ms(value.get("timestamp"));
+        match json::str_field(value, "type") {
+            Some("assistant") => self.assistant(value, at_ms),
+            Some("user") => self.user(value, at_ms),
+            Some("last-prompt") => {
+                self.last_prompt_record = json::str_field(value, "lastPrompt").map(str::to_owned);
+            }
+            _ => {}
+        }
+    }
+
+    /// 标题类记录；是就收下并返回 true。
+    fn title_record(&mut self, value: &Value) -> bool {
+        let (slot, key) = match json::str_field(value, "type") {
+            Some("custom-title") => (&mut self.custom_title, "customTitle"),
+            Some("ai-title") => (&mut self.ai_title, "aiTitle"),
+            Some("summary") => (&mut self.summary_title, "summary"),
+            _ => return false,
+        };
+        if let Some(title) = json::str_field(value, key) {
+            *slot = Some(title.to_owned());
+        }
+        true
+    }
+
+    fn assistant(&mut self, value: &Value, at_ms: Option<u64>) {
+        let Some(message) = value.get("message").filter(|message| message.is_object()) else {
+            return;
+        };
+        if value.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true) {
+            let text = message
+                .get("content")
+                .and_then(|content| json::text_content(content, &["text"]));
+            match text.as_deref().or_else(|| json::str_field(value, "error")) {
+                Some(error) => self.scan.error(error, at_ms),
+                None => self.scan.error("API error", at_ms),
+            }
+            self.scan.turn_ended(at_ms);
+            return;
+        }
+        if let Some(model) =
+            json::str_field(message, "model").filter(|model| *model != "<synthetic>")
+        {
+            self.scan.model(model);
+        }
+        let response_id = json::str_field(message, "id");
+        if response_id != self.response_id.as_deref() {
+            self.scan.tools_settled();
+            self.response_id = response_id.map(str::to_owned);
+        }
+        match message.get("content") {
+            Some(Value::String(text)) => self.scan.message(text, at_ms),
+            Some(Value::Array(blocks)) => {
+                for block in blocks {
+                    self.assistant_block(block, at_ms);
+                }
+            }
+            _ => {}
+        }
+        if matches!(
+            json::str_field(message, "stop_reason"),
+            Some("end_turn" | "stop_sequence")
+        ) {
+            self.scan.turn_ended(at_ms);
+        }
+    }
+
+    fn assistant_block(&mut self, block: &Value, at_ms: Option<u64>) {
+        match json::str_field(block, "type") {
+            Some("text") => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    self.scan.message(text, at_ms);
+                }
+            }
+            Some("tool_use") => {
+                let (Some(id), Some(name)) =
+                    (json::str_field(block, "id"), json::str_field(block, "name"))
+                else {
+                    return;
+                };
+                let input = block.get("input");
+                let display = tool_display::display(name, input, self.cwd.as_deref());
+                self.scan.tool_started(id, &display, at_ms);
+                if display.kind == ToolKind::Question {
+                    if let Some(question) = input.and_then(tool_display::question) {
+                        self.scan
+                            .question(Some(id), &question.text, &question.options, at_ms);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn user(&mut self, value: &Value, at_ms: Option<u64>) {
+        let Some(content) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+        else {
+            return;
+        };
+        if let Value::Array(blocks) = content {
+            for block in blocks {
+                if json::str_field(block, "type") == Some("tool_result") {
+                    if let Some(id) = json::str_field(block, "tool_use_id") {
+                        self.scan.tool_finished(id, at_ms);
+                    }
+                }
+            }
+        }
+        let flag = |key: &str| value.get(key).and_then(Value::as_bool) == Some(true);
+        let system_origin = value
+            .get("origin")
+            .and_then(|origin| json::str_field(origin, "kind"))
+            .is_some_and(|kind| kind != "human");
+        if value.get("toolUseResult").is_some()
+            || flag("isMeta")
+            || flag("isCompactSummary")
+            || flag("isVisibleInTranscriptOnly")
+            || system_origin
+        {
+            return;
+        }
+        let Some(text) = json::text_content(content, &["text"]) else {
+            return;
+        };
+        match classify_user_text(&text) {
+            UserText::Prompt(prompt) => self.scan.prompt(&prompt, at_ms),
+            UserText::Interrupted => self.scan.turn_ended(at_ms),
+            UserText::Noise => {}
+        }
+    }
+
+    fn finish(mut self) -> Option<AgentInsight> {
+        if let Some(title) = self
+            .custom_title
+            .take()
+            .or(self.ai_title.take())
+            .or(self.summary_title.take())
+        {
+            self.scan.title(&title);
+        }
+        if !self.scan.has_prompt() {
+            if let Some(prompt) = self.last_prompt_record.take() {
+                self.scan.steer(&prompt, None);
+            }
+        }
+        self.scan.finish()
+    }
+}
+
+/// 一条 `user` 文本的归类。
+#[derive(Debug, PartialEq, Eq)]
+enum UserText {
+    /// 真正的用户提示（斜杠命令按 `/名字 参数` 显示）。
+    Prompt(String),
+    /// 用户中断了回合。
+    Interrupted,
+    /// 内部消息：命令输出、系统提醒、通知等。
+    Noise,
+}
+
+fn classify_user_text(text: &str) -> UserText {
+    let trimmed = text.trim();
+    if trimmed.starts_with("[Request interrupted by user") {
+        return UserText::Interrupted;
+    }
+    if trimmed == "No response requested." || trimmed.starts_with("Caveat:") {
+        return UserText::Noise;
+    }
+    let names = tag_values(trimmed, "command-name");
+    let messages = tag_values(trimmed, "command-message");
+    let name = names
+        .first()
+        .or(messages.first())
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty());
+    if let Some(name) = name {
+        let command = if name.starts_with('/') {
+            name.to_owned()
+        } else {
+            format!("/{name}")
+        };
+        let args = tag_values(trimmed, "command-args");
+        return UserText::Prompt(
+            match args
+                .first()
+                .map(|args| args.trim())
+                .filter(|args| !args.is_empty())
+            {
+                Some(args) => format!("{command} {args}"),
+                None => command,
+            },
+        );
+    }
+    if wrapped_in_tag(trimmed) {
+        return UserText::Noise;
+    }
+    UserText::Prompt(trimmed.to_owned())
+}
+
+/// 整段被同一个 `<tag>…</tag>` 包着（内部消息的形状）。
+fn wrapped_in_tag(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('<') else {
+        return false;
+    };
+    let Some(end) = rest.find('>') else {
+        return false;
+    };
+    let name = &rest[..end];
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        && text.ends_with(&format!("</{name}>"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,7 +2039,7 @@ fn tool_result_lines(content: Option<&Value>) -> Vec<String> {
     let mut trailing_blank = 0usize;
     for raw in text.lines() {
         if shown.len() < TOOL_RESULT_LINES {
-            let line = clean_output_line(raw, TOOL_RESULT_LINE_CHARS);
+            let line = clean_output(raw, TOOL_RESULT_LINE_CHARS, false);
             let blank = line.trim().is_empty();
             if !(shown.is_empty() && blank) {
                 shown.push(if blank { String::new() } else { line });
@@ -1700,41 +2064,6 @@ fn tool_result_lines(content: Option<&Value>) -> Vec<String> {
     shown
 }
 
-/// 输出行去掉 ANSI 转义序列与控制字符（制表符留给客户端展开），取前 `max_chars`
-/// 个字符，超出以省略号结尾。逐字符处理，超长行读到上限就停。
-fn clean_output_line(line: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    let mut kept = 0usize;
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            // CSI（ESC [ … 终止字节 0x40–0x7e）整段丢；其余 ESC 连同下一个字符丢。
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&next) {
-                        break;
-                    }
-                }
-            } else {
-                chars.next();
-            }
-            continue;
-        }
-        if ch.is_control() && ch != '\t' {
-            continue;
-        }
-        if kept == max_chars {
-            out.push('…');
-            break;
-        }
-        out.push(ch);
-        kept += 1;
-    }
-    out.truncate(out.trim_end().len());
-    out
-}
-
 // ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
@@ -1747,39 +2076,12 @@ fn read_capped(path: &Path, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buffer).into_owned())
 }
 
-/// 读文件尾部窗口，并丢掉第一条可能被截断的行。
-fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
-    use std::io::Read;
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(max_bytes);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buffer = Vec::new();
-    file.take(max_bytes).read_to_end(&mut buffer).ok()?;
-    let text = String::from_utf8_lossy(&buffer).into_owned();
-    if start == 0 {
-        return Some(text);
-    }
-    Some(match text.split_once('\n') {
-        Some((_, rest)) => rest.to_string(),
-        None => String::new(),
-    })
-}
-
 fn trimmed_string(value: Option<&Value>) -> Option<String> {
-    let text = value?.as_str()?.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    crate::harness::json::trimmed(value).map(str::to_string)
 }
 
 fn non_negative(value: Option<&Value>) -> u64 {
     value.and_then(Value::as_u64).unwrap_or(0)
-}
-
-fn rfc3339_ms(value: Option<&Value>) -> Option<u64> {
-    let text = value?.as_str()?;
-    let stamp =
-        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()?;
-    u64::try_from(stamp.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
 /// 取消息内容里的第一段纯文本，用作缺 label 时的兜底标题。
@@ -1799,58 +2101,8 @@ fn plain_text(content: Option<&Value>) -> Option<String> {
     }
 }
 
-/// 折叠换行与连续空白，保证标题与内容行都是单行。
-fn collapse(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut pending_space = false;
-    for ch in text.chars() {
-        if ch.is_whitespace() || ch.is_control() {
-            pending_space = !out.is_empty();
-            continue;
-        }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
-        }
-        out.push(ch);
-    }
-    out
-}
-
 fn clip(text: &str) -> String {
     clip_chars(text, MAX_LABEL_CHARS)
-}
-
-/// 取前 `max_chars` 个字符，超出以省略号结尾。
-fn clip_chars(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let mut out: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
-/// 按字节上限截断到字符边界。
-fn clip_bytes(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
-fn compact_count(value: u64) -> String {
-    if value < 1_000 {
-        value.to_string()
-    } else if value < 1_000_000 {
-        format!("{}.{}k", value / 1_000, (value % 1_000) / 100)
-    } else {
-        format!("{}.{}M", value / 1_000_000, (value % 1_000_000) / 100_000)
-    }
 }
 
 #[cfg(test)]
@@ -1873,6 +2125,7 @@ mod tests {
     ) -> SourceContext<'a> {
         SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent: "claude",
             session,
             cwd: None,
@@ -2015,6 +2268,7 @@ mod tests {
 
         let relocated = SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent_config_dir: Some(&config_dir),
             ..context(&empty_home, Some(&session), FIXTURE_LAST_MS)
         };
@@ -2049,6 +2303,7 @@ mod tests {
         let nowhere = temp.path().join("nowhere");
         let pinned = SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent_config_dir: Some(&nowhere),
             ..context(&home, Some(&session), FIXTURE_LAST_MS)
         };
@@ -2992,5 +3247,298 @@ mod tests {
             Some("[unparsable line]".into())
         );
         assert_eq!(render_transcript_line("   "), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // 会话洞察（夹具：tests/fixtures/agent-activity/claude/insight，全是合成内容）
+    // -----------------------------------------------------------------------
+
+    /// 夹具时间基准：2026-09-23T08:00:00.000Z。
+    const INSIGHT_BASE_MS: u64 = 1_790_150_400_000;
+
+    fn insight_home() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agent-activity/claude/insight/home")
+    }
+
+    fn insight_of(id: &str) -> Option<AgentInsight> {
+        let home = insight_home();
+        let session = session_ref(id);
+        Claude
+            .insight(&context(&home, Some(&session), INSIGHT_BASE_MS))
+            .expect("夹具会话可读")
+    }
+
+    #[test]
+    fn insight_reads_title_model_prompt_reply_and_the_open_tool() {
+        struct Case {
+            id: &'static str,
+            title: Option<&'static str>,
+            model: Option<&'static str>,
+            prompt: Option<&'static str>,
+            message: Option<&'static str>,
+            tool: Option<&'static str>,
+            error: Option<&'static str>,
+            error_at: Option<u64>,
+            updated_at: Option<u64>,
+        }
+        let at = |seconds: u64| Some(INSIGHT_BASE_MS + seconds * 1000);
+        let cases = [
+            // 工作中：custom 标题压过 ai 标题；命令输出、元消息、提醒、通知与旁支都不算
+            // 提示；当前工具是最近一次没有结果的调用，路径相对会话 cwd。
+            Case {
+                id: "5f000000-0000-4000-8000-0000000000a1",
+                title: Some("Fix the focus bug"),
+                model: Some("claude-test-model"),
+                prompt: Some("Now run the tests"),
+                message: Some("Found it; patching now."),
+                tool: Some("Shell cargo test --workspace"),
+                error: None,
+                error_at: None,
+                updated_at: at(15),
+            },
+            // API 报错结束回合：错误带它自己的时刻，`<synthetic>` 不算模型，重试中的
+            // system 行不算错误。
+            Case {
+                id: "5f000000-0000-4000-8000-0000000000a2",
+                title: None,
+                model: Some("claude-test-model"),
+                prompt: Some("Summarise the error logs"),
+                message: Some("Reading the logs."),
+                tool: None,
+                error: Some("API Error: 529 Overloaded, please retry later"),
+                error_at: at(5),
+                updated_at: at(5),
+            },
+            // 报错之后用户又发了提示、agent 正常回复：旧错误作废。
+            Case {
+                id: "5f000000-0000-4000-8000-0000000000a3",
+                title: None,
+                model: Some("claude-test-model"),
+                prompt: Some("try again"),
+                message: Some("Done: version bumped to 1.2.3."),
+                tool: None,
+                error: None,
+                error_at: None,
+                updated_at: at(3),
+            },
+            // 用户中断：回合结束，被中断的工具不再是当前工具，中断标记不算提示。
+            Case {
+                id: "5f000000-0000-4000-8000-0000000000a5",
+                title: None,
+                model: Some("claude-test-model"),
+                prompt: Some("Watch the build"),
+                message: None,
+                tool: None,
+                error: None,
+                error_at: None,
+                updated_at: at(2),
+            },
+        ];
+        for case in cases {
+            let insight = insight_of(case.id).expect("有洞察");
+            assert_eq!(insight.session_title.as_deref(), case.title, "{}", case.id);
+            assert_eq!(insight.model.as_deref(), case.model, "{}", case.id);
+            assert_eq!(insight.last_prompt.as_deref(), case.prompt, "{}", case.id);
+            assert_eq!(insight.last_message.as_deref(), case.message, "{}", case.id);
+            assert_eq!(insight.current_tool.as_deref(), case.tool, "{}", case.id);
+            assert_eq!(insight.error.as_deref(), case.error, "{}", case.id);
+            assert_eq!(insight.error_at_ms, case.error_at, "{}", case.id);
+            assert_eq!(insight.updated_at_ms, case.updated_at, "{}", case.id);
+            assert_eq!(insight.question, None, "{}", case.id);
+            assert_eq!(
+                insight_of(case.id),
+                Some(insight),
+                "同一份会话读两次逐字节相同：{}",
+                case.id
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_ask_user_question_is_the_pending_question() {
+        let insight = insight_of("5f000000-0000-4000-8000-0000000000a4").expect("有洞察");
+        assert_eq!(
+            insight.question.as_deref(),
+            Some("Which database should I use?")
+        );
+        assert_eq!(insight.options, ["SQLite", "Postgres"]);
+        assert_eq!(
+            insight.current_tool.as_deref(),
+            Some("Ask Which database should I use?")
+        );
+    }
+
+    #[test]
+    fn malformed_and_half_written_lines_degrade_to_what_is_readable() {
+        let insight = insight_of("5f000000-0000-4000-8000-0000000000a6").expect("有洞察");
+        assert_eq!(insight.last_prompt.as_deref(), Some("still readable"));
+        assert_eq!(insight.updated_at_ms, None, "唯一的提示没有可用的时刻");
+        assert_eq!(
+            (insight.model, insight.current_tool, insight.last_message),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn insight_follows_a_reported_path_and_degrades_without_a_transcript() {
+        let home = std::env::temp_dir();
+        let transcript = insight_home()
+            .join(".claude/projects/-tmp-insight-project")
+            .join("5f000000-0000-4000-8000-0000000000a3.jsonl");
+        let by_path =
+            AgentSessionRef::path(transcript.to_string_lossy().into_owned()).expect("绝对路径");
+        let insight = Claude
+            .insight(&context(&home, Some(&by_path), INSIGHT_BASE_MS))
+            .expect("转录可读");
+        assert_eq!(
+            insight.and_then(|insight| insight.last_prompt).as_deref(),
+            Some("try again")
+        );
+
+        for missing in [
+            AgentSessionRef::id("5f000000-0000-4000-8000-00000000dead").expect("合法 id"),
+            AgentSessionRef::path(
+                insight_home()
+                    .join(".claude/projects/-tmp-insight-project")
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .expect("绝对路径"),
+        ] {
+            let home = insight_home();
+            assert_eq!(
+                Claude
+                    .insight(&context(&home, Some(&missing), INSIGHT_BASE_MS))
+                    .expect("找不到转录不报错"),
+                None
+            );
+        }
+        let home = insight_home();
+        assert!(matches!(
+            Claude.insight(&context(&home, None, INSIGHT_BASE_MS)),
+            Err(SourceError::Unsupported)
+        ));
+    }
+
+    /// 尾部窗口里没有标题时读头部找标题；窗口之外的旧提示不影响尾部的新提示。读同一份
+    /// 文件第二次走缓存，文件追加后重新读。
+    #[test]
+    fn a_title_beyond_the_tail_window_is_read_from_the_head_and_cached() {
+        let temp = TempDir::new("insight-head");
+        let project = temp.path().join(".claude/projects/-tmp-big");
+        std::fs::create_dir_all(&project).expect("建项目目录");
+        let id = "5f000000-0000-4000-8000-0000000000b1";
+        let transcript = project.join(format!("{id}.jsonl"));
+        let row = |kind: &str, content: &str, seconds: u64| {
+            serde_json::json!({
+                "type": kind,
+                "timestamp": format!("2026-09-23T08:{:02}:{:02}.000Z", seconds / 60, seconds % 60),
+                "cwd": "/tmp/big",
+                "message": {"role": kind, "id": format!("m{seconds}"), "model": "m", "content": content},
+            })
+            .to_string()
+        };
+        let mut text = String::new();
+        text.push_str(r#"{"type":"custom-title","customTitle":"Large session","sessionId":"x"}"#);
+        text.push('\n');
+        text.push_str(&row("user", "old prompt outside the window", 0));
+        text.push('\n');
+        let filler = row("assistant", &"x".repeat(4000), 1);
+        while (text.len() as u64) < INSIGHT_TAIL_BYTES + 64 * 1024 {
+            text.push_str(&filler);
+            text.push('\n');
+        }
+        text.push_str(&row("user", "new prompt", 2));
+        text.push('\n');
+        std::fs::write(&transcript, &text).expect("写大转录");
+
+        let session = session_ref(id);
+        let cache = std::sync::Mutex::new(super::super::InsightCache::default());
+        let cx = SourceContext {
+            insight_cache: Some(&cache),
+            ..context(temp.path(), Some(&session), INSIGHT_BASE_MS)
+        };
+        let insight = Claude.insight(&cx).expect("可读").expect("有洞察");
+        assert_eq!(insight.session_title.as_deref(), Some("Large session"));
+        assert_eq!(insight.last_prompt.as_deref(), Some("new prompt"));
+        assert_eq!(
+            Claude.insight(&cx).expect("可读").as_ref(),
+            Some(&insight),
+            "缓存命中"
+        );
+
+        text.push_str(&row("user", "appended prompt", 3));
+        text.push('\n');
+        std::fs::write(&transcript, &text).expect("追加");
+        assert_eq!(
+            Claude
+                .insight(&cx)
+                .expect("可读")
+                .and_then(|insight| insight.last_prompt)
+                .as_deref(),
+            Some("appended prompt"),
+            "文件变了重新读"
+        );
+    }
+
+    #[test]
+    fn user_text_is_classified_into_prompts_interrupts_and_noise() {
+        let cases = [
+            ("fix the bug", UserText::Prompt("fix the bug".into())),
+            (
+                "<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>PR 12</command-args>",
+                UserText::Prompt("/review PR 12".into()),
+            ),
+            (
+                "<command-message>compact</command-message>",
+                UserText::Prompt("/compact".into()),
+            ),
+            ("[Request interrupted by user]", UserText::Interrupted),
+            (
+                "[Request interrupted by user for tool use]",
+                UserText::Interrupted,
+            ),
+            ("No response requested.", UserText::Noise),
+            ("Caveat: generated by local commands", UserText::Noise),
+            (
+                "<local-command-stdout>done</local-command-stdout>",
+                UserText::Noise,
+            ),
+            ("<bash-input>ls</bash-input>", UserText::Noise),
+            (
+                "<system-reminder>be brief</system-reminder>",
+                UserText::Noise,
+            ),
+            // 只是以尖括号开头的正常提示。
+            (
+                "<div> is not closed here",
+                UserText::Prompt("<div> is not closed here".into()),
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(classify_user_text(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn workflow_and_notification_statuses_follow_the_normalisation_table() {
+        use NotifiedStatus::{Blocked, Completed, Failed, Stopped};
+        let cases = [
+            ("completed", Some(Completed)),
+            ("failed", Some(Failed)),
+            ("error", Some(Failed)),
+            ("aborted", Some(Failed)),
+            ("killed", Some(Stopped)),
+            ("stopped", Some(Stopped)),
+            ("blocked", Some(Blocked)),
+            ("running", None),
+            ("paused", None),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(NotifiedStatus::parse(raw), expected, "{raw}");
+        }
+        assert_eq!(todo_status(Some("cancelled")), AgentActivityStatus::Done);
+        assert_eq!(todo_status(Some("blocked")), AgentActivityStatus::Unknown);
     }
 }

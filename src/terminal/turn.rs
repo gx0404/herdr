@@ -276,9 +276,10 @@ impl TurnTracker {
         failure || needs_input
     }
 
-    /// 会话洞察带来的错误：不在 Working、不早于本回合开始、本回合还没处理过同一错误时
-    /// 锁存失败。没有错误时刻的按现在算；本 server 从没见过这个 agent 工作时不锁存（启动
-    /// 时读到的旧错误不算失败）。
+    /// 会话洞察带来的错误：不在 Working、错误记录自己的时刻不早于本回合开始、本回合还
+    /// 没处理过同一错误时锁存失败。没有错误时刻的不锁存——证明不了它属于本回合，更早
+    /// 回合留下的错误绝不能算成这一回合的失败；本 server 从没见过这个 agent 工作时也不
+    /// 锁存（启动时读到的旧错误不算失败）。
     pub(crate) fn observe_error(
         &mut self,
         error: &str,
@@ -290,11 +291,11 @@ impl TurnTracker {
         if state == AgentState::Working {
             return false;
         }
-        let Some(turn_start) = self.last_working_start_ms else {
+        let (Some(turn_start), Some(at_ms)) = (self.last_working_start_ms, at_ms) else {
             return false;
         };
         // 毫秒粒度：与回合开始同一毫秒的错误算本回合的。
-        if at_ms.unwrap_or(now_ms) < turn_start || self.observed_error.as_deref() == Some(error) {
+        if at_ms < turn_start || self.observed_error.as_deref() == Some(error) {
             return false;
         }
         self.observed_error = Some(error.to_owned());
@@ -380,7 +381,37 @@ mod tests {
             !tracker.observe_error("boom", Some(120), AgentState::Idle, None, 300),
             "同一错误确认后不再锁存"
         );
-        assert!(tracker.observe_error("other", None, AgentState::Idle, None, 300));
+        assert!(tracker.observe_error("other", Some(130), AgentState::Idle, None, 300));
+    }
+
+    /// 更早回合留下的错误永远不能锁存成当前回合的失败：没有时刻的错误不锁存，早于本
+    /// 回合开始的错误在之后的任何回合里都不锁存，哪怕用户看过、错误文本没变。
+    #[test]
+    fn a_stale_error_from_an_earlier_turn_never_latches() {
+        let mut tracker = tracker_after_turn(100);
+        assert!(
+            !tracker.observe_error("boom", None, AgentState::Idle, Some("claude"), 10_000),
+            "没有时刻的错误证明不了属于本回合"
+        );
+        assert!(tracker.observe_error("boom", Some(120), AgentState::Idle, Some("claude"), 200));
+        assert!(tracker.take_failure_notice(AgentState::Idle));
+        assert!(tracker.acknowledge());
+
+        // 新的回合开始又结束：来源还在报上一回合的那条错误（时刻 120 早于新回合开始）。
+        let now = Instant::now();
+        tracker.on_state_change(AgentState::Idle, AgentState::Working, now, 1_000);
+        tracker.on_state_change(AgentState::Working, AgentState::Idle, now, 1_500);
+        assert!(!tracker.observe_error("boom", Some(120), AgentState::Idle, Some("claude"), 1_600));
+        assert!(!tracker.observe_error("boom", None, AgentState::Idle, Some("claude"), 1_600));
+        assert_eq!(tracker.attention(AgentState::Idle, None), None);
+        // 本回合真的又失败了（时刻晚于回合开始）才锁存。
+        assert!(tracker.observe_error(
+            "boom",
+            Some(1_200),
+            AgentState::Idle,
+            Some("claude"),
+            1_600
+        ));
     }
 
     #[test]

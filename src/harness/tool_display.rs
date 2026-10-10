@@ -16,6 +16,8 @@ pub enum ToolKind {
     Fetch,
     Agent,
     Plan,
+    /// 向用户提问的工具（Claude `AskUserQuestion`、Codex `request_user_input` 等）。
+    Question,
     Other,
 }
 
@@ -29,7 +31,6 @@ pub struct ToolDisplay {
 
 impl ToolDisplay {
     /// 单行文本：`名称 摘要`，摘要压成一行。
-    #[allow(dead_code)] // 会话洞察适配器（阶段 2b）接入
     pub fn line(&self) -> String {
         match self
             .summary
@@ -47,6 +48,8 @@ const SHELL_NAMES: &[&str] = &[
     "bash",
     "shell",
     "Shell",
+    "PowerShell",
+    "powershell",
     "exec_command",
     "exec",
     "command",
@@ -59,6 +62,7 @@ const READ_NAMES: &[&str] = &[
     "read",
     "read_file",
     "ReadFile",
+    "ReadMediaFile",
     "view_file",
     "view",
     "NotebookRead",
@@ -85,6 +89,7 @@ const SEARCH_NAMES: &[&str] = &[
     "grep",
     "Glob",
     "glob",
+    "find",
     "search",
     "Search",
     "WebSearch",
@@ -100,20 +105,31 @@ const FETCH_NAMES: &[&str] = &[
     "FetchURL",
     "fetch",
 ];
-const AGENT_NAMES: &[&str] = &["Task", "task", "Agent", "agent", "spawn_agent", "subagent"];
+const AGENT_NAMES: &[&str] = &[
+    "Task",
+    "task",
+    "Agent",
+    "agent",
+    "AgentSwarm",
+    "spawn_agent",
+    "subagent",
+];
 const PLAN_NAMES: &[&str] = &[
     "TodoWrite",
     "todowrite",
+    "TodoList",
     "update_plan",
     "SetTodoList",
+    "EnterPlanMode",
     "ExitPlanMode",
     "plan",
 ];
+const QUESTION_NAMES: &[&str] = &["AskUserQuestion", "request_user_input", "question"];
 
 /// 工具名 → 类别。
 pub fn tool_kind(name: &str) -> ToolKind {
     let name = name.trim();
-    let table: [(&[&str], ToolKind); 8] = [
+    let table: [(&[&str], ToolKind); 9] = [
         (SHELL_NAMES, ToolKind::Shell),
         (READ_NAMES, ToolKind::Read),
         (WRITE_NAMES, ToolKind::Write),
@@ -122,6 +138,7 @@ pub fn tool_kind(name: &str) -> ToolKind {
         (FETCH_NAMES, ToolKind::Fetch),
         (AGENT_NAMES, ToolKind::Agent),
         (PLAN_NAMES, ToolKind::Plan),
+        (QUESTION_NAMES, ToolKind::Question),
     ];
     table
         .into_iter()
@@ -131,7 +148,6 @@ pub fn tool_kind(name: &str) -> ToolKind {
 }
 
 /// 归一一次工具调用的展示。`cwd` 用于把绝对路径显示成相对路径。
-#[allow(dead_code)] // 会话洞察适配器（阶段 2b）接入
 pub fn display(name: &str, input: Option<&Value>, cwd: Option<&str>) -> ToolDisplay {
     let kind = tool_kind(name);
     let path = || input.and_then(file_path).map(|path| strip_cwd(&path, cwd));
@@ -162,6 +178,10 @@ pub fn display(name: &str, input: Option<&Value>, cwd: Option<&str>) -> ToolDisp
             input.and_then(|input| string_field(input, &["description", "title", "prompt"])),
         ),
         ToolKind::Plan => ("Plan".to_owned(), input.and_then(plan_summary)),
+        ToolKind::Question => (
+            "Ask".to_owned(),
+            input.and_then(question).map(|question| question.text),
+        ),
         ToolKind::Other => (humanize(name), None),
     };
     ToolDisplay {
@@ -174,7 +194,8 @@ pub fn display(name: &str, input: Option<&Value>, cwd: Option<&str>) -> ToolDisp
 }
 
 /// 工具名人性化：命名空间形式（`mcp__server__tool`、`a.b`、`a/b`、`a:b`）原样保留；
-/// 其余把分隔符换成空格、首字母大写（`read_mcp_resource` → `Read mcp resource`）。
+/// 其余按分隔符与驼峰边界拆词、首字母大写（`read_mcp_resource` → `Read mcp resource`，
+/// `TaskOutput` → `Task output`）。
 pub fn humanize(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -186,6 +207,7 @@ pub fn humanize(name: &str) -> String {
     let words = trimmed
         .split(['_', '-', ' '])
         .filter(|word| !word.is_empty())
+        .map(split_camel_case)
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
@@ -194,6 +216,59 @@ pub fn humanize(name: &str) -> String {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => trimmed.to_owned(),
     }
+}
+
+/// 在小写（或数字）后接大写处断词：`ReadMediaFile` → `Read Media File`；连续大写
+/// （`URL`、`LS`）不拆。
+fn split_camel_case(word: &str) -> String {
+    let mut out = String::with_capacity(word.len() + 4);
+    let mut previous: Option<char> = None;
+    for ch in word.chars() {
+        if ch.is_uppercase()
+            && previous.is_some_and(|previous| previous.is_lowercase() || previous.is_ascii_digit())
+        {
+            out.push(' ');
+        }
+        out.push(ch);
+        previous = Some(ch);
+    }
+    out
+}
+
+/// 一个待答问题：问题正文与可选回答。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    pub text: String,
+    pub options: Vec<String>,
+}
+
+/// 提问类工具的入参里第一个问题。各家共用同一形状：`{questions: [{question, header?,
+/// options: [{label, description?}] | [string]}]}`（Claude `AskUserQuestion`、Codex
+/// `request_user_input`、Kimi 交互请求、OpenCode `question`）；不止一个问题时正文注明
+/// 余下的个数。
+pub fn question(input: &Value) -> Option<Question> {
+    let questions = input.get("questions")?.as_array()?;
+    let first = questions.first()?;
+    let text = string_field(first, &["question", "header", "text"])?;
+    let options = first
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| match option {
+                    Value::String(label) => Some(label.trim().to_owned()),
+                    _ => string_field(option, &["label", "value"]),
+                })
+                .filter(|label| !label.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let text = match questions.len() {
+        0 | 1 => text,
+        count => format!("{text} (+{})", count - 1),
+    };
+    Some(Question { text, options })
 }
 
 /// 绝对路径在 `cwd` 之下时显示相对部分（分隔符两种都认）。
@@ -458,6 +533,69 @@ mod tests {
         );
         assert_eq!(line("browser.click", json!({})), "browser.click");
         assert_eq!(display("Think", None, None).kind, ToolKind::Other);
+    }
+
+    #[test]
+    fn camel_case_names_are_split_into_words() {
+        assert_eq!(humanize("TaskOutput"), "Task output");
+        assert_eq!(humanize("WaitFor"), "Wait for");
+        assert_eq!(humanize("FetchURL"), "Fetch url");
+        assert_eq!(humanize("v2Tool"), "V2 tool");
+        assert_eq!(line("Skill", json!({"skill": "review"})), "Skill");
+    }
+
+    /// 本机各家转录里实测的工具名（只核对名字与参数键，Claude / Kimi 的形状一致）。
+    #[test]
+    fn harness_specific_tool_names_map_to_their_kind() {
+        assert_eq!(
+            line("PowerShell", json!({"command": "Get-ChildItem"})),
+            "Shell Get-ChildItem"
+        );
+        assert_eq!(
+            line(
+                "ReadMediaFile",
+                json!({"path": "/src/herdr/assets/logo.png"})
+            ),
+            "Read assets/logo.png"
+        );
+        assert_eq!(
+            line("TodoList", json!({"todos": [{"status": "done"}]})),
+            "Plan 1/1"
+        );
+        assert_eq!(line("find", json!({"pattern": "*.rs"})), "Search *.rs");
+        assert_eq!(
+            line("AgentSwarm", json!({"description": "review shards"})),
+            "Agent review shards"
+        );
+    }
+
+    #[test]
+    fn question_tools_show_their_first_question() {
+        let input = json!({"questions": [
+            {"header": "Retry", "question": "Retry on 429?", "multiSelect": false,
+             "options": [{"label": "Yes", "description": "retry"}, {"label": "No"}]},
+            {"header": "Other", "question": "Second?", "options": []}
+        ]});
+        assert_eq!(
+            question(&input),
+            Some(Question {
+                text: "Retry on 429? (+1)".into(),
+                options: vec!["Yes".into(), "No".into()],
+            })
+        );
+        assert_eq!(
+            line("AskUserQuestion", input.clone()),
+            "Ask Retry on 429? (+1)"
+        );
+        assert_eq!(
+            question(&json!({"questions": [{"question": "Pick", "options": ["a", " ", "b"]}]}))
+                .map(|question| question.options),
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
+        assert_eq!(question(&json!({"questions": []})), None);
+        assert_eq!(question(&json!({"questions": [{"options": []}]})), None);
+        assert_eq!(question(&json!("not an object")), None);
+        assert_eq!(display("request_user_input", None, None).line(), "Ask");
     }
 
     #[test]

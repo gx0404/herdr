@@ -6582,18 +6582,23 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         assert!(
-            !terminal.observe_insight_error("stale", None),
+            !terminal.observe_insight_error("stale", Some(turn::wall_clock_ms())),
             "没见过工作的 agent 不锁存"
         );
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
+        let during_turn = turn::wall_clock_ms();
         assert!(
-            !terminal.observe_insight_error("boom", None),
+            !terminal.observe_insight_error("boom", Some(during_turn)),
             "Working 时不锁存"
         );
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
-        assert!(terminal.observe_insight_error("boom", None));
         assert!(
             !terminal.observe_insight_error("boom", None),
+            "没有时刻的错误不锁存"
+        );
+        assert!(terminal.observe_insight_error("boom", Some(during_turn)));
+        assert!(
+            !terminal.observe_insight_error("boom", Some(during_turn)),
             "同一错误只锁存一次"
         );
         assert!(

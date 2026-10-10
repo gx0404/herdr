@@ -102,7 +102,14 @@ use serde_json::Value;
 use super::{ActivitySource, ContentChunk, SourceContext, SourceError};
 use crate::api::schema::{
     AgentActivityContentFormat, AgentActivityKind, AgentActivityNode, AgentActivityStatus,
+    AgentInsight,
 };
+use crate::harness::insight::InsightScan;
+use crate::harness::json;
+use crate::harness::tail::Tail;
+use crate::harness::text::{clean_output, clip_chars, collapse};
+use crate::harness::time::{rfc3339_ms, rfc3339_value_ms, unix_seconds_ms};
+use crate::harness::tool_display::{self, ToolKind};
 
 mod rollout_io;
 use rollout_io::DecodeBudget;
@@ -241,6 +248,39 @@ impl ActivitySource for Codex {
         Ok(nodes)
     }
 
+    fn insight(&self, cx: &SourceContext<'_>) -> Result<Option<AgentInsight>, SourceError> {
+        let Some(root_id) = root_thread_id(cx) else {
+            return Err(SourceError::Unsupported);
+        };
+        let sessions = sessions_dir(cx)?;
+        let reported = cx
+            .session
+            .filter(|session| session.kind == crate::agent_resume::AgentSessionRefKind::Path)
+            .map(|session| PathBuf::from(&session.value));
+        let rollout = match reported {
+            Some(path) => path,
+            None => match find_rollout(&sessions, &root_id) {
+                Ok(path) => path,
+                // 线程的 rollout 还没生成：没有洞察。
+                Err(SourceError::Unavailable) => return Ok(None),
+                Err(error) => return Err(error),
+            },
+        };
+        let index = sessions
+            .parent()
+            .map(|config| config.join(SESSION_INDEX_FILE));
+        let mut inputs: Vec<&Path> = vec![&rollout];
+        inputs.extend(index.as_deref());
+        let fallback = std::sync::Mutex::new(RolloutCache::default());
+        let cache = cx.codex_cache.unwrap_or(&fallback);
+        Ok(crate::harness::tail::cached(
+            cx.insight_cache,
+            &rollout,
+            &inputs,
+            || read_insight(&rollout, index.as_deref(), &root_id, cache),
+        ))
+    }
+
     fn read(
         &self,
         cx: &SourceContext<'_>,
@@ -337,11 +377,7 @@ fn root_thread_id(cx: &SourceContext<'_>) -> Option<String> {
 
 /// 线程 id 只会是 UUID 一类的字符；这里也顺手挡住路径成分。
 fn is_plausible_thread_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    crate::harness::text::is_plain_identifier(id, 128)
 }
 
 /// 从 `rollout-<stamp>-<id>.jsonl[.zst]` 取 id；返回 `(id, 是否压缩)`。
@@ -546,7 +582,7 @@ fn parse_meta(payload: &Value, path: &Path) -> Option<RolloutMeta> {
     let started_at_ms = payload
         .get("timestamp")
         .and_then(Value::as_str)
-        .and_then(rfc3339_millis)
+        .and_then(rfc3339_ms)
         .or_else(|| uuid_v7_millis(id));
     Some(RolloutMeta {
         id: id.to_string(),
@@ -561,13 +597,6 @@ fn parse_meta(payload: &Value, path: &Path) -> Option<RolloutMeta> {
             .get("subagent_history_start_ordinal")
             .and_then(Value::as_u64),
     })
-}
-
-fn rfc3339_millis(text: &str) -> Option<u64> {
-    let date =
-        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()?;
-    let nanos = date.unix_timestamp_nanos();
-    u64::try_from(nanos / 1_000_000).ok()
 }
 
 /// Enumerate a bounded set of regular files; active storage wins over an archived copy.
@@ -810,7 +839,7 @@ fn lifecycle_from_reader(
         let Some(payload) = record.get("payload") else {
             continue;
         };
-        let ended_at_ms = || unix_seconds_to_millis(payload.get("completed_at"));
+        let ended_at_ms = || unix_seconds_ms(payload.get("completed_at"));
         match payload.get("type").and_then(Value::as_str) {
             Some("task_started") => last = Some(Lifecycle::Running),
             Some("task_complete") => {
@@ -838,11 +867,6 @@ fn lifecycle_from_reader(
         None if start > 0 => Lifecycle::Running,
         None => Lifecycle::Idle,
     })
-}
-
-fn unix_seconds_to_millis(value: Option<&Value>) -> Option<u64> {
-    let seconds = value?.as_u64()?;
-    seconds.checked_mul(1000)
 }
 
 fn error_message(error: &Value) -> String {
@@ -883,6 +907,311 @@ fn apply_lifecycle(node: &mut AgentActivityNode, lifecycle: &Lifecycle) {
         }
         Lifecycle::Unreadable => node.status = AgentActivityStatus::Unknown,
     }
+}
+
+// ---- 会话洞察 ----
+
+/// 洞察只读根线程 rollout 尾部这么多字节。
+const INSIGHT_TAIL_BYTES: u64 = 1024 * 1024;
+/// 尾部窗口里没有 `turn_context`（拿不到模型）时，再读头部这么多字节：首行
+/// `session_meta` 带整份 `base_instructions`，本机实测不到 64 KiB。
+const INSIGHT_HEAD_BYTES: u64 = 256 * 1024;
+/// 线程名索引（`<config>/session_index.jsonl`，每行 `{id, thread_name, updated_at}`，
+/// 只追加）只读尾部这么多字节。
+const SESSION_INDEX_FILE: &str = "session_index.jsonl";
+const SESSION_INDEX_TAIL_BYTES: u64 = 256 * 1024;
+
+/// 读根线程 rollout 尾部的洞察。读不动按没有洞察处理。
+///
+/// 本机取证（Codex Desktop 0.155–0.162，25 个 rollout，只看 `type`、键名与枚举取值）：
+///
+/// - 模型：`turn_context.payload.model`（每回合一条）；工作目录同在 `cwd`。
+/// - 用户提示：`response_item` 的 `message`（`role: user`，`input_text` 块）。注入的
+///   上下文同样是 user 消息：整块被 `<tag>…</tag>` 包着（`<environment_context>`、
+///   `<user_instructions>`、`<external_…>` 等）或以 `# AGENTS.md instructions` 开头，
+///   逐块跳过。旧版另有 `event_msg.user_message {message}`，新版另有
+///   `item_completed.item {type: UserMessage}`，都是同一提示的镜像。
+/// - 回复：`message`（`role: assistant`，`output_text` 块，`phase` 为 commentary /
+///   final_answer）与 `event_msg.agent_message`；`task_complete.last_agent_message`
+///   兜底。
+/// - 工具：`function_call {name, arguments(JSON 文本), call_id}`、`custom_tool_call
+///   {name, input(自由文本), call_id}`、`local_shell_call {action.command, call_id}`；
+///   结果是同 `call_id` 的 `function_call_output` / `custom_tool_call_output`。
+///   `request_user_input` 的入参 `{questions: […]}` 是待答问题。
+/// - 回合结束：`task_complete`（`error` 非空即这一回合失败，本机 19 条里 1 条）、
+///   `turn_aborted`（用户中断，不算错误）；`event_msg.error {message}` 同样是错误，
+///   `stream_error` 是重连中的中间状态，不算。
+/// - 线程名：`session_index.jsonl` 里同 id 的最后一条 `thread_name`；rollout 里如有
+///   `thread_name_updated {thread_name}` 也收。
+fn read_insight(
+    rollout: &Path,
+    index: Option<&Path>,
+    root_id: &str,
+    cache: &std::sync::Mutex<RolloutCache>,
+) -> Option<AgentInsight> {
+    let mut budget = DecodeBudget::default();
+    let mut reader = rollout_io::open(rollout, cache, &mut budget).ok()?;
+    let len = reader.len().ok()?;
+    let tail = Tail::read_from(&mut reader, len, INSIGHT_TAIL_BYTES).ok()?;
+    let mut insight = CodexInsight::default();
+    for line in tail.lines() {
+        if let Ok(record) = serde_json::from_slice::<Value>(line) {
+            insight.record(&record);
+        }
+    }
+    if !insight.scan.has_model() && !tail.whole_file() {
+        let mut head = Vec::new();
+        if reader.seek(SeekFrom::Start(0)).is_ok()
+            && (&mut reader)
+                .take(INSIGHT_HEAD_BYTES)
+                .read_to_end(&mut head)
+                .is_ok()
+        {
+            for line in head.split(|byte| *byte == b'\n') {
+                if let Ok(record) = serde_json::from_slice::<Value>(line.trim_ascii()) {
+                    insight.head_record(&record);
+                }
+            }
+        }
+    }
+    if insight.title.is_none() {
+        insight.title = index.and_then(|index| thread_name(index, root_id));
+    }
+    insight.finish()
+}
+
+/// `session_index.jsonl` 里该线程最后一条非空的 `thread_name`。
+fn thread_name(index: &Path, id: &str) -> Option<String> {
+    let tail = Tail::read(index, SESSION_INDEX_TAIL_BYTES).ok()?;
+    let name = tail.lines().rev().find_map(|line| {
+        let entry: Value = serde_json::from_slice(line).ok()?;
+        if json::str_field(&entry, "id") != Some(id) {
+            return None;
+        }
+        json::str_field(&entry, "thread_name").map(str::to_owned)
+    });
+    name
+}
+
+#[derive(Default)]
+struct CodexInsight {
+    scan: InsightScan,
+    title: Option<String>,
+    cwd: Option<String>,
+}
+
+impl CodexInsight {
+    fn record(&mut self, record: &Value) {
+        let at_ms = rfc3339_value_ms(record.get("timestamp"));
+        let Some(payload) = record.get("payload") else {
+            return;
+        };
+        match json::str_field(record, "type") {
+            Some("turn_context") => self.turn_context(payload),
+            Some("response_item") => self.response_item(payload, at_ms),
+            Some("event_msg") => self.event(payload, at_ms),
+            _ => {}
+        }
+    }
+
+    /// 头部窗口只补模型与工作目录。
+    fn head_record(&mut self, record: &Value) {
+        if json::str_field(record, "type") == Some("turn_context") {
+            if let Some(payload) = record.get("payload") {
+                self.turn_context(payload);
+            }
+        }
+    }
+
+    fn turn_context(&mut self, payload: &Value) {
+        if let Some(model) = json::str_field(payload, "model") {
+            self.scan.model(model);
+        }
+        if let Some(cwd) = json::str_field(payload, "cwd") {
+            self.cwd = Some(cwd.to_owned());
+        }
+    }
+
+    fn response_item(&mut self, payload: &Value, at_ms: Option<u64>) {
+        match json::str_field(payload, "type") {
+            Some("message") => {
+                let content = payload.get("content");
+                match json::str_field(payload, "role") {
+                    Some("user") => {
+                        if let Some(prompt) = content.and_then(user_prompt_text) {
+                            self.scan.prompt(&prompt, at_ms);
+                        }
+                    }
+                    Some("assistant") => {
+                        if let Some(text) = content.and_then(|content| {
+                            json::text_content(content, &["output_text", "text"])
+                        }) {
+                            self.scan.message(&text, at_ms);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("function_call") => {
+                let arguments = payload
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok());
+                self.tool_started(payload, arguments.as_ref(), at_ms);
+            }
+            Some("custom_tool_call") => {
+                let input = payload.get("input").and_then(Value::as_str).map(|input| {
+                    let shell = payload
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| tool_display::tool_kind(name) == ToolKind::Shell);
+                    if shell {
+                        serde_json::json!({ "command": input })
+                    } else {
+                        Value::String(input.to_owned())
+                    }
+                });
+                self.tool_started(payload, input.as_ref(), at_ms);
+            }
+            Some("local_shell_call") => {
+                let command = payload
+                    .get("action")
+                    .and_then(|action| action.get("command"))
+                    .map(|command| serde_json::json!({ "command": command }));
+                let Some(call_id) =
+                    json::str_field(payload, "call_id").or_else(|| json::str_field(payload, "id"))
+                else {
+                    return;
+                };
+                let display = tool_display::display("local_shell", command.as_ref(), self.cwd());
+                self.scan.tool_started(call_id, &display, at_ms);
+            }
+            Some("function_call_output" | "custom_tool_call_output") => {
+                if let Some(call_id) = json::str_field(payload, "call_id") {
+                    self.scan.tool_finished(call_id, at_ms);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn tool_started(&mut self, payload: &Value, input: Option<&Value>, at_ms: Option<u64>) {
+        let (Some(call_id), Some(name)) = (
+            json::str_field(payload, "call_id"),
+            json::str_field(payload, "name"),
+        ) else {
+            return;
+        };
+        let display = tool_display::display(name, input, self.cwd());
+        self.scan.tool_started(call_id, &display, at_ms);
+        if display.kind == ToolKind::Question {
+            if let Some(question) = input.and_then(tool_display::question) {
+                self.scan
+                    .question(Some(call_id), &question.text, &question.options, at_ms);
+            }
+        }
+    }
+
+    fn event(&mut self, payload: &Value, at_ms: Option<u64>) {
+        match json::str_field(payload, "type") {
+            Some("user_message") => {
+                if let Some(prompt) = payload.get("message").and_then(user_prompt_text) {
+                    self.scan.prompt(&prompt, at_ms);
+                }
+            }
+            Some("agent_message") => {
+                if let Some(message) = payload.get("message").and_then(Value::as_str) {
+                    self.scan.message(message, at_ms);
+                }
+            }
+            Some("item_completed") => {
+                let Some(item) = payload.get("item") else {
+                    return;
+                };
+                let content = item.get("content");
+                match json::str_field(item, "type") {
+                    Some("UserMessage") => {
+                        if let Some(prompt) = content.and_then(user_prompt_text) {
+                            self.scan.prompt(&prompt, at_ms);
+                        }
+                    }
+                    Some("AgentMessage") => {
+                        if let Some(text) = content.and_then(|content| {
+                            json::text_content(content, &["text", "Text", "output_text"])
+                        }) {
+                            self.scan.message(&text, at_ms);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("task_complete") => {
+                match payload.get("error").filter(|error| !error.is_null()) {
+                    Some(error) => {
+                        let at_ms = unix_seconds_ms(payload.get("completed_at")).or(at_ms);
+                        self.scan.error(&error_message(error), at_ms);
+                    }
+                    None => {
+                        if let Some(message) = json::str_field(payload, "last_agent_message") {
+                            self.scan.message(message, at_ms);
+                        }
+                    }
+                }
+                self.scan.turn_ended(at_ms);
+            }
+            Some("turn_aborted") => self.scan.turn_ended(at_ms),
+            Some("error") => {
+                if let Some(message) = json::str_field(payload, "message") {
+                    self.scan.error(message, at_ms);
+                }
+            }
+            Some("thread_name_updated") => {
+                if let Some(name) = json::str_field(payload, "thread_name") {
+                    self.title = Some(name.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    fn finish(mut self) -> Option<AgentInsight> {
+        if let Some(title) = self.title.take() {
+            self.scan.title(&title);
+        }
+        self.scan.finish()
+    }
+}
+
+/// 用户消息里真正的提示：逐块跳过注入的上下文（整块被 `<tag>…</tag>` 包着，或是
+/// `# AGENTS.md instructions` 段），其余文本块按换行连起来。字符串内容按一块处理。
+fn user_prompt_text(content: &Value) -> Option<String> {
+    let real = |text: &str| {
+        let trimmed = text.trim();
+        !trimmed.is_empty()
+            && wrapper_tag(trimmed).is_none()
+            && !trimmed.starts_with("# AGENTS.md instructions")
+    };
+    let text = match content {
+        Value::String(text) => real(text).then(|| text.clone())?,
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    json::str_field(block, "type"),
+                    Some("input_text" | "text" | "Text")
+                )
+            })
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .filter(|text| real(text))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
 }
 
 // ---- 内容读取 ----
@@ -1326,13 +1655,13 @@ fn render_message(payload: &Value) -> Option<String> {
         return None;
     }
     if role == Some("assistant") {
-        return Some(clean_text(text, MESSAGE_CHARS, true));
+        return Some(clean_output(text, MESSAGE_CHARS, true));
     }
     // `<environment_context>…</environment_context>` 这类内部包装只留标签名。
     if let Some(tag) = wrapper_tag(text) {
         return Some(format!("[{tag}]"));
     }
-    Some(format!("user: {}", clean_text(text, MESSAGE_CHARS, true)))
+    Some(format!("user: {}", clean_output(text, MESSAGE_CHARS, true)))
 }
 
 /// agent 之间的协作消息：发送方 + 明文部分，负载加密时注明。
@@ -1483,7 +1812,7 @@ fn push_output_lines(out: &mut String, text: &str) {
     let mut trailing_blank = 0usize;
     for raw in text.lines() {
         if shown.len() < OUTPUT_LINES {
-            let line = clean_text(raw, OUTPUT_LINE_CHARS, false);
+            let line = clean_output(raw, OUTPUT_LINE_CHARS, false);
             let blank = line.trim().is_empty();
             if !(shown.is_empty() && blank) {
                 shown.push(if blank { String::new() } else { line });
@@ -1704,74 +2033,6 @@ fn wrapper_tag(text: &str) -> Option<&str> {
     (plausible && text.ends_with(&format!("</{name}>"))).then_some(name)
 }
 
-/// 折叠换行与连续空白，保证摘要是单行。
-fn collapse(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut pending_space = false;
-    for ch in text.chars() {
-        if ch.is_whitespace() || ch.is_control() {
-            pending_space = !out.is_empty();
-            continue;
-        }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
-        }
-        out.push(ch);
-    }
-    out
-}
-
-/// 取前 `max_chars` 个字符，超出以省略号结尾。
-fn clip_chars(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let mut out: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
-/// 去掉 ANSI 转义序列与控制字符（制表符留给客户端展开；`keep_newlines` 时保留换行
-/// 并去掉行尾空白），取前 `max_chars` 个字符，超出以省略号结尾。逐字符处理，读到
-/// 上限就停。
-fn clean_text(text: &str, max_chars: usize, keep_newlines: bool) -> String {
-    let mut out = String::new();
-    let mut kept = 0usize;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            // CSI（ESC [ … 终止字节 0x40–0x7e）整段丢；其余 ESC 连同下一个字符丢。
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&next) {
-                        break;
-                    }
-                }
-            } else {
-                chars.next();
-            }
-            continue;
-        }
-        let keep = ch == '\t' || (keep_newlines && ch == '\n');
-        if ch.is_control() && !keep {
-            continue;
-        }
-        if kept == max_chars {
-            out.push('…');
-            break;
-        }
-        if ch == '\n' {
-            out.truncate(out.trim_end_matches([' ', '\t']).len());
-        }
-        out.push(ch);
-        kept += 1;
-    }
-    out.truncate(out.trim_end().len());
-    out
-}
-
 /// `index` 若落在一个多字节字符中间，退到该字符的起点；否则原样返回。
 fn floor_char_boundary(bytes: &[u8], index: usize) -> usize {
     let index = index.min(bytes.len());
@@ -1835,6 +2096,7 @@ mod tests {
     fn context<'a>(home: &'a Path, session: Option<&'a AgentSessionRef>) -> SourceContext<'a> {
         SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent: "codex",
             session,
             cwd: None,
@@ -2052,6 +2314,7 @@ mod tests {
 
         let relocated = SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent_config_dir: Some(&codex_home),
             ..context(&empty_home, Some(&session))
         };
@@ -2088,6 +2351,7 @@ mod tests {
         let nowhere = temp.join("nowhere");
         let pinned = SourceContext {
             codex_cache: None,
+            insight_cache: None,
             agent_config_dir: Some(&nowhere),
             ..context(&home, Some(&session))
         };
@@ -2111,6 +2375,7 @@ mod tests {
             let session = AgentSessionRef::path(path.to_string_lossy()).unwrap();
             let cx = SourceContext {
                 codex_cache: None,
+                insight_cache: None,
                 agent_config_dir: Some(&wrong_config),
                 ..context(&home, Some(&session))
             };
@@ -3410,5 +3675,156 @@ mod tests {
         assert_eq!(floor_char_boundary(bytes, 5), 5);
         assert_eq!(floor_char_boundary(bytes, 99), 5);
         assert_eq!(floor_char_boundary(&[0x80, 0x80, 0x80, 0x80, 0x80], 5), 1);
+    }
+
+    // ---- 会话洞察（夹具：tests/fixtures/agent-activity/codex/insight，全是合成内容）----
+
+    /// 夹具时间基准：2026-09-23T08:00:00.000Z。
+    const INSIGHT_BASE_MS: u64 = 1_790_150_400_000;
+    const WORKING: &str = "01a0cd47-5800-7000-8000-0000000000d1";
+    const FAILED: &str = "01a0cd47-5800-7000-8000-0000000000d2";
+    const ASKING: &str = "01a0cd47-5800-7000-8000-0000000000d3";
+    const RECOVERED: &str = "01a0cd47-5800-7000-8000-0000000000d4";
+
+    fn insight_home() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-activity/codex/insight")
+    }
+
+    fn insight_of(id: &str) -> Option<AgentInsight> {
+        let home = insight_home();
+        let session = AgentSessionRef::id(id).expect("合法线程 id");
+        Codex
+            .insight(&context(&home, Some(&session)))
+            .expect("夹具线程可读")
+    }
+
+    #[test]
+    fn insight_reads_each_rollout_shape() {
+        let at = |seconds: u64| Some(INSIGHT_BASE_MS + seconds * 1000);
+        // (线程, 标题, 提示, 回复, 当前工具, 错误, 错误时刻, 更新时刻)
+        let cases = [
+            // 注入的上下文（环境、AGENTS.md）不算提示；`apply_patch` 没有结果，是当前
+            // 工具，路径相对 turn_context 的 cwd；参数不是 JSON 的调用照样配对结果；
+            // 线程名取索引里同 id 的最后一条，坏行跳过。
+            (
+                WORKING,
+                Some("Uploader retries"),
+                Some("Add a retry to the uploader"),
+                Some("I'll look at the uploader first."),
+                Some("Edit src/upload.rs"),
+                None,
+                None,
+                at(7),
+            ),
+            // `task_complete.error`：这一回合失败，错误时刻取 completed_at。
+            (
+                FAILED,
+                Some("Staging deploy"),
+                Some("Deploy the staging build"),
+                Some("Building the image."),
+                None,
+                Some("stream disconnected before completion"),
+                at(9),
+                at(9),
+            ),
+            // 错误之后用户中断又重来，新回合正常结束：旧错误作废，最后回复取结束消息。
+            (
+                RECOVERED,
+                None,
+                Some("second try, smaller scope"),
+                Some("All set: tokenizer moved to src/lex.rs."),
+                None,
+                None,
+                None,
+                at(6),
+            ),
+        ];
+        for (id, title, prompt, message, tool, error, error_at, updated_at) in cases {
+            let insight = insight_of(id).expect("有洞察");
+            assert_eq!(insight.session_title.as_deref(), title, "{id}");
+            assert_eq!(insight.model.as_deref(), Some("gpt-test"), "{id}");
+            assert_eq!(insight.last_prompt.as_deref(), prompt, "{id}");
+            assert_eq!(insight.last_message.as_deref(), message, "{id}");
+            assert_eq!(insight.current_tool.as_deref(), tool, "{id}");
+            assert_eq!(insight.error.as_deref(), error, "{id}");
+            assert_eq!(insight.error_at_ms, error_at, "{id}");
+            assert_eq!(insight.updated_at_ms, updated_at, "{id}");
+            assert_eq!(insight_of(id), Some(insight), "读两次逐字节相同：{id}");
+        }
+    }
+
+    #[test]
+    fn a_pending_request_user_input_is_the_pending_question() {
+        let insight = insight_of(ASKING).expect("有洞察");
+        assert_eq!(
+            insight.question.as_deref(),
+            Some("Should I also update the docs?")
+        );
+        assert_eq!(insight.options, ["Yes", "No"]);
+        assert_eq!(
+            insight.current_tool.as_deref(),
+            Some("Ask Should I also update the docs?")
+        );
+    }
+
+    #[test]
+    fn insight_follows_a_reported_rollout_path_and_degrades_without_one() {
+        let home = insight_home();
+        let path = home
+            .join(".codex/sessions/2026/09/23")
+            .join(format!("rollout-2026-09-23T10-01-00-{FAILED}.jsonl"));
+        let reported =
+            AgentSessionRef::path(path.to_string_lossy().into_owned()).expect("绝对路径");
+        let empty = std::env::temp_dir();
+        let insight = Codex
+            .insight(&context(&empty, Some(&reported)))
+            .expect("rollout 可读")
+            .expect("有洞察");
+        assert_eq!(
+            insight.error.as_deref(),
+            Some("stream disconnected before completion")
+        );
+        assert_eq!(
+            insight.session_title.as_deref(),
+            Some("Staging deploy"),
+            "索引在 rollout 所在库的根下"
+        );
+
+        let missing = AgentSessionRef::id("01a0cd47-5800-7000-8000-0000000000ff").expect("合法 id");
+        assert_eq!(
+            Codex
+                .insight(&context(&home, Some(&missing)))
+                .expect("还没生成 rollout 不报错"),
+            None
+        );
+        assert!(matches!(
+            Codex.insight(&context(&home, None)),
+            Err(SourceError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn user_prompts_skip_injected_context_blocks() {
+        let text = |value: Value| user_prompt_text(&value);
+        assert_eq!(
+            text(serde_json::json!([
+                {"type": "input_text", "text": "<environment_context>x</environment_context>"},
+                {"type": "input_text", "text": "real ask"},
+                {"type": "input_image", "image_url": "data:"}
+            ]))
+            .as_deref(),
+            Some("real ask")
+        );
+        assert_eq!(
+            text(serde_json::json!("# AGENTS.md instructions for /x\n\nbody")),
+            None
+        );
+        assert_eq!(
+            text(serde_json::json!(
+                "<user_instructions>x</user_instructions>"
+            )),
+            None
+        );
+        assert_eq!(text(serde_json::json!(42)), None);
     }
 }
