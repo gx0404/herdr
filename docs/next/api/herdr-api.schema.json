@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 23,
+  "protocol": 24,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -3166,6 +3166,26 @@
             }
           ]
         },
+        "PaneAgentAttentionKind": {
+          "description": "`pane.report_agent_attention` 上报的种类。",
+          "oneOf": [
+            {
+              "const": "needs_input",
+              "description": "agent 在等用户回答或批准：带问题（`detail`）与选项，只在 agent 受阻时露面。",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "上一回合失败：锁存到用户看过该 pane、agent 重新开始工作或集成清除。",
+              "type": "string"
+            },
+            {
+              "const": "clear",
+              "description": "清除这个 pane 已上报的待处理事项。",
+              "type": "string"
+            }
+          ]
+        },
         "PaneAgentState": {
           "enum": [
             "idle",
@@ -3659,6 +3679,56 @@
             "pane_id",
             "source",
             "agent"
+          ],
+          "type": "object"
+        },
+        "PaneReportAgentAttentionParams": {
+          "description": "集成上报「agent 需要用户处理的事」。只更新 `AgentInfo.attention`，不改 agent 状态。\n`herdr:<agent>` 来源只能由对应的官方集成使用；带 `seq` 时按来源单调递增取舍，与\n`pane.report_agent` 同口径。`title` 最多 200 个字符、`detail` 最多 2000 个字符、\n`options` 最多 8 个且每个最多 120 个字符，超出即 `invalid_attention`；`options` 只对\n`needs_input` 有效。",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "$ref": "#/schemas/request/$defs/PaneAgentAttentionKind"
+            },
+            "options": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "agent",
+            "kind"
           ],
           "type": "object"
         },
@@ -7183,6 +7253,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_agent_attention",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportAgentAttentionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.report_metadata",
               "type": "string"
             },
@@ -9137,6 +9223,66 @@
           ],
           "type": "string"
         },
+        "AgentAttention": {
+          "description": "agent 需要用户处理的一件事。",
+          "properties": {
+            "detail": {
+              "description": "问题或失败原因（纯文本，可能被截断）。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AgentAttentionKind",
+              "default": "unknown"
+            },
+            "options": {
+              "description": "可选的回答选项（最多 8 个）。",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "since_ms": {
+              "description": "这件事开始的墙钟毫秒时间戳。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "AgentAttentionKind": {
+          "description": "agent 需要用户处理的事的种类。未知字符串落 `Unknown`，旧客户端可安全忽略新种类。",
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "needs_input",
+              "description": "agent 受阻，等用户回答或批准。",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "上一回合失败（集成上报、会话错误或运行中进程退出）。",
+              "type": "string"
+            }
+          ]
+        },
         "AgentInfo": {
           "properties": {
             "activity": {
@@ -9193,6 +9339,17 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "attention": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentAttention"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "需要用户处理的事：受阻时是 `needs_input`（带集成上报的问题与选项），上一回合\n失败且用户还没看过时是 `failed`；都没有时省略，旧 server 不下发。"
+            },
             "completion_seq": {
               "description": "The current idle transition completed work, independently of who has viewed it.",
               "format": "uint64",
@@ -9222,6 +9379,17 @@
                 "string",
                 "null"
               ]
+            },
+            "insight": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentInsight"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "会话洞察：来源适配器读到的会话摘要与 server 记录的回合计时；都没有时省略，旧\nserver 不下发。"
             },
             "interactive_ready": {
               "type": "boolean"
@@ -9312,6 +9480,102 @@
             "focused",
             "revision"
           ],
+          "type": "object"
+        },
+        "AgentInsight": {
+          "description": "一个 agent 会话的洞察。文本字段都是单行摘要（可能被截断）；时间都是墙钟毫秒时间戳，\n时长是毫秒。",
+          "properties": {
+            "current_tool": {
+              "description": "正在执行的工具调用（统一的单行展示，如 `Shell cargo test`）。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "description": "会话里最近一次错误。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_message": {
+              "description": "agent 最后一条回复。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_prompt": {
+              "description": "用户最后一条提示。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_turn_ms": {
+              "description": "上一回合（一次 Working）的时长。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "options": {
+              "description": "`question` 的可选回答（最多 8 个）。",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "question": {
+              "description": "agent 正在问用户的问题。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state_changed_at_ms": {
+              "description": "最近一次状态变化的时刻。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "updated_at_ms": {
+              "description": "来源适配器读到的会话数据的时刻。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "working_since_ms": {
+              "description": "当前回合开始工作的时刻；不在 Working 时省略。",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "AgentManifestInfo": {

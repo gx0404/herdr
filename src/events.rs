@@ -126,6 +126,15 @@ pub enum AppEvent {
         /// still uses `session_ref`.
         transcript: Option<crate::agent_resume::ReportedTranscript>,
     },
+    /// An integration reported (or cleared) something the user must attend to
+    /// for a pane's agent. It never changes the agent state.
+    AgentAttentionReported {
+        pane_id: PaneId,
+        source: String,
+        agent_label: String,
+        seq: Option<u64>,
+        report: crate::terminal::AttentionReport,
+    },
     /// A hook hinted that a pane's agent activity (subagents, tasks, todos,
     /// background processes) may have changed. The hint carries no tree content.
     AgentActivityHinted {
@@ -159,6 +168,9 @@ pub enum AppEvent {
         started: std::sync::Arc<std::sync::atomic::AtomicBool>,
         ticket: u64,
         result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
+        /// 同一次发现读到的会话洞察；来源没有或读取失败时为 `None`。装箱以免撑大
+        /// `AppEvent` 的每个变体（clippy::large_enum_variant）。
+        insight: Option<Box<crate::api::schema::AgentInsight>>,
     },
     /// An interactive whole-tree read finished for its submitted identity.
     AgentActivityReadFor {

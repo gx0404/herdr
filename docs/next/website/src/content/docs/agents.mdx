@@ -66,6 +66,18 @@ This means unusual new agent prompts may initially show as `idle` instead of `bl
 
 Startup prompts that wait for a decision before the agent session begins count as blocking UI too, for example the Codex "Hooks need review" chooser and the Kimi Code CLI "Trust this folder?" prompt. While such a prompt is open the pane is `blocked`, and `herdr agent start` reports that the agent is not ready instead of succeeding. Herdr counts such a prompt only while it is the last thing on the screen, so an agent that quotes the prompt's text in its output is not marked `blocked`.
 
+## Attention and failures
+
+Besides its state, an agent can carry one item that needs you. `herdr agent get`, `herdr agent list`, and the socket API return it as `attention`; see [Agent attention and insight](/docs/socket-api/#agent-attention-and-insight) for the fields. It never changes the agent state, waits, or rollups.
+
+While an agent is `blocked`, the item is the question it is asking. The question and its answer options come from an integration's `herdr pane report-agent-attention --kind needs_input` report, or from the message a full-lifecycle integration sends with its `blocked` report. When Herdr already knows the question as the agent becomes `blocked`, the question is also the body of the needs-input notification. It is dropped as soon as the agent stops being `blocked`.
+
+When a turn fails, Herdr keeps the failure until you have seen it. A failure comes from an integration's `--kind failed` report, from an error in the agent's session that is newer than the current turn (when Herdr reads that session), or from the agent process exiting while it was `working`. Herdr announces it with a "failed" notification and the needs-input sound; a failure recorded while the agent is still working is announced when that turn ends. The failure clears when the agent starts working again, when you view the pane's tab after the notification, when the agent is released or replaced by another agent, or on a `--kind clear` report.
+
+Pressing `ctrl+c` or `esc` on its own counts as interrupting the agent. If the agent goes `idle` within 1.5 seconds of that key, Herdr sends no finished notification or sound, and an agent process that exits in that window is not counted as a failure. This covers keys typed in the Herdr client and in `herdr agent attach`; keys sent through the CLI or socket API do not count.
+
+Herdr also times each turn. `insight.working_since_ms` is when the current turn started and is set only while the agent works, `insight.state_changed_at_ms` is when the state last changed, and `insight.last_turn_ms` is how long the last working turn took. The first two are Unix milliseconds; the last is a duration in milliseconds.
+
 ## Detection manifests
 
 Bundled manifests live inside Herdr. Herdr also checks herdr.dev for remote manifest updates and applies valid per-agent rule updates automatically without requiring a Herdr restart. Background checks run at most once every 6 hours and only after the first frame renders; `herdr server update-agent-manifests` always fetches immediately and is not throttled. Remote manifests are stored in Herdr's state directory. Set `[update] manifest_check = false` to disable background remote manifest checks.

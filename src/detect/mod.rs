@@ -217,11 +217,9 @@ pub fn detect_agent_with_osc(
     )
 }
 
+/// 名单真源是 `harness::registry::HARNESSES`；保留上游函数名，调用点不变。
 pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> bool {
-    matches!(
-        (source, agent_label),
-        ("herdr:pi", "pi") | ("herdr:opencode", "opencode") | ("herdr:kimi", "kimi")
-    )
+    crate::harness::registry::has_full_lifecycle_authority(source, agent_label)
 }
 
 /// 只上报会话身份、不上报生命周期状态的集成。五家官方集成里没有这一类（上游属于

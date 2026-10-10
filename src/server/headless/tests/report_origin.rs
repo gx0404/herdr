@@ -204,6 +204,42 @@ async fn verification_switch_off_accepts_detached_reports() {
 }
 
 #[tokio::test]
+async fn attention_reports_go_through_the_same_origin_check() {
+    let attention = |fixture: &ReportFixture| {
+        api::schema::Method::PaneReportAgentAttention(api::schema::PaneReportAgentAttentionParams {
+            pane_id: fixture.public_pane_id.clone(),
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            kind: api::schema::PaneAgentAttentionKind::Failed,
+            title: None,
+            detail: Some("boom".into()),
+            options: Vec::new(),
+            seq: None,
+        })
+    };
+    let failed = |fixture: &ReportFixture| {
+        fixture
+            .server
+            .app
+            .state
+            .terminals
+            .get(&fixture.terminal_id)
+            .and_then(crate::terminal::TerminalState::agent_attention)
+            .is_some()
+    };
+
+    let mut fixture = ReportFixture::new(Some(PANE_ROOT));
+    let method = attention(&fixture);
+    let response = fixture.request(method, Some(origin(Some(detached()))));
+    assert_eq!(response["result"]["type"], "ok", "{response}");
+    assert!(!failed(&fixture), "窗格进程树之外的上报静默丢弃");
+
+    let method = attention(&fixture);
+    fixture.request(method, Some(origin(Some(inside_pane()))));
+    assert!(failed(&fixture), "窗格里的上报照常落锁存");
+}
+
+#[tokio::test]
 async fn unknown_pane_keeps_its_error_instead_of_being_silently_dropped() {
     let mut fixture = ReportFixture::new(Some(PANE_ROOT));
     fixture.public_pane_id = "missing:p1".into();

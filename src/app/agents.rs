@@ -438,6 +438,8 @@ impl App {
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,
+            attention: terminal.agent_attention(),
+            insight: self.state.agent_insight(pane_id, terminal),
         })
     }
 

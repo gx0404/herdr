@@ -48,6 +48,7 @@ fn agent(
     activity: ClientShellAgentActivity,
 ) -> ClientShellAgent {
     ClientShellAgent {
+        insight: Default::default(),
         pane_id: pane.into(),
         workspace_id: workspace.into(),
         tab_id: tab.into(),

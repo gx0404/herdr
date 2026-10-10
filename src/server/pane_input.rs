@@ -200,6 +200,36 @@ pub(super) fn apply_terminal_attach_input(
     }
 }
 
+/// 用户的中断输入：发往 PTY 的恰好是单个 Ctrl-C（0x03）或单个 ESC（0x1b）。
+pub(super) fn is_interrupt_bytes(bytes: &[u8]) -> bool {
+    matches!(bytes, [0x03] | [0x1b])
+}
+
+/// 一批客户端 pane 输入里是否有用户单独发出的中断：按下（或自动重复）的、不带其他
+/// 修饰键的 Esc / Ctrl+C（传统键盘编码下正是单个 0x1b / 0x03；kitty 键盘协议下字节
+/// 不同但仍是同一个中断），或恰好是单个 0x03 / 0x1b 的文本提交。逐事件 O(1)，不分配。
+pub(super) fn events_contain_interrupt(events: &[ClientPaneInputEvent]) -> bool {
+    events.iter().any(|event| match event {
+        ClientPaneInputEvent::Key {
+            code,
+            modifiers,
+            kind,
+            ..
+        } => {
+            *kind != crate::protocol::ClientKeyKind::Release
+                && match code {
+                    crate::protocol::ClientKeyCode::Esc => *modifiers == 0,
+                    crate::protocol::ClientKeyCode::Char('c' | 'C') => {
+                        *modifiers == KeyModifiers::CONTROL.bits()
+                    }
+                    _ => false,
+                }
+        }
+        ClientPaneInputEvent::TextCommit(text) => is_interrupt_bytes(text.as_bytes()),
+        ClientPaneInputEvent::Mouse { .. } | ClientPaneInputEvent::Paste(_) => false,
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn test_apply_client_pane_input_events(
     runtime: &crate::terminal::TerminalRuntime,
@@ -584,5 +614,78 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    fn key(
+        code: crate::protocol::ClientKeyCode,
+        modifiers: KeyModifiers,
+        kind: crate::protocol::ClientKeyKind,
+    ) -> ClientPaneInputEvent {
+        ClientPaneInputEvent::Key {
+            code,
+            modifiers: modifiers.bits(),
+            kind,
+            repeat_count: 1,
+            shifted_codepoint: None,
+            generated_text: None,
+            tracks_release: true,
+            physical_key_id: None,
+            windows_record: None,
+        }
+    }
+
+    #[test]
+    fn lone_ctrl_c_and_esc_are_interrupts() {
+        use crate::protocol::{ClientKeyCode, ClientKeyKind};
+        assert!(is_interrupt_bytes(&[0x03]));
+        assert!(is_interrupt_bytes(&[0x1b]));
+        assert!(!is_interrupt_bytes(b"\x1b[A"), "方向键序列不是中断");
+        assert!(!is_interrupt_bytes(b"\x03\x03x"));
+        assert!(!is_interrupt_bytes(&[]));
+
+        for event in [
+            key(
+                ClientKeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                ClientKeyKind::Press,
+            ),
+            key(ClientKeyCode::Esc, KeyModifiers::NONE, ClientKeyKind::Press),
+            key(
+                ClientKeyCode::Esc,
+                KeyModifiers::NONE,
+                ClientKeyKind::Repeat,
+            ),
+            ClientPaneInputEvent::TextCommit("\u{3}".into()),
+        ] {
+            assert!(
+                events_contain_interrupt(std::slice::from_ref(&event)),
+                "{event:?}"
+            );
+        }
+        for event in [
+            key(
+                ClientKeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                ClientKeyKind::Release,
+            ),
+            key(
+                ClientKeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ClientKeyKind::Press,
+            ),
+            key(
+                ClientKeyCode::Char('c'),
+                KeyModifiers::NONE,
+                ClientKeyKind::Press,
+            ),
+            key(ClientKeyCode::Esc, KeyModifiers::ALT, ClientKeyKind::Press),
+            ClientPaneInputEvent::TextCommit("\u{1b}[A".into()),
+            ClientPaneInputEvent::Paste("\u{3}".into()),
+        ] {
+            assert!(
+                !events_contain_interrupt(std::slice::from_ref(&event)),
+                "{event:?}"
+            );
+        }
     }
 }

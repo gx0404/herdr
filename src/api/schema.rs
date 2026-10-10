@@ -243,6 +243,8 @@ pub enum Method {
     PaneReportAgentSession(PaneReportAgentSessionParams),
     #[serde(rename = "pane.report_agent_activity")]
     PaneReportAgentActivity(PaneReportAgentActivityParams),
+    #[serde(rename = "pane.report_agent_attention")]
+    PaneReportAgentAttention(PaneReportAgentAttentionParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
     #[serde(rename = "pane.clear_agent_authority")]

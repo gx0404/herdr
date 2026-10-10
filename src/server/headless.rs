@@ -61,7 +61,7 @@ use crate::server::clients::{
 };
 use crate::server::keybindings::{app_keybindings, apply_keybindings};
 use crate::server::notifications::{
-    should_forward_toast_to_clients, toast_message_from_state_change, toast_notify_kind,
+    should_forward_toast_to_clients, toast_message_for_pane, toast_notify_kind,
 };
 use crate::server::pane_input::{
     apply_client_pane_input_events, apply_client_popup_input_events, apply_terminal_attach_input,
@@ -2373,9 +2373,28 @@ impl HeadlessServer {
                 else {
                     return false;
                 };
+                let interrupt = super::pane_input::is_interrupt_bytes(&data);
+                let mut delivered = false;
                 if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
-                    if let Err(err) = apply_terminal_attach_input(runtime, data) {
-                        warn!(client_id, terminal_id = %terminal_id, err = %err);
+                    match apply_terminal_attach_input(runtime, data) {
+                        Ok(()) => delivered = true,
+                        Err(err) => warn!(client_id, terminal_id = %terminal_id, err = %err),
+                    }
+                }
+                if interrupt && delivered {
+                    if let Some(terminal_id) =
+                        self.clients
+                            .get(&client_id)
+                            .and_then(|client| match &client.mode {
+                                ClientConnectionMode::TerminalAttach { terminal_id } => {
+                                    self.terminal_id_by_string(terminal_id)
+                                }
+                                _ => None,
+                            })
+                    {
+                        if let Some(terminal) = self.app.state.terminals.get_mut(&terminal_id) {
+                            terminal.note_interrupt_input(Instant::now());
+                        }
                     }
                 }
                 true
@@ -2740,7 +2759,16 @@ impl HeadlessServer {
                         &events[..applied],
                     );
                 }
-                foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
+                let scrolled = runtime.scroll_metrics() != scroll_before;
+                // 用户单独按了 Ctrl-C / ESC：紧随其后的完成迁移不发「已完成」通知。
+                if super::pane_input::events_contain_interrupt(&events[..applied]) {
+                    self.app.state.note_pane_interrupt_input(
+                        workspace_index,
+                        runtime_pane_id,
+                        Instant::now(),
+                    );
+                }
+                foreground_changed | geometry_changed || scrolled
             }
             ServerEvent::ClientShellPopupInput {
                 client_id,
@@ -3318,11 +3346,14 @@ impl HeadlessServer {
         // bypasses drain_internal_events_with_forwarding. Headless mode disables
         // local sound playback, so sound notifications need to be forwarded here.
         let toast_before = self.app.state.toast.clone();
+        // 每个 pane 请求前的有效状态、agent 与已发出的失败通知数：请求内新锁存的失败
+        // （`pane.report_agent_attention` 等）按通知数的前后差识别。
         let pane_states_before: Vec<(
             usize,
             crate::layout::PaneId,
             crate::detect::AgentState,
             Option<String>,
+            u64,
         )> = {
             let terminals = &self.app.state.terminals;
             self.app
@@ -3339,6 +3370,7 @@ impl HeadlessServer {
                                     pane_id,
                                     terminal.state,
                                     terminal.effective_agent_label().map(str::to_string),
+                                    terminal.failure_notices(),
                                 )
                             })
                         })
@@ -3479,7 +3511,9 @@ impl HeadlessServer {
         // Forward notifications for effective pane state changes that occurred
         // during the API request. Hook authority is already folded into
         // pane.state, so raw hook transitions must not produce separate sounds.
-        for (ws_idx, pane_id, prev_state, prev_agent_label) in &pane_states_before {
+        for (ws_idx, pane_id, prev_state, prev_agent_label, prev_failure_notices) in
+            &pane_states_before
+        {
             let pane_after = self
                 .app
                 .state
@@ -3497,12 +3531,16 @@ impl HeadlessServer {
             };
 
             let new_state = terminal_after.state;
-            if new_state == *prev_state
-                || (new_state == crate::detect::AgentState::Idle
-                    && terminal_after.last_agent_completion_seq.is_none())
-            {
+            let state_changed = new_state != *prev_state;
+            let failed = terminal_after.failure_notices() != *prev_failure_notices;
+            if !state_changed && !failed {
                 continue;
             }
+            // 回到 Idle 却没有完成序号：agent 刚被接管或会话被替换，不算一次完成。
+            let suppress_completion = state_changed
+                && new_state == crate::detect::AgentState::Idle
+                && terminal_after.last_agent_completion_seq.is_none();
+            let interrupted = state_changed && terminal_after.last_completion_interrupted();
 
             let is_active_tab = self.app.state.pane_is_in_active_tab(*ws_idx, *pane_id);
             let suppress_active_tab_notifications =
@@ -3510,6 +3548,20 @@ impl HeadlessServer {
 
             let agent = terminal_after.effective_known_agent();
             let agent_label = terminal_after.effective_agent_label().map(str::to_string);
+            let body = self.app.state.attention_body_source(*pane_id);
+            let decision =
+                crate::server::attention::decide(&crate::server::attention::AttentionInput {
+                    previous_state: *prev_state,
+                    state: new_state,
+                    suppress_active_tab: suppress_active_tab_notifications,
+                    suppress_completion,
+                    interrupted_recently: interrupted,
+                    failed_latched: failed,
+                    body: body.as_deref(),
+                });
+            let Some(kind) = decision.kind else {
+                continue;
+            };
 
             debug!(
                 ws_idx,
@@ -3517,58 +3569,44 @@ impl HeadlessServer {
                 prev_state = ?prev_state,
                 new_state = ?new_state,
                 agent = ?agent,
-                "pane effective state changed during API request, checking notification"
+                kind = ?kind,
+                "pane attention changed during API request, forwarding notification"
             );
-            self.forward_semantic_agent_transition(
+            self.forward_semantic_agent_decision(
                 *ws_idx,
                 *pane_id,
-                *prev_state,
-                new_state,
                 prev_agent_label.as_deref(),
                 agent_label.as_deref(),
                 agent,
+                &decision,
             );
 
             if !forwarded_toast_from_state
+                && decision.toast.is_some()
                 && self.app.state.toast_config.delay_seconds == 0
                 && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
             {
-                if let Some(kind) = crate::app::actions::notification_toast_for_state_change(
-                    suppress_active_tab_notifications,
-                    *prev_state,
-                    new_state,
-                ) {
-                    if let Some(agent_label) = self
-                        .app
-                        .state
-                        .terminals
-                        .get(&terminal_id)
-                        .and_then(|terminal| terminal.effective_agent_label())
+                if let Some(agent_label) = agent_label.as_deref() {
+                    let workspace_label = self.app.state.workspaces[*ws_idx]
+                        .display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
+                    let context = crate::app::actions::notification_context(
+                        &self.app.state.workspaces[*ws_idx],
+                        &workspace_label,
+                        *ws_idx,
+                        *pane_id,
+                    );
+                    // HSR-15：不做 expect；kind 缺失时跳过该条转发。
+                    if let Some(notify_kind) =
+                        toast_notify_kind(self.app.state.toast_config.delivery)
                     {
-                        let event_text = match kind {
-                            crate::app::state::ToastKind::NeedsAttention => "needs attention",
-                            crate::app::state::ToastKind::Finished => "finished",
-                            crate::app::state::ToastKind::UpdateInstalled => "updated",
-                        };
-                        let workspace_label = self.app.state.workspaces[*ws_idx].display_name_from(
-                            &self.app.state.terminals,
-                            &self.app.terminal_runtimes,
+                        self.send_notify_to_foreground_client(
+                            notify_kind,
+                            crate::i18n::fill(
+                                crate::i18n::texts().notify.title_fmt,
+                                &[("agent", agent_label), ("event", kind.event_text())],
+                            ),
+                            non_empty_body(&context),
                         );
-                        let context = crate::app::actions::notification_context(
-                            &self.app.state.workspaces[*ws_idx],
-                            &workspace_label,
-                            *ws_idx,
-                            *pane_id,
-                        );
-                        // HSR-15：不做 expect；kind 缺失时跳过该条转发。
-                        if let Some(kind) = toast_notify_kind(self.app.state.toast_config.delivery)
-                        {
-                            self.send_notify_to_foreground_client(
-                                kind,
-                                format!("{agent_label} {event_text}"),
-                                non_empty_body(&context),
-                            );
-                        }
                     }
                 }
             }
@@ -3577,11 +3615,7 @@ impl HeadlessServer {
             // Clients still decide locally whether they can execute the side effect.
             if self.app.state.toast_config.delay_seconds == 0 && self.app.state.sound.allows(agent)
             {
-                if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                    suppress_active_tab_notifications,
-                    *prev_state,
-                    new_state,
-                ) {
+                if let Some(sound) = decision.sound {
                     debug!(sound = ?sound, "forwarding sound notification from API request");
                     self.send_notify_to_foreground_client(
                         protocol::NotifyKind::Sound,

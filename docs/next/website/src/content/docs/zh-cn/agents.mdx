@@ -66,6 +66,18 @@ ZCode 作为只读外部来源，仅列出近期仍在运行的根会话；没�
 
 智能体会话开始前等你做决定的启动提示也算阻塞界面,例如 Codex 的「Hooks need review」选择框和 Kimi Code CLI 的「Trust this folder?」提示。提示打开期间窗格为 `blocked`,`herdr agent start` 会报告智能体尚未就绪,而不是直接返回成功。只有这类提示是屏幕上最后的内容时 Herdr 才按提示处理,所以智能体在输出里原样引用提示文字时不会被标成 `blocked`。
 
+## 待处理事项与失败
+
+除了状态,智能体还可以带一件需要你处理的事。`herdr agent get`、`herdr agent list` 和 socket API 以 `attention` 返回它,字段见[智能体待处理事项与洞察](/zh-cn/docs/socket-api/#智能体待处理事项与洞察)。它从不改变智能体状态、等待和汇总。
+
+智能体处于 `blocked` 时,这件事就是它正在问的问题。问题和回答选项来自集成的 `herdr pane report-agent-attention --kind needs_input` 上报,或完整生命周期集成随 `blocked` 上报带来的消息。智能体进入 `blocked` 时如果 Herdr 已经知道这个问题,它也会成为需要处理通知的正文。智能体一离开 `blocked`,它就被丢弃。
+
+一个回合失败时,Herdr 会保留这次失败,直到你看过为止。失败来自集成的 `--kind failed` 上报、晚于当前回合开始的智能体会话错误(Herdr 能读取该会话时),或智能体进程在 `working` 时退出。Herdr 用「失败」通知和需要处理时的提示音告诉你;智能体工作期间记下的失败在这一回合结束时才通知。智能体重新开始工作、通知之后你看到该窗格所在的标签页、智能体被释放或被另一个智能体替换,或收到 `--kind clear` 上报时,失败清除。
+
+单独按下 `ctrl+c` 或 `esc` 视为打断智能体。按键后 1.5 秒内智能体变为 `idle` 时,Herdr 不发完成通知、不响提示音,这段时间内退出的智能体进程也不算失败。这只针对在 Herdr 客户端和 `herdr agent attach` 中按下的键;通过 CLI 或 socket API 发送的键不算。
+
+Herdr 还会为每个回合计时。`insight.working_since_ms` 是当前回合开始的时刻,只在智能体工作时存在;`insight.state_changed_at_ms` 是状态最近一次变化的时刻;`insight.last_turn_ms` 是上一个工作回合用了多久。前两个是 Unix 毫秒,最后一个是以毫秒计的时长。
+
 ## 检测清单
 
 内置清单打包在 Herdr 内部。Herdr 还会向 herdr.dev 检查远程清单更新,并自动应用有效的按智能体规则更新,不需要重启 Herdr。后台检查每 6 小时最多执行一次,且在首帧渲染完成后才开始;`herdr server update-agent-manifests` 手动拉取不受节流限制,始终立即执行。远程清单存放在 Herdr 的状态目录中。设置 `[update] manifest_check = false` 可以禁用后台远程清单检查。

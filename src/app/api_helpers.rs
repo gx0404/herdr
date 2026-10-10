@@ -199,6 +199,71 @@ pub(super) fn normalize_reported_agent_label(agent: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+pub(super) const ATTENTION_TITLE_MAX_CHARS: usize = 200;
+pub(super) const ATTENTION_DETAIL_MAX_CHARS: usize = 2000;
+pub(super) const ATTENTION_MAX_OPTIONS: usize = 8;
+pub(super) const ATTENTION_OPTION_MAX_CHARS: usize = 120;
+
+/// `pane.report_agent_attention` 的参数校验：文本去首尾空白、去控制字符（`detail` 保留
+/// 换行与制表符），空文本视为没给；超出长度上限即拒绝。`options` 只对 `needs_input`
+/// 有效。
+pub(super) fn attention_report_from_params(
+    kind: crate::api::schema::PaneAgentAttentionKind,
+    title: Option<String>,
+    detail: Option<String>,
+    options: Vec<String>,
+) -> Result<crate::terminal::AttentionReport, String> {
+    use crate::api::schema::PaneAgentAttentionKind;
+    let title = normalize_attention_text(title, ATTENTION_TITLE_MAX_CHARS, "title", false)?;
+    let detail = normalize_attention_text(detail, ATTENTION_DETAIL_MAX_CHARS, "detail", true)?;
+    if options.len() > ATTENTION_MAX_OPTIONS {
+        return Err(format!(
+            "an attention report may list at most {ATTENTION_MAX_OPTIONS} options"
+        ));
+    }
+    let mut normalized_options = Vec::with_capacity(options.len());
+    for option in options {
+        if let Some(option) =
+            normalize_attention_text(Some(option), ATTENTION_OPTION_MAX_CHARS, "option", false)?
+        {
+            normalized_options.push(option);
+        }
+    }
+    Ok(match kind {
+        PaneAgentAttentionKind::NeedsInput => crate::terminal::AttentionReport::NeedsInput {
+            title,
+            detail,
+            options: normalized_options,
+        },
+        PaneAgentAttentionKind::Failed => {
+            crate::terminal::AttentionReport::Failed { title, detail }
+        }
+        PaneAgentAttentionKind::Clear => crate::terminal::AttentionReport::Clear,
+    })
+}
+
+fn normalize_attention_text(
+    value: Option<String>,
+    max_chars: usize,
+    field: &str,
+    multiline: bool,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let text = value
+        .chars()
+        .filter(|ch| !ch.is_control() || (multiline && matches!(ch, '\n' | '\t')))
+        .collect::<String>();
+    let text = text.trim();
+    if text.chars().count() > max_chars {
+        return Err(format!(
+            "attention {field} must be {max_chars} characters or fewer"
+        ));
+    }
+    Ok((!text.is_empty()).then(|| text.to_owned()))
+}
+
 pub(super) const METADATA_TTL_MAX_MS: u64 = 86_400_000;
 pub(super) const METADATA_SOURCE_MAX_CHARS: usize = 80;
 const METADATA_TTL_MIN_MS: u64 = 1;
@@ -276,6 +341,86 @@ pub(super) fn normalize_metadata_tokens(
             Ok((key, value))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod attention_report_tests {
+    use super::*;
+    use crate::api::schema::PaneAgentAttentionKind;
+    use crate::terminal::AttentionReport;
+
+    #[test]
+    fn attention_text_is_trimmed_sanitized_and_bounded() {
+        let report = attention_report_from_params(
+            PaneAgentAttentionKind::NeedsInput,
+            Some("  Allow\nedit?  ".into()),
+            Some(" line one\nline two\u{7} ".into()),
+            vec![" yes ".into(), "  ".into(), "no".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            report,
+            AttentionReport::NeedsInput {
+                title: Some("Allowedit?".into()),
+                detail: Some("line one\nline two".into()),
+                options: vec!["yes".into(), "no".into()],
+            }
+        );
+
+        let at_limit = "题".repeat(ATTENTION_TITLE_MAX_CHARS);
+        assert!(attention_report_from_params(
+            PaneAgentAttentionKind::Failed,
+            Some(at_limit.clone()),
+            None,
+            Vec::new()
+        )
+        .is_ok());
+        for (title, detail, options) in [
+            (Some(format!("{at_limit}x")), None, Vec::new()),
+            (
+                None,
+                Some("x".repeat(ATTENTION_DETAIL_MAX_CHARS + 1)),
+                Vec::new(),
+            ),
+            (None, None, vec!["o".to_string(); ATTENTION_MAX_OPTIONS + 1]),
+            (None, None, vec!["o".repeat(ATTENTION_OPTION_MAX_CHARS + 1)]),
+        ] {
+            assert!(attention_report_from_params(
+                PaneAgentAttentionKind::NeedsInput,
+                title,
+                detail,
+                options
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn options_only_apply_to_needs_input_and_clear_carries_nothing() {
+        assert_eq!(
+            attention_report_from_params(
+                PaneAgentAttentionKind::Failed,
+                None,
+                Some("rate limited".into()),
+                vec!["retry".into()],
+            )
+            .unwrap(),
+            AttentionReport::Failed {
+                title: None,
+                detail: Some("rate limited".into()),
+            }
+        );
+        assert_eq!(
+            attention_report_from_params(
+                PaneAgentAttentionKind::Clear,
+                Some("ignored".into()),
+                None,
+                Vec::new(),
+            )
+            .unwrap(),
+            AttentionReport::Clear
+        );
+    }
 }
 
 #[cfg(test)]

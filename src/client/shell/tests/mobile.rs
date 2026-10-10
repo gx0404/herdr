@@ -207,6 +207,7 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let mut projected = snapshot();
     projected.agents.push(ClientShellAgent {
+        insight: Default::default(),
         pane_id: "pane_1".into(),
         workspace_id: "ws_1".into(),
         tab_id: "tab_1".into(),

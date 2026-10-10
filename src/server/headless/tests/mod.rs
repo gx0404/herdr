@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "agent_activity.rs"]
 mod agent_activity_tests;
+#[path = "attention.rs"]
+mod attention_tests;
 mod endpoint_responses;
 mod event_fairness;
 mod input_leases;

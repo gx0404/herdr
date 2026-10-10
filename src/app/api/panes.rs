@@ -9,12 +9,12 @@ use crate::api::schema::{
     PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
     PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
-    PaneRenameParams, PaneReportAgentActivityParams, PaneReportAgentParams,
-    PaneReportAgentSessionParams, PaneReportMetadataParams, PaneResizeParams, PaneResizeReason,
-    PaneResizeResult, PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
-    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams,
-    PaneZoomReason, PaneZoomResult, ResponseResult,
+    PaneRenameParams, PaneReportAgentActivityParams, PaneReportAgentAttentionParams,
+    PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
+    PaneResizeParams, PaneResizeReason, PaneResizeResult, PaneScrollParams,
+    PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
+    PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult, PaneTarget, PaneTextPoint,
+    PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -23,8 +23,9 @@ use crate::app::Mode;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 
 use super::super::api_helpers::{
-    detect_state_from_api, encode_api_keys, normalize_metadata_source, normalize_metadata_tokens,
-    normalize_metadata_ttl, normalize_reported_agent_label, MAX_METADATA_TOKEN_KEYS_PER_RESOURCE,
+    attention_report_from_params, detect_state_from_api, encode_api_keys,
+    normalize_metadata_source, normalize_metadata_tokens, normalize_metadata_ttl,
+    normalize_reported_agent_label, MAX_METADATA_TOKEN_KEYS_PER_RESOURCE,
 };
 #[cfg(test)]
 use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
@@ -1774,6 +1775,54 @@ impl App {
             hint: params.hint,
             node_id: params.node_id,
             seq: params.seq,
+        });
+
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    /// `pane.report_agent_attention`：集成上报 agent 需要用户处理的事（受阻时的问题、
+    /// 上一回合失败、或清除）。不改 agent 状态；来源校验在请求入口
+    /// （`api::report_target`），序号按来源单调，`herdr:<agent>` 只能由对应的官方集成
+    /// 使用。
+    pub(super) fn handle_pane_report_agent_attention(
+        &mut self,
+        id: String,
+        params: PaneReportAgentAttentionParams,
+    ) -> String {
+        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
+            return invalid_agent(id);
+        };
+        let source = params.source.trim();
+        if source.is_empty() {
+            return encode_error(id, "invalid_source", "source must not be empty");
+        }
+        if source.starts_with("herdr:")
+            && crate::harness::registry::official(source, &agent_label).is_none()
+        {
+            return encode_error(
+                id,
+                "invalid_source",
+                "herdr: sources are reserved for the matching official integration (herdr:<agent>)",
+            );
+        }
+        let report = match attention_report_from_params(
+            params.kind,
+            params.title,
+            params.detail,
+            params.options,
+        ) {
+            Ok(report) => report,
+            Err(message) => return encode_error(id, "invalid_attention", message),
+        };
+        self.handle_internal_event(crate::events::AppEvent::AgentAttentionReported {
+            pane_id,
+            source: source.to_owned(),
+            agent_label,
+            seq: params.seq,
+            report,
         });
 
         encode_success(id, ResponseResult::Ok {})

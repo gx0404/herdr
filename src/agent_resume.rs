@@ -153,10 +153,7 @@ pub fn transcript_from_report(
     agent_session_id: Option<&str>,
     agent_session_path: Option<&str>,
 ) -> Option<ReportedTranscript> {
-    if !matches!(
-        (source, agent),
-        ("herdr:claude", "claude") | ("herdr:codex", "codex") | ("herdr:kimi", "kimi")
-    ) {
+    if !crate::harness::registry::reports_transcript(source, agent) {
         return None;
     }
     let session_id = agent_session_id.filter(|id| valid_session_id(id))?;
@@ -274,7 +271,7 @@ pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
 }
 
 pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
-    matches!((source, agent), ("herdr:claude", "claude"))
+    crate::harness::registry::reserves_native_state(source, agent)
 }
 
 pub fn session_ref_from_snapshot(
@@ -303,32 +300,12 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         return None;
     }
 
-    let argv = match (source, agent, session_ref.kind) {
-        ("herdr:claude", "claude", AgentSessionRefKind::Id) => {
-            vec![
-                "claude".into(),
-                "--resume".into(),
-                session_ref.value.clone(),
-            ]
-        }
-        ("herdr:codex", "codex", AgentSessionRefKind::Id) => {
-            vec!["codex".into(), "resume".into(), session_ref.value.clone()]
-        }
-        ("herdr:kimi", "kimi", AgentSessionRefKind::Id) => {
-            vec!["kimi".into(), "--session".into(), session_ref.value.clone()]
-        }
-        ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
-            vec!["pi".into(), "--session".into(), session_ref.value.clone()]
-        }
-        ("herdr:opencode", "opencode", AgentSessionRefKind::Id) => {
-            vec![
-                "opencode".into(),
-                "--session".into(),
-                session_ref.value.clone(),
-            ]
-        }
-        _ => return None,
-    };
+    // 各家的恢复命令与可接受的会话引用形状在 harness 注册表里（pi 收路径或 id）。
+    let argv = crate::harness::registry::resume_argv(
+        agent,
+        session_ref.kind == AgentSessionRefKind::Path,
+        &session_ref.value,
+    )?;
 
     Some(AgentResumePlan {
         agent: agent.to_string(),
@@ -344,17 +321,11 @@ pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> S
     )
 }
 
-/// 官方集成的保留来源：只有五家官方集成能以 `herdr:<agent>` 上报会话并参与恢复。
-/// 已删除集成残留的 hook 即使仍在上报，也按非官方来源处理（不落会话、不生成恢复计划）。
+/// 官方集成的保留来源：只有五家在 pane 里运行的官方集成能以 `herdr:<agent>` 上报会话并
+/// 参与恢复（名单见 `harness::registry::HARNESSES`）。已删除集成残留的 hook 即使仍在
+/// 上报，也按非官方来源处理（不落会话、不生成恢复计划）。
 pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
-    matches!(
-        (source, agent),
-        ("herdr:claude", "claude")
-            | ("herdr:codex", "codex")
-            | ("herdr:kimi", "kimi")
-            | ("herdr:pi", "pi")
-            | ("herdr:opencode", "opencode")
-    )
+    crate::harness::registry::is_official_pane_source(source, agent)
 }
 
 fn valid_session_id(value: &str) -> bool {

@@ -42,6 +42,7 @@ id = "app-render"
 doc = "docs/AGENT_RULES/app-render.md"
 paths = [
   "scripts/test_ui_hot_path_architecture.py",
+  "scripts/ui_gallery.py",
   "src/agent_view_eval.rs",
   "src/app/**",
   "src/copy_mode.rs",
@@ -76,6 +77,8 @@ paths = [
   "scripts/upstream_sync_drop_check.py",
   "scripts/upstream_sync_drop_paths.txt",
   "src/detect/**",
+  # harness 注册表同时是钩子权威表与官方集成清单，与 integration-assets 取并集。
+  "src/harness/**",
   # 检测的运行时消费点与领域实现共用不变量，取并集。
   "src/pane/agent_detection.rs",
   "src/server/autodetect.rs",
@@ -119,6 +122,8 @@ paths = [
   "scripts/test_upstream_sync_drop_check.py",
   "scripts/upstream_sync_drop_check.py",
   "scripts/upstream_sync_drop_paths.txt",
+  # harness 注册表（官方集成的来源标签、配置目录与恢复命令），与 detection 取并集。
+  "src/harness/**",
   "src/integration/**",
 ]
 tasks = []

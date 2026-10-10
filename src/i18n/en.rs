@@ -397,6 +397,8 @@ pub const TEXTS: Texts = Texts {
         agent_done_fmt: "{agent} done",
         needs_attention: "needs attention",
         finished: "finished",
+        failed: "failed",
+        process_exited_while_working: "process exited while working",
         updated: "updated",
         title_fmt: "{agent} {event}",
         title_with_context_fmt: "{agent} {event}: {context}",
@@ -1150,6 +1152,9 @@ pub const TEXTS: Texts = Texts {
         pane_run_about: "Run a command in a pane",
         pane_report_agent_about: "Report pane agent lifecycle state",
         pane_report_agent_session_about: "Report pane agent session identity",
+        pane_report_agent_attention_about:
+            "Report what a pane agent needs from the user (needs input, failed) or clear it",
+        pane_report_agent_activity_about: "Hint that a pane agent's activity tree changed",
         pane_release_agent_about: "Release pane agent lifecycle authority",
         pane_report_metadata_about: "Report display-only pane metadata",
         terminal_about: "Attach to or observe raw terminal streams",
@@ -1626,6 +1631,10 @@ pub const TEXTS: Texts = Texts {
             "usage: herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [-- <resume-command...>]",
         pane_report_agent_session_usage:
             "usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE] [-- <resume-command...>]",
+        pane_report_agent_attention_usage:
+            "usage: herdr pane report-agent-attention [<pane_id>] --source ID --agent LABEL --kind needs_input|failed|clear [--title TEXT] [--detail TEXT] [--option TEXT]... [--seq N] (pane defaults to $HERDR_PANE_ID)",
+        pane_report_agent_activity_usage:
+            "usage: herdr pane report-agent-activity [<pane_id>] --source ID --agent LABEL [--hint TEXT] [--node-id ID] [--seq N] (pane defaults to $HERDR_PANE_ID)",
         pane_release_agent_usage:
             "usage: herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]",
         pane_report_metadata_usage:
@@ -1645,6 +1654,8 @@ pub const TEXTS: Texts = Texts {
         source_required: "missing required --source",
         agent_flag_required: "missing required --agent",
         state_required: "missing required --state",
+        invalid_attention_kind_fmt:
+            "invalid attention kind: {value} (expected needs_input, failed, or clear)",
         state_label_format: "expected --state-label STATUS=TEXT",
         unknown_state_label_fmt: "unknown state label: {status}",
         metadata_set_clear_conflict: "cannot set and clear the same metadata field",

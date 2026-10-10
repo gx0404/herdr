@@ -1,7 +1,6 @@
 use crate::app;
 use crate::app::state::AppState;
 use crate::config;
-use crate::detect::AgentState;
 use crate::layout::PaneId;
 use crate::protocol;
 use crate::terminal::TerminalRuntimeRegistry;
@@ -18,13 +17,13 @@ pub(crate) fn toast_notify_kind(delivery: config::ToastDelivery) -> Option<proto
     }
 }
 
-pub(crate) fn toast_message_from_state_change(
+/// 终端 / 系统 toast 的单行文案（`{agent} {event}：{context}`）。种类由
+/// `server::attention::decide` 决定，这里只拼文案；pane 已不持有 agent 时为 `None`。
+pub(crate) fn toast_message_for_pane(
     state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     pane_id: PaneId,
-    suppress_active_tab_notifications: bool,
-    prev_state: AgentState,
-    new_state: AgentState,
+    kind: crate::server::attention::AttentionKind,
 ) -> Option<String> {
     state
         .workspaces
@@ -37,17 +36,12 @@ pub(crate) fn toast_message_from_state_change(
                     .terminals
                     .get(&pane.attached_terminal_id)
                     .and_then(|terminal| terminal.effective_agent_label())?;
-                let kind = app::actions::notification_toast_for_state_change(
-                    suppress_active_tab_notifications,
-                    prev_state,
-                    new_state,
-                )?;
                 let workspace_label = ws.display_name_from(&state.terminals, terminal_runtimes);
                 Some(crate::i18n::fill(
                     crate::i18n::texts().notify.title_with_context_fmt,
                     &[
                         ("agent", agent_label),
-                        ("event", app::actions::toast_event_text(kind)),
+                        ("event", kind.event_text()),
                         (
                             "context",
                             &app::actions::notification_context(
@@ -68,7 +62,7 @@ mod tests {
     #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
-    use crate::detect::Agent;
+    use crate::detect::{Agent, AgentState};
     #[cfg(unix)]
     use crate::terminal::TerminalState;
 
@@ -134,13 +128,11 @@ mod tests {
         let mut terminal_runtimes = TerminalRuntimeRegistry::new();
         terminal_runtimes.insert(terminal_id, runtime);
 
-        let message = toast_message_from_state_change(
+        let message = toast_message_for_pane(
             &state,
             &terminal_runtimes,
             root,
-            false,
-            AgentState::Working,
-            AgentState::Idle,
+            crate::server::attention::AttentionKind::Finished,
         );
 
         assert_eq!(

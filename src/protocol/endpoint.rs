@@ -549,6 +549,74 @@ mod tests {
         assert!(external.label.is_empty());
     }
 
+    /// 旧 server 的快照没有会话洞察：冻结 fixture 里的 agent 解码出空洞察。
+    #[test]
+    fn frozen_snapshot_decodes_with_default_insight() {
+        let frozen: ClientShellSnapshot = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-snapshot-v1.json"
+        )))
+        .unwrap();
+        assert!(!frozen.agents.is_empty(), "夹具前提：冻结快照里有 agent");
+        for agent in &frozen.agents {
+            assert_eq!(
+                agent.insight,
+                crate::protocol::ClientShellAgentInsight::default()
+            );
+        }
+    }
+
+    /// 新 server → 旧 / 新 client：洞察里的未知字段被忽略，未知的待处理种类落
+    /// `Unknown`，整份快照照常解码。
+    #[test]
+    fn snapshot_json_tolerates_future_insight_fields_and_attention_kinds() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-snapshot-v1.json"
+        )))
+        .unwrap();
+        let second = value["agents"][0].clone();
+        value["agents"]
+            .as_array_mut()
+            .expect("agents array")
+            .push(second);
+        value["agents"][0]["insight"] = serde_json::json!({
+            "model": "gpt-5",
+            "question": "retry on 429?",
+            "options": ["yes", "no"],
+            "working_since_ms": 1_000,
+            "future_insight_field": {"nested": true},
+            "attention": {
+                "kind": "future_kind",
+                "detail": "needs a decision",
+                "future_attention_field": 1
+            }
+        });
+        value["agents"][1]["insight"] = serde_json::json!({
+            "attention": {"kind": "failed", "since_ms": 5}
+        });
+
+        let decoded: ClientShellSnapshot = serde_json::from_value(value).unwrap();
+        let insight = &decoded.agents[0].insight;
+        assert_eq!(insight.model.as_deref(), Some("gpt-5"));
+        assert_eq!(insight.question.as_deref(), Some("retry on 429?"));
+        assert_eq!(insight.options, ["yes", "no"]);
+        assert_eq!(insight.working_since_ms, Some(1_000));
+        let attention = insight.attention.as_ref().expect("attention");
+        assert_eq!(
+            attention.kind,
+            crate::api::schema::AgentAttentionKind::Unknown
+        );
+        assert_eq!(attention.detail.as_deref(), Some("needs a decision"));
+        let failed = decoded.agents[1]
+            .insight
+            .attention
+            .as_ref()
+            .expect("attention");
+        assert_eq!(failed.kind, crate::api::schema::AgentAttentionKind::Failed);
+        assert_eq!(failed.since_ms, Some(5));
+    }
+
     #[test]
     fn legacy_hello_defaults_to_an_active_surface() {
         let mut value = serde_json::to_value(hello()).unwrap();

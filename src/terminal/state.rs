@@ -14,6 +14,9 @@ use crate::terminal::TerminalId;
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
 
+#[path = "turn.rs"]
+mod turn;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HookAuthority {
     pub source: String,
@@ -94,6 +97,23 @@ pub struct EffectiveStateChange {
     pub known_agent: Option<Agent>,
     pub state: AgentState,
     pub presentation: EffectivePresentation,
+    /// 这是一次紧跟用户中断（单独的 Ctrl-C / ESC）的完成迁移。
+    pub interrupted: bool,
+}
+
+/// `pane.report_agent_attention` 落到终端上的内容（长度已由 API 层校验）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttentionReport {
+    NeedsInput {
+        title: Option<String>,
+        detail: Option<String>,
+        options: Vec<String>,
+    },
+    Failed {
+        title: Option<String>,
+        detail: Option<String>,
+    },
+    Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -162,6 +182,8 @@ pub struct TerminalState {
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
     pub restore_error: Option<String>,
+    /// 回合计时、失败锁存、needs-input 载荷与用户中断标记（见 `turn.rs`）。
+    turn: turn::TurnTracker,
 }
 
 impl TerminalState {
@@ -202,6 +224,7 @@ impl TerminalState {
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
             restore_error: None,
+            turn: turn::TurnTracker::default(),
         }
     }
 
@@ -425,6 +448,10 @@ impl TerminalState {
                 agent_released: false,
             };
         }
+        if replacement_process_detected {
+            // 新起的进程是新的一次运行：上一个进程留下的待处理事项作废。
+            self.turn.forget_agent();
+        }
         self.detected_agent = agent;
         if process_exited || agent != Some(Agent::Codex) || fallback_state == AgentState::Blocked {
             self.codex_prompt_ready = false;
@@ -639,6 +666,12 @@ impl TerminalState {
         if agent.is_none() && self.recent_agent_process_exit.is_some() {
             self.clear_agent_name();
         }
+        // 运行中退出的 agent 算一次失败；用户刚单独按过 Ctrl-C / ESC 的退出是有意为之。
+        let failed_on_exit = (process_exited
+            && agent_released
+            && previous_state == AgentState::Working
+            && !self.turn.interrupted_within(now))
+        .then(|| previous_agent_label.clone());
         let effective_state_change = self.recompute_effective_state(
             previous_agent_label,
             previous_known_agent,
@@ -646,6 +679,19 @@ impl TerminalState {
             previous_presentation,
             now,
         );
+        if let Some(agent_label) = failed_on_exit.filter(|_| self.state != AgentState::Working) {
+            self.turn.latch_failure(
+                None,
+                Some(
+                    crate::i18n::texts()
+                        .notify
+                        .process_exited_while_working
+                        .to_owned(),
+                ),
+                agent_label.as_deref(),
+                turn::wall_clock_ms(),
+            );
+        }
         if fallback_state == AgentState::Working && self.state == AgentState::Working {
             self.agent_process_acquisition_pending = false;
         }
@@ -1830,6 +1876,7 @@ impl TerminalState {
             self.fallback_visible_blocker = false;
             self.fallback_observed_at = None;
             self.clear_agent_name();
+            self.turn.forget_agent();
         }
         self.hook_authority = None;
         self.forget_reported_resume_of(source, agent_label);
@@ -1880,6 +1927,7 @@ impl TerminalState {
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
         self.clear_agent_name();
+        self.turn.forget_agent();
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -2044,7 +2092,118 @@ impl TerminalState {
             known_agent,
             state,
             presentation,
+            interrupted: false,
         }
+    }
+
+    /// 当前回合开始工作的墙钟毫秒；不在 Working 时为 `None`。
+    pub fn working_since_ms(&self) -> Option<u64> {
+        self.turn.working_since_ms()
+    }
+
+    /// 上一回合（一次 Working）的时长，毫秒。
+    pub fn last_turn_ms(&self) -> Option<u64> {
+        self.turn.last_turn_ms()
+    }
+
+    /// 最近一次有效状态变化的墙钟毫秒。
+    pub fn state_changed_at_ms(&self) -> Option<u64> {
+        self.turn.state_changed_at_ms()
+    }
+
+    /// 对外的待处理事项（`AgentInfo.attention`）：受阻时是 needs-input，Working 时没有，
+    /// 其余时候是尚未被看过的失败。
+    pub fn agent_attention(&self) -> Option<crate::api::schema::AgentAttention> {
+        self.turn.attention(self.state, self.blocked_hook_message())
+    }
+
+    /// 完整生命周期钩子随受阻状态带来的说明（needs-input 详情的兜底）。
+    fn blocked_hook_message(&self) -> Option<&str> {
+        self.hook_authority
+            .as_ref()
+            .filter(|authority| {
+                authority.state == AgentState::Blocked
+                    && self.hook_authority_is_effective(authority)
+                    && crate::detect::full_lifecycle_hook_authority(
+                        &authority.source,
+                        &authority.agent_label,
+                    )
+            })
+            .and_then(|authority| authority.message.as_deref())
+    }
+
+    /// 待处理事项的修订号：变化即客户端投影要重建。
+    pub(crate) fn attention_revision(&self) -> u64 {
+        self.turn.revision()
+    }
+
+    /// 用户往这个终端单独发了 Ctrl-C / ESC。
+    pub(crate) fn note_interrupt_input(&mut self, now: Instant) {
+        self.turn.note_interrupt_input(now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_interrupt_input_at(&self) -> Option<Instant> {
+        self.turn.last_interrupt_input_at()
+    }
+
+    /// 最近一次有效状态变化是否是紧跟用户中断的完成迁移。
+    pub(crate) fn last_completion_interrupted(&self) -> bool {
+        self.turn.last_completion_interrupted()
+    }
+
+    /// 取走一次待发的失败通知（不在 Working 且锁存的失败还没通知过）。
+    pub(crate) fn take_failure_notice(&mut self) -> bool {
+        self.turn.take_failure_notice(self.state)
+    }
+
+    /// 已发出的失败通知次数。
+    pub(crate) fn failure_notices(&self) -> u64 {
+        self.turn.failure_notices()
+    }
+
+    /// 用户看过这个 pane：确认已经通知过的失败。返回是否有变化。
+    pub(crate) fn acknowledge_attention(&mut self) -> bool {
+        self.turn.acknowledge()
+    }
+
+    /// 应用一次 `pane.report_agent_attention`（不改 agent 状态）。按来源序号取舍，返回
+    /// 是否有变化。
+    pub(crate) fn report_attention(
+        &mut self,
+        source: &str,
+        agent_label: &str,
+        seq: Option<u64>,
+        report: AttentionReport,
+    ) -> bool {
+        if !self.turn.accept_report(source, seq) {
+            return false;
+        }
+        let now_ms = turn::wall_clock_ms();
+        match report {
+            AttentionReport::NeedsInput {
+                title,
+                detail,
+                options,
+            } => self.turn.set_needs_input(title, detail, options, now_ms),
+            AttentionReport::Failed { title, detail } => {
+                self.turn
+                    .latch_failure(title, detail, Some(agent_label), now_ms)
+            }
+            AttentionReport::Clear => self.turn.clear_reported(),
+        }
+    }
+
+    /// 会话洞察带来的错误：晚于本回合开始且不在 Working 时锁存一次失败。返回是否锁存。
+    pub(crate) fn observe_insight_error(&mut self, error: &str, at_ms: Option<u64>) -> bool {
+        let agent_label = self.effective_agent_label().map(str::to_owned);
+        self.turn.observe_error(
+            error,
+            at_ms,
+            self.state,
+            agent_label.as_deref(),
+            turn::wall_clock_ms(),
+        )
     }
 
     pub fn full_lifecycle_hook_authority_active(&self) -> bool {
@@ -2319,6 +2478,7 @@ impl TerminalState {
         self.recent_agent_process_exit = None;
         self.agent_process_acquisition_pending = false;
         self.pending_agent_resume_plan = None;
+        self.turn = turn::TurnTracker::default();
         self.clear_agent_name();
     }
 
@@ -2407,6 +2567,14 @@ impl TerminalState {
             return None;
         }
 
+        if previous_state != state {
+            self.turn
+                .on_state_change(previous_state, state, now, turn::wall_clock_ms());
+        }
+        if previous_agent_label != agent_label {
+            self.turn.reconcile_agent(agent_label.as_deref());
+        }
+        let interrupted = previous_state != state && self.turn.last_completion_interrupted();
         self.state = state;
         Some(EffectiveStateChange {
             previous_agent_label,
@@ -2417,6 +2585,7 @@ impl TerminalState {
             known_agent,
             state,
             presentation,
+            interrupted,
         })
     }
 }
@@ -6118,6 +6287,325 @@ mod tests {
         assert_eq!(
             terminal.hook_authority.as_ref().unwrap().source,
             "custom:pi"
+        );
+    }
+
+    fn failed_report(detail: &str) -> AttentionReport {
+        AttentionReport::Failed {
+            title: None,
+            detail: Some(detail.into()),
+        }
+    }
+
+    fn attention_kind(terminal: &TerminalState) -> Option<crate::api::schema::AgentAttentionKind> {
+        terminal.agent_attention().map(|attention| attention.kind)
+    }
+
+    #[test]
+    fn turn_timing_records_working_start_turn_length_and_state_changes() {
+        let mut terminal = test_terminal();
+        assert_eq!(terminal.state_changed_at_ms(), None);
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let idle_at = terminal.state_changed_at_ms().expect("状态变化记录时刻");
+        assert_eq!(terminal.working_since_ms(), None);
+        assert_eq!(terminal.last_turn_ms(), None);
+
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        let since = terminal
+            .working_since_ms()
+            .expect("进入 Working 记录开始时刻");
+        assert!(since >= idle_at);
+        assert_eq!(terminal.state_changed_at_ms(), Some(since));
+
+        // Working → Working 不是状态变化，开始时刻不动。
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        assert_eq!(terminal.working_since_ms(), Some(since));
+
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Blocked);
+        let blocked_at = terminal.state_changed_at_ms().unwrap();
+        assert_eq!(
+            terminal.working_since_ms(),
+            None,
+            "离开 Working 清掉开始时刻"
+        );
+        let turn = terminal.last_turn_ms().expect("离开 Working 记录回合时长");
+        assert_eq!(blocked_at, since + turn);
+
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        assert!(terminal.state_changed_at_ms().unwrap() >= blocked_at);
+        assert_eq!(
+            terminal.last_turn_ms(),
+            Some(turn),
+            "Blocked → Idle 不改上一回合时长"
+        );
+    }
+
+    #[test]
+    fn failed_latch_is_set_by_reports_and_cleared_by_working_ack_and_clear() {
+        use crate::api::schema::AgentAttentionKind;
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let revision = terminal.attention_revision();
+
+        assert!(terminal.report_attention("herdr:pi", "pi", Some(1), failed_report("boom")));
+        assert_ne!(terminal.attention_revision(), revision);
+        assert_eq!(terminal.state, AgentState::Idle, "上报不改状态");
+        let attention = terminal.agent_attention().expect("失败锁存");
+        assert_eq!(attention.kind, AgentAttentionKind::Failed);
+        assert_eq!(attention.detail.as_deref(), Some("boom"));
+        assert!(attention.since_ms.is_some());
+
+        assert!(
+            !terminal.acknowledge_attention(),
+            "还没通知过的失败不算被看过"
+        );
+        assert!(terminal.take_failure_notice());
+        assert!(!terminal.take_failure_notice(), "同一失败只通知一次");
+        assert!(terminal.acknowledge_attention(), "用户看过后清掉");
+        assert_eq!(attention_kind(&terminal), None);
+
+        // 进入 Working 清掉。
+        terminal.report_attention("herdr:pi", "pi", Some(2), failed_report("again"));
+        assert_eq!(attention_kind(&terminal), Some(AgentAttentionKind::Failed));
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        assert_eq!(attention_kind(&terminal), None);
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        assert_eq!(attention_kind(&terminal), None);
+
+        // 集成清除；旧序号的清除被忽略。
+        terminal.report_attention("herdr:pi", "pi", Some(5), failed_report("third"));
+        assert!(!terminal.report_attention("herdr:pi", "pi", Some(4), AttentionReport::Clear));
+        assert_eq!(attention_kind(&terminal), Some(AgentAttentionKind::Failed));
+        assert!(terminal.report_attention("herdr:pi", "pi", Some(6), AttentionReport::Clear));
+        assert_eq!(attention_kind(&terminal), None);
+    }
+
+    #[test]
+    fn failure_reported_while_working_waits_for_the_turn_to_end() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
+        terminal.report_attention("herdr:codex", "codex", None, failed_report("api error"));
+        assert_eq!(attention_kind(&terminal), None, "Working 时不露面");
+        assert!(!terminal.take_failure_notice(), "Working 时不通知");
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        assert_eq!(
+            attention_kind(&terminal),
+            Some(crate::api::schema::AgentAttentionKind::Failed)
+        );
+        assert!(terminal.take_failure_notice(), "回合结束时通知");
+    }
+
+    #[test]
+    fn released_or_replaced_agents_drop_their_failure() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "custom:bot".into(),
+            "bot".into(),
+            AgentState::Idle,
+            None,
+            Some(1),
+        );
+        terminal.report_attention("custom:bot", "bot", None, failed_report("x"));
+        assert!(terminal.agent_attention().is_some());
+        terminal
+            .release_agent_with_mutation("custom:bot", "bot", Some(2))
+            .expect("释放");
+        assert_eq!(attention_kind(&terminal), None, "释放后作废");
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.report_attention("herdr:claude", "claude", None, failed_report("x"));
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        assert_eq!(attention_kind(&terminal), None, "换成别的 agent 后作废");
+    }
+
+    #[test]
+    fn process_exit_while_working_latches_failure_unless_the_user_interrupted() {
+        let exit = |terminal: &mut TerminalState, now: Instant| {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Codex),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                true,
+                now,
+            )
+        };
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
+        let mutation = exit(&mut terminal, Instant::now());
+        assert!(mutation.agent_released);
+        let attention = terminal.agent_attention().expect("运行中退出算失败");
+        assert_eq!(
+            attention.detail.as_deref(),
+            Some(crate::i18n::texts().notify.process_exited_while_working)
+        );
+        assert!(terminal.take_failure_notice());
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        exit(&mut terminal, Instant::now());
+        assert_eq!(attention_kind(&terminal), None, "空闲时退出不算失败");
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
+        let now = Instant::now();
+        terminal.note_interrupt_input(now);
+        let mutation = exit(&mut terminal, now);
+        assert_eq!(
+            attention_kind(&terminal),
+            None,
+            "用户刚按过 Ctrl-C 的退出是有意的"
+        );
+        assert!(mutation
+            .effective_state_change
+            .is_some_and(|change| change.interrupted));
+    }
+
+    #[test]
+    fn interrupt_marker_only_covers_the_completion_right_after_it() {
+        let mut terminal = test_terminal();
+        let start = Instant::now();
+        let at = |offset_ms: u64| start + Duration::from_millis(offset_ms);
+        let observe = |terminal: &mut TerminalState, state: AgentState, now: Instant| {
+            terminal
+                .set_detected_state_with_screen_signals_at(
+                    Some(Agent::Claude),
+                    state,
+                    false,
+                    false,
+                    false,
+                    false,
+                    now,
+                )
+                .effective_state_change
+        };
+        observe(&mut terminal, AgentState::Working, at(0));
+        terminal.note_interrupt_input(at(100));
+        assert_eq!(terminal.last_interrupt_input_at(), Some(at(100)));
+        let change = observe(&mut terminal, AgentState::Idle, at(600)).expect("Working → Idle");
+        assert!(change.interrupted, "中断后 1.5 s 内的完成");
+
+        observe(&mut terminal, AgentState::Working, at(1_000));
+        assert_eq!(
+            terminal.last_interrupt_input_at(),
+            None,
+            "新回合开始清掉上一回合的中断"
+        );
+        let change = observe(&mut terminal, AgentState::Idle, at(1_200)).expect("Working → Idle");
+        assert!(!change.interrupted);
+
+        observe(&mut terminal, AgentState::Working, at(2_000));
+        terminal.note_interrupt_input(at(2_100));
+        let change = observe(&mut terminal, AgentState::Idle, at(4_000)).expect("Working → Idle");
+        assert!(!change.interrupted, "超过 1.5 s 的中断不算");
+    }
+
+    #[test]
+    fn needs_input_detail_comes_from_the_hook_message_or_the_reported_payload() {
+        use crate::api::schema::AgentAttentionKind;
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            crate::agent_resume::AgentSessionRef::id("pi-attention").unwrap(),
+        );
+        terminal.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Blocked,
+            Some("Allow   write to\nsrc/main.rs?".into()),
+            Some(1),
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
+        let attention = terminal.agent_attention().expect("受阻时有 needs-input");
+        assert_eq!(attention.kind, AgentAttentionKind::NeedsInput);
+        assert_eq!(
+            attention.detail.as_deref(),
+            Some("Allow write to src/main.rs?"),
+            "完整生命周期钩子的说明压成一行"
+        );
+        assert!(attention.since_ms.is_some());
+
+        // 只带载荷的上报：屏幕检测到受阻的 claude，集成补上问题与选项。
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_visible_blocker(
+            Some(Agent::Claude),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+        );
+        let blocked = terminal.agent_attention().expect("受阻时有 needs-input");
+        assert_eq!(blocked.detail, None, "没有钩子说明也没有载荷");
+        assert!(terminal.report_attention(
+            "herdr:claude",
+            "claude",
+            Some(1),
+            AttentionReport::NeedsInput {
+                title: Some("Permission".into()),
+                detail: Some("Run the tests?".into()),
+                options: vec!["yes".into(), "no".into()],
+            },
+        ));
+        assert_eq!(terminal.state, AgentState::Blocked, "载荷不改状态");
+        let attention = terminal.agent_attention().unwrap();
+        assert_eq!(attention.title.as_deref(), Some("Permission"));
+        assert_eq!(attention.detail.as_deref(), Some("Run the tests?"));
+        assert_eq!(attention.options, ["yes", "no"]);
+
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        assert_eq!(attention_kind(&terminal), None, "Working 时没有待处理事项");
+        terminal.set_detected_state_with_visible_blocker(
+            Some(Agent::Claude),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+        );
+        let attention = terminal.agent_attention().unwrap();
+        assert_eq!(
+            (attention.title, attention.detail),
+            (None, None),
+            "离开 Blocked 时载荷已清掉"
+        );
+    }
+
+    #[test]
+    fn insight_errors_latch_a_failure_once_after_the_turn_started() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        assert!(
+            !terminal.observe_insight_error("stale", None),
+            "没见过工作的 agent 不锁存"
+        );
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
+        assert!(
+            !terminal.observe_insight_error("boom", None),
+            "Working 时不锁存"
+        );
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        assert!(terminal.observe_insight_error("boom", None));
+        assert!(
+            !terminal.observe_insight_error("boom", None),
+            "同一错误只锁存一次"
+        );
+        assert!(
+            !terminal.observe_insight_error("older", Some(1)),
+            "早于本回合开始的错误不算"
+        );
+        assert_eq!(
+            terminal
+                .agent_attention()
+                .and_then(|attention| attention.detail)
+                .as_deref(),
+            Some("boom")
         );
     }
 }

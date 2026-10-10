@@ -1,5 +1,6 @@
 pub(crate) mod agent_activity;
 mod alt_screen_read;
+pub(crate) mod attention;
 pub mod autodetect;
 pub(crate) mod client_accept;
 pub(crate) mod client_commands;

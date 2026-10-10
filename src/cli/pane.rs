@@ -1,8 +1,9 @@
 use crate::api::schema::{
-    Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
+    Method, OutputMatch, PaneAgentAttentionKind, PaneCurrentParams, PaneDirection, PaneEdgesParams,
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
     PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentActivityParams,
+    PaneReportAgentAttentionParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
     PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
     PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
@@ -59,6 +60,8 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "wait-output" => pane_wait_output(&args[1..]),
         "report-agent" => pane_report_agent(&args[1..]),
         "report-agent-session" => pane_report_agent_session(&args[1..]),
+        "report-agent-attention" => pane_report_agent_attention(&args[1..]),
+        "report-agent-activity" => pane_report_agent_activity(&args[1..]),
         "release-agent" => pane_release_agent(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
         "run" => pane_run(&args[1..]),
@@ -1431,6 +1434,181 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
     ))
 }
 
+fn pane_report_agent_attention(args: &[String]) -> std::io::Result<i32> {
+    match parse_report_agent_attention(args, super::target::caller_pane_id()) {
+        Ok(params) => super::send_ok_request(Method::PaneReportAgentAttention(params)),
+        Err(message) => {
+            eprintln!("{message}");
+            Ok(2)
+        }
+    }
+}
+
+fn pane_report_agent_activity(args: &[String]) -> std::io::Result<i32> {
+    match parse_report_agent_activity(args, super::target::caller_pane_id()) {
+        Ok(params) => super::send_ok_request(Method::PaneReportAgentActivity(params)),
+        Err(message) => {
+            eprintln!("{message}");
+            Ok(2)
+        }
+    }
+}
+
+fn parse_attention_kind(value: &str) -> Result<PaneAgentAttentionKind, String> {
+    match value {
+        "needs_input" | "needs-input" => Ok(PaneAgentAttentionKind::NeedsInput),
+        "failed" => Ok(PaneAgentAttentionKind::Failed),
+        "clear" => Ok(PaneAgentAttentionKind::Clear),
+        _ => Err(crate::i18n::fill(
+            errors().invalid_attention_kind_fmt,
+            &[("value", value)],
+        )),
+    }
+}
+
+/// 上报类命令的共同参数（位置参数 pane_id、`--source` / `--agent` / `--seq`）之外的
+/// 选项值。
+struct ReportArgs {
+    pane_id: Option<String>,
+    source: Option<String>,
+    agent: Option<String>,
+    seq: Option<u64>,
+    values: Vec<(String, String)>,
+}
+
+/// 解析上报类命令：`value_options` 是该命令额外接受的带值选项（原样收进 `values`，
+/// 可重复）。错误返回要打印的消息。
+fn parse_report_args(args: &[String], value_options: &[&str]) -> Result<ReportArgs, String> {
+    let mut known = vec!["--source", "--agent", "--seq"];
+    known.extend_from_slice(value_options);
+    let args = super::expand_equals_args(args, &known);
+    let mut parsed = ReportArgs {
+        pane_id: None,
+        source: None,
+        agent: None,
+        seq: None,
+        values: Vec::new(),
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg.starts_with('-') {
+            if !known.contains(&arg) {
+                return Err(unknown_option(arg));
+            }
+            let Some(value) = args.get(index + 1) else {
+                return Err(missing_value(arg));
+            };
+            match arg {
+                "--source" => parsed.source = Some(value.clone()),
+                "--agent" => parsed.agent = Some(value.clone()),
+                "--seq" => {
+                    parsed.seq = Some(
+                        super::parse_u64_flag("--seq", value).map_err(|error| error.to_string())?,
+                    );
+                }
+                _ => parsed.values.push((arg.to_owned(), value.clone())),
+            }
+            index += 2;
+            continue;
+        }
+        if parsed.pane_id.is_some() {
+            return Err(crate::i18n::fill(
+                errors().unexpected_argument_fmt,
+                &[("argument", arg)],
+            ));
+        }
+        parsed.pane_id = Some(super::normalize_pane_id(arg));
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+/// `herdr pane report-agent-attention`：省略位置参数时用 `env_pane_id`
+/// （`HERDR_PANE_ID`）。
+fn parse_report_agent_attention(
+    args: &[String],
+    env_pane_id: Option<String>,
+) -> Result<PaneReportAgentAttentionParams, String> {
+    let parsed = parse_report_args(args, &["--kind", "--title", "--detail", "--option"])?;
+    let mut kind = None;
+    let mut title = None;
+    let mut detail = None;
+    let mut options = Vec::new();
+    for (flag, value) in parsed.values {
+        match flag.as_str() {
+            "--kind" => kind = Some(parse_attention_kind(&value)?),
+            "--title" => title = Some(value),
+            "--detail" => detail = Some(value),
+            _ => options.push(value),
+        }
+    }
+    let Some(pane_id) = parsed.pane_id.or(env_pane_id) else {
+        return Err(errors().pane_report_agent_attention_usage.to_owned());
+    };
+    let Some(source) = required_source(parsed.source) else {
+        return Err(errors().source_required.to_owned());
+    };
+    let Some(agent) = parsed.agent else {
+        return Err(errors().agent_flag_required.to_owned());
+    };
+    let Some(kind) = kind else {
+        return Err(errors().kind_required.to_owned());
+    };
+    Ok(PaneReportAgentAttentionParams {
+        pane_id,
+        source,
+        agent,
+        kind,
+        title,
+        detail,
+        options,
+        seq: parsed.seq,
+    })
+}
+
+/// `herdr pane report-agent-activity`：`pane.report_agent_activity` 的命令行入口（钩子
+/// 用它发活动提示，Windows PowerShell 钩子也能直接调用）。省略位置参数时用
+/// `env_pane_id`（`HERDR_PANE_ID`）。
+fn parse_report_agent_activity(
+    args: &[String],
+    env_pane_id: Option<String>,
+) -> Result<PaneReportAgentActivityParams, String> {
+    let parsed = parse_report_args(args, &["--hint", "--node-id"])?;
+    let mut hint = None;
+    let mut node_id = None;
+    for (flag, value) in parsed.values {
+        match flag.as_str() {
+            "--hint" => hint = Some(value),
+            _ => node_id = Some(value),
+        }
+    }
+    let Some(pane_id) = parsed.pane_id.or(env_pane_id) else {
+        return Err(errors().pane_report_agent_activity_usage.to_owned());
+    };
+    let Some(source) = required_source(parsed.source) else {
+        return Err(errors().source_required.to_owned());
+    };
+    let Some(agent) = parsed.agent else {
+        return Err(errors().agent_flag_required.to_owned());
+    };
+    Ok(PaneReportAgentActivityParams {
+        pane_id,
+        source,
+        agent,
+        hint,
+        node_id,
+        seq: parsed.seq,
+    })
+}
+
+fn required_source(source: Option<String>) -> Option<String> {
+    source.and_then(|source| {
+        let source = source.trim().to_string();
+        (!source.is_empty()).then_some(source)
+    })
+}
+
 fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!("{}", errors().pane_release_agent_usage);
@@ -1721,6 +1899,8 @@ fn print_pane_help() {
     eprintln!("  herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]");
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
+    eprintln!("  herdr pane report-agent-attention [<pane_id>] --source ID --agent LABEL --kind needs_input|failed|clear [--title TEXT] [--detail TEXT] [--option TEXT]... [--seq N]");
+    eprintln!("  herdr pane report-agent-activity [<pane_id>] --source ID --agent LABEL [--hint TEXT] [--node-id ID] [--seq N]");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr pane run <pane_id> <command>");
@@ -1732,6 +1912,121 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_report_agent_attention_reads_flags_and_defaults_the_pane() {
+        let params = parse_report_agent_attention(
+            &args(&[
+                "--source",
+                "herdr:codex",
+                "--agent=codex",
+                "--kind",
+                "needs-input",
+                "--title",
+                "Approve?",
+                "--detail",
+                "Run cargo test?",
+                "--option",
+                "yes",
+                "--option=no",
+                "--seq",
+                "7",
+            ]),
+            Some("w1:p2".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            params,
+            PaneReportAgentAttentionParams {
+                pane_id: "w1:p2".into(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                kind: PaneAgentAttentionKind::NeedsInput,
+                title: Some("Approve?".into()),
+                detail: Some("Run cargo test?".into()),
+                options: vec!["yes".into(), "no".into()],
+                seq: Some(7),
+            }
+        );
+
+        let explicit = parse_report_agent_attention(
+            &args(&["w9:p1", "--source", "s", "--agent", "a", "--kind", "clear"]),
+            Some("w1:p2".into()),
+        )
+        .unwrap();
+        assert_eq!(explicit.pane_id, "w9:p1", "位置参数优先于 HERDR_PANE_ID");
+        assert_eq!(explicit.kind, PaneAgentAttentionKind::Clear);
+    }
+
+    #[test]
+    fn parse_report_agent_attention_rejects_missing_or_invalid_input() {
+        let full = ["--source", "s", "--agent", "a", "--kind", "failed"];
+        assert!(
+            parse_report_agent_attention(&args(&full), None).is_err(),
+            "没有 pane"
+        );
+        for missing in [
+            &["--agent", "a", "--kind", "failed"][..],
+            &["--source", "s", "--kind", "failed"][..],
+            &["--source", "s", "--agent", "a"][..],
+            &["--source", "s", "--agent", "a", "--kind", "done"][..],
+            &[
+                "--source", "s", "--agent", "a", "--kind", "failed", "--bogus", "x",
+            ][..],
+            &["--source", "s", "--agent", "a", "--kind"][..],
+            &["--source", " ", "--agent", "a", "--kind", "failed"][..],
+            &[
+                "--source", "s", "--agent", "a", "--kind", "failed", "--seq", "x",
+            ][..],
+            &[
+                "p1", "p2", "--source", "s", "--agent", "a", "--kind", "failed",
+            ][..],
+        ] {
+            assert!(
+                parse_report_agent_attention(&args(missing), Some("w1:p1".into())).is_err(),
+                "{missing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_report_agent_activity_wraps_the_activity_hint() {
+        let params = parse_report_agent_activity(
+            &args(&[
+                "--source",
+                "herdr:kimi",
+                "--agent",
+                "kimi",
+                "--hint",
+                "PostToolUse",
+                "--node-id",
+                "task-1",
+            ]),
+            Some("w1:p3".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            params,
+            PaneReportAgentActivityParams {
+                pane_id: "w1:p3".into(),
+                source: "herdr:kimi".into(),
+                agent: "kimi".into(),
+                hint: Some("PostToolUse".into()),
+                node_id: Some("task-1".into()),
+                seq: None,
+            }
+        );
+        assert!(parse_report_agent_activity(
+            &args(&["--source", "herdr:kimi", "--agent", "kimi"]),
+            None
+        )
+        .is_err());
+        assert!(parse_report_agent_activity(
+            &args(&["--source", "herdr:kimi", "--agent", "kimi", "--kind", "x"]),
+            Some("w1:p3".into())
+        )
+        .is_err());
     }
 
     #[test]

@@ -972,6 +972,8 @@ pub struct ResolvedTheme {
 pub enum ToastKind {
     NeedsAttention,
     Finished,
+    /// agent 上一回合失败（见 `server::attention`）。
+    Failed,
     UpdateInstalled,
 }
 
@@ -1429,6 +1431,8 @@ pub struct AgentActivityStore {
     next_launch_seq: u64,
     launch_seqs: std::collections::HashMap<PaneId, u64>,
     activity: std::collections::HashMap<PaneId, AgentActivitySnapshot>,
+    /// 各 pane 最近一次发现读到的会话洞察（已截断，见 [`bounded_insight`]）。
+    insights: std::collections::HashMap<PaneId, crate::api::schema::AgentInsight>,
     hinted: std::collections::HashSet<PaneId>,
     latest_hints: std::collections::HashMap<PaneId, std::sync::Arc<str>>,
     /// 各 pane 钩子随会话上报的转录路径（claude/codex）及其上报序号，只给活动树定位会话文件
@@ -1478,18 +1482,43 @@ impl AgentActivityStore {
         self.latest_hints.remove(&pane_id);
         let seq = self.launch_seqs.remove(&pane_id).is_some();
         let activity = self.activity.remove(&pane_id).is_some();
-        seq || activity
+        let insight = self.insights.remove(&pane_id).is_some();
+        seq || activity || insight
     }
 
     /// 只保留 `alive` 判定为真的 pane 的记录（过期清理）。返回投影可见的内容是否
     /// 有被移除。
     pub fn retain_panes(&mut self, mut alive: impl FnMut(PaneId) -> bool) -> bool {
-        let before = self.launch_seqs.len() + self.activity.len();
+        let before = self.launch_seqs.len() + self.activity.len() + self.insights.len();
         self.launch_seqs.retain(|pane_id, _| alive(*pane_id));
         self.activity.retain(|pane_id, _| alive(*pane_id));
+        self.insights.retain(|pane_id, _| alive(*pane_id));
         self.hinted.retain(|pane_id| alive(*pane_id));
         self.latest_hints.retain(|pane_id, _| alive(*pane_id));
-        before != self.launch_seqs.len() + self.activity.len()
+        before != self.launch_seqs.len() + self.activity.len() + self.insights.len()
+    }
+
+    /// 写入一次发现读到的会话洞察（先截断到上限）；`None` 清掉旧的。返回是否变化。
+    pub fn apply_insight(
+        &mut self,
+        pane_id: PaneId,
+        insight: Option<crate::api::schema::AgentInsight>,
+    ) -> bool {
+        match insight.map(bounded_insight) {
+            Some(insight) => {
+                if self.insights.get(&pane_id) == Some(&insight) {
+                    return false;
+                }
+                self.insights.insert(pane_id, insight);
+                true
+            }
+            None => self.insights.remove(&pane_id).is_some(),
+        }
+    }
+
+    /// 该 pane 落库的会话洞察。
+    pub fn insight(&self, pane_id: PaneId) -> Option<&crate::api::schema::AgentInsight> {
+        self.insights.get(&pane_id)
     }
 
     /// 该 pane 当前的活动树快照。
@@ -1862,6 +1891,41 @@ fn truncate_activity_nodes(nodes: Vec<crate::api::schema::AgentActivityNode>) ->
     }
 }
 
+/// 会话洞察里消息类文本（最后回复 / 最后提示 / 待答问题 / 错误）的字符上限。
+const INSIGHT_TEXT_MAX_CHARS: usize = 500;
+/// 会话洞察里名称类文本（会话标题 / 模型 / 当前工具）的字符上限。
+const INSIGHT_LABEL_MAX_CHARS: usize = 200;
+/// 会话洞察回答选项的个数上限与单个选项的字符上限。
+const INSIGHT_MAX_OPTIONS: usize = 8;
+const INSIGHT_OPTION_MAX_CHARS: usize = 120;
+
+/// 截断会话洞察：文本压成一行并截到上限，空文本省略，选项最多 8 个。回合计时由
+/// server 记录（`TerminalState`），来源适配器给的计时不落库。
+fn bounded_insight(insight: crate::api::schema::AgentInsight) -> crate::api::schema::AgentInsight {
+    let line = |text: Option<String>, max_chars: usize| {
+        text.and_then(|text| crate::harness::text::clean_line(&text, max_chars))
+    };
+    crate::api::schema::AgentInsight {
+        session_title: line(insight.session_title, INSIGHT_LABEL_MAX_CHARS),
+        model: line(insight.model, INSIGHT_LABEL_MAX_CHARS),
+        current_tool: line(insight.current_tool, INSIGHT_LABEL_MAX_CHARS),
+        last_message: line(insight.last_message, INSIGHT_TEXT_MAX_CHARS),
+        last_prompt: line(insight.last_prompt, INSIGHT_TEXT_MAX_CHARS),
+        question: line(insight.question, INSIGHT_TEXT_MAX_CHARS),
+        options: insight
+            .options
+            .iter()
+            .filter_map(|option| crate::harness::text::clean_line(option, INSIGHT_OPTION_MAX_CHARS))
+            .take(INSIGHT_MAX_OPTIONS)
+            .collect(),
+        error: line(insight.error, INSIGHT_TEXT_MAX_CHARS),
+        working_since_ms: None,
+        last_turn_ms: None,
+        state_changed_at_ms: None,
+        updated_at_ms: insight.updated_at_ms,
+    }
+}
+
 /// pane 是否仍持有 agent（存在且其终端是 agent 终端）。
 fn pane_hosts_agent(
     workspaces: &[Workspace],
@@ -2048,6 +2112,88 @@ impl AppState {
             self.bump_projection_epoch();
         }
         Some(applied)
+    }
+
+    /// 会话洞察落库；pane 已不持有 agent（迟到的结果）时丢弃。洞察随快照下发，变化时
+    /// 递增投影纪元（HSR-05 写入点）。返回是否变化。
+    pub(crate) fn store_agent_insight(
+        &mut self,
+        pane_id: PaneId,
+        insight: Option<crate::api::schema::AgentInsight>,
+    ) -> bool {
+        if !pane_hosts_agent(&self.workspaces, &self.terminals, pane_id) {
+            return false;
+        }
+        let changed = self.agent_activity.apply_insight(pane_id, insight);
+        if changed {
+            self.bump_projection_epoch();
+        }
+        changed
+    }
+
+    /// 用户往这个 pane 单独发了 Ctrl-C / ESC（只给通知策略用，不进投影）。
+    pub(crate) fn note_pane_interrupt_input(
+        &mut self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        now: std::time::Instant,
+    ) {
+        let AppState {
+            workspaces,
+            terminals,
+            ..
+        } = self;
+        if let Some(terminal) = workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.pane_state(pane_id))
+            .and_then(|pane| terminals.get_mut(&pane.attached_terminal_id))
+        {
+            terminal.note_interrupt_input(now);
+        }
+    }
+
+    /// 通知正文的原文：待处理事项的详情（问题 / 失败原因）优先，其次是会话洞察里的
+    /// 待答问题、最近错误、最后一条回复。
+    pub(crate) fn attention_body_source(&self, pane_id: PaneId) -> Option<String> {
+        let attention_detail = self
+            .workspaces
+            .iter()
+            .find_map(|workspace| workspace.pane_state(pane_id))
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
+            .and_then(crate::terminal::TerminalState::agent_attention)
+            .and_then(|attention| attention.detail);
+        attention_detail.or_else(|| {
+            let insight = self.agent_activity.insight(pane_id)?;
+            insight
+                .question
+                .clone()
+                .or_else(|| insight.error.clone())
+                .or_else(|| insight.last_message.clone())
+        })
+    }
+
+    /// `AgentInfo.insight`：落库的会话洞察加上 server 记录的回合计时；都没有时为 `None`。
+    pub(crate) fn agent_insight(
+        &self,
+        pane_id: PaneId,
+        terminal: &crate::terminal::TerminalState,
+    ) -> Option<crate::api::schema::AgentInsight> {
+        let timing = (
+            terminal.working_since_ms(),
+            terminal.last_turn_ms(),
+            terminal.state_changed_at_ms(),
+        );
+        let stored = self.agent_activity.insight(pane_id);
+        if stored.is_none() && timing == (None, None, None) {
+            return None;
+        }
+        let mut insight = stored.cloned().unwrap_or_default();
+        (
+            insight.working_since_ms,
+            insight.last_turn_ms,
+            insight.state_changed_at_ms,
+        ) = timing;
+        Some(insight)
     }
 
     /// 外部来源条目落库；集合变化时递增投影纪元。返回是否变化。

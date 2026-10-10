@@ -109,7 +109,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_activity`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_activity`, `pane.report_agent_attention`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear`, `agent.activity.read`, `agent.external.list` |
@@ -798,6 +798,49 @@ Presentation text is normalized before storage. Herdr trims surrounding whitespa
 Use `ttl_ms` for short-lived metadata. It must be between `1` and `86400000` milliseconds. Omit `ttl_ms` for metadata that should stay until replaced, cleared, or the pane/workspace closes. Presentation fields retain their existing source-scoped expiry behavior; each token updated by the call receives its own deadline. Token metadata is not restored after a server restart.
 
 Use `seq` when a hook may send updates out of order. For the same `source`, reports with a sequence number less than or equal to the last accepted sequence are accepted by the API but ignored by the pane state. A pane or workspace accepts sequenced token reports from at most 32 distinct sources during its lifetime; clearing or expiry does not release those source slots.
+
+## Agent attention and insight
+
+Integrations report what an agent needs from the user with `pane.report_agent_attention`. It never changes the agent state, waits, or rollups.
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.report_agent_attention",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:codex",
+    "agent": "codex",
+    "kind": "needs_input",
+    "title": "Permission",
+    "detail": "Run cargo test?",
+    "options": ["Yes", "No"],
+    "seq": 12
+  }
+}
+```
+
+`kind` is `needs_input`, `failed`, or `clear`. A `needs_input` report attaches the question and its options to the pane and appears only while the agent is `blocked`; it is dropped when the agent leaves the blocked state. A `failed` report latches a failure for the last turn. `clear` removes both. `title` allows 200 characters, `detail` 2000 characters, and `options` at most 8 entries of 120 characters each; longer values fail with `invalid_attention`. Control characters are removed (`detail` keeps newlines and tabs) and blank values count as omitted. `options` only applies to `needs_input`. A `herdr:<agent>` source is reserved for the matching official integration and otherwise fails with `invalid_source`; reports from such sources go through the same pane process-tree check as `pane.report_agent`. With `seq`, reports for the same `source` must increase; older or repeated sequence numbers are accepted by the API but ignored.
+
+`agent.get`, `agent.list`, and `session.snapshot` expose the result as `AgentInfo.attention`, omitted when there is nothing to attend to:
+
+```json
+{
+  "attention": {
+    "kind": "needs_input",
+    "title": "Permission",
+    "detail": "Run cargo test?",
+    "options": ["Yes", "No"],
+    "since_ms": 1760000000000
+  }
+}
+```
+
+While the agent is blocked, `attention.kind` is `needs_input`. Its `detail` comes from the latest `needs_input` report, or from the `message` of a full-lifecycle integration's blocked `pane.report_agent` report. Otherwise `kind` is `failed` when a failure is latched and not yet seen. Failures come from a `failed` report, a session error newer than the current turn, or the agent process exiting while working. A failure latched while the agent works surfaces when that turn ends. The latch clears when the agent starts working again, when the user views the pane's tab after the failure was notified, when the agent is released or replaced, or on a `clear` report. Unknown `kind` values decode as `unknown`.
+
+`AgentInfo.insight` carries the session insight: `session_title`, `model`, `current_tool`, `last_message`, `last_prompt`, `question`, `options`, and `error` come from the agent's source adapter when it provides them. `working_since_ms` (only while working), `last_turn_ms` (the duration of the last working turn), and `state_changed_at_ms` are recorded by the server. Times are Unix milliseconds. Text fields are single lines capped at 500 characters (200 for names), with at most 8 options. Empty fields are omitted, and the whole object is omitted when nothing is known.
+
+Agent notifications follow one policy. Blocking notifies "needs attention" and plays the request sound even in the active tab. A finished turn notifies "finished" unless the tab is in view or the user interrupted the turn with a lone Ctrl-C or Esc in the 1.5 seconds before it went idle. A newly latched failure notifies "failed" with the request sound. Notifications sent to client shells carry the pane context in their body, followed by a one-line summary of up to 220 characters of the question, failure reason, or last message when available.
 
 ## Agent activity
 

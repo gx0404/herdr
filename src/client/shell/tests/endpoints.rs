@@ -24,6 +24,7 @@ fn agent(
     state_change_seq: u64,
 ) -> ClientShellAgent {
     ClientShellAgent {
+        insight: Default::default(),
         pane_id: "pane_1".into(),
         workspace_id: "ws_1".into(),
         tab_id: "tab_1".into(),

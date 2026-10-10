@@ -400,9 +400,27 @@ herdr pane release-agent <pane_id> \
   --source ID \
   --agent LABEL \
   [--seq N]
+
+herdr pane report-agent-attention [<pane_id>] \
+  --source ID \
+  --agent LABEL \
+  --kind needs_input|failed|clear \
+  [--title TEXT] \
+  [--detail TEXT] \
+  [--option TEXT]... \
+  [--seq N]
+
+herdr pane report-agent-activity [<pane_id>] \
+  --source ID \
+  --agent LABEL \
+  [--hint TEXT] \
+  [--node-id ID] \
+  [--seq N]
 ```
 
 `report-agent-session` updates native session identity without reporting lifecycle state. `release-agent` ends that source's lifecycle authority when its agent process exits.
+
+`report-agent-attention` wraps `pane.report_agent_attention`: `needs_input` attaches a question (`--detail`) and up to 8 `--option` answers that show while the agent is blocked, `failed` latches a failure for the last turn, and `clear` removes both. It never changes the agent state. `report-agent-activity` wraps `pane.report_agent_activity` so hooks, including Windows PowerShell hooks, can hint that the activity tree changed. Both commands use `HERDR_PANE_ID` when `<pane_id>` is omitted and print their usage with exit status 2 when neither is available. Limits and validation follow the [socket API](/docs/socket-api/#agent-attention-and-insight).
 
 Arguments after `--` are the command Herdr runs to resume this session after a server restart. The first argument must be a plain command name on `PATH`, and no argument may contain an apostrophe.
 

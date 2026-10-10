@@ -19,37 +19,44 @@ impl HeadlessServer {
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
 
+    /// 一条 pane 状态更新的语义通知（发给客户端 shell，不做 tab 抑制）。
     fn forward_semantic_agent_notification(
         &mut self,
         update: &crate::app::actions::PaneStateUpdate,
     ) -> bool {
-        if update.suppress_completion {
+        let input = update.attention_input(false, None);
+        if crate::server::attention::decide(&input).kind.is_none() {
             return false;
         }
-        self.forward_semantic_agent_transition(
+        // 只在真的要发时才取正文原文。
+        let body = self.app.state.attention_body_source(update.pane_id);
+        let decision =
+            crate::server::attention::decide(&crate::server::attention::AttentionInput {
+                body: body.as_deref(),
+                ..input
+            });
+        self.forward_semantic_agent_decision(
             update.ws_idx,
             update.pane_id,
-            update.previous_state,
-            update.state,
             update.previous_agent_label.as_deref(),
             update.agent_label.as_deref(),
             update.known_agent.or(update.previous_known_agent),
+            &decision,
         )
     }
 
-    pub(super) fn forward_semantic_agent_transition(
+    /// 按 `server::attention::decide` 的结果给客户端 shell 发一条语义通知。正文是 pane 的
+    /// 上下文（工作区 · 序号 · tab），有问题 / 失败原因 / 最后一条消息时接在后面。
+    pub(super) fn forward_semantic_agent_decision(
         &mut self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
-        previous_state: crate::detect::AgentState,
-        state: crate::detect::AgentState,
         previous_agent_label: Option<&str>,
         agent_label: Option<&str>,
         known_agent: Option<crate::detect::Agent>,
+        decision: &crate::server::attention::AttentionDecision,
     ) -> bool {
-        let Some(kind) =
-            crate::app::actions::notification_toast_for_state_change(false, previous_state, state)
-        else {
+        let (Some(kind), Some(semantic_kind)) = (decision.kind, decision.semantic) else {
             return false;
         };
         let Some(workspace) = self.app.state.workspaces.get(ws_idx) else {
@@ -67,38 +74,31 @@ impl HeadlessServer {
         let Some(agent_label) = agent_label.or(previous_agent_label) else {
             return false;
         };
-        let (semantic_kind, event_text, sound) = match kind {
-            crate::app::state::ToastKind::NeedsAttention => (
-                protocol::SemanticNotificationKind::NeedsAttention,
-                "needs attention",
-                Some(protocol::SemanticNotificationSound::Request),
-            ),
-            crate::app::state::ToastKind::Finished => (
-                protocol::SemanticNotificationKind::Finished,
-                "finished",
-                Some(protocol::SemanticNotificationSound::Done),
-            ),
-            crate::app::state::ToastKind::UpdateInstalled => (
-                protocol::SemanticNotificationKind::UpdateInstalled,
-                "updated",
-                None,
-            ),
-        };
         let workspace_id = workspace.id.clone();
         let tab_id = crate::workspace::public_tab_id_for_number(&workspace_id, tab_number);
         let workspace_label =
             workspace.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
         let context =
             crate::app::actions::notification_context(workspace, &workspace_label, ws_idx, pane_id);
+        // `SemanticNotification` 的字段集是 generation 1 冻结的 bincode 形状，不能加字段：
+        // 摘要沿用已有的 `body`，接在上下文后面。
+        let body = match decision.body.as_deref() {
+            Some(summary) if !context.is_empty() => Some(format!("{context} · {summary}")),
+            Some(summary) => Some(summary.to_owned()),
+            None => non_empty_body(&context),
+        };
         let agent = known_agent
             .map(crate::detect::agent_label)
             .map(str::to_owned);
         self.send_to_client_shells(ServerMessage::SemanticNotification(
             protocol::SemanticNotification {
                 kind: semantic_kind,
-                title: format!("{agent_label} {event_text}"),
-                body: non_empty_body(&context),
-                sound,
+                title: crate::i18n::fill(
+                    crate::i18n::texts().notify.title_fmt,
+                    &[("agent", agent_label), ("event", kind.event_text())],
+                ),
+                body,
+                sound: Some(kind.semantic_sound()),
                 agent,
                 workspace_id: Some(workspace_id),
                 tab_id: Some(tab_id),
@@ -122,13 +122,12 @@ impl HeadlessServer {
             .pane_is_in_active_tab(update.ws_idx, update.pane_id);
         let suppress_active_tab_notifications =
             self.active_tab_suppresses_notifications(is_active_tab);
+        let decision = crate::server::attention::decide(
+            &update.attention_input(suppress_active_tab_notifications, None),
+        );
 
-        if !update.suppress_completion && self.app.state.sound.allows(update.known_agent) {
-            if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                suppress_active_tab_notifications,
-                update.previous_state,
-                update.state,
-            ) {
+        if self.app.state.sound.allows(update.known_agent) {
+            if let Some(sound) = decision.sound {
                 self.send_notify_to_foreground_client(
                     protocol::NotifyKind::Sound,
                     sound_notify_message(sound),
@@ -140,10 +139,7 @@ impl HeadlessServer {
         if !should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
             return;
         }
-        let Some(kind) = crate::app::actions::notification_toast_for_pane_state_update(
-            suppress_active_tab_notifications,
-            update,
-        ) else {
+        let (Some(kind), Some(_)) = (decision.kind, decision.toast) else {
             return;
         };
         let Some(ws) = self.app.state.workspaces.get(update.ws_idx) else {
@@ -152,7 +148,6 @@ impl HeadlessServer {
         let Some(agent_label) = update.agent_label.as_deref() else {
             return;
         };
-        let event_text = crate::app::actions::toast_event_text(kind);
         let workspace_label =
             ws.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
         let context = crate::app::actions::notification_context(
@@ -163,16 +158,112 @@ impl HeadlessServer {
         );
         // HSR-15：`should_forward_toast_to_clients` 已保证有 kind；这里仍用
         // `if let` 而不是 expect，事件循环里不 panic。
-        if let Some(kind) = toast_notify_kind(self.app.state.toast_config.delivery) {
+        if let Some(kind_to_notify) = toast_notify_kind(self.app.state.toast_config.delivery) {
             self.send_notify_to_foreground_client(
-                kind,
+                kind_to_notify,
                 crate::i18n::fill(
                     crate::i18n::texts().notify.title_fmt,
-                    &[("agent", agent_label), ("event", event_text)],
+                    &[("agent", agent_label), ("event", kind.event_text())],
                 ),
                 non_empty_body(&context),
             );
         }
+    }
+
+    /// 屏幕检测 / 钩子上报处理后的通知转发：语义通知按每条 pane 更新发；声音与终端 /
+    /// 系统 toast 按处理前后的有效状态，同样经 `server::attention::decide` 决定。返回是否
+    /// 转发了声音。
+    fn forward_reported_transition_notifications(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        agent: Option<crate::detect::Agent>,
+        prev_state: crate::detect::AgentState,
+        pane_updates: &[crate::app::actions::PaneStateUpdate],
+        toast_before: &Option<crate::app::state::ToastNotification>,
+    ) -> bool {
+        let mut suppress_completion = false;
+        let mut interrupted = false;
+        let mut failed = false;
+        for update in pane_updates
+            .iter()
+            .filter(|update| update.pane_id == pane_id)
+        {
+            suppress_completion |= update.suppress_completion;
+            interrupted |= update.interrupted;
+            failed |= update.failed;
+            self.forward_semantic_agent_notification(update);
+        }
+
+        let is_active_tab = self
+            .app
+            .state
+            .active
+            .and_then(|ws_idx| self.app.state.workspaces.get(ws_idx))
+            .is_some_and(|ws| {
+                ws.find_tab_index_for_pane(pane_id)
+                    .is_some_and(|tab_idx| ws.active_tab_index() == tab_idx)
+            });
+        let suppress_active_tab_notifications =
+            self.active_tab_suppresses_notifications(is_active_tab);
+        let next_state = self.pane_effective_state(pane_id);
+        let decision =
+            crate::server::attention::decide(&crate::server::attention::AttentionInput {
+                previous_state: prev_state,
+                state: next_state,
+                suppress_active_tab: suppress_active_tab_notifications,
+                suppress_completion,
+                interrupted_recently: interrupted,
+                failed_latched: failed,
+                body: None,
+            });
+
+        let mut sound_forwarded = false;
+        if self.app.state.toast_config.delay_seconds == 0 && self.app.state.sound.allows(agent) {
+            if let Some(sound) = decision.sound {
+                self.send_notify_to_foreground_client(
+                    protocol::NotifyKind::Sound,
+                    sound_notify_message(sound),
+                    None,
+                );
+                sound_forwarded = true;
+            }
+        }
+
+        let toast_msg = if !suppress_completion
+            && self.app.state.toast_config.delay_seconds == 0
+            && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
+        {
+            if self.app.state.toast.is_some() && self.app.state.toast != *toast_before {
+                self.app
+                    .state
+                    .toast
+                    .as_ref()
+                    .map(|toast| format!("{}: {}", toast.title, toast.context))
+            } else {
+                decision
+                    .kind
+                    .filter(|_| decision.toast.is_some())
+                    .and_then(|kind| {
+                        toast_message_for_pane(
+                            &self.app.state,
+                            &self.app.terminal_runtimes,
+                            pane_id,
+                            kind,
+                        )
+                    })
+            }
+        } else {
+            None
+        };
+
+        // HSR-15：事件循环里不做 expect。
+        if let (Some(msg), Some(kind)) = (
+            toast_msg,
+            toast_notify_kind(self.app.state.toast_config.delivery),
+        ) {
+            self.send_flat_toast_to_foreground_client(kind, msg);
+        }
+        sound_forwarded
     }
 
     pub(super) fn forward_agent_notification_delivery(
@@ -356,82 +447,14 @@ impl HeadlessServer {
                 // sound policy so reloads can keep server-side notification policy live.
                 self.sync_foreground_client_state();
                 let pane_updates = self.app.handle_internal_event_with_pane_updates(ev);
-                let suppress_completion = pane_updates
-                    .iter()
-                    .any(|update| update.pane_id == pane_id_val && update.suppress_completion);
-                for update in pane_updates
-                    .iter()
-                    .filter(|update| update.pane_id == pane_id_val)
-                {
-                    self.forward_semantic_agent_notification(update);
-                }
-
-                // Forward sound notification to clients when server-side sound policy allows it.
-                let is_active_tab = self
-                    .app
-                    .state
-                    .active
-                    .and_then(|ws_idx| self.app.state.workspaces.get(ws_idx))
-                    .is_some_and(|ws| {
-                        ws.find_tab_index_for_pane(pane_id_val)
-                            .is_some_and(|tab_idx| ws.active_tab_index() == tab_idx)
-                    });
-
-                let suppress_active_tab_notifications =
-                    self.active_tab_suppresses_notifications(is_active_tab);
-
-                let next_state = self.pane_effective_state(pane_id_val);
-
-                let mut sound_forwarded = false;
-                if !suppress_completion
-                    && self.app.state.toast_config.delay_seconds == 0
-                    && self.app.state.sound.allows(agent_val)
-                {
-                    if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                        suppress_active_tab_notifications,
-                        prev_state,
-                        next_state,
-                    ) {
-                        self.send_notify_to_foreground_client(
-                            protocol::NotifyKind::Sound,
-                            sound_notify_message(sound),
-                            None,
-                        );
-                        sound_forwarded = true;
-                    }
-                }
-
-                let toast_msg = if !suppress_completion
-                    && self.app.state.toast_config.delay_seconds == 0
-                    && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
-                {
-                    if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
-                        self.app
-                            .state
-                            .toast
-                            .as_ref()
-                            .map(|toast| format!("{}: {}", toast.title, toast.context))
-                    } else {
-                        toast_message_from_state_change(
-                            &self.app.state,
-                            &self.app.terminal_runtimes,
-                            pane_id_val,
-                            suppress_active_tab_notifications,
-                            prev_state,
-                            next_state,
-                        )
-                    }
-                } else {
-                    None
-                };
-
-                // HSR-15：事件循环里不做 expect。
-                if let (Some(msg), Some(kind)) = (
-                    toast_msg,
-                    toast_notify_kind(self.app.state.toast_config.delivery),
-                ) {
-                    self.send_flat_toast_to_foreground_client(kind, msg);
-                }
+                // Forward sound / toast notifications to clients when server-side policy allows it.
+                let sound_forwarded = self.forward_reported_transition_notifications(
+                    pane_id_val,
+                    agent_val,
+                    prev_state,
+                    &pane_updates,
+                    &toast_before,
+                );
 
                 // 周期性心跳（blocked 800ms 等）重复同一观测时不产生 pane_updates，
                 // 不得升级为整帧重绘；toast/声音兜底保留。
@@ -453,83 +476,15 @@ impl HeadlessServer {
 
                 self.sync_foreground_client_state();
                 let pane_updates = self.app.handle_internal_event_with_pane_updates(ev);
-                let suppress_completion = pane_updates
-                    .iter()
-                    .any(|update| update.pane_id == pane_id_val && update.suppress_completion);
-                for update in pane_updates
-                    .iter()
-                    .filter(|update| update.pane_id == pane_id_val)
-                {
-                    self.forward_semantic_agent_notification(update);
-                }
-
-                // Forward sound notification based on the effective transition when
-                // server-side sound policy allows it.
-                let is_active_tab = self
-                    .app
-                    .state
-                    .active
-                    .and_then(|ws_idx| self.app.state.workspaces.get(ws_idx))
-                    .is_some_and(|ws| {
-                        ws.find_tab_index_for_pane(pane_id_val)
-                            .is_some_and(|tab_idx| ws.active_tab_index() == tab_idx)
-                    });
-
-                let suppress_active_tab_notifications =
-                    self.active_tab_suppresses_notifications(is_active_tab);
-
-                let next_state = self.pane_effective_state(pane_id_val);
-
-                let mut sound_forwarded = false;
-                if !suppress_completion
-                    && self.app.state.toast_config.delay_seconds == 0
-                    && self.app.state.sound.allows(agent_val)
-                {
-                    if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                        suppress_active_tab_notifications,
-                        prev_state,
-                        next_state,
-                    ) {
-                        self.send_notify_to_foreground_client(
-                            protocol::NotifyKind::Sound,
-                            sound_notify_message(sound),
-                            None,
-                        );
-                        sound_forwarded = true;
-                    }
-                }
-
-                let toast_msg = if !suppress_completion
-                    && self.app.state.toast_config.delay_seconds == 0
-                    && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
-                {
-                    if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
-                        self.app
-                            .state
-                            .toast
-                            .as_ref()
-                            .map(|toast| format!("{}: {}", toast.title, toast.context))
-                    } else {
-                        toast_message_from_state_change(
-                            &self.app.state,
-                            &self.app.terminal_runtimes,
-                            pane_id_val,
-                            suppress_active_tab_notifications,
-                            prev_state,
-                            next_state,
-                        )
-                    }
-                } else {
-                    None
-                };
-
-                // HSR-15：事件循环里不做 expect。
-                if let (Some(msg), Some(kind)) = (
-                    toast_msg,
-                    toast_notify_kind(self.app.state.toast_config.delivery),
-                ) {
-                    self.send_flat_toast_to_foreground_client(kind, msg);
-                }
+                // Forward sound / toast notifications based on the effective transition
+                // when server-side policy allows it.
+                let sound_forwarded = self.forward_reported_transition_notifications(
+                    pane_id_val,
+                    agent_val,
+                    prev_state,
+                    &pane_updates,
+                    &toast_before,
+                );
 
                 // 与 StateChanged 同理：序列驳回/无变化的 hook 上报不产生
                 // pane_updates，不升级为整帧重绘；toast/声音兜底保留。
@@ -724,6 +679,7 @@ impl HeadlessServer {
                 started,
                 ticket,
                 result,
+                ..
             } => {
                 let pane_id = *pane_id;
                 let started = started.clone();
@@ -733,10 +689,26 @@ impl HeadlessServer {
                         Ok(_) => self.agent_activity.accept_pane_tree(pane_id, *ticket),
                         Err(_) => true,
                     };
-                let changed = store && self.app.handle_internal_event_with_render_impact(ev);
+                let (changed, updates) = match ev {
+                    AppEvent::AgentActivityRefreshedFor {
+                        identity,
+                        result,
+                        insight,
+                        ..
+                    } if store => self
+                        .app
+                        .apply_agent_activity_refreshed_for(pane_id, &identity, result, insight),
+                    _ => (false, Vec::new()),
+                };
+                // 洞察带来的错误锁存了失败：与其他状态更新同样投递通知（herdr toast
+                // 要重绘）。
+                for update in &updates {
+                    self.forward_semantic_agent_notification(update);
+                    self.forward_pane_state_update_notifications_to_clients(update);
+                }
                 self.agent_activity
                     .pane_refreshed_for(pane_id, &started, changed);
-                false
+                !updates.is_empty()
             }
             AppEvent::AgentActivityReadFor {
                 pane_id,

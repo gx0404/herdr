@@ -102,7 +102,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | タブ | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
-| ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_agent_activity`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
+| ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_agent_activity`、`pane.report_agent_attention`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
 | ポップアップ | `popup.close` |
 | レイアウト | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
 | エージェント | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start`、`agent.view.set`、`agent.view.clear`、`agent.activity.read`、`agent.external.list` |
@@ -639,6 +639,49 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 短寿命のメタデータには `ttl_ms` を使ってください。`1` から `86400000` ミリ秒の間でなければなりません。置き換え・クリア・ペインまたはワークスペースのクローズまで残るべきメタデータでは省略します。表示フィールドは従来どおりソース単位で失効し、呼び出しで更新した各トークンには個別の期限が設定されます。トークンメタデータはサーバー再起動後に復元されません。
 
 フックが順不同で更新を送る可能性がある場合は `seq` を使ってください。同じ `source` について、最後に受理されたシーケンス以下のシーケンス番号を持つ報告は、API には受理されますがペイン状態には無視されます。ペインまたはワークスペースが存続する間、シーケンス付きトークン報告を送れる異なるソースは最大 32 個です。クリアや失効でもそのソース枠は解放されません。
+
+## エージェントの要対応事項とインサイト
+
+インテグレーションは、エージェントがユーザーに求めていることを `pane.report_agent_attention` で報告します。エージェント状態、待機、ロールアップは変わりません。
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.report_agent_attention",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:codex",
+    "agent": "codex",
+    "kind": "needs_input",
+    "title": "Permission",
+    "detail": "Run cargo test?",
+    "options": ["Yes", "No"],
+    "seq": 12
+  }
+}
+```
+
+`kind` は `needs_input`、`failed`、`clear` のいずれかです。`needs_input` は質問と選択肢をペインに付け、エージェントが `blocked` の間だけ表に出ます。エージェントが blocked を離れると破棄されます。`failed` は直前のターンの失敗をラッチします。`clear` は両方を消します。`title` は 200 文字、`detail` は 2000 文字、`options` は各 120 文字までの最大 8 個までで、超えると `invalid_attention` になります。制御文字は除去され(`detail` は改行とタブを保持)、空の値は省略扱いです。`options` は `needs_input` にのみ効きます。`herdr:<agent>` ソースは対応する公式インテグレーション専用で、それ以外は `invalid_source` になります。このソースの報告は `pane.report_agent` と同じペインのプロセスツリー検査を通ります。`seq` を付けた場合、同じ `source` の報告は増加していなければならず、古い番号や重複した番号は API に受理されますが無視されます。
+
+`agent.get`、`agent.list`、`session.snapshot` は結果を `AgentInfo.attention` として公開し、対応すべきことがなければ省略します:
+
+```json
+{
+  "attention": {
+    "kind": "needs_input",
+    "title": "Permission",
+    "detail": "Run cargo test?",
+    "options": ["Yes", "No"],
+    "since_ms": 1760000000000
+  }
+}
+```
+
+エージェントが blocked の間、`attention.kind` は `needs_input` です。その `detail` は最新の `needs_input` 報告、または完全ライフサイクル型インテグレーションが blocked を報告した `pane.report_agent` の `message` から取られます。それ以外では、ラッチされたまま未確認の失敗があれば `kind` は `failed` です。失敗は `failed` 報告、現在のターンより新しいセッションエラー、作業中のエージェントプロセスの終了から生じます。エージェントの作業中にラッチされた失敗は、そのターンが終わった時点で表に出ます。ラッチは、エージェントが再び作業を始めたとき、失敗の通知後にユーザーがペインのタブを見たとき、エージェントが解放または置き換えられたとき、または `clear` 報告で消えます。未知の `kind` 値は `unknown` としてデコードされます。
+
+`AgentInfo.insight` はセッションのインサイトを運びます。`session_title`、`model`、`current_tool`、`last_message`、`last_prompt`、`question`、`options`、`error` は、エージェントのソースアダプターが提供する場合に入ります。`working_since_ms`(作業中のみ)、`last_turn_ms`(直前の作業ターンの長さ)、`state_changed_at_ms` はサーバーが記録します。時刻は Unix ミリ秒です。テキストフィールドは 1 行で最大 500 文字(名前は 200 文字)、選択肢は最大 8 個です。空のフィールドは省略され、何も分からなければオブジェクトごと省略されます。
+
+エージェント通知は 1 つのポリシーに従います。blocked になると「needs attention」を通知し、アクティブなタブでもリクエスト音を鳴らします。ターンが終わると「finished」を通知しますが、タブを表示中の場合や、アイドルになる直前 1.5 秒以内にユーザーが単独の Ctrl-C または Esc でターンを中断した場合は通知しません。新たにラッチされた失敗は、リクエスト音とともに「failed」を通知します。クライアントシェルへの通知本文にはペインのコンテキストが入り、利用できる場合は質問、失敗理由、または最後のメッセージを最大 220 文字の 1 行に要約したものが続きます。
 
 ## エージェントアクティビティ
 

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 fn agent(pane_id: &str, running: u32, total: u32) -> ClientShellAgent {
     ClientShellAgent {
+        insight: Default::default(),
         pane_id: pane_id.into(),
         workspace_id: "ws_1".into(),
         tab_id: "tab_1".into(),

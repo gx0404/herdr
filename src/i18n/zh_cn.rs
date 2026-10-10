@@ -418,6 +418,8 @@ pub const TEXTS: Texts = Texts {
         agent_done_fmt: "{agent} 已完成",
         needs_attention: "需要关注",
         finished: "已完成",
+        failed: "运行失败",
+        process_exited_while_working: "运行中进程退出",
         updated: "已更新",
         title_fmt: "{agent} {event}",
         title_with_context_fmt: "{agent} {event}：{context}",
@@ -1151,6 +1153,8 @@ pub const TEXTS: Texts = Texts {
         pane_run_about: "在窗格中运行命令",
         pane_report_agent_about: "上报窗格 agent 生命周期状态",
         pane_report_agent_session_about: "上报窗格 agent 会话身份",
+        pane_report_agent_attention_about: "上报窗格 agent 需要用户处理的事（待回答、失败）或清除",
+        pane_report_agent_activity_about: "提示窗格 agent 的活动树可能变了",
         pane_release_agent_about: "释放窗格 agent 生命周期控制权",
         pane_report_metadata_about: "上报仅用于显示的窗格元数据",
         terminal_about: "attach 或观察原始终端流",
@@ -1606,6 +1610,10 @@ pub const TEXTS: Texts = Texts {
             "用法：herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]",
         pane_report_agent_session_usage:
             "用法：herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE] [-- <恢复命令...>]",
+        pane_report_agent_attention_usage:
+            "用法：herdr pane report-agent-attention [<pane_id>] --source ID --agent LABEL --kind needs_input|failed|clear [--title TEXT] [--detail TEXT] [--option TEXT]... [--seq N]（省略 pane 时取 $HERDR_PANE_ID）",
+        pane_report_agent_activity_usage:
+            "用法：herdr pane report-agent-activity [<pane_id>] --source ID --agent LABEL [--hint TEXT] [--node-id ID] [--seq N]（省略 pane 时取 $HERDR_PANE_ID）",
         pane_release_agent_usage:
             "用法：herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]",
         pane_report_metadata_usage:
@@ -1623,6 +1631,7 @@ pub const TEXTS: Texts = Texts {
         source_required: "缺少必需的 --source",
         agent_flag_required: "缺少必需的 --agent",
         state_required: "缺少必需的 --state",
+        invalid_attention_kind_fmt: "无效的待处理种类：{value}（应为 needs_input、failed 或 clear）",
         state_label_format: "应为 --state-label STATUS=TEXT",
         unknown_state_label_fmt: "未知的状态标签：{status}",
         metadata_set_clear_conflict: "不能同时设置和清除同一个元数据字段",

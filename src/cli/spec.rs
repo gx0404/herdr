@@ -715,8 +715,40 @@ fn pane_command() -> Command {
         )
         .subcommand(report_agent_command())
         .subcommand(report_agent_session_command())
+        .subcommand(report_agent_attention_command())
+        .subcommand(report_agent_activity_command())
         .subcommand(release_agent_command())
         .subcommand(report_metadata_command())
+}
+
+fn report_agent_attention_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
+    Command::new("report-agent-attention")
+        .about(t.pane_report_agent_attention_about)
+        .arg(Arg::new("pane_id").value_name("PANE_ID"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("agent", "LABEL").required(true))
+        .arg(
+            option("kind", "KIND")
+                .required(true)
+                .value_parser(["needs_input", "failed", "clear"]),
+        )
+        .arg(option("title", "TEXT"))
+        .arg(option("detail", "TEXT"))
+        .arg(repeatable_option("option", "TEXT"))
+        .arg(option("seq", "N"))
+}
+
+fn report_agent_activity_command() -> Command {
+    let t = &crate::i18n::texts().cli_help;
+    Command::new("report-agent-activity")
+        .about(t.pane_report_agent_activity_about)
+        .arg(Arg::new("pane_id").value_name("PANE_ID"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("agent", "LABEL").required(true))
+        .arg(option("hint", "TEXT"))
+        .arg(option("node-id", "ID"))
+        .arg(option("seq", "N"))
 }
 
 fn report_agent_command() -> Command {
@@ -1299,6 +1331,14 @@ mod tests {
             (&["pane", "report-agent"][..], &["source", "agent"][..]),
             (
                 &["pane", "report-agent-session"][..],
+                &["source", "agent"][..],
+            ),
+            (
+                &["pane", "report-agent-attention"][..],
+                &["source", "agent", "kind"][..],
+            ),
+            (
+                &["pane", "report-agent-activity"][..],
                 &["source", "agent"][..],
             ),
             (&["pane", "release-agent"][..], &["source", "agent"][..]),

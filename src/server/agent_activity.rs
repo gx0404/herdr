@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{
     AgentActivityContent, AgentActivityContentFormat, AgentActivityKind, AgentActivityNode,
-    AgentActivityStatus, ErrorBody, ErrorResponse, ExternalAgentInfo, Method, Request,
-    ResponseResult, SuccessResponse,
+    AgentActivityStatus, AgentInsight, ErrorBody, ErrorResponse, ExternalAgentInfo, Method,
+    Request, ResponseResult, SuccessResponse,
 };
 use crate::app::state::AgentActivitySubject;
 use crate::events::AppEvent;
@@ -120,6 +120,13 @@ pub(crate) trait ActivitySource: Send + Sync {
 
     /// 该会话下的活动节点。缺文件 / 缺字段一律降级为空或部分结果，绝不 panic。
     fn discover(&self, cx: &SourceContext<'_>) -> Result<Vec<AgentActivityNode>, SourceError>;
+
+    /// 该会话的洞察（会话标题、模型、当前工具、最后回复 / 提示、待答问题、最近错误），
+    /// 与 [`Self::discover`] 在同一次调度发现里读取。默认没有；各家适配器在阶段 2b 接入。
+    /// 失败只记 debug 日志并按没有洞察处理。
+    fn insight(&self, _cx: &SourceContext<'_>) -> Result<Option<AgentInsight>, SourceError> {
+        Ok(None)
+    }
 
     /// 读一个节点的内容片段；`cursor` 对调用方不透明。
     fn read(
@@ -218,8 +225,9 @@ fn read_node(
 
 /// 该 CLI 的配置目录，与 `integration::env` 的 `claude_dir` / `codex_dir` /
 /// `kimi_dir` 同一套规则：环境变量覆盖优先（支持 `~` 前缀），否则 `home` 下的
-/// 默认目录；未知 agent 为 `None`。`integration` 没有导出这些常量与 `~` 展开，
-/// 此处按同一规则镜像，等价性由测试钉住。
+/// 默认目录；未知 agent 为 `None`。变量名与默认目录登记在
+/// `harness::registry::HARNESSES`，解析委托 `harness::registry::config_dir`，与
+/// `integration` 的等价性由测试钉住。
 ///
 /// opencode 与 zcode 不接覆盖变量（2026-09 按官方文档与源码核实）：
 /// - opencode 官方的 `OPENCODE_CONFIG_DIR` 只额外叠加一个 agents / commands / modes /
@@ -235,38 +243,7 @@ fn read_node(
 /// `AppState::agent_activity_subject` 把活动会话引用换成匹配 agent 和 id 的路径，
 /// 适配器按已知布局定位会话库。kimi 的钩子载荷没有路径，仍需要 server 侧目录设置。
 fn agent_config_dir(agent: &str, home: &Path) -> Option<PathBuf> {
-    let (env_var, segments): (Option<&str>, &[&str]) = match agent {
-        "claude" => (Some("CLAUDE_CONFIG_DIR"), &[".claude"]),
-        "codex" => (Some("CODEX_HOME"), &[".codex"]),
-        "kimi" => (Some("KIMI_CODE_HOME"), &[".kimi-code"]),
-        "opencode" => (None, &[".config", "opencode"]),
-        "pi" => (Some("PI_CODING_AGENT_DIR"), &[".pi", "agent"]),
-        "zcode" => (None, &[".zcode", "cli"]),
-        _ => return None,
-    };
-    if let Some(value) = env_var
-        .and_then(std::env::var_os)
-        .filter(|value| !value.is_empty())
-    {
-        return Some(expand_tilde(PathBuf::from(value), home));
-    }
-    let mut dir = home.to_path_buf();
-    dir.extend(segments);
-    Some(dir)
-}
-
-/// `~` / `~/rest` / `~\rest` 展开到 `home`；其余原样。
-fn expand_tilde(path: PathBuf, home: &Path) -> PathBuf {
-    let Some(raw) = path.to_str() else {
-        return path;
-    };
-    if raw == "~" {
-        return home.to_path_buf();
-    }
-    match raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        Some(rest) => home.join(rest),
-        None => path,
-    }
+    crate::harness::registry::config_dir(agent, home)
 }
 
 /// 来源未实现（适配器回 `Unsupported`）时的应答。
@@ -893,12 +870,20 @@ impl Worker {
                 );
                 let ticket = self.tickets.take();
                 let result = discover_nodes(source, &cx).map_err(|error| error.to_string());
+                let insight = source
+                    .insight(&cx)
+                    .unwrap_or_else(|error| {
+                        tracing::debug!(?pane_id, agent = %subject.agent, %error, "agent insight read failed");
+                        None
+                    })
+                    .map(Box::new);
                 self.send_event(AppEvent::AgentActivityRefreshedFor {
                     pane_id,
                     identity: subject.identity,
                     started,
                     ticket,
                     result,
+                    insight,
                 })
             }
             Job::DiscoverExternal { sources, .. } => {
@@ -988,6 +973,7 @@ impl Worker {
                 started,
                 ticket: 0,
                 result: Err(NO_HOME.into()),
+                insight: None,
             }),
             Job::DiscoverExternal { sources, .. } => sources.iter().all(|source| {
                 self.send_event(AppEvent::ExternalAgentsRefreshed {
@@ -2969,6 +2955,7 @@ mod tests {
             started,
             ticket,
             result,
+            ..
         } = received.try_recv().expect("受控 worker 已返回发现结果")
         else {
             panic!("应为 pane 发现结果");

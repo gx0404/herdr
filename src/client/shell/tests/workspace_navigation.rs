@@ -585,6 +585,7 @@ fn agent_sidebar_state(count: usize) -> ClientShellState {
     let mut projected = snapshot();
     projected.agents = (1..=count)
         .map(|index| ClientShellAgent {
+            insight: Default::default(),
             pane_id: format!("pane_{index}"),
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1101,12 +1101,94 @@ pub struct ClientShellAgent {
     /// 该 agent 的活动树摘要；旧 server 不下发（缺省为空）。
     #[serde(default)]
     pub activity: ClientShellAgentActivity,
+    /// 会话洞察与待处理事项；旧 server 不下发（缺省为空）。
+    #[serde(default)]
+    pub insight: ClientShellAgentInsight,
 }
 
-// 以下三个结构是 API schema（`AgentActivityNode` / `ExternalAgentInfo`）的 wire
-// 镜像。本文件内不用 `skip_serializing_if`：快照仍经 legacy 变体
-// `ServerMessage::ClientShellSnapshot` 被 bincode 可达，跳过序列化会让编解码
-// 不对称；新字段一律只靠 `#[serde(default)]` 对旧 JSON 兼容。
+// 以下结构是 API schema（`AgentActivityNode` / `ExternalAgentInfo` /
+// `AgentInsight` / `AgentAttention`）的 wire 镜像。本文件内不用
+// `skip_serializing_if`：快照仍经 legacy 变体 `ServerMessage::ClientShellSnapshot`
+// 被 bincode 可达，跳过序列化会让编解码不对称；新字段一律只靠 `#[serde(default)]`
+// 对旧 JSON 兼容。
+
+/// `AgentInsight` 的 wire 镜像，另带 `AgentInfo.attention`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellAgentInsight {
+    #[serde(default)]
+    pub session_title: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub current_tool: Option<String>,
+    #[serde(default)]
+    pub last_message: Option<String>,
+    #[serde(default)]
+    pub last_prompt: Option<String>,
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub working_since_ms: Option<u64>,
+    #[serde(default)]
+    pub last_turn_ms: Option<u64>,
+    #[serde(default)]
+    pub state_changed_at_ms: Option<u64>,
+    #[serde(default)]
+    pub updated_at_ms: Option<u64>,
+    /// 需要用户处理的事（受阻待答 / 上一回合失败）。
+    #[serde(default)]
+    pub attention: Option<ClientShellAgentAttention>,
+}
+
+/// `AgentAttention` 的 wire 镜像；未知种类落 `AgentAttentionKind::Unknown`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellAgentAttention {
+    #[serde(default)]
+    pub kind: crate::api::schema::AgentAttentionKind,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+}
+
+impl ClientShellAgentInsight {
+    /// 由 API 的洞察与待处理事项投影；两者都没有时为空。
+    pub(crate) fn from_api(
+        insight: Option<crate::api::schema::AgentInsight>,
+        attention: Option<crate::api::schema::AgentAttention>,
+    ) -> Self {
+        let insight = insight.unwrap_or_default();
+        Self {
+            session_title: insight.session_title,
+            model: insight.model,
+            current_tool: insight.current_tool,
+            last_message: insight.last_message,
+            last_prompt: insight.last_prompt,
+            question: insight.question,
+            options: insight.options,
+            error: insight.error,
+            working_since_ms: insight.working_since_ms,
+            last_turn_ms: insight.last_turn_ms,
+            state_changed_at_ms: insight.state_changed_at_ms,
+            updated_at_ms: insight.updated_at_ms,
+            attention: attention.map(|attention| ClientShellAgentAttention {
+                kind: attention.kind,
+                title: attention.title,
+                detail: attention.detail,
+                options: attention.options,
+                since_ms: attention.since_ms,
+            }),
+        }
+    }
+}
 
 /// 一个 agent 的活动树摘要。计数都是截断前的（来源给出的整棵树）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3058,6 +3140,40 @@ mod tests {
         let (decoded, _): ((ClientShellAgentActivity, ClientShellExternalAgent), _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(decoded, (activity, external));
+    }
+
+    /// 洞察镜像同样不跳过序列化：空值与满值都经 bincode 原样往返。
+    #[test]
+    fn client_shell_insight_mirror_roundtrips_through_bincode() {
+        let full = ClientShellAgentInsight {
+            session_title: Some("fix login".into()),
+            model: Some("gpt-5".into()),
+            current_tool: Some("Shell cargo test".into()),
+            last_message: Some("done".into()),
+            last_prompt: Some("run tests".into()),
+            question: Some("retry?".into()),
+            options: vec!["yes".into(), "no".into()],
+            error: Some("rate limited".into()),
+            working_since_ms: Some(1),
+            last_turn_ms: Some(2),
+            state_changed_at_ms: Some(3),
+            updated_at_ms: Some(4),
+            attention: Some(ClientShellAgentAttention {
+                kind: crate::api::schema::AgentAttentionKind::Failed,
+                title: Some("failed".into()),
+                detail: Some("process exited".into()),
+                options: Vec::new(),
+                since_ms: Some(5),
+            }),
+        };
+        for insight in [ClientShellAgentInsight::default(), full] {
+            let encoded =
+                bincode::serde::encode_to_vec(&insight, bincode::config::standard()).unwrap();
+            let (decoded, consumed): (ClientShellAgentInsight, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(consumed, encoded.len());
+            assert_eq!(decoded, insight);
+        }
     }
 
     #[test]

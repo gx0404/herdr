@@ -68,10 +68,12 @@ impl App {
                 pane_id,
                 identity,
                 result,
+                insight,
                 ..
             } => {
-                self.state.agent_activity_is_current(pane_id, &identity)
-                    && self.apply_agent_activity_refresh(pane_id, result)
+                let (changed, updates) =
+                    self.apply_agent_activity_refreshed_for(pane_id, &identity, result, insight);
+                changed || !updates.is_empty()
             }
             AppEvent::AgentActivityReadFor {
                 pane_id,
@@ -138,6 +140,33 @@ impl App {
             });
         }
         applied.summary_changed
+    }
+
+    /// 一次调度发现的结果（活动树 + 会话洞察）落库；入队时的身份已过期则丢弃。返回
+    /// （随快照下发的内容是否变化，洞察锁存失败时该 pane 的状态更新——调用方据此发
+    /// 「失败」通知）。
+    pub(crate) fn apply_agent_activity_refreshed_for(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        identity: &crate::app::state::AgentActivityIdentity,
+        result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
+        insight: Option<Box<crate::api::schema::AgentInsight>>,
+    ) -> (bool, Vec<crate::app::actions::PaneStateUpdate>) {
+        if !self.state.agent_activity_is_current(pane_id, identity) {
+            return (false, Vec::new());
+        }
+        let tree_changed = self.apply_agent_activity_refresh(pane_id, result);
+        let previous_toast = self.state.toast.clone();
+        let (insight_changed, update) = self
+            .state
+            .apply_agent_insight(pane_id, insight.map(|insight| *insight));
+        let updates = update.into_iter().collect::<Vec<_>>();
+        for update in &updates {
+            self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
+            self.emit_pane_state_update(update);
+        }
+        self.sync_toast_deadline(previous_toast);
+        (tree_changed || insight_changed, updates)
     }
 
     /// 一个外部来源的后台刷新结果整源落库。失败结果保留旧条目（过期由
@@ -229,13 +258,13 @@ impl App {
             pane_id,
             identity,
             result,
+            insight,
             ..
         } = ev
         {
-            if self.state.agent_activity_is_current(pane_id, &identity) {
-                self.apply_agent_activity_refresh(pane_id, result);
-            }
-            return Vec::new();
+            return self
+                .apply_agent_activity_refreshed_for(pane_id, &identity, result, insight)
+                .1;
         }
         if let AppEvent::AgentActivityReadFor {
             pane_id,
@@ -908,7 +937,7 @@ impl App {
         if self.state.toast != previous_toast {
             self.toast_deadline = self.state.toast.as_ref().map(|toast| {
                 let duration = match toast.kind {
-                    ToastKind::NeedsAttention => Duration::from_secs(8),
+                    ToastKind::NeedsAttention | ToastKind::Failed => Duration::from_secs(8),
                     ToastKind::Finished => Duration::from_secs(5),
                     ToastKind::UpdateInstalled => Duration::from_secs(3),
                 };
@@ -1392,6 +1421,9 @@ impl App {
             }
             Method::PaneReportAgentActivity(params) => {
                 return self.handle_pane_report_agent_activity(request.id, params);
+            }
+            Method::PaneReportAgentAttention(params) => {
+                return self.handle_pane_report_agent_attention(request.id, params);
             }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);

@@ -418,6 +418,39 @@ pub struct PaneReportAgentActivityParams {
     pub seq: Option<u64>,
 }
 
+/// `pane.report_agent_attention` 上报的种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneAgentAttentionKind {
+    /// agent 在等用户回答或批准：带问题（`detail`）与选项，只在 agent 受阻时露面。
+    NeedsInput,
+    /// 上一回合失败：锁存到用户看过该 pane、agent 重新开始工作或集成清除。
+    Failed,
+    /// 清除这个 pane 已上报的待处理事项。
+    Clear,
+}
+
+/// 集成上报「agent 需要用户处理的事」。只更新 `AgentInfo.attention`，不改 agent 状态。
+/// `herdr:<agent>` 来源只能由对应的官方集成使用；带 `seq` 时按来源单调递增取舍，与
+/// `pane.report_agent` 同口径。`title` 最多 200 个字符、`detail` 最多 2000 个字符、
+/// `options` 最多 8 个且每个最多 120 个字符，超出即 `invalid_attention`；`options` 只对
+/// `needs_input` 有效。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportAgentAttentionParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    pub kind: PaneAgentAttentionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReportMetadataParams {
     pub pane_id: String,

@@ -42,85 +42,6 @@ pub fn active_tab_suppresses_notifications(
     is_active_tab && outer_terminal_focus != Some(false)
 }
 
-pub fn notification_sound_for_state_change(
-    suppress_active_tab_notifications: bool,
-    prev_state: AgentState,
-    new_state: AgentState,
-) -> Option<crate::sound::Sound> {
-    if new_state == prev_state {
-        return None;
-    }
-
-    match new_state {
-        AgentState::Blocked => Some(crate::sound::Sound::Request),
-        AgentState::Idle
-            if is_background_completion_transition(prev_state, new_state)
-                && !suppress_active_tab_notifications =>
-        {
-            Some(crate::sound::Sound::Done)
-        }
-        _ => None,
-    }
-}
-
-fn notification_sound_for_effective_state_change(
-    suppress_active_tab_notifications: bool,
-    change: &EffectiveStateChange,
-) -> Option<crate::sound::Sound> {
-    notification_sound_for_state_change(
-        suppress_active_tab_notifications,
-        change.previous_state,
-        change.state,
-    )
-}
-
-pub fn notification_toast_for_state_change(
-    suppress_active_tab_notifications: bool,
-    prev_state: AgentState,
-    new_state: AgentState,
-) -> Option<ToastKind> {
-    if suppress_active_tab_notifications || new_state == prev_state {
-        return None;
-    }
-
-    match new_state {
-        AgentState::Blocked => Some(ToastKind::NeedsAttention),
-        AgentState::Idle if is_background_completion_transition(prev_state, new_state) => {
-            Some(ToastKind::Finished)
-        }
-        _ => None,
-    }
-}
-
-fn notification_toast_for_effective_state_change(
-    suppress_active_tab_notifications: bool,
-    change: &EffectiveStateChange,
-) -> Option<ToastKind> {
-    notification_toast_for_state_change(
-        suppress_active_tab_notifications,
-        change.previous_state,
-        change.state,
-    )
-}
-
-pub fn notification_toast_for_pane_state_update(
-    suppress_active_tab_notifications: bool,
-    update: &PaneStateUpdate,
-) -> Option<ToastKind> {
-    if update.suppress_completion
-        || suppress_active_tab_notifications
-        || update.state == update.previous_state
-    {
-        return None;
-    }
-
-    notification_toast_for_state_change(
-        suppress_active_tab_notifications,
-        update.previous_state,
-        update.state,
-    )
-}
-
 fn toast_agent_label(agent_label: &str) -> &str {
     agent_label
 }
@@ -130,21 +51,23 @@ pub(crate) fn toast_event_text(kind: ToastKind) -> &'static str {
     match kind {
         ToastKind::NeedsAttention => notify.needs_attention,
         ToastKind::Finished => notify.finished,
+        ToastKind::Failed => notify.failed,
         ToastKind::UpdateInstalled => notify.updated,
     }
 }
 
+/// 延迟投递的通知按投递时刻的 tab 状态取声音，规则同 `server::attention::sound_for`。
 fn sound_for_toast_kind(
     kind: ToastKind,
     suppress_active_tab_notifications: bool,
 ) -> Option<crate::sound::Sound> {
-    match kind {
-        ToastKind::NeedsAttention => Some(crate::sound::Sound::Request),
-        ToastKind::Finished if !suppress_active_tab_notifications => {
-            Some(crate::sound::Sound::Done)
-        }
-        ToastKind::Finished | ToastKind::UpdateInstalled => None,
-    }
+    let kind = match kind {
+        ToastKind::NeedsAttention => crate::server::attention::AttentionKind::NeedsAttention,
+        ToastKind::Finished => crate::server::attention::AttentionKind::Finished,
+        ToastKind::Failed => crate::server::attention::AttentionKind::Failed,
+        ToastKind::UpdateInstalled => return None,
+    };
+    crate::server::attention::sound_for(kind, suppress_active_tab_notifications)
 }
 
 pub fn notification_context(
@@ -182,6 +105,29 @@ pub struct PaneStateUpdate {
     pub agent_released: bool,
     pub agent_release_status: Option<crate::api::schema::AgentStatus>,
     pub suppress_completion: bool,
+    /// 完成迁移紧跟用户中断（单独的 Ctrl-C / ESC），不发「已完成」。
+    pub interrupted: bool,
+    /// 这次更新新锁存了一次失败（要发「失败」通知）。
+    pub failed: bool,
+}
+
+impl PaneStateUpdate {
+    /// 这次更新的通知决策输入（`server::attention::decide`）。
+    pub(crate) fn attention_input<'a>(
+        &self,
+        suppress_active_tab: bool,
+        body: Option<&'a str>,
+    ) -> crate::server::attention::AttentionInput<'a> {
+        crate::server::attention::AttentionInput {
+            previous_state: self.previous_state,
+            state: self.state,
+            suppress_active_tab,
+            suppress_completion: self.suppress_completion,
+            interrupted_recently: self.interrupted,
+            failed_latched: self.failed,
+            body,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +253,7 @@ impl AppState {
                     .get_mut(&terminal_id)?
                     .expire_agent_metadata_at(scheduled_deadline, now)?;
                 let change = mutation.effective_state_change?;
-                let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, false)?;
+                let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, false, false)?;
                 let update = PaneStateUpdate {
                     pane_id,
                     ws_idx,
@@ -325,6 +271,8 @@ impl AppState {
                     agent_released: false,
                     agent_release_status: None,
                     suppress_completion: false,
+                    interrupted: change.interrupted,
+                    failed: false,
                 };
                 Some(update)
             })
@@ -399,6 +347,7 @@ impl AppState {
                 let tab_id =
                     public_tab_id_for_index(ws, active_tab).unwrap_or_else(|| workspace_id.clone());
                 crate::logging::tab_focused(&workspace_id, &tab_id);
+                self.acknowledge_tab_attention(idx, active_tab);
             }
             self.record_pane_focus_after_navigation(previous_focus);
         }
@@ -430,6 +379,7 @@ impl AppState {
             let tab_id =
                 public_tab_id_for_index(ws, tab_idx).unwrap_or_else(|| workspace_id.clone());
             crate::logging::tab_focused(&workspace_id, &tab_id);
+            self.acknowledge_tab_attention(ws_idx, tab_idx);
         }
         self.record_pane_focus_after_navigation(previous_focus);
         true
@@ -470,7 +420,31 @@ impl AppState {
                 changed = true;
             }
         }
-        changed
+        let active_tab = self.workspaces[ws_idx].active_tab;
+        self.acknowledge_tab_attention(ws_idx, active_tab) || changed
+    }
+
+    /// 用户看到了这个 tab（`seen` 置位的同一时刻）：确认其中各 pane 已经通知过的失败。
+    /// 有确认时递增投影纪元（待处理事项随快照下发）。
+    fn acknowledge_tab_attention(&mut self, ws_idx: usize, tab_idx: usize) -> bool {
+        let AppState {
+            workspaces,
+            terminals,
+            ..
+        } = self;
+        let Some(tab) = workspaces.get(ws_idx).and_then(|ws| ws.tabs.get(tab_idx)) else {
+            return false;
+        };
+        let mut acknowledged = false;
+        for pane in tab.panes.values() {
+            if let Some(terminal) = terminals.get_mut(&pane.attached_terminal_id) {
+                acknowledged |= terminal.acknowledge_attention();
+            }
+        }
+        if acknowledged {
+            self.bump_projection_epoch();
+        }
+        acknowledged
     }
 
     pub fn move_workspace(&mut self, source_idx: usize, insert_idx: usize) -> bool {
@@ -1598,6 +1572,39 @@ impl AppState {
                 .into_iter()
                 .collect()
             }
+            AppEvent::AgentAttentionReported {
+                pane_id,
+                source,
+                agent_label,
+                seq,
+                report,
+            } => {
+                if matches!(report, crate::terminal::AttentionReport::Failed { .. }) {
+                    // 失败要发通知：走状态更新的同一个漏斗（只锁存，不改状态）。
+                    self.update_terminal_state(pane_id, |terminal| {
+                        terminal
+                            .report_attention(&source, &agent_label, seq, report)
+                            .then(TerminalStateMutation::default)
+                    })
+                    .into_iter()
+                    .collect()
+                } else {
+                    let changed = self
+                        .workspaces
+                        .iter()
+                        .find_map(|ws| ws.pane_state(pane_id))
+                        .map(|pane| pane.attached_terminal_id.clone())
+                        .and_then(|terminal_id| self.terminals.get_mut(&terminal_id))
+                        .is_some_and(|terminal| {
+                            terminal.report_attention(&source, &agent_label, seq, report)
+                        });
+                    if changed {
+                        // 待处理事项随快照下发（HSR-05 写入点）。
+                        self.bump_projection_epoch();
+                    }
+                    Vec::new()
+                }
+            }
             AppEvent::AgentActivityHinted {
                 pane_id,
                 source,
@@ -1634,19 +1641,24 @@ impl AppState {
                 pane_id,
                 identity,
                 result,
+                insight,
                 ..
             } => {
-                if self.agent_activity_is_current(pane_id, &identity) {
-                    match result {
-                        Ok(nodes) => {
-                            self.apply_agent_activity(pane_id, nodes, Instant::now());
-                        }
-                        Err(error) => {
-                            tracing::debug!(?pane_id, %error, "agent activity refresh failed");
-                        }
+                if !self.agent_activity_is_current(pane_id, &identity) {
+                    return Vec::new();
+                }
+                match result {
+                    Ok(nodes) => {
+                        self.apply_agent_activity(pane_id, nodes, Instant::now());
+                    }
+                    Err(error) => {
+                        tracing::debug!(?pane_id, %error, "agent activity refresh failed");
                     }
                 }
-                Vec::new()
+                self.apply_agent_insight(pane_id, insight.map(|insight| *insight))
+                    .1
+                    .into_iter()
+                    .collect()
             }
             AppEvent::AgentActivityReadFor {
                 pane_id,
@@ -1806,6 +1818,29 @@ impl AppState {
         }
     }
 
+    /// 一次发现读到的会话洞察：落库；洞察带的错误晚于本回合开始且 agent 不在工作时
+    /// 锁存一次失败。返回（投影是否变化，锁存失败时该 pane 的状态更新——要发「失败」
+    /// 通知）。
+    pub(crate) fn apply_agent_insight(
+        &mut self,
+        pane_id: PaneId,
+        insight: Option<crate::api::schema::AgentInsight>,
+    ) -> (bool, Option<PaneStateUpdate>) {
+        let changed = self.store_agent_insight(pane_id, insight);
+        let error = self
+            .agent_activity
+            .insight(pane_id)
+            .and_then(|insight| Some((insight.error.clone()?, insight.updated_at_ms)));
+        let update = error.and_then(|(error, at_ms)| {
+            self.update_terminal_state(pane_id, |terminal| {
+                terminal
+                    .observe_insight_error(&error, at_ms)
+                    .then(TerminalStateMutation::default)
+            })
+        });
+        (changed, update)
+    }
+
     fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
@@ -1839,11 +1874,14 @@ impl AppState {
             unchanged_change,
             suppress_acquisition_completion,
             completion_reset,
+            failure_notice,
+            attention_changed,
         ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
             let had_completion = terminal.last_agent_completion_seq.is_some() || !previous_seen;
             let resume_revision = terminal.reported_resume_revision();
+            let attention_revision = terminal.attention_revision();
             let mutation = update(terminal);
             terminal.reconcile_reported_resume();
             // Resume-only changes return no mutation but must still be saved.
@@ -1862,9 +1900,14 @@ impl AppState {
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let suppress_acquisition_completion = terminal.finish_agent_process_acquisition();
             let agent_name_changed = terminal.agent_name != previous_agent_name;
+            // 新锁存（或 Working 期间锁存、此刻回合结束）的失败只通知一次；状态没变时也
+            // 要产出一次更新，让各路通知照常投递。
+            let failure_notice = terminal.take_failure_notice();
+            let attention_changed = terminal.attention_revision() != attention_revision;
             let unchanged_change = (mutation.agent_released
                 || agent_name_changed
-                || (completion_reset && had_completion))
+                || (completion_reset && had_completion)
+                || failure_notice)
                 .then(|| terminal.unchanged_effective_state_change_at(now));
             (
                 mutation,
@@ -1873,8 +1916,14 @@ impl AppState {
                 unchanged_change,
                 suppress_acquisition_completion,
                 completion_reset,
+                failure_notice,
+                attention_changed,
             )
         };
+        if attention_changed {
+            // 待处理事项随快照下发（HSR-05 写入点）。
+            self.bump_projection_epoch();
+        }
         if completion_reset
             || mutation.agent_released
             || mutation
@@ -1920,7 +1969,13 @@ impl AppState {
         if launch_changed {
             self.bump_projection_epoch();
         }
-        let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, suppress_completion)?;
+        let seen = self.apply_pane_state_change(
+            ws_idx,
+            pane_id,
+            &change,
+            suppress_completion,
+            failure_notice,
+        )?;
         let update = PaneStateUpdate {
             pane_id,
             ws_idx,
@@ -1946,6 +2001,8 @@ impl AppState {
             agent_released,
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
             suppress_completion,
+            interrupted: change.interrupted,
+            failed: failure_notice,
         };
         Some(update)
     }
@@ -1991,6 +2048,7 @@ impl AppState {
         pane_id: PaneId,
         change: &EffectiveStateChange,
         suppress_completion: bool,
+        failure_notice: bool,
     ) -> Option<bool> {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
@@ -2009,7 +2067,7 @@ impl AppState {
 
         if !suppress_completion {
             if let Some(delivery) =
-                self.record_or_deliver_agent_notification(ws_idx, pane_id, change)
+                self.record_or_deliver_agent_notification(ws_idx, pane_id, change, failure_notice)
             {
                 self.apply_agent_notification_delivery(&delivery);
             }
@@ -2023,6 +2081,7 @@ impl AppState {
         ws_idx: usize,
         pane_id: PaneId,
         change: &EffectiveStateChange,
+        failure_notice: bool,
     ) -> Option<AgentNotificationDelivery> {
         self.pending_agent_notifications.remove(&pane_id);
 
@@ -2030,27 +2089,27 @@ impl AppState {
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
 
-        let client_notification_kind = notification_toast_for_effective_state_change(
-            suppress_active_tab_notifications,
-            change,
-        );
-        let sound = notification_sound_for_effective_state_change(
-            suppress_active_tab_notifications,
-            change,
-        );
-        if client_notification_kind.is_none() && sound.is_none() {
+        // herdr toast 只有标题与上下文，不带正文摘要。
+        let decision =
+            crate::server::attention::decide(&crate::server::attention::AttentionInput {
+                previous_state: change.previous_state,
+                state: change.state,
+                suppress_active_tab: suppress_active_tab_notifications,
+                suppress_completion: false,
+                interrupted_recently: change.interrupted,
+                failed_latched: failure_notice,
+                body: None,
+            });
+        if decision.toast.is_none() && decision.sound.is_none() {
             return None;
         }
+        let kind = decision.kind?.toast_kind();
 
         let agent_label = change
             .agent_label
             .clone()
             .or_else(|| change.previous_agent_label.clone())?;
         let known_agent = change.known_agent.or(change.previous_known_agent);
-        let kind = client_notification_kind.unwrap_or(match sound {
-            Some(crate::sound::Sound::Request) => ToastKind::NeedsAttention,
-            Some(crate::sound::Sound::Done) | None => ToastKind::Finished,
-        });
         let workspace_id = self.workspaces[ws_idx].id.clone();
 
         if self.toast_config.delay_seconds == 0 {
@@ -3693,10 +3752,27 @@ mod tests {
         assert!(!exit_update.suppress_completion);
     }
 
+    fn notification_sound(
+        suppress_active_tab: bool,
+        previous_state: AgentState,
+        state: AgentState,
+    ) -> Option<crate::sound::Sound> {
+        crate::server::attention::decide(&crate::server::attention::AttentionInput {
+            previous_state,
+            state,
+            suppress_active_tab,
+            suppress_completion: false,
+            interrupted_recently: false,
+            failed_latched: false,
+            body: None,
+        })
+        .sound
+    }
+
     #[test]
     fn waiting_sound_plays_even_in_active_workspace() {
         assert_eq!(
-            notification_sound_for_state_change(true, AgentState::Working, AgentState::Blocked),
+            notification_sound(true, AgentState::Working, AgentState::Blocked),
             Some(crate::sound::Sound::Request)
         );
     }
@@ -3704,17 +3780,111 @@ mod tests {
     #[test]
     fn done_sound_only_plays_in_background() {
         assert_eq!(
-            notification_sound_for_state_change(false, AgentState::Working, AgentState::Idle),
+            notification_sound(false, AgentState::Working, AgentState::Idle),
             Some(crate::sound::Sound::Done)
         );
         assert_eq!(
-            notification_sound_for_state_change(true, AgentState::Working, AgentState::Idle),
+            notification_sound(true, AgentState::Working, AgentState::Idle),
             None
         );
         assert_eq!(
-            notification_sound_for_state_change(false, AgentState::Unknown, AgentState::Idle),
+            notification_sound(false, AgentState::Unknown, AgentState::Idle),
             None
         );
+    }
+
+    #[test]
+    fn failed_attention_report_toasts_once_and_is_acknowledged_by_viewing_the_tab() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        let failed = || AppEvent::AgentAttentionReported {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            seq: None,
+            report: crate::terminal::AttentionReport::Failed {
+                title: None,
+                detail: Some("boom".into()),
+            },
+        };
+
+        let epoch = state.projection_epoch;
+        let update = state
+            .handle_app_event(failed())
+            .pop()
+            .expect("失败锁存产出一次更新");
+        assert!(update.failed);
+        assert_eq!(update.previous_state, update.state, "不改状态");
+        assert_ne!(state.projection_epoch, epoch, "待处理事项进投影");
+        let toast = state.toast.as_ref().expect("后台失败弹 toast");
+        assert_eq!(toast.kind, ToastKind::Failed);
+        assert_eq!(
+            toast.title,
+            format!("pi {}", crate::i18n::texts().notify.failed)
+        );
+        assert!(
+            state.handle_app_event(failed()).is_empty(),
+            "同一失败不再通知"
+        );
+
+        let terminal_id = state.workspaces[1].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        assert!(state.terminals[&terminal_id].agent_attention().is_some());
+        let epoch = state.projection_epoch;
+        state.switch_workspace(1);
+        assert_eq!(
+            state.terminals[&terminal_id].agent_attention(),
+            None,
+            "看到这个 tab 时确认失败"
+        );
+        assert_ne!(state.projection_epoch, epoch);
+    }
+
+    #[test]
+    fn needs_input_attention_report_never_changes_state() {
+        let mut state = app_with_workspaces(&["one"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        let epoch = state.projection_epoch;
+        let updates = state.handle_app_event(AppEvent::AgentAttentionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: Some(1),
+            report: crate::terminal::AttentionReport::NeedsInput {
+                title: None,
+                detail: Some("Allow Bash(cargo test)?".into()),
+                options: vec!["Yes".into(), "No".into()],
+            },
+        });
+        assert!(updates.is_empty(), "载荷不产出状态更新");
+        assert_ne!(state.projection_epoch, epoch);
+        let terminal =
+            &state.terminals[&state.workspaces[0].tabs[0].panes[&pane_id].attached_terminal_id];
+        assert_eq!(terminal.state, AgentState::Blocked);
+        let attention = terminal.agent_attention().expect("受阻时露面");
+        assert_eq!(attention.detail.as_deref(), Some("Allow Bash(cargo test)?"));
+        assert_eq!(attention.options, ["Yes", "No"]);
     }
 
     #[test]
@@ -4900,9 +5070,11 @@ mod tests {
             update.agent_release_status,
             Some(crate::api::schema::AgentStatus::Done)
         );
+        // 工作中的 agent 随 pane 进程退出算一次失败：通知「失败」而不是「已完成」。
+        assert!(update.failed);
         assert!(matches!(
             state.toast.as_ref().map(|toast| toast.kind),
-            Some(ToastKind::Finished)
+            Some(ToastKind::Failed)
         ));
     }
 

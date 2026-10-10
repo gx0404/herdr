@@ -32,6 +32,7 @@ pub(crate) fn report_target(method: &Method) -> Option<ReportTarget<'_>> {
         Method::PaneReportAgent(params) => (&params.pane_id, Some(&params.source)),
         Method::PaneReportAgentSession(params) => (&params.pane_id, Some(&params.source)),
         Method::PaneReportAgentActivity(params) => (&params.pane_id, Some(&params.source)),
+        Method::PaneReportAgentAttention(params) => (&params.pane_id, Some(&params.source)),
         Method::PaneReportMetadata(params) => (&params.pane_id, Some(&params.source)),
         Method::PaneClearAgentAuthority(params) => (&params.pane_id, params.source.as_ref()),
         Method::PaneReleaseAgent(params) => (&params.pane_id, Some(&params.source)),
@@ -243,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn all_six_pane_report_methods_are_checked() {
+    fn all_seven_pane_report_methods_are_checked() {
         for method in [
             "pane.report_agent",
             "pane.report_agent_session",
@@ -251,12 +252,14 @@ mod tests {
             "pane.clear_agent_authority",
             "pane.release_agent",
             "pane.report_agent_activity",
+            "pane.report_agent_attention",
         ] {
             for source in ["herdr:claude", "herdr:pi", "custom:wrapper"] {
                 let request: crate::api::schema::Request =
                     serde_json::from_value(serde_json::json!({
                         "id": "test", "method": method, "params": {
-                            "pane_id": "w1:p1", "source": source, "agent": "pi", "state": "working"
+                            "pane_id": "w1:p1", "source": source, "agent": "pi",
+                            "state": "working", "kind": "needs_input"
                         }
                     }))
                     .unwrap();

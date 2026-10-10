@@ -264,6 +264,10 @@ fn snapshot_parts(
                 tokens,
                 focused,
                 launch_seq: agent.launch_seq,
+                insight: protocol::ClientShellAgentInsight::from_api(
+                    agent.insight,
+                    agent.attention,
+                ),
                 activity: stored_activity[owner].map_or_else(Default::default, |stored| {
                     activity_projection(
                         &stored.counts,
@@ -1183,6 +1187,73 @@ mod agent_activity_tests {
             seqs,
             vec![(Some("claude".into()), 1), (Some("pi".into()), 2)]
         );
+    }
+
+    /// 快照里的洞察带 server 记录的回合计时与待处理事项；适配器读到的洞察截断后合入，
+    /// 洞察与待处理事项的变化都递增投影纪元（快照才会重建）。
+    #[test]
+    fn snapshot_carries_turn_timing_insight_and_attention() {
+        let mut app = app_with_panes(&["first"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        detect(&mut app, pane_id, Agent::Claude);
+        let working = snapshot(&app, "boot", 1, None, None);
+        let insight = &working.agents[0].insight;
+        assert!(insight.working_since_ms.is_some(), "Working 时带开始时刻");
+        assert!(insight.state_changed_at_ms.is_some());
+        assert_eq!(insight.attention, None);
+
+        let epoch = app.state.projection_epoch;
+        let reported = crate::api::schema::AgentInsight {
+            model: Some("opus\n  4".into()),
+            question: Some("x".repeat(900)),
+            options: (0..12).map(|index| format!("option {index}")).collect(),
+            working_since_ms: Some(1),
+            ..crate::api::schema::AgentInsight::default()
+        };
+        let (changed, update) = app
+            .state
+            .apply_agent_insight(pane_id, Some(reported.clone()));
+        assert!(changed);
+        assert!(update.is_none(), "没有错误就不锁存失败");
+        assert_ne!(app.state.projection_epoch, epoch, "洞察进投影");
+        let epoch = app.state.projection_epoch;
+        assert!(!app.state.apply_agent_insight(pane_id, Some(reported)).0);
+        assert_eq!(app.state.projection_epoch, epoch, "同样的洞察不递增纪元");
+
+        app.handle_internal_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        app.handle_internal_event(AppEvent::AgentAttentionReported {
+            pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            seq: None,
+            report: crate::terminal::AttentionReport::NeedsInput {
+                title: Some("Permission".into()),
+                detail: Some("Allow Bash(cargo test)?".into()),
+                options: vec!["Yes".into(), "No".into()],
+            },
+        });
+        let blocked = snapshot(&app, "boot", 2, None, None);
+        let insight = &blocked.agents[0].insight;
+        assert_eq!(insight.model.as_deref(), Some("opus 4"), "文本压成一行");
+        assert!(insight.question.as_ref().unwrap().chars().count() <= 500);
+        assert_eq!(insight.options.len(), 8, "选项最多 8 个");
+        assert_eq!(insight.working_since_ms, None, "回合计时只认 server 记录");
+        assert!(insight.last_turn_ms.is_some());
+        let attention = insight.attention.as_ref().expect("受阻时的待处理事项");
+        assert_eq!(
+            attention.kind,
+            crate::api::schema::AgentAttentionKind::NeedsInput
+        );
+        assert_eq!(attention.title.as_deref(), Some("Permission"));
+        assert_eq!(attention.options, ["Yes", "No"]);
     }
 
     fn snapshot_with_activity() -> crate::protocol::ClientShellSnapshot {

@@ -548,6 +548,10 @@ pub struct NotifyTexts {
     pub agent_done_fmt: &'static str,
     pub needs_attention: &'static str,
     pub finished: &'static str,
+    /// agent 上一回合失败（集成上报、会话错误或运行中进程退出）。
+    pub failed: &'static str,
+    /// 失败详情：agent 进程在工作中退出。
+    pub process_exited_while_working: &'static str,
     pub updated: &'static str,
     pub title_fmt: &'static str,
     pub title_with_context_fmt: &'static str,
@@ -1460,6 +1464,8 @@ pub struct CliHelpTexts {
     pub pane_run_about: &'static str,
     pub pane_report_agent_about: &'static str,
     pub pane_report_agent_session_about: &'static str,
+    pub pane_report_agent_attention_about: &'static str,
+    pub pane_report_agent_activity_about: &'static str,
     pub pane_release_agent_about: &'static str,
     pub pane_report_metadata_about: &'static str,
     pub terminal_about: &'static str,
@@ -1908,6 +1914,8 @@ pub struct CliErrorTexts {
     pub pane_wait_output_usage: &'static str,
     pub pane_report_agent_usage: &'static str,
     pub pane_report_agent_session_usage: &'static str,
+    pub pane_report_agent_attention_usage: &'static str,
+    pub pane_report_agent_activity_usage: &'static str,
     pub pane_release_agent_usage: &'static str,
     pub pane_report_metadata_usage: &'static str,
     pub invalid_amount_fmt: &'static str, // args: value
@@ -1923,6 +1931,7 @@ pub struct CliErrorTexts {
     pub source_required: &'static str,
     pub agent_flag_required: &'static str,
     pub state_required: &'static str,
+    pub invalid_attention_kind_fmt: &'static str, // args: value
     pub state_label_format: &'static str,
     pub unknown_state_label_fmt: &'static str, // args: status
     pub metadata_set_clear_conflict: &'static str,

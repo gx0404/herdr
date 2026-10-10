@@ -102,7 +102,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | 标签页 | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
-| 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_agent_activity`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
+| 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_agent_activity`、`pane.report_agent_attention`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
 | 弹窗 | `popup.close` |
 | 布局 | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
 | 智能体 | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start`、`agent.view.set`、`agent.view.clear`、`agent.activity.read`、`agent.external.list` |
@@ -635,6 +635,49 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 短期元数据用 `ttl_ms`。取值必须在 `1` 到 `86400000` 毫秒之间。想让元数据保留到被替换、清除或窗格或工作区关闭时,省略 `ttl_ms`。展示字段继续按来源过期;该次调用更新的每个令牌都有独立期限。令牌元数据不会在服务器重启后恢复。
 
 钩子可能乱序发送更新时,使用 `seq`。对同一 `source`,序号小于等于最后接受序号的上报会被 API 接受,但被窗格状态忽略。每个窗格或工作区在其生命周期内最多接受来自 32 个不同来源的带序号令牌上报;清除或过期不会释放这些来源名额。
+
+## 智能体待处理事项与洞察
+
+集成用 `pane.report_agent_attention` 上报智能体需要用户处理的事。它从不改变智能体状态、等待和汇总。
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.report_agent_attention",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:codex",
+    "agent": "codex",
+    "kind": "needs_input",
+    "title": "Permission",
+    "detail": "Run cargo test?",
+    "options": ["Yes", "No"],
+    "seq": 12
+  }
+}
+```
+
+`kind` 取 `needs_input`、`failed` 或 `clear`。`needs_input` 把问题和选项挂到窗格上,只在智能体处于 `blocked` 时露面,智能体离开受阻状态时丢弃。`failed` 锁存上一回合的失败。`clear` 清掉两者。`title` 最多 200 个字符,`detail` 最多 2000 个字符,`options` 最多 8 个、每个最多 120 个字符;超出即 `invalid_attention`。控制字符会被移除(`detail` 保留换行和制表符),空值视为未提供。`options` 只对 `needs_input` 有效。`herdr:<agent>` 来源只能由对应的官方集成使用,否则返回 `invalid_source`;这类来源的上报和 `pane.report_agent` 一样要通过窗格进程树校验。带 `seq` 时,同一 `source` 的上报必须递增,更旧或重复的序号会被 API 接受但被忽略。
+
+`agent.get`、`agent.list` 和 `session.snapshot` 把结果公开为 `AgentInfo.attention`,没有要处理的事时省略:
+
+```json
+{
+  "attention": {
+    "kind": "needs_input",
+    "title": "Permission",
+    "detail": "Run cargo test?",
+    "options": ["Yes", "No"],
+    "since_ms": 1760000000000
+  }
+}
+```
+
+智能体受阻时,`attention.kind` 是 `needs_input`,其 `detail` 来自最近一次 `needs_input` 上报,或完整生命周期集成上报受阻时 `pane.report_agent` 携带的 `message`。其余时候,有已锁存且尚未被看过的失败时 `kind` 是 `failed`。失败来自 `failed` 上报、晚于当前回合开始的会话错误,或智能体进程在工作中退出。智能体工作期间锁存的失败在这一回合结束时才露面。智能体重新开始工作、失败已通知后用户看到该窗格所在的标签页、智能体被释放或替换、或收到 `clear` 上报时,锁存清除。未知的 `kind` 值解码为 `unknown`。
+
+`AgentInfo.insight` 携带会话洞察:`session_title`、`model`、`current_tool`、`last_message`、`last_prompt`、`question`、`options` 和 `error` 在智能体的来源适配器提供时填入;`working_since_ms`(只在工作时)、`last_turn_ms`(上一个工作回合的时长)和 `state_changed_at_ms` 由服务器记录。时间是 Unix 毫秒。文本字段是单行,最多 500 个字符(名称类 200 个字符),选项最多 8 个。空字段省略,什么都不知道时整个对象省略。
+
+智能体通知遵循同一套策略。受阻时通知「需要关注」,即使在当前标签页也播放请求音。一回合结束时通知「已完成」,但标签页正被查看时,或用户在进入空闲前 1.5 秒内单独按下 Ctrl-C 或 Esc 中断了这一回合时不通知。新锁存的失败以请求音通知「运行失败」。发给客户端 shell 的通知正文是窗格上下文,有问题、失败原因或最后一条消息时,后面接一行不超过 220 个字符的摘要。
 
 ## 智能体活动
 

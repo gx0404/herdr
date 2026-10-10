@@ -253,6 +253,87 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
     pub revision: u64,
+    /// 需要用户处理的事：受阻时是 `needs_input`（带集成上报的问题与选项），上一回合
+    /// 失败且用户还没看过时是 `failed`；都没有时省略，旧 server 不下发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<AgentAttention>,
+    /// 会话洞察：来源适配器读到的会话摘要与 server 记录的回合计时；都没有时省略，旧
+    /// server 不下发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insight: Option<AgentInsight>,
+}
+
+/// agent 需要用户处理的事的种类。未知字符串落 `Unknown`，旧客户端可安全忽略新种类。
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAttentionKind {
+    /// agent 受阻，等用户回答或批准。
+    NeedsInput,
+    /// 上一回合失败（集成上报、会话错误或运行中进程退出）。
+    Failed,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// agent 需要用户处理的一件事。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentAttention {
+    #[serde(default)]
+    pub kind: AgentAttentionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 问题或失败原因（纯文本，可能被截断）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// 可选的回答选项（最多 8 个）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// 这件事开始的墙钟毫秒时间戳。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<u64>,
+}
+
+/// 一个 agent 会话的洞察。文本字段都是单行摘要（可能被截断）；时间都是墙钟毫秒时间戳，
+/// 时长是毫秒。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentInsight {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 正在执行的工具调用（统一的单行展示，如 `Shell cargo test`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<String>,
+    /// agent 最后一条回复。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message: Option<String>,
+    /// 用户最后一条提示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt: Option<String>,
+    /// agent 正在问用户的问题。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    /// `question` 的可选回答（最多 8 个）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// 会话里最近一次错误。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 当前回合开始工作的时刻；不在 Working 时省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_since_ms: Option<u64>,
+    /// 上一回合（一次 Working）的时长。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_ms: Option<u64>,
+    /// 最近一次状态变化的时刻。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_changed_at_ms: Option<u64>,
+    /// 来源适配器读到的会话数据的时刻。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -514,5 +595,59 @@ mod tests {
         assert_eq!(json["activity_truncated"], true);
         let round_trip: AgentInfo = serde_json::from_value(json).expect("往返");
         assert_eq!(round_trip, info);
+    }
+
+    /// 混版本：`attention` / `insight` 是追加的可选字段——旧 JSON 解码为 `None`，
+    /// 为 `None` 时不序列化，未知的种类落 `Unknown`，未知字段被忽略。
+    #[test]
+    fn agent_info_attention_and_insight_are_optional_and_forward_compatible() {
+        let legacy = serde_json::json!({
+            "terminal_id": "term_1",
+            "agent_status": "blocked",
+            "workspace_id": "ws_1",
+            "tab_id": "t_1",
+            "pane_id": "p_1",
+            "focused": false,
+            "revision": 1
+        });
+        let mut info: AgentInfo = serde_json::from_value(legacy.clone()).expect("旧 JSON 可解码");
+        assert_eq!(
+            (info.attention.as_ref(), info.insight.as_ref()),
+            (None, None)
+        );
+        let json = serde_json::to_value(&info).expect("序列化");
+        assert!(json.get("attention").is_none());
+        assert!(json.get("insight").is_none());
+
+        info.attention = Some(AgentAttention {
+            kind: AgentAttentionKind::NeedsInput,
+            title: None,
+            detail: Some("Allow edits to src/main.rs?".into()),
+            options: vec!["yes".into(), "no".into()],
+            since_ms: Some(10),
+        });
+        info.insight = Some(AgentInsight {
+            model: Some("opus".into()),
+            working_since_ms: Some(1),
+            ..AgentInsight::default()
+        });
+        let json = serde_json::to_value(&info).expect("序列化");
+        assert_eq!(json["attention"]["kind"], "needs_input");
+        assert!(json["insight"].get("last_message").is_none(), "空字段省略");
+        let round_trip: AgentInfo = serde_json::from_value(json).expect("往返");
+        assert_eq!(round_trip, info);
+
+        let mut future = legacy;
+        future["attention"] = serde_json::json!({"kind": "future_kind", "extra": 1});
+        future["insight"] = serde_json::json!({"future_field": true, "error": "boom"});
+        let decoded: AgentInfo = serde_json::from_value(future).expect("未来字段可解码");
+        assert_eq!(
+            decoded.attention.map(|attention| attention.kind),
+            Some(AgentAttentionKind::Unknown)
+        );
+        assert_eq!(
+            decoded.insight.and_then(|insight| insight.error).as_deref(),
+            Some("boom")
+        );
     }
 }

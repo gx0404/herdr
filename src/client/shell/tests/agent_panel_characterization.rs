@@ -31,6 +31,7 @@ fn panel_agent(
     seq: u64,
 ) -> ClientShellAgent {
     ClientShellAgent {
+        insight: Default::default(),
         pane_id: pane_id.into(),
         workspace_id: workspace_id.into(),
         tab_id: tab_id.into(),

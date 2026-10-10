@@ -366,9 +366,27 @@ herdr pane release-agent <pane_id> \
   --source ID \
   --agent LABEL \
   [--seq N]
+
+herdr pane report-agent-attention [<pane_id>] \
+  --source ID \
+  --agent LABEL \
+  --kind needs_input|failed|clear \
+  [--title TEXT] \
+  [--detail TEXT] \
+  [--option TEXT]... \
+  [--seq N]
+
+herdr pane report-agent-activity [<pane_id>] \
+  --source ID \
+  --agent LABEL \
+  [--hint TEXT] \
+  [--node-id ID] \
+  [--seq N]
 ```
 
 `report-agent-session` 只更新原生会话身份,不上报生命周期状态。`release-agent` 在智能体进程退出时结束该来源的生命周期权威。
+
+`report-agent-attention` 是 `pane.report_agent_attention` 的命令行入口:`needs_input` 挂上问题(`--detail`)和最多 8 个 `--option` 回答,在智能体受阻时显示;`failed` 锁存上一回合的失败;`clear` 清掉两者。它不改变智能体状态。`report-agent-activity` 是 `pane.report_agent_activity` 的命令行入口,钩子(包括 Windows PowerShell 钩子)用它提示活动树变了。两者省略 `<pane_id>` 时都取 `HERDR_PANE_ID`,两者都没有时打印用法并以退出码 2 结束。上限与校验见 [socket API](/zh-cn/docs/socket-api/#智能体待处理事项与洞察)。
 
 `--` 之后的参数是服务器重启后 Herdr 为恢复此会话而运行的命令。第一个参数必须是 `PATH` 上的普通命令名,并且任何参数都不能包含撇号。
 

@@ -366,9 +366,27 @@ herdr pane release-agent <pane_id> \
   --source ID \
   --agent LABEL \
   [--seq N]
+
+herdr pane report-agent-attention [<pane_id>] \
+  --source ID \
+  --agent LABEL \
+  --kind needs_input|failed|clear \
+  [--title TEXT] \
+  [--detail TEXT] \
+  [--option TEXT]... \
+  [--seq N]
+
+herdr pane report-agent-activity [<pane_id>] \
+  --source ID \
+  --agent LABEL \
+  [--hint TEXT] \
+  [--node-id ID] \
+  [--seq N]
 ```
 
 `report-agent-session` はライフサイクル状態を報告せずにネイティブセッション識別子を更新します。`release-agent` は、そのエージェントプロセスが終了したときに、そのソースのライフサイクル権限を終了します。
+
+`report-agent-attention` は `pane.report_agent_attention` のラッパーです。`needs_input` はエージェントが blocked の間に表示される質問(`--detail`)と最大 8 個の `--option` 回答を付け、`failed` は直前のターンの失敗をラッチし、`clear` は両方を消します。エージェント状態は変えません。`report-agent-activity` は `pane.report_agent_activity` のラッパーで、Windows の PowerShell フックを含むフックがアクティビティツリーの変化を合図できます。どちらも `<pane_id>` を省略すると `HERDR_PANE_ID` を使い、どちらもなければ使い方を表示して終了ステータス 2 で終わります。制限と検証は[ソケット API](/ja/docs/socket-api/#エージェントの要対応事項とインサイト)に従います。
 
 `--` の後の引数は、サーバー再起動後にこのセッションを再開するために Herdr が実行するコマンドです。最初の引数は `PATH` 上の単純なコマンド名でなければならず、どの引数にもアポストロフィを含めることはできません。
 

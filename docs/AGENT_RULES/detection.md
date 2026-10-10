@@ -77,3 +77,6 @@ manifest）不叠加。改 fork 规则同样走上面的证据流程，第 3 步
   只产生 `unknown config key` 诊断。上游日后新增、fork 不收的 agent 不需要登记。
 - **残留 hook 与旧快照**：`src/agent_resume.rs::is_official_agent_source` 只认五家，
   已删集成残留 hook 的会话上报与旧快照里的会话一律按非官方来源丢弃。
+- **单一真源**：官方来源标签、完整生命周期钩子权威、原生状态保留、转录上报、配置
+  目录与恢复命令都登记在 `src/harness/registry.rs::HARNESSES`；`detect`、
+  `agent_resume`、`server::agent_activity` 的同名判断只委托它，不再各自维护清单。

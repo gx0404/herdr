@@ -916,6 +916,8 @@ mod tests {
             activity_failed: 0,
             activity_truncated: false,
             launch_seq: 0,
+            attention: None,
+            insight: None,
         }
     }
 
