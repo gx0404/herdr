@@ -15,6 +15,7 @@
 | `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test ./scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败）。清单由 `scripts/run_parallel_unittest.py` 按类拆成子进程，默认以 `min(4, cpu_count)` worker 并发，可用 `HERDR_MAINTENANCE_JOBS`/执行器 `--jobs` 覆盖；`just test` 通过 `--maintenance-jobs` 解析后注入该环境变量。上一轮耗时记在 `target/test-suite-logs/unittest-durations.json`，以原子替换写回，据此把慢类拆块、从长到短派发 | Python ≥3.11（环境入口测试需要）、Bun | 写 `target/test-suite-logs/unittest-durations.json` | 执行器末行 `OK` + bun test OK + 丢弃检查 `OK: … 均无命中`；失败单元回放完整输出 |
 | `just test-windows-input [args..]` | 仅 Windows：本机交互式 Windows Terminal 输入资格测试（`scripts/test_windows_input.ps1`，注入输入并清空剪贴板；普通 CI 不跑） | Windows、pwsh | 注入键鼠输入、清空剪贴板 | 报告中各输入路径的覆盖结论 |
 | `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |
+| `just ui-gallery [--skip-test] [--no-png] [--filter <名>]` | 手动界面画廊：运行忽略测试 `client::shell::tests::gallery::ui_gallery`，把典型场景（多工作区、各状态 agent、浮层、窄屏、经典布局）合成为逐帧 HTML；装有 Chrome/Edge 时再用无头浏览器截成 PNG，供界面改版前后对比审阅（非门禁） | Rust、Python3；PNG 需 Chrome/Edge | 写 `target/ui-gallery/`（HTML/TXT/PNG）与 `target/ui-gallery-browser-profile/` | 打印帧数与 PNG 成功数；测试失败或无帧时非零 |
 | `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |
 | `just ci [filter]` / `just ci-tests [filter]` | PR CI 等效链（ci 含 lint） | 同上 | 编译产物 | 退出码 0 |
 | `just check` | ci + windows-lint + docs 契约 + 提醒（unix）；Windows 走 `windows_check.ps1 -Mode check` | 同 `just test`（含 Node）+ Windows SDK（交叉） | 编译产物 | 退出码 0 |

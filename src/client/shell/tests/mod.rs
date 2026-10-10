@@ -308,6 +308,7 @@ mod endpoints;
 mod feedback;
 mod floating_pages;
 mod frozen_selection;
+mod gallery;
 mod graphics;
 mod input_conformance;
 #[path = "input.rs"]
