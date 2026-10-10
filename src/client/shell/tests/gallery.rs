@@ -926,3 +926,365 @@ fn ui_gallery() {
 
     write_shots("gallery", &shots);
 }
+
+/// 画廊用的主机快照：一台 32 线程工作站，两块 GPU、四块盘（根分区接近满）、三个接口、
+/// 四个温度传感器与一屏多的进程——数字取真实机器上常见的量级。
+fn gallery_system_sample(now_ms: u64) -> crate::api::schema::SystemMetricsSnapshot {
+    use crate::api::schema::{
+        CpuCoreMetric, DiskMetric, GpuMetric, MemoryMetric, NetworkMetric, ObservationStatus,
+        ProcessIdentity, ProcessMetric, SensorMetric, SystemMetricsSnapshot,
+    };
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    let cores = (0..32)
+        .map(|id| {
+            let usage = match id {
+                3 | 17 => 97.0,
+                5 | 21 => 81.0,
+                _ => 12.0 + ((id * 37) % 53) as f32,
+            };
+            CpuCoreMetric {
+                id,
+                name: format!("cpu{id}"),
+                usage_percent: Some(usage),
+                frequency_mhz: Some(4_200),
+            }
+        })
+        .collect();
+    let process = |pid: u32, name: &str, user: &str, cpu: f32, memory: u64| ProcessMetric {
+        identity: ProcessIdentity {
+            pid,
+            started_at: 1_700_000_000,
+            boot_id: "gallery-boot".into(),
+            instance_token: None,
+        },
+        parent_pid: Some(1),
+        name: name.into(),
+        cpu_percent: Some(cpu),
+        memory_bytes: memory,
+        status: "Running".into(),
+        user: Some(user.into()),
+        protected: false,
+        action_token: Some(format!("token-{pid}")),
+        executable: Some(format!("/usr/bin/{name}")),
+    };
+    let processes = vec![
+        process(412_906, "rustc", "dev", 98.4, 1_900 * MIB),
+        process(412_911, "rustc", "dev", 96.1, 1_420 * MIB),
+        process(398_120, "cargo", "dev", 12.5, 310 * MIB),
+        process(52_118, "claude", "dev", 7.8, 640 * MIB),
+        process(52_377, "codex", "dev", 4.2, 380 * MIB),
+        process(9_771, "herdr", "dev", 3.1, 96 * MIB),
+        process(2_559, "Xorg", "root", 2.4, 210 * MIB),
+        process(3_101, "firefox", "dev", 2.2, 2_870 * MIB),
+        process(1_204, "postgres", "postgres", 1.1, 455 * MIB),
+        process(1_377, "dockerd", "root", 0.9, 162 * MIB),
+        process(4_012, "nvim", "dev", 0.6, 88 * MIB),
+        process(4_090, "zsh", "dev", 0.1, 9 * MIB),
+        process(812, "systemd-journald", "root", 0.1, 64 * MIB),
+        process(1, "systemd", "root", 0.0, 14 * MIB),
+    ]
+    .into_iter()
+    .chain((0..26u32).map(|index| {
+        process(
+            20_000 + index * 7,
+            ["kworker/u64:2", "sshd", "node", "python3", "gnome-shell"][index as usize % 5],
+            "dev",
+            (index % 4) as f32 * 0.3,
+            u64::from(12 + index * 9) * MIB,
+        )
+    }))
+    .collect();
+    SystemMetricsSnapshot {
+        boot_id: "gallery-boot".into(),
+        sequence: 900,
+        sampled_at_ms: now_ms - 2_000,
+        interval_ms: 1000,
+        hostname: "devbox".into(),
+        operating_system: "Ubuntu 24.04 LTS".into(),
+        environment: "native".into(),
+        uptime_seconds: 3 * 86_400 + 4 * 3_600 + 12 * 60,
+        status: ObservationStatus::Ready,
+        cpu_percent: Some(46.3),
+        cpu_brand: "AMD Ryzen 9 7950X".into(),
+        physical_core_count: Some(16),
+        cores,
+        memory: MemoryMetric {
+            total_bytes: 64 * GIB,
+            used_bytes: 41 * GIB,
+            available_bytes: 17 * GIB,
+            swap_total_bytes: 8 * GIB,
+            swap_used_bytes: GIB + 200 * MIB,
+        },
+        gpus: vec![
+            GpuMetric {
+                id: "gpu0".into(),
+                name: "NVIDIA GeForce RTX 4090".into(),
+                status: ObservationStatus::Ready,
+                usage_percent: Some(78.0),
+                memory_used_bytes: Some(18 * GIB + 400 * MIB),
+                memory_total_bytes: Some(24 * GIB),
+                temperature_celsius: Some(71.0),
+                ..Default::default()
+            },
+            GpuMetric {
+                id: "gpu1".into(),
+                name: "AMD Radeon Graphics".into(),
+                status: ObservationStatus::Ready,
+                usage_percent: Some(4.0),
+                memory_used_bytes: Some(380 * MIB),
+                memory_total_bytes: Some(2 * GIB),
+                temperature_celsius: Some(48.0),
+                ..Default::default()
+            },
+        ],
+        disks: vec![
+            DiskMetric {
+                id: "nvme0n1p2:/".into(),
+                name: "/dev/nvme0n1p2".into(),
+                mount_point: "/".into(),
+                total_bytes: 1_860 * GIB,
+                available_bytes: 150 * GIB,
+                ..Default::default()
+            },
+            DiskMetric {
+                id: "nvme1n1p1:/data".into(),
+                name: "/dev/nvme1n1p1".into(),
+                mount_point: "/data".into(),
+                total_bytes: 3_720 * GIB,
+                available_bytes: 2_190 * GIB,
+                ..Default::default()
+            },
+            DiskMetric {
+                id: "sda1:/backup".into(),
+                name: "/dev/sda1".into(),
+                mount_point: "/backup".into(),
+                total_bytes: 7_450 * GIB,
+                available_bytes: 1_310 * GIB,
+                ..Default::default()
+            },
+            DiskMetric {
+                id: "nvme0n1p1:/boot/efi".into(),
+                name: "/dev/nvme0n1p1".into(),
+                mount_point: "/boot/efi".into(),
+                total_bytes: GIB,
+                available_bytes: GIB - 6 * MIB,
+                ..Default::default()
+            },
+        ],
+        networks: vec![
+            NetworkMetric {
+                id: "eth0".into(),
+                received_bytes_per_second: Some(12.4 * 1_048_576.0),
+                transmitted_bytes_per_second: Some(860.0 * 1024.0),
+                ..Default::default()
+            },
+            NetworkMetric {
+                id: "docker0".into(),
+                received_bytes_per_second: Some(48.0 * 1024.0),
+                transmitted_bytes_per_second: Some(31.0 * 1024.0),
+                ..Default::default()
+            },
+            NetworkMetric {
+                id: "wlan0".into(),
+                received_bytes_per_second: Some(0.0),
+                transmitted_bytes_per_second: Some(0.0),
+                ..Default::default()
+            },
+        ],
+        sensors: vec![
+            SensorMetric {
+                name: "k10temp Tctl".into(),
+                temperature_celsius: Some(68.0),
+                critical_celsius: Some(95.0),
+            },
+            SensorMetric {
+                name: "k10temp Tccd1".into(),
+                temperature_celsius: Some(61.0),
+                critical_celsius: Some(95.0),
+            },
+            SensorMetric {
+                name: "nvme Composite".into(),
+                temperature_celsius: Some(44.0),
+                critical_celsius: Some(84.0),
+            },
+            SensorMetric {
+                name: "amdgpu edge".into(),
+                temperature_celsius: Some(52.0),
+                critical_celsius: Some(100.0),
+            },
+        ],
+        processes,
+        ..Default::default()
+    }
+}
+
+/// 把一份画廊快照和 15 分钟的历史灌进监控状态，并按生产路径算好预分桶与进程行序。
+fn seed_monitor(state: &mut ClientShellState) {
+    use crate::client::shell::observability::HistoryPoint;
+    const NOW_MS: u64 = 1_760_000_000_000;
+    let monitor = &mut state.observability;
+    monitor.now_ms = NOW_MS;
+    monitor.metrics = Some(Box::new(gallery_system_sample(NOW_MS)));
+    monitor.history = (0..900u64)
+        .map(|second| {
+            let t = second as f32;
+            let wave = (t / 41.0).sin() * 14.0 + (t / 13.0).sin() * 6.0;
+            let burst = if (520..640).contains(&second) {
+                32.0
+            } else {
+                0.0
+            };
+            HistoryPoint {
+                at: NOW_MS - 2_000 - (899 - second) * 1_000,
+                cpu: Some((34.0 + wave + burst).clamp(2.0, 99.0)),
+                memory: Some(58.0 + t / 900.0 * 6.0 + (t / 70.0).sin()),
+                cores: Vec::new(),
+                temperature: Some(58.0 + wave * 0.4 + burst * 0.3),
+            }
+        })
+        .collect();
+    for (id, rx, tx) in [
+        ("eth0", 12.4 * 1_048_576.0_f32, 860.0 * 1024.0_f32),
+        ("docker0", 48.0 * 1024.0, 31.0 * 1024.0),
+    ] {
+        let samples = (0..128)
+            .map(|index| {
+                let t = index as f32;
+                let swing = 0.55 + 0.45 * (t / 9.0).sin().abs();
+                (rx * swing, tx * (1.2 - swing * 0.6))
+            })
+            .collect();
+        monitor.net_history.insert(id.into(), samples);
+    }
+    monitor.refresh_history_buckets();
+    monitor.refresh_process_rows();
+}
+
+/// 监控面板画廊：停靠在终端旁（200×50，面板聚焦与终端聚焦各一帧）、聚焦并最大化
+/// （160×45）、偏好页、窄屏 80×24、尚未连上采样器的空状态与 graphite-light。
+/// `python scripts/ui_gallery.py --filter monitor`。
+#[test]
+#[ignore = "manual visual gallery; run `just ui-gallery`"]
+fn ui_gallery_monitor() {
+    use crate::client::shell::dock::PanelId;
+    use crate::client::shell::observability::Page;
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let dark = || ClientShellConfig::from_config(&Config::default());
+    let light = || {
+        let mut config = Config::default();
+        config.theme.name = Some("graphite-light".into());
+        ClientShellConfig::from_config(&config)
+    };
+    let docked: Prepare = |state| {
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        seed_monitor(state);
+    };
+    let terminal_focused: Prepare = |state| {
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        seed_monitor(state);
+        if let Some(group) = state.workbench.dock.groups.first() {
+            state.workbench.dock.focused = PanelId::Terminal(group.id);
+        }
+        state.observability.page = None;
+    };
+    let maximized: Prepare = |state| {
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        seed_monitor(state);
+        state.workbench.dock.maximized = Some(PanelId::Monitor);
+    };
+    let preferences: Prepare = |state| {
+        state.open_observation_page(Page::Settings, &mut ClientShellInput::default());
+        seed_monitor(state);
+        state.observability.monitor.alerts_enabled = true;
+        state.workbench.dock.maximized = Some(PanelId::Monitor);
+    };
+    let connecting: Prepare = |state| {
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    };
+    fn process_dialog_scene(state: &mut ClientShellState) {
+        use crate::client::shell::observability::{Action, ProcessDialog};
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        seed_monitor(state);
+        let process = state
+            .observability
+            .metrics
+            .as_deref()
+            .and_then(|sample| sample.processes.first())
+            .cloned()
+            .expect("gallery process");
+        state.observability.process_dialog = Some(ProcessDialog {
+            process,
+            force: false,
+            confirm: false,
+            pending: false,
+        });
+        state.observability.hovered_action = Some(Action::Terminate(true));
+    }
+    let confirmation: Prepare = |state| {
+        process_dialog_scene(state);
+        if let Some(dialog) = state.observability.process_dialog.as_mut() {
+            dialog.force = true;
+            dialog.confirm = true;
+        }
+        state.observability.hovered_action =
+            Some(crate::client::shell::observability::Action::ConfirmProcess);
+    };
+    let hovered: Prepare = |state| {
+        state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+        seed_monitor(state);
+        state.observability.hovered_action = Some(
+            crate::client::shell::observability::Action::Page(Page::Settings),
+        );
+    };
+    let scenes: [(&str, (u16, u16), Prepare, bool); 11] = [
+        ("monitor system docked", (200, 50), docked, false),
+        (
+            "monitor terminal focused",
+            (200, 50),
+            terminal_focused,
+            false,
+        ),
+        ("monitor system maximized", (160, 45), maximized, false),
+        ("monitor preferences", (160, 45), preferences, false),
+        ("monitor narrow", (80, 24), docked, false),
+        ("monitor connecting", (120, 40), connecting, false),
+        ("monitor graphite-light", (200, 50), docked, true),
+        ("monitor hover", (160, 45), hovered, false),
+        (
+            "monitor process narrow",
+            (60, 24),
+            process_dialog_scene,
+            false,
+        ),
+        (
+            "monitor process light",
+            (60, 24),
+            process_dialog_scene,
+            true,
+        ),
+        (
+            "monitor process confirmation",
+            (160, 45),
+            confirmation,
+            false,
+        ),
+    ];
+    let mut shots = Vec::new();
+    let mut step = 0;
+    for (name, size, prepare, is_light) in scenes {
+        let config = if is_light { light() } else { dark() };
+        let frame = shoot_scene(config, size, prepare, &mut step);
+        let title = format!("{name} {}x{}", size.0, size.1);
+        shots.push(if is_light {
+            Shot {
+                title,
+                frame,
+                host: LIGHT_HOST,
+            }
+        } else {
+            Shot::dark(title, frame)
+        });
+    }
+    write_shots("monitor", &shots);
+}

@@ -189,7 +189,8 @@ fn fit_tab_labels<'a, const N: usize>(labels: [&'a str; N], width: u16) -> [Cow<
 }
 
 /// 页脚键位提示（kit `footer_hints`，可点）：系统页有「刷新」与「暂停 / 继续」；
-/// 编辑布局模式下换成移动卡片的说明与「完成」。
+/// 编辑布局模式下换成移动卡片的说明与「完成」。键帽与标签和状态栏同一套样式
+/// （`chrome::bar_key_cap` / `chrome::bar_hint_label`），按面板底色挑对比度。
 fn footer_hints(
     buffer: &mut Buffer,
     area: Rect,
@@ -198,7 +199,7 @@ fn footer_hints(
     palette: &Palette,
     hits: &mut Vec<(Rect, Action)>,
 ) {
-    use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
+    use crate::ui::kit::footer_hints::{render_footer_hints_styled, FooterHint, FooterHintStyles};
     let texts = &crate::i18n::texts().monitor;
     let hint = |key, label, enabled, primary| FooterHint {
         key,
@@ -240,7 +241,12 @@ fn footer_hints(
             actions.push(Some(Action::Close));
             (hints, actions)
         };
-    for (rect, index) in render_footer_hints(buffer, area, &hints, None, palette) {
+    let styles = FooterHintStyles {
+        key: super::super::chrome::bar_key_cap(palette, palette.panel_bg),
+        label: super::super::chrome::bar_hint_label(palette, palette.panel_bg),
+        hover_bg: palette.hover_row_bg(),
+    };
+    for (rect, index) in render_footer_hints_styled(buffer, area, &hints, None, palette, styles) {
         if let Some(action) = actions.get(index).cloned().flatten() {
             hits.push((rect, action));
         }
@@ -281,16 +287,19 @@ pub(super) fn status(status: ObservationStatus) -> &'static str {
     }
 }
 
-/// Health grading so a glance separates fine / busy / action-needed rows.
+/// 采集状态的颜色，与状态语义（`ui::design`）同一套：已更新 = 待查看绿、采集中 =
+/// 运行中蓝、缺少权限 = 需要你处理的琥珀、查询失败 = 失败红；暂不支持、不可用、
+/// 缓存与未知只是事实陈述，用元信息灰，不报警。
 pub(super) fn status_color(status: ObservationStatus, palette: &Palette) -> ratatui::style::Color {
     match status {
         ObservationStatus::Ready => palette.green,
         ObservationStatus::Warming => palette.blue,
+        ObservationStatus::PermissionDenied => palette.yellow,
+        ObservationStatus::Error => palette.red,
         ObservationStatus::Unavailable
         | ObservationStatus::Unsupported
-        | ObservationStatus::PermissionDenied
-        | ObservationStatus::Error => palette.red,
-        ObservationStatus::Stale | ObservationStatus::Unknown => palette.overlay1,
+        | ObservationStatus::Stale
+        | ObservationStatus::Unknown => palette.overlay1,
     }
 }
 
@@ -375,8 +384,8 @@ pub(super) fn paint(
         };
         // Single navigation level: page tabs only. Refresh/pause/close live
         // on keyboard shortcuts (see footer) so the row never mixes
-        // navigation with actions. 页签走 kit `tabs`：活动页 accent 反色，
-        // 前景按对比度挑选（ds-08）。
+        // navigation with actions. 页签走 kit `tabs` 的分段式标签条：活动页是
+        // 浅一档的结构面上的粗体正文，其余说明色字（Graphite，不反色）。
         let texts = &crate::i18n::texts().monitor;
         let tabs = [
             (texts.tab_system, Page::Monitor),
@@ -402,24 +411,23 @@ pub(super) fn paint(
                 x = rect.right().saturating_add(1);
             }
         }
+        // 暂停是需要留意的状态（历史停止记录），用「需要你处理」的琥珀色小标签。
         if state.paused {
-            let label = tr(" ‖ paused ", " ‖ 已暂停 ");
+            let label = tr("‖ paused", "‖ 已暂停");
             let width = UnicodeWidthStr::width(label) as u16;
-            let rect = Rect::new(
-                inner.right().saturating_sub(width).max(x),
-                inner.y,
-                width.min(inner.right().saturating_sub(x.max(inner.x))),
-                1,
-            );
-            text(
-                buffer,
-                rect,
-                0,
-                label,
-                Style::default()
-                    .fg(palette.yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+            let room = inner.right().saturating_sub(x.saturating_add(1));
+            if room >= width {
+                let rect = Rect::new(inner.right() - width, inner.y, width, 1);
+                text(
+                    buffer,
+                    rect,
+                    0,
+                    label,
+                    Style::default()
+                        .fg(palette.yellow)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
         }
         let body = Rect::new(
             inner.x,
@@ -440,7 +448,7 @@ pub(super) fn paint(
                 footer,
                 0,
                 message,
-                Style::default().fg(palette.overlay0),
+                crate::ui::design::muted(palette),
             ),
             None => footer_hints(buffer, footer, state, page, palette, &mut hits),
         }
@@ -449,6 +457,16 @@ pub(super) fn paint(
     if let Some(dialog) = &state.process_dialog {
         hits.clear();
         dialog_rect = process_dialog(buffer, dialog, state, cx, &mut hits);
+    }
+    if let Some(hovered) = state.hovered_action.as_ref() {
+        if let Some((rect, action)) = hits.iter().rev().find(|(_, action)| action == hovered) {
+            let style = if matches!(action, Action::Terminate(_) | Action::ConfirmProcess) {
+                Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().bg(cx.components.hover_bg)
+            };
+            buffer.set_style(*rect, style);
+        }
     }
     PaintOutput {
         hits,
@@ -570,6 +588,39 @@ mod tests {
         state
     }
 
+    #[test]
+    fn monitor_hover_uses_control_identity_without_changing_keyboard_selection() {
+        let mut state = plain_state();
+        let (_, output) = paint_page(&state, Page::Monitor, 100, 30);
+        state.hits = output.hits;
+        state.selected_hit = 1;
+        let rect = state.hits[0].0;
+        let point = (rect.x + 1, rect.y);
+        assert!(state.update_hover(point, true));
+        assert_eq!(state.hovered_action, Some(Action::Page(Page::Monitor)));
+        assert_eq!(state.selected_hit, 1);
+        assert!(!state.update_hover(point, true));
+        let (buffer, _) = paint_page(&state, Page::Monitor, 100, 30);
+        assert_eq!(buffer[point].style().bg, Some(config().components.hover_bg));
+        assert!(state.update_hover(point, false));
+        assert_eq!(state.hovered_action, None);
+        assert_eq!(state.selected_hit, 1);
+    }
+
+    #[test]
+    fn monitor_hover_skips_card_regions_and_prefers_nested_controls() {
+        let mut state = plain_state();
+        state.hits = vec![
+            (Rect::new(0, 0, 40, 12), Action::Card("cpu".into())),
+            (Rect::new(2, 3, 6, 1), Action::Core(2)),
+        ];
+        assert!(!state.update_hover((1, 1), true));
+        assert!(state.update_hover((3, 3), true));
+        assert_eq!(state.hovered_action, Some(Action::Core(2)));
+        assert!(state.update_hover((60, 20), true));
+        assert_eq!(state.hovered_action, None);
+    }
+
     /// 未确认的进程对话框：Terminate / Force 都该是破坏性语义。
     fn process_dialog_state() -> State {
         let mut state = State::new(&config());
@@ -683,12 +734,10 @@ mod tests {
         }
     }
 
-    /// ds-08：terminal 主题的 `panel_bg` 是 `Reset`，页签「反色」曾退化成
-    /// 「终端默认前景压在 accent 上」。反色前景取组件表（与按钮同源）；组件表
-    /// 现在按对比度挑颜色（`crate::ui::color::contrast_fg`），`Reset` 候选被跳过，
-    /// 16 色主题下也有明确对比。
+    /// ds-08 / Graphite：活动页签是浅一档的结构面上的粗体正文。terminal 主题的
+    /// `panel_bg` 与 `text` 都是 `Reset`，前景不能退回终端默认色：按对比度挑。
     #[test]
-    fn active_page_tab_inverts_with_the_component_contrast_color() {
+    fn active_page_tab_sits_on_a_lighter_surface_with_a_readable_label() {
         let mut raw = Config::default();
         raw.theme.name = Some("terminal".into());
         let config = ClientShellConfig::from_config(&raw);
@@ -714,18 +763,111 @@ mod tests {
             .find(|(_, action)| matches!(action, Action::Page(Page::Monitor)))
             .map(|(rect, _)| *rect)
             .expect("系统页签命中区");
-        let cell = buffer[(active.x, active.y)].clone();
-        assert_eq!(cell.style().bg, Some(config.palette.accent), "活动页签底色");
+        let cell = buffer[(active.x + 1, active.y)].clone();
+        let bg = cell.style().bg.expect("活动页签有底色");
+        assert_eq!(bg, config.palette.hover_row_bg(), "浅一档的结构面");
         let fg = cell.style().fg.expect("活动页签有前景");
-        assert_ne!(fg, Color::Reset, "面板底为 Reset 时不能退回终端默认前景");
-        assert_eq!(
-            fg,
-            crate::ui::panel_contrast_fg(&config.palette),
-            "反色前景与组件表同源"
-        );
-        let ratio = crate::ui::color::contrast_ratio(fg, config.palette.accent)
-            .expect("ANSI accent 可换算");
+        assert_ne!(fg, Color::Reset, "不能退回终端默认前景");
+        let ratio = crate::ui::color::contrast_ratio(fg, bg).expect("ANSI 颜色可换算");
         assert!(ratio >= 4.5, "对比度只有 {ratio:.2}");
+        assert!(cell.style().add_modifier.contains(Modifier::BOLD));
+        // 其余页签是说明色字、没有底色。
+        let other = output
+            .hits
+            .iter()
+            .find(|(_, action)| matches!(action, Action::Page(Page::Settings)))
+            .map(|(rect, _)| *rect)
+            .expect("偏好页签命中区");
+        let cell = buffer[(other.x + 1, other.y)].clone();
+        assert_eq!(cell.style().fg, Some(config.palette.subtext0));
+    }
+
+    /// 回归：面板聚焦时键盘焦点环落在第一个命中区（系统页签）上，曾把前景改成
+    /// accent——活动页签的底色也是 accent，标签文字整个看不见。焦点环只叠下划线，
+    /// 字色、底色保持活动页签自己的样式；面板没有键盘时不画焦点环。
+    #[test]
+    fn focused_active_tab_label_stays_visible_under_the_focus_ring() {
+        let config = config();
+        let cx = chrome_context(&config);
+        let area = Rect::new(0, 0, 100, 30);
+        for theme in ["graphite-dark", "graphite-light", "catppuccin", "terminal"] {
+            let mut raw = Config::default();
+            raw.theme.name = Some(theme.into());
+            let config = ClientShellConfig::from_config(&raw);
+            let cx = chrome_context(&config);
+            let mut state = plain_state();
+            state.page = Some(Page::Monitor);
+            state.selected_hit = 0;
+            let mut canvas =
+                crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 100, 30);
+            let painted = state
+                .paint(&mut canvas, area, &cx, Some(Page::Monitor), false)
+                .expect("页面已绘制");
+            let (tab, action) = painted.hits.first().expect("首个命中区");
+            assert!(matches!(action, Action::Page(Page::Monitor)), "{theme}");
+            let buffer = canvas.buffer();
+            // 宽字符的续格被 ratatui 复位成默认样式，只看画了字的格。
+            for x in (tab.x + 1..tab.right() - 1)
+                .filter(|x| !buffer[(*x, tab.y)].symbol().trim().is_empty())
+            {
+                let style = buffer[(x, tab.y)].style();
+                assert!(
+                    style.add_modifier.contains(Modifier::UNDERLINED),
+                    "{theme}：焦点环是下划线"
+                );
+                let (fg, bg) = (style.fg.expect("前景"), style.bg.expect("底色"));
+                assert_ne!(fg, bg, "{theme}：标签字色不能等于底色");
+                if let Some(ratio) = crate::ui::color::contrast_ratio(fg, bg) {
+                    assert!(ratio >= 4.5, "{theme}：对比度只有 {ratio:.2}");
+                }
+            }
+        }
+        // 面板没有键盘（终端聚焦）：不画焦点环。
+        let state = plain_state();
+        let mut canvas =
+            crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 100, 30);
+        let painted = state
+            .paint(&mut canvas, area, &cx, Some(Page::Monitor), false)
+            .expect("页面已绘制");
+        let (tab, _) = painted.hits.first().expect("首个命中区");
+        assert!(!canvas.buffer()[(tab.x + 1, tab.y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn global_process_dialog_keeps_focus_and_clears_only_covered_links() {
+        let state = process_dialog_state();
+        let config = config();
+        let cx = chrome_context(&config);
+        let (preview, output) = paint_page(&state, Page::Monitor, 120, 40);
+        let cancel = hit_rect(&output, |action| matches!(action, Action::CancelProcess))
+            .expect("cancel action");
+        let point = (cancel.x + 1, cancel.y);
+        let symbol = preview[point].symbol().to_owned();
+        let mut canvas =
+            crate::client::shell::compose_canvas::ComposeCanvas::reuse_or_new(None, 120, 40);
+        canvas.buffer()[point].set_symbol(&symbol);
+        canvas.push_link(
+            point.0,
+            point.1,
+            symbol.into(),
+            "https://covered.example".into(),
+        );
+        canvas.buffer()[(0, 0)].set_symbol("x");
+        canvas.push_link(0, 0, "x".into(), "https://outside.example".into());
+        state
+            .paint(&mut canvas, Rect::new(0, 0, 120, 40), &cx, None, false)
+            .expect("global process dialog");
+        assert!(canvas.buffer()[point]
+            .style()
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+        let (frame, _) = canvas.finish(Vec::new());
+        let covered = usize::from(point.1) * usize::from(frame.width) + usize::from(point.0);
+        assert_eq!(frame.cells[covered].hyperlink, None);
+        assert!(frame.cells[0].hyperlink.is_some());
     }
 
     /// C-29：结束进程是破坏性操作，用组件的 Danger 语义色；「取消」保持常态，
@@ -763,44 +905,50 @@ mod tests {
         );
     }
 
-    /// ds-15：对话框按钮用固定 cell 起点，中文标签必须完整落在命中区内
-    /// （不是被截断或与相邻按钮重叠）。
     #[test]
-    fn process_dialog_fixed_offsets_fit_the_chinese_labels() {
-        let _guard = lang_guard(Lang::ZhCn);
-        let state = process_dialog_state();
-        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 40);
-        let rect_of = |wanted: fn(&Action) -> bool| {
-            output
-                .hits
-                .iter()
-                .find(|(_, action)| wanted(action))
-                .map(|(rect, _)| *rect)
-                .expect("按钮命中区")
-        };
-        let cancel = rect_of(|action| matches!(action, Action::CancelProcess));
-        let terminate = rect_of(|action| matches!(action, Action::Terminate(false)));
-        let force = rect_of(|action| matches!(action, Action::Terminate(true)));
-        for (rect, label) in [
-            (cancel, "取消"),
-            (terminate, "正常结束"),
-            (force, "强制结束"),
-        ] {
-            let width = UnicodeWidthStr::width(label) as u16;
-            assert!(
-                rect.width >= width,
-                "{label} 的命中区只有 {} 列，放不下 {width} 列",
-                rect.width
-            );
-            assert!(
-                row_has(&buffer, rect.y, label),
-                "{label} 应完整画在命中区所在行"
-            );
+    fn process_dialog_buttons_fit_translated_labels_at_narrow_widths() {
+        for lang in [Lang::En, Lang::ZhCn] {
+            let _guard = lang_guard(lang);
+            for columns in [40, 60, 120] {
+                let state = process_dialog_state();
+                let (buffer, output) = paint_page(&state, Page::Monitor, columns, 30);
+                let rect_of = |wanted: fn(&Action) -> bool| {
+                    output
+                        .hits
+                        .iter()
+                        .find(|(_, action)| wanted(action))
+                        .map(|(rect, _)| *rect)
+                        .expect("button hit region")
+                };
+                let cancel = rect_of(|action| matches!(action, Action::CancelProcess));
+                let terminate = rect_of(|action| matches!(action, Action::Terminate(false)));
+                let force = rect_of(|action| matches!(action, Action::Terminate(true)));
+                for (rect, label) in [
+                    (cancel, tr("Cancel", "取消")),
+                    (terminate, tr("Terminate", "正常结束")),
+                    (force, tr("Force", "强制结束")),
+                ] {
+                    assert!(rect.width >= UnicodeWidthStr::width(label) as u16);
+                    assert!(contains_rect(output.dialog_rect, rect));
+                    assert!(row_has(&buffer, rect.y, label), "{columns}: {label}");
+                }
+                assert!(cancel.right() < terminate.x);
+                assert!(terminate.right() < force.x);
+            }
         }
-        assert!(
-            terminate.right() < force.x || force.right() <= terminate.x,
-            "固定列偏移下两个结束按钮不能重叠: {terminate:?} / {force:?}"
-        );
+    }
+
+    #[test]
+    fn process_dialog_hover_preserves_destructive_button_colours() {
+        let mut state = process_dialog_state();
+        state.hovered_action = Some(Action::Terminate(true));
+        let (buffer, output) = paint_page(&state, Page::Monitor, 60, 30);
+        let force = hit_rect(&output, |action| matches!(action, Action::Terminate(true)))
+            .expect("force action");
+        let cell = &buffer[(force.x + 1, force.y)];
+        assert_eq!(cell.style().bg, Some(config().palette.red));
+        assert!(cell.style().add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(state.selected_hit, 0);
     }
 
     #[test]
@@ -866,10 +1014,9 @@ mod tests {
         }
     }
 
-    /// 选中页签反色到 accent 底上；前景由 `panel_contrast_fg` 按对比度挑选，
-    /// 每个内置主题在真彩与 256 色降级下都要读得出字：各格字符逐一相等，且
-    /// 前景 / 底色对比度 ≥ 3.0（曾有主题的 `panel_bg` 与 `accent` 亮度接近，
-    /// 字叠上去就看不见）。
+    /// 选中页签画在浅一档的结构面上（`hover_row_bg`）；前景按对比度挑选，每个
+    /// 内置主题在真彩与 256 色降级下都要读得出字：各格字符逐一相等，且前景 /
+    /// 底色对比度 ≥ 3.0。
     #[test]
     fn active_page_tab_stays_legible_on_every_builtin_theme_and_color_depth() {
         type ThemeCtor = fn() -> Palette;
@@ -927,13 +1074,12 @@ mod tests {
                     let style = cell.style();
                     let bg = style.bg.expect("选中页签有底色");
                     let fg = style.fg.expect("选中页签有前景");
-                    assert_eq!(bg, palette.accent, "{name}/{depth:?}");
+                    assert_eq!(bg, palette.hover_row_bg(), "{name}/{depth:?}");
                     match crate::ui::color::contrast_ratio(fg, bg) {
                         Some(ratio) => assert!(
                             ratio >= 3.0,
-                            "{name}/{depth:?}: fg {fg:?} 叠在 accent {bg:?} 上对比度只有 {ratio:.2}"
+                            "{name}/{depth:?}: fg {fg:?} 叠在 {bg:?} 上对比度只有 {ratio:.2}"
                         ),
-                        // terminal 主题的 accent 是终端默认色，无从换算。
                         None => assert!(
                             matches!(bg, Color::Reset) || matches!(fg, Color::Reset),
                             "{name}/{depth:?}: 只有 Reset 才允许算不出对比度"

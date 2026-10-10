@@ -105,13 +105,13 @@ fn command_palette_fuzzy_filters_and_activates_with_highlight_data() {
     let item_count = palette_overlay(&state).items.len();
     assert!(item_count > 30, "all actions are indexed: {item_count}");
 
-    // 监控单入口写出它的三个页签，按页签名（第三个是「监控偏好」）也能搜到。
+    // 监控单入口写出它的两个页签，按页签名（第二个是「偏好」）也能搜到。
     assert!(state.insert_overlay_text("偏好"));
     let rows = super::command_palette::palette_rows(palette_overlay(&state));
     let ids: Vec<&str> = rows.iter().map(|row| row.item.id.as_str()).collect();
     assert!(
         ids.contains(&"observation:monitor"),
-        "监控单入口包含监控偏好页签：{ids:?}"
+        "监控单入口包含偏好页签：{ids:?}"
     );
 
     state.open_command_search();

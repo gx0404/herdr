@@ -1,5 +1,8 @@
 //! 占用比例条：阈值色、溢出态、时间窗口进度刻度、分段填充与 ascii 降级。
 //! 只画 `area` 的第一行；数字由调用方另画（见 `meter_row`），条本身不带文字。
+//!
+//! Graphite 外观：已用段是粗线 `━`，常态用中性的 accent，只有越过阈值才转黄 / 红；
+//! 空槽是同一高度的细线 `─`，按底色挑一档刚好看得见的灰。
 
 use ratatui::{
     buffer::Buffer,
@@ -10,7 +13,7 @@ use ratatui::{
 use super::fill_row;
 use crate::app::state::Palette;
 
-/// 阈值：`ratio >= warn` 黄，`>= crit` 红，其余青。默认 0.75 / 0.90。
+/// 阈值：`ratio >= warn` 黄，`>= crit` 红，其余中性 accent。默认 0.75 / 0.90。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GaugeThresholds {
     pub warn: f32,
@@ -53,7 +56,7 @@ struct Glyphs {
 
 const UNICODE: Glyphs = Glyphs {
     filled: "━",
-    empty: "░",
+    empty: "─",
     tick: "┃",
     overflow: "▸",
 };
@@ -65,23 +68,55 @@ const ASCII: Glyphs = Glyphs {
     overflow: ">",
 };
 
-/// 用量比例的语义色：阈值之外，窗口进度 `window_progress` 给出「按时间应到的
-/// 比例」，用量超前 25 个百分点转红、超前 10 个百分点转黄。NaN 视为 0。
+/// 用量的严重程度：常态 / 警告（黄）/ 严重（红）。颜色只用来表达它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Severity {
+    Normal,
+    Warning,
+    Critical,
+}
+
+impl Severity {
+    /// 按阈值判定；`window_progress` 给出「按时间应到的比例」，用量超前 25 个百分点
+    /// 算严重、超前 10 个百分点算警告。NaN 视为 0。
+    pub(crate) fn of(
+        ratio: f32,
+        window_progress: Option<f32>,
+        thresholds: GaugeThresholds,
+    ) -> Self {
+        let ratio = if ratio.is_nan() { 0.0 } else { ratio };
+        let expected = window_progress.filter(|progress| progress.is_finite());
+        if ratio >= thresholds.crit || expected.is_some_and(|expected| ratio >= expected + 0.25) {
+            Self::Critical
+        } else if ratio >= thresholds.warn
+            || expected.is_some_and(|expected| ratio > expected + 0.10)
+        {
+            Self::Warning
+        } else {
+            Self::Normal
+        }
+    }
+
+    /// 非常态时的语义色（黄 / 红）；常态为 `None`，由调用方用自己的中性色。
+    pub(crate) fn color(self, palette: &Palette) -> Option<Color> {
+        match self {
+            Self::Normal => None,
+            Self::Warning => Some(palette.yellow),
+            Self::Critical => Some(palette.red),
+        }
+    }
+}
+
+/// 用量比例的语义色：常态是中性的 accent，越过阈值转黄 / 红（见 [`Severity::of`]）。
 pub(crate) fn gauge_color(
     ratio: f32,
     window_progress: Option<f32>,
     thresholds: GaugeThresholds,
     palette: &Palette,
 ) -> Color {
-    let ratio = if ratio.is_nan() { 0.0 } else { ratio };
-    let expected = window_progress.filter(|progress| progress.is_finite());
-    if ratio >= thresholds.crit || expected.is_some_and(|expected| ratio >= expected + 0.25) {
-        palette.red
-    } else if ratio >= thresholds.warn || expected.is_some_and(|expected| ratio > expected + 0.10) {
-        palette.yellow
-    } else {
-        palette.teal
-    }
+    Severity::of(ratio, window_progress, thresholds)
+        .color(palette)
+        .unwrap_or(palette.accent)
 }
 
 /// 空槽与底色的最低对比度：看得出条形总长，又不抢已用段的风头。
@@ -222,8 +257,8 @@ mod tests {
                 ..GaugeSpec::default()
             },
         );
-        assert_eq!(row_text(&buffer, 0), "━━━━━░░░░░");
-        assert_eq!(buffer[(0, 0)].style().fg, Some(palette.teal));
+        assert_eq!(row_text(&buffer, 0), "━━━━━─────");
+        assert_eq!(buffer[(0, 0)].style().fg, Some(palette.accent));
         assert_eq!(buffer[(9, 0)].style().fg, Some(palette.surface_dim));
 
         let (buffer, palette) = render(
@@ -233,7 +268,7 @@ mod tests {
                 ..GaugeSpec::default()
             },
         );
-        assert_eq!(row_text(&buffer, 0), "━━━━━━━━░░");
+        assert_eq!(row_text(&buffer, 0), "━━━━━━━━──");
         assert_eq!(buffer[(0, 0)].style().fg, Some(palette.yellow));
 
         let (buffer, palette) = render(
@@ -263,7 +298,7 @@ mod tests {
     #[test]
     fn unknown_ratio_draws_only_the_empty_track() {
         let (buffer, palette) = render(6, GaugeSpec::default());
-        assert_eq!(row_text(&buffer, 0), "░░░░░░");
+        assert_eq!(row_text(&buffer, 0), "──────");
         assert_eq!(buffer[(0, 0)].style().fg, Some(palette.surface_dim));
         let (buffer, _) = render(
             6,
@@ -272,7 +307,7 @@ mod tests {
                 ..GaugeSpec::default()
             },
         );
-        assert_eq!(row_text(&buffer, 0), "░░░░░░", "0 与未知都不填充");
+        assert_eq!(row_text(&buffer, 0), "──────", "0 与未知都不填充");
         let (buffer, _) = render(
             6,
             GaugeSpec {
@@ -280,7 +315,7 @@ mod tests {
                 ..GaugeSpec::default()
             },
         );
-        assert_eq!(row_text(&buffer, 0), "━░░░░░", "非零比例至少占一格");
+        assert_eq!(row_text(&buffer, 0), "━─────", "非零比例至少占一格");
     }
 
     #[test]
@@ -315,9 +350,9 @@ mod tests {
                 ..GaugeSpec::default()
             },
         );
-        assert_eq!(row_text(&buffer, 0), "━━━░░┃░░░░");
+        assert_eq!(row_text(&buffer, 0), "━━━──┃────");
         assert_eq!(buffer[(5, 0)].style().fg, Some(palette.overlay1));
-        assert_eq!(buffer[(0, 0)].style().fg, Some(palette.teal));
+        assert_eq!(buffer[(0, 0)].style().fg, Some(palette.accent));
 
         // 用量跑在时间前面：0.5 已用 vs 窗口才过 0.2 → 超前 30 个百分点 → 红。
         let thresholds = GaugeThresholds::default();
@@ -331,11 +366,11 @@ mod tests {
         );
         assert_eq!(
             gauge_color(0.25, Some(0.2), thresholds, &palette),
-            palette.teal
+            palette.accent
         );
         assert_eq!(
             gauge_color(f32::NAN, None, thresholds, &palette),
-            palette.teal
+            palette.accent
         );
         // 进度 1.0 的刻度钉在末格，不越界。
         let (buffer, _) = render(
@@ -345,7 +380,7 @@ mod tests {
                 ..GaugeSpec::default()
             },
         );
-        assert_eq!(row_text(&buffer, 0), "░░░┃");
+        assert_eq!(row_text(&buffer, 0), "───┃");
     }
 
     #[test]
@@ -380,7 +415,7 @@ mod tests {
                 ..GaugeSpec::default()
             },
         );
-        assert_eq!(row_text(&buffer, 0), "━━━━━░░░░░");
+        assert_eq!(row_text(&buffer, 0), "━━━━━─────");
     }
 
     /// 空槽按所在格的底色挑色：每个内置主题的面板底上对比度都不低于 1.5:1
@@ -403,7 +438,7 @@ mod tests {
                 &palette,
             );
             let track = buffer[(9, 0)].style();
-            assert_eq!(buffer[(9, 0)].symbol(), "░", "{name}");
+            assert_eq!(buffer[(9, 0)].symbol(), "─", "{name}");
             match crate::ui::color::contrast_ratio(track.fg.expect("前景"), palette.panel_bg) {
                 Some(ratio) => assert!(ratio >= 1.5, "{name}: 空槽对比度 {ratio:.2}:1"),
                 None => assert_eq!(track.fg, Some(palette.surface_dim), "{name}: 无从比较"),

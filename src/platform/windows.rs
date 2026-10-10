@@ -14,11 +14,13 @@ use std::{
 };
 
 mod client_stream;
-#[cfg(test)]
-pub(crate) use client_stream::client_transport_process_sample;
 pub(crate) use client_stream::{
     client_stream_control, finish_client_stream, prepare_server_client_stream,
     read_client_handshake, write_client_stream, ClientStreamControl, ServerClientStream,
+};
+#[cfg(test)]
+pub(crate) use client_stream::{
+    client_transport_process_cpu_time, client_transport_process_sample,
 };
 mod clipboard_image;
 mod command_search;

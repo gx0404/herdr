@@ -1,5 +1,8 @@
 //! 卡片：带标题与徽标的边框容器，是监控系统页 / 设置页的分区单元。
 //! 边框字形来自调用方的 `BorderGlyphs`（随 `ui.border_style` 解析一次）。
+//!
+//! Graphite 外观：常态边框 `surface1`、标题是说明色小字（不加粗），徽标（卡片的
+//! 主读数或状态）粗体靠右压在上边框上；返回的内容区在边框内再留左右各 1 列内边距。
 
 use ratatui::{
     buffer::Buffer,
@@ -36,8 +39,12 @@ fn border_color(spec: &CardSpec<'_>, palette: &Palette) -> Color {
     }
 }
 
-/// 画卡片，返回内容区（边框内一圈）。`area` 不足 2×2 时什么都不画、返回空矩形。
-/// 标题放在上边框左侧、徽标放在上边框右侧，两者都按剩余宽度截断（徽标优先）。
+/// 内容区左右各留的内边距（列）。
+pub(crate) const CARD_PADDING: u16 = 1;
+
+/// 画卡片，返回内容区（边框内一圈，再去掉左右各 [`CARD_PADDING`] 列；边框内不足
+/// 3 列时不留内边距）。`area` 不足 2×2 时什么都不画、返回空矩形。标题放在上边框
+/// 左侧、徽标放在上边框右侧，两者都按剩余宽度截断（徽标优先）。
 pub(crate) fn render_card(
     buffer: &mut Buffer,
     area: Rect,
@@ -70,7 +77,9 @@ pub(crate) fn render_card(
     // 留一格边框线，不让标题贴着徽标。
     let mut title_budget = area.width - 2;
     if let Some((badge, color)) = spec.badge {
-        let style = background.fg(if spec.dimmed { palette.overlay0 } else { color });
+        let style = background
+            .fg(if spec.dimmed { palette.overlay0 } else { color })
+            .add_modifier(Modifier::BOLD);
         let used = framed_label_width(badge, title_budget);
         if used > 0 {
             let x = right - used;
@@ -79,22 +88,33 @@ pub(crate) fn render_card(
         }
     }
     if !spec.title.is_empty() {
-        let style = background
-            .fg(if spec.dimmed {
-                palette.overlay0
-            } else if spec.focused {
-                palette.accent
-            } else {
-                palette.text
-            })
-            .add_modifier(Modifier::BOLD);
+        // 标题是说明层级的小字：常态说明色、不加粗；选中的卡片标题换正文色加粗，
+        // 与 accent 边框一起标出焦点。
+        let style = if spec.dimmed {
+            background.fg(palette.overlay0)
+        } else if spec.focused {
+            background.fg(palette.text).add_modifier(Modifier::BOLD)
+        } else {
+            background.fg(palette.subtext0)
+        };
         let used = framed_label_width(spec.title, title_budget);
         if used > 0 {
             put_framed_label(buffer, area.x + 1, top, used, spec.title, style);
         }
     }
 
-    Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2)
+    let inner_width = area.width - 2;
+    let padding = if inner_width > CARD_PADDING * 2 {
+        CARD_PADDING
+    } else {
+        0
+    };
+    Rect::new(
+        area.x + 1 + padding,
+        area.y + 1,
+        inner_width - padding * 2,
+        area.height - 2,
+    )
 }
 
 /// ` text ` 在 `budget` 列内实际占多少列：两侧各留一格空白，正文至少 1 列，
@@ -140,13 +160,22 @@ mod tests {
         assert_eq!(row_text(&buffer, 0), "╭ CPU ────── stale ╮");
         assert_eq!(row_text(&buffer, 1), "│                  │");
         assert_eq!(row_text(&buffer, 3), "╰──────────────────╯");
-        assert_eq!(inner, Rect::new(1, 1, 18, 2));
+        assert_eq!(inner, Rect::new(2, 1, 16, 2), "边框内左右各留 1 列内边距");
         let title = buffer[(2, 0)].style();
-        assert_eq!(title.fg, Some(palette.text));
-        assert!(title.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(buffer[(14, 0)].style().fg, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(title.fg, Some(palette.subtext0), "标题是说明层级的小字");
+        assert!(!title.add_modifier.contains(Modifier::BOLD));
+        let badge = buffer[(14, 0)].style();
+        assert_eq!(badge.fg, Some(Color::Rgb(1, 2, 3)));
+        assert!(badge.add_modifier.contains(Modifier::BOLD), "徽标是主读数");
         assert_eq!(buffer[(0, 0)].style().fg, Some(palette.surface1));
         assert_eq!(buffer[(5, 1)].style().bg, Some(palette.panel_bg));
+        // 太窄放不下内边距时退回边框内一圈。
+        let (_, inner, _) = render(
+            Rect::new(0, 0, 4, 3),
+            CardSpec::default(),
+            BorderGlyphs::ROUNDED,
+        );
+        assert_eq!(inner, Rect::new(1, 1, 2, 1));
     }
 
     #[test]
@@ -161,7 +190,9 @@ mod tests {
             BorderGlyphs::SINGLE,
         );
         assert_eq!(buffer[(0, 0)].style().fg, Some(palette.accent));
-        assert_eq!(buffer[(2, 0)].style().fg, Some(palette.accent));
+        let title = buffer[(2, 0)].style();
+        assert_eq!(title.fg, Some(palette.text), "选中卡片的标题换正文色");
+        assert!(title.add_modifier.contains(Modifier::BOLD));
         let (buffer, _, palette) = render(
             Rect::new(0, 0, 10, 3),
             CardSpec {

@@ -312,14 +312,38 @@ pub(crate) fn write_client_stream(stream: &ServerClientStream, mut data: &[u8]) 
 }
 
 #[cfg(test)]
+pub(crate) fn client_transport_process_cpu_time() -> Duration {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    assert_ne!(
+        unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+        },
+        0
+    );
+    let ticks =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+}
+
+#[cfg(test)]
 pub(crate) fn client_transport_process_sample() -> (u32, u32, Duration) {
-    use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
-    use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, GetProcessHandleCount, GetProcessTimes,
-    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
 
     let mut handles = 0;
     assert_ne!(
@@ -341,29 +365,7 @@ pub(crate) fn client_transport_process_sample() -> (u32, u32, Duration) {
         }
         next = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) };
     }
-    let mut created = FILETIME::default();
-    let mut exited = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    assert_ne!(
-        unsafe {
-            GetProcessTimes(
-                GetCurrentProcess(),
-                &mut created,
-                &mut exited,
-                &mut kernel,
-                &mut user,
-            )
-        },
-        0
-    );
-    let ticks =
-        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
-    (
-        handles,
-        threads,
-        Duration::from_nanos((ticks(kernel) + ticks(user)) * 100),
-    )
+    (handles, threads, client_transport_process_cpu_time())
 }
 
 pub(crate) fn finish_client_stream(stream: &mut ServerClientStream) -> io::Result<()> {

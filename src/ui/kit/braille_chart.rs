@@ -107,15 +107,18 @@ fn auto_max(samples: &[f32], columns: usize) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// 单序列迷你图。`max` 为 `None` 时按可见样本自动定标；`area` 可多行，级数
-/// 随行数线性叠加。空样本或空区域不画。
-pub(crate) fn render_sparkline(
+/// 单序列迷你图（面积式，两色）：每列最上面那一格（曲线的轮廓）用 `edge`，其下
+/// 填满的格用 `fill`——多行的面积图读起来是一条清楚的线加一片安静的底，不是一整块
+/// 实心点阵；两者传同一个样式就是单色迷你图。`max` 为 `None` 时按可见样本自动定标；
+/// `area` 可多行，级数随行数线性叠加。空样本或空区域不画。
+pub(crate) fn render_shaded_sparkline(
     buffer: &mut Buffer,
     area: Rect,
     samples: &[f32],
     max: Option<f32>,
     glyphs: ChartGlyphs,
-    style: Style,
+    edge: Style,
+    fill: Style,
 ) {
     if area.is_empty() || samples.is_empty() {
         return;
@@ -134,6 +137,8 @@ pub(crate) fn render_sparkline(
             *level =
                 sample_at(samples, slot, columns).map_or(0, |value| level_of(value, max, total));
         }
+        // 轮廓所在的行：这一列最高的子列落在哪一行（自底向上数）。
+        let top = levels[0].max(levels[1]).saturating_sub(1) / levels_per_row;
         for row in 0..area.height {
             let base = row * levels_per_row;
             let heights = [
@@ -146,7 +151,7 @@ pub(crate) fn render_sparkline(
                 area.bottom() - 1 - row,
                 glyphs,
                 heights,
-                style,
+                if row < top { fill } else { edge },
             );
         }
     }
@@ -240,7 +245,8 @@ mod tests {
     ) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_sparkline(&mut buffer, area, samples, max, glyphs, Style::default());
+        let style = Style::default();
+        render_shaded_sparkline(&mut buffer, area, samples, max, glyphs, style, style);
         buffer
     }
 
@@ -290,6 +296,27 @@ mod tests {
         assert_eq!(row_text(&buffer, 0), "  ", "全零不除零、不画");
         let buffer = sparkline(2, 1, &[f32::NAN, -3.0], Some(8.0), ChartGlyphs::Blocks);
         assert_eq!(row_text(&buffer, 0), "  ");
+    }
+
+    #[test]
+    fn shaded_sparklines_draw_the_outline_over_a_quieter_fill() {
+        let area = Rect::new(0, 0, 2, 2);
+        let mut buffer = Buffer::empty(area);
+        let edge = Style::default().fg(Color::White);
+        let fill = Style::default().fg(Color::DarkGray);
+        render_shaded_sparkline(
+            &mut buffer,
+            area,
+            &[8.0, 16.0],
+            Some(16.0),
+            ChartGlyphs::Blocks,
+            edge,
+            fill,
+        );
+        // 列 0 只有底行：底行就是轮廓。列 1 两行满：底行是填充、顶行是轮廓。
+        assert_eq!(buffer[(0, 1)].style().fg, Some(Color::White));
+        assert_eq!(buffer[(1, 1)].style().fg, Some(Color::DarkGray));
+        assert_eq!(buffer[(1, 0)].style().fg, Some(Color::White));
     }
 
     #[test]

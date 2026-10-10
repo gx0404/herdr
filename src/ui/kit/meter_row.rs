@@ -7,7 +7,7 @@ use ratatui::{
     style::{Modifier, Style},
 };
 
-use super::gauge::{render_gauge, GaugeSpec};
+use super::gauge::{render_gauge, GaugeSpec, Severity};
 use super::{put_str, put_str_ellipsis};
 use crate::app::state::Palette;
 use crate::ui::display_width_u16;
@@ -116,12 +116,16 @@ pub(crate) fn render_meter_row_aligned(
         let muted = Style::default().fg(palette.overlay0);
         (muted, muted, muted)
     } else {
+        // 数字跟条形同一个语义：越过阈值才转黄 / 红，常态是正文色。
+        let severity = row.gauge.ratio.map_or(Severity::Normal, |ratio| {
+            Severity::of(ratio, row.gauge.window_progress, row.gauge.thresholds)
+        });
         (
             Style::default().fg(palette.subtext0),
             Style::default()
-                .fg(palette.text)
+                .fg(severity.color(palette).unwrap_or(palette.text))
                 .add_modifier(Modifier::BOLD),
-            Style::default().fg(palette.overlay0),
+            Style::default().fg(palette.overlay1),
         )
     };
 
@@ -207,13 +211,35 @@ mod tests {
     #[test]
     fn wide_row_shows_every_segment_in_order() {
         let (buffer, palette) = render(24, &sample(Some("4 cores")));
-        assert_eq!(row_text(&buffer, 0), "CPU ━━━━░░░░ 42% 4 cores");
+        assert_eq!(row_text(&buffer, 0), "CPU ━━━━──── 42% 4 cores");
         assert_eq!(buffer[(0, 0)].style().fg, Some(palette.subtext0));
-        assert_eq!(buffer[(4, 0)].style().fg, Some(palette.teal));
+        assert_eq!(buffer[(4, 0)].style().fg, Some(palette.accent));
         let value = buffer[(13, 0)].style();
         assert_eq!(value.fg, Some(palette.text));
         assert!(value.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(buffer[(17, 0)].style().fg, Some(palette.overlay0));
+        assert_eq!(buffer[(17, 0)].style().fg, Some(palette.overlay1));
+    }
+
+    /// 颜色只表达严重程度：越过警告 / 严重阈值时数字与条形一起转黄 / 红。
+    #[test]
+    fn values_past_the_thresholds_take_the_severity_color() {
+        for (ratio, expected) in [(0.5, None), (0.8, Some("yellow")), (0.95, Some("red"))] {
+            let row = MeterRow {
+                gauge: GaugeSpec {
+                    ratio: Some(ratio),
+                    ..GaugeSpec::default()
+                },
+                ..sample(None)
+            };
+            let (buffer, palette) = render(16, &row);
+            let value = buffer[(13, 0)].style().fg;
+            let color = match expected {
+                None => palette.text,
+                Some("yellow") => palette.yellow,
+                Some(_) => palette.red,
+            };
+            assert_eq!(value, Some(color), "{ratio}");
+        }
     }
 
     #[test]
@@ -221,7 +247,7 @@ mod tests {
         let (buffer, _) = render(12, &sample(Some("4 cores")));
         assert_eq!(
             row_text(&buffer, 0),
-            "CPU ━━░░ 42%",
+            "CPU ━━── 42%",
             "说明先丢，条形缩到最窄"
         );
         let (buffer, _) = render(8, &sample(Some("4 cores")));
@@ -242,7 +268,7 @@ mod tests {
             ..sample(None)
         };
         let (buffer, _) = render(18, &row);
-        assert_eq!(row_text(&buffer, 0), "内存 ━━━━░░░░ 6.2G");
+        assert_eq!(row_text(&buffer, 0), "内存 ━━━━──── 6.2G");
         let (buffer, _) = render(8, &row);
         assert_eq!(row_text(&buffer, 0), "内… 6.2G", "宽字符按 2 列截断");
     }
@@ -254,7 +280,7 @@ mod tests {
             ..sample(Some("old"))
         };
         let (buffer, palette) = render(20, &row);
-        assert_eq!(row_text(&buffer, 0), "CPU ━━━━░░░░ 42% old");
+        assert_eq!(row_text(&buffer, 0), "CPU ━━━━──── 42% old");
         assert_eq!(buffer[(4, 0)].style().fg, Some(palette.overlay0));
         let value = buffer[(13, 0)].style();
         assert_eq!(value.fg, Some(palette.overlay0));
@@ -300,8 +326,8 @@ mod tests {
                 &palette,
             );
         }
-        assert_eq!(row_text(&buffer, 0), "0  ━━━━░░░░  57%    ");
-        assert_eq!(row_text(&buffer, 1), "10 ━━━━░░░░ 100% hot");
+        assert_eq!(row_text(&buffer, 0), "0  ━━━━────  57%    ");
+        assert_eq!(row_text(&buffer, 1), "10 ━━━━──── 100% hot");
         // 窄到放不下条形时仍先砍条形、保数字，与逐行预算同口径。
         let mut buffer = Buffer::empty(Rect::new(0, 0, 8, 1));
         render_meter_row_aligned(

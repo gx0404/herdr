@@ -1,8 +1,12 @@
 //! 表格：一行表头（可排序列带方向标记与命中区）+ 数据行（选中 / 悬浮 / 右对齐
-//! 列 / 单元格前景色）。列宽按 `Fixed` / `Min` / `Fill` 分配，列间 1 列间隔；
-//! 放不下时先丢 `priority` 大的列（同优先级丢靠右的），至少保留一列。列布局用
-//! 栈数组（最多 64 列），单元格文本由调用方的回调按需给出，原语本身只分配返回
-//! 的命中表。
+//! 列 / 单元格前景色 / 变暗的单位）。列宽按 `Fixed` / `Min` / `Fill` 分配，列间
+//! 1 列间隔；放不下时先丢 `priority` 大的列（同优先级丢靠右的），至少保留一列。
+//! 列布局用栈数组（最多 64 列），单元格文本由调用方的回调按需给出，原语本身只
+//! 分配返回的命中表。
+//!
+//! Graphite 外观：表头是说明色小字，排序列换正文色加粗并带方向标记；选中行是
+//! `selection_bg` 底上的粗体正文（不反色）；数量单元格的单位（`MiB`、`GiB`）用
+//! 元信息色，数字本身保持正文色。
 
 use std::borrow::Cow;
 
@@ -12,7 +16,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
 };
 
-use super::{ellipsis_width, fill_row, put_str, put_str_ellipsis, selected_style};
+use super::{ellipsis_width, fill_row, put_str, put_str_ellipsis, selected_row_style};
 use crate::app::state::Palette;
 use crate::ui::display_width_u16;
 
@@ -21,14 +25,16 @@ pub(crate) const MAX_COLUMNS: usize = 64;
 
 /// 列宽规则。`Fixed(n)` 恒为 n；`Min(n)` 至少 n，有富余时先长到容下表头与
 /// 画面上的单元格（数字列不被 `Fill` 列抢光而截断），没有 `Fill` 列时再平分
-/// 剩下的富余；`Fill(w)` 至少容下表头标题，富余按权重 w 分配（w = 0 不分）。
-/// 丢列只按声明的基础宽度（`Min` 取 n）判断：内容要保证完整时，调用方把 n
-/// 定成内容宽度。
+/// 剩下的富余；`Fill(w)` 至少容下表头标题，富余按权重 w 分配（w = 0 不分）；
+/// `FillAtLeast(n, w)` 同 `Fill(w)`，但至少 n 列——名称这类主列不会被低优先级
+/// 的列挤成几个字符，放不下时先丢别的列。丢列只按声明的基础宽度（`Min` 取 n）
+/// 判断：内容要保证完整时，调用方把 n 定成内容宽度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColumnWidth {
     Fixed(u16),
     Min(u16),
     Fill(u16),
+    FillAtLeast(u16, u16),
 }
 
 /// 一列。`priority` 越大越先被丢（0 = 最重要）。
@@ -60,12 +66,28 @@ pub(crate) struct TableState {
     pub ascii: bool,
 }
 
-/// 单元格：文本与可选前景色（如按阈值着色的 CPU 占用）；选中行统一用反色，
-/// 忽略 `fg`。`&str` / `String` / `Cow<str>` 都能直接转换。
+/// 单元格：文本、可选前景色（如按阈值着色的 CPU 占用）与末尾变暗的字节数
+/// （`dim_tail`：数量的单位，见 [`TableCell::quantity`]）。选中行忽略 `fg`，单位
+/// 照样变暗。`&str` / `String` / `Cow<str>` 都能直接转换。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TableCell<'a> {
     pub text: Cow<'a, str>,
     pub fg: Option<Color>,
+    pub dim_tail: usize,
+}
+
+impl<'a> TableCell<'a> {
+    /// 带单位的数量（`"900.0 MiB"`）：最后一个空格之后的单位用元信息色画，数字
+    /// 保持单元格本来的颜色。没有空格时整格都是数字。
+    pub(crate) fn quantity(text: impl Into<Cow<'a, str>>) -> Self {
+        let text = text.into();
+        let dim_tail = text.rfind(' ').map_or(0, |space| text.len() - space - 1);
+        Self {
+            text,
+            fg: None,
+            dim_tail,
+        }
+    }
 }
 
 impl<'a> From<&'a str> for TableCell<'a> {
@@ -73,6 +95,7 @@ impl<'a> From<&'a str> for TableCell<'a> {
         Self {
             text: Cow::Borrowed(text),
             fg: None,
+            dim_tail: 0,
         }
     }
 }
@@ -82,13 +105,18 @@ impl From<String> for TableCell<'_> {
         Self {
             text: Cow::Owned(text),
             fg: None,
+            dim_tail: 0,
         }
     }
 }
 
 impl<'a> From<Cow<'a, str>> for TableCell<'a> {
     fn from(text: Cow<'a, str>) -> Self {
-        Self { text, fg: None }
+        Self {
+            text,
+            fg: None,
+            dim_tail: 0,
+        }
     }
 }
 
@@ -112,6 +140,15 @@ fn base_width(column: &Column<'_>) -> u16 {
     match column.width {
         ColumnWidth::Fixed(width) | ColumnWidth::Min(width) => width,
         ColumnWidth::Fill(_) => display_width_u16(column.title).max(1),
+        ColumnWidth::FillAtLeast(min, _) => display_width_u16(column.title).max(min).max(1),
+    }
+}
+
+/// 参与分富余的权重：`Fill` / `FillAtLeast` 的 w，其余 0。
+fn fill_weight_of(width: ColumnWidth) -> Option<u32> {
+    match width {
+        ColumnWidth::Fill(weight) | ColumnWidth::FillAtLeast(_, weight) => Some(u32::from(weight)),
+        ColumnWidth::Fixed(_) | ColumnWidth::Min(_) => None,
     }
 }
 
@@ -174,19 +211,16 @@ fn layout(columns: &[Column<'_>], width: u16, content: &[u16; MAX_COLUMNS]) -> L
     let extra = extra;
     let fill_weight: u32 = (0..count)
         .filter(|&index| is_shown(shown, index))
-        .filter_map(|index| match columns[index].width {
-            ColumnWidth::Fill(weight) => Some(u32::from(weight)),
-            _ => None,
-        })
+        .filter_map(|index| fill_weight_of(columns[index].width))
         .sum();
     let min_count = (0..count)
         .filter(|&index| is_shown(shown, index))
         .filter(|&index| matches!(columns[index].width, ColumnWidth::Min(_)))
         .count() as u32;
     let share = |index: usize| -> u32 {
-        match columns[index].width {
-            ColumnWidth::Fill(weight) if fill_weight > 0 => extra * u32::from(weight) / fill_weight,
-            ColumnWidth::Min(_) if fill_weight == 0 && min_count > 0 => extra / min_count,
+        match (columns[index].width, fill_weight_of(columns[index].width)) {
+            (_, Some(weight)) if fill_weight > 0 => extra * weight / fill_weight,
+            (ColumnWidth::Min(_), _) if fill_weight == 0 && min_count > 0 => extra / min_count,
             _ => 0,
         }
     };
@@ -195,7 +229,9 @@ fn layout(columns: &[Column<'_>], width: u16, content: &[u16; MAX_COLUMNS]) -> L
     for index in (0..count).filter(|&index| is_shown(shown, index)) {
         let add = share(index);
         let grows = match columns[index].width {
-            ColumnWidth::Fill(weight) => fill_weight > 0 && weight > 0,
+            ColumnWidth::Fill(weight) | ColumnWidth::FillAtLeast(_, weight) => {
+                fill_weight > 0 && weight > 0
+            }
             ColumnWidth::Min(_) => fill_weight == 0,
             ColumnWidth::Fixed(_) => false,
         };
@@ -222,12 +258,38 @@ fn put_cell(
     align_right: bool,
     style: Style,
 ) {
-    let offset = if align_right {
-        width - ellipsis_width(text, width)
-    } else {
-        0
-    };
-    put_str_ellipsis(buffer, x + offset, y, width - offset, text, style);
+    put_cell_dimmed(buffer, x, y, width, (text, 0), align_right, (style, style));
+}
+
+/// 同 [`put_cell`]，`text` 末尾 `dim_tail` 字节换成 `styles.1`——只在整格放得下时
+/// 分开着色，截断时整格用 `styles.0`（半个单位没有意义）。
+fn put_cell_dimmed(
+    buffer: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    (text, dim_tail): (&str, usize),
+    align_right: bool,
+    (style, dim): (Style, Style),
+) {
+    let used = ellipsis_width(text, width);
+    let offset = if align_right { width - used } else { 0 };
+    let split = text.len().saturating_sub(dim_tail);
+    let fits = display_width_u16(text) <= width;
+    if dim_tail == 0 || !fits || !text.is_char_boundary(split) {
+        put_str_ellipsis(buffer, x + offset, y, width - offset, text, style);
+        return;
+    }
+    let (head, tail) = text.split_at(split);
+    let written = put_str(buffer, x + offset, y, width - offset, head, style);
+    put_str(
+        buffer,
+        x + offset + written,
+        y,
+        width - offset - written,
+        tail,
+        dim,
+    );
 }
 
 /// 画表格：第一行表头，其余是表体。`cell(row, column)` 只对画出来的格调用
@@ -284,13 +346,14 @@ where
             break;
         }
         let sorted = state.sort.filter(|sort| sort.column == index);
-        let style = Style::default()
-            .fg(if sorted.is_some() {
-                palette.accent
-            } else {
-                palette.subtext0
-            })
-            .add_modifier(Modifier::BOLD);
+        // 表头是说明层级的小字；排序列换正文色加粗，标出当前按哪一列排。
+        let style = if sorted.is_some() {
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.subtext0)
+        };
         let rect = Rect::new(x, area.y, width, 1);
         match sorted {
             Some(sort) if width >= 3 => {
@@ -336,7 +399,7 @@ where
         let y = body.y + u16::try_from(offset).unwrap_or(0);
         let selected = state.selected == Some(row);
         let row_style = if selected {
-            selected_style(palette)
+            selected_row_style(palette)
         } else if state.hovered == Some(row) {
             Style::default().fg(palette.text).bg(hover_bg)
         } else {
@@ -359,7 +422,18 @@ where
                 Some(fg) if !selected => row_style.fg(fg),
                 _ => row_style,
             };
-            put_cell(buffer, x, y, width, &value.text, column.align_right, style);
+            put_cell_dimmed(
+                buffer,
+                x,
+                y,
+                width,
+                (&value.text, value.dim_tail),
+                column.align_right,
+                (
+                    style,
+                    style.fg(palette.overlay1).remove_modifier(Modifier::BOLD),
+                ),
+            );
             x = x.saturating_add(width).saturating_add(1);
         }
         render.rows.push((Rect::new(body.x, y, body.width, 1), row));
@@ -475,9 +549,11 @@ mod tests {
             ]
         );
         let sorted = buffer[(21, 0)].style();
-        assert_eq!(sorted.fg, Some(palette.accent), "排序列表头 accent");
+        assert_eq!(sorted.fg, Some(palette.text), "排序列表头换正文色");
         assert!(sorted.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(buffer[(2, 0)].style().fg, Some(palette.subtext0));
+        let plain = buffer[(2, 0)].style();
+        assert_eq!(plain.fg, Some(palette.subtext0), "其余表头是说明色小字");
+        assert!(!plain.add_modifier.contains(Modifier::BOLD));
         assert_eq!(buffer[(6, 1)].style().fg, Some(palette.text));
     }
 
@@ -641,6 +717,7 @@ mod tests {
                 (_, _) => TableCell {
                     text: Cow::Borrowed("99%"),
                     fg: Some(hot),
+                    dim_tail: 0,
                 },
             },
             &palette,
@@ -648,7 +725,12 @@ mod tests {
         assert_eq!(row_text(&buffer, 0), "名称   占用");
         assert_eq!(row_text(&buffer, 1), "浏览…   99%", "宽字符按显示宽度截断");
         let selected = buffer[(0, 1)].style();
-        assert_eq!(selected.bg, Some(palette.accent));
+        assert_eq!(
+            selected.bg,
+            Some(palette.selection_row_bg()),
+            "选中行是 selection_bg 底，不反色"
+        );
+        assert!(selected.add_modifier.contains(Modifier::BOLD));
         assert_ne!(buffer[(8, 1)].style().fg, Some(hot), "选中行忽略单元格色");
         assert_eq!(buffer[(0, 2)].style().bg, Some(palette.hover_row_bg()));
         assert_eq!(buffer[(8, 2)].style().fg, Some(hot), "单元格色");
@@ -681,6 +763,102 @@ mod tests {
         assert_eq!(row_text(&buffer, 0), "  PID Name           CPU   Mem");
         let (_, render, _) = paint(30, 3, &[], state(3));
         assert_eq!(render, TableRender::default());
+    }
+
+    /// 数量单元格右对齐、单位变暗；放不下时整格截断、不再分开着色。
+    #[test]
+    fn quantity_cells_dim_their_unit_and_stay_right_aligned() {
+        let columns = [Column {
+            title: "Mem",
+            width: ColumnWidth::Fixed(9),
+            align_right: true,
+            sortable: false,
+            priority: 0,
+        }];
+        let palette = Palette::catppuccin();
+        let area = Rect::new(0, 0, 9, 2);
+        let mut buffer = Buffer::empty(area);
+        render_table(
+            &mut buffer,
+            area,
+            &columns,
+            &state(1),
+            |_, _| TableCell::quantity("64.0 MiB"),
+            &palette,
+        );
+        assert_eq!(row_text(&buffer, 1), " 64.0 MiB");
+        assert_eq!(
+            buffer[(1, 1)].style().fg,
+            Some(palette.text),
+            "数字是正文色"
+        );
+        assert_eq!(
+            buffer[(6, 1)].style().fg,
+            Some(palette.overlay1),
+            "单位变暗"
+        );
+        let cell = TableCell::quantity("12");
+        assert_eq!(cell.dim_tail, 0, "没有单位就不变暗");
+        let area = Rect::new(0, 0, 5, 2);
+        let mut buffer = Buffer::empty(area);
+        render_table(
+            &mut buffer,
+            area,
+            &columns,
+            &state(1),
+            |_, _| TableCell::quantity("64.0 MiB"),
+            &palette,
+        );
+        assert_eq!(row_text(&buffer, 1), "64.0…", "截断时整格同色");
+        assert_eq!(buffer[(4, 1)].style().fg, Some(palette.text));
+    }
+
+    /// 主列带最小宽度时，放不下先丢低优先级的列，而不是把主列挤成几个字符；
+    /// 放得下时它照样吃掉全部富余。
+    #[test]
+    fn fill_columns_with_a_minimum_make_lower_priority_columns_drop_first() {
+        let columns = [
+            Column {
+                title: "Name",
+                width: ColumnWidth::FillAtLeast(8, 1),
+                align_right: false,
+                sortable: false,
+                priority: 0,
+            },
+            Column {
+                title: "User",
+                width: ColumnWidth::Fixed(6),
+                align_right: false,
+                sortable: false,
+                priority: 2,
+            },
+            Column {
+                title: "CPU",
+                width: ColumnWidth::Fixed(4),
+                align_right: true,
+                sortable: false,
+                priority: 1,
+            },
+        ];
+        let rows = [["herdr-server", "dev", "12%"]];
+        let palette = Palette::catppuccin();
+        let paint = |width: u16| {
+            let area = Rect::new(0, 0, width, 2);
+            let mut buffer = Buffer::empty(area);
+            render_table(
+                &mut buffer,
+                area,
+                &columns,
+                &state(1),
+                |row, column| rows[row][column],
+                &palette,
+            );
+            buffer
+        };
+        // 8 + 6 + 4 + 2 间隔 = 20：放得下就都在，富余给主列。
+        assert_eq!(row_text(&paint(24), 1), "herdr-server dev     12%");
+        // 19 列：先丢 User（priority 2），名称保住至少 8 列。
+        assert_eq!(row_text(&paint(19), 1), "herdr-server    12%");
     }
 
     #[test]

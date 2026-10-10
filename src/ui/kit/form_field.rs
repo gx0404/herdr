@@ -82,6 +82,57 @@ fn skip_columns(value: &str, skip: u16) -> (&str, u16) {
     ("", skipped)
 }
 
+/// 设置行（「标签 + 说明 + 控件」，桌面端设置页的行卡片）：标签是正文色、在第一行
+/// 左侧，控件槽占第一行右侧 `control_width` 列（不超过行宽），说明是说明色小字、
+/// 在第二行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SettingRowSpec<'a> {
+    pub label: &'a str,
+    pub description: Option<&'a str>,
+    pub control_width: u16,
+}
+
+/// 设置行需要的行数：标签行，有说明再加一行。
+pub(crate) fn setting_row_height(spec: &SettingRowSpec<'_>) -> u16 {
+    1 + u16::from(spec.description.is_some())
+}
+
+/// 画设置行，返回第一行右侧的控件槽（调用方在里面画开关 / 步进器 / 分段控件）。
+/// 标签与控件之间至少空 1 列，放不下的标签按显示宽度截断；`area` 只有一行时说明
+/// 省略。
+pub(crate) fn render_setting_row(
+    buffer: &mut Buffer,
+    area: Rect,
+    spec: &SettingRowSpec<'_>,
+    palette: &Palette,
+) -> Rect {
+    if area.is_empty() {
+        return Rect::default();
+    }
+    let control_width = spec.control_width.min(area.width);
+    let control = Rect::new(area.right() - control_width, area.y, control_width, 1);
+    let label_width = control.x.saturating_sub(area.x).saturating_sub(1);
+    put_str_ellipsis(
+        buffer,
+        area.x,
+        area.y,
+        label_width,
+        spec.label,
+        Style::default().fg(palette.text),
+    );
+    if let Some(description) = spec.description.filter(|_| area.height > 1) {
+        put_str_ellipsis(
+            buffer,
+            area.x,
+            area.y + 1,
+            area.width,
+            description,
+            Style::default().fg(palette.subtext0),
+        );
+    }
+    control
+}
+
 /// 画字段。`area` 高度不足时从下往上省略（提示行、输入行），标签行总在。
 pub(crate) fn render_form_field(
     buffer: &mut Buffer,
@@ -532,6 +583,38 @@ mod tests {
         assert_ne!(
             focused.add_modifier, normal.add_modifier,
             "聚焦态还要有额外标记"
+        );
+    }
+
+    #[test]
+    fn setting_rows_put_the_label_left_the_control_right_and_the_description_below() {
+        let palette = Palette::catppuccin();
+        let spec = SettingRowSpec {
+            label: "采样间隔",
+            description: Some("越短越实时"),
+            control_width: 6,
+        };
+        assert_eq!(setting_row_height(&spec), 2);
+        let area = Rect::new(0, 0, 16, 2);
+        let mut buffer = Buffer::empty(area);
+        let control = render_setting_row(&mut buffer, area, &spec, &palette);
+        assert_eq!(control, Rect::new(10, 0, 6, 1));
+        assert_eq!(row_text(&buffer, 0), "采样间隔        ");
+        assert_eq!(row_text(&buffer, 1), "越短越实时      ");
+        assert_eq!(buffer[(0, 0)].style().fg, Some(palette.text));
+        assert_eq!(buffer[(0, 1)].style().fg, Some(palette.subtext0));
+        // 窄行：标签截断、给控件让位，控件槽不越界。
+        let area = Rect::new(0, 0, 9, 1);
+        let mut buffer = Buffer::empty(area);
+        let control = render_setting_row(&mut buffer, area, &spec, &palette);
+        assert_eq!(control, Rect::new(3, 0, 6, 1));
+        assert_eq!(row_text(&buffer, 0), "…        ");
+        assert_eq!(
+            setting_row_height(&SettingRowSpec {
+                description: None,
+                ..spec
+            }),
+            1
         );
     }
 

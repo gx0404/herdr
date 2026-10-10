@@ -1,23 +1,27 @@
 //! 系统页：主机摘要条、资源卡片（kit 原语：card / meter_row / gauge /
 //! braille_chart / table）与进程详情对话框。布局与命中计算全在这里完成，
-//! 状态只读；历史迷你图的桶与网络样本都拷进栈上缓冲，不在渲染期分配（被页面
-//! 底边裁到的卡片例外：借一块一卡大小的暂存缓冲，见 `cut_system_card`）。
+//! 状态只读；历史曲线读每份样本算好的预分桶、进程表读每份样本排好的行序（见
+//! `HistoryBuckets` / `ProcessRows`），只按图宽合并桶、拷进栈上缓冲，不逐帧遍历
+//! 历史、不逐帧排序（被页面底边裁到的卡片例外：借一块一卡大小的暂存缓冲，见
+//! `cut_system_card`）。
+//!
+//! Graphite 外观：圆角卡片（字形随 `ui.border_style`）、`surface1` 细边框、说明色的
+//! 卡片标题；卡片的主读数（CPU / 内存 / GPU / 磁盘占用、最高温度、进程数）粗体压在
+//! 上边框右侧。颜色只表达严重程度：常态是中性的 accent 与灰阶，越过告警规则的
+//! 警告线转黄、越过规则阈值转红（`thresholds`）。
 
 use std::borrow::Cow;
 
 use super::*;
-use crate::ui::kit::braille_chart::{render_area_chart, render_sparkline, ChartGlyphs};
+use crate::ui::kit::braille_chart::{render_area_chart, render_shaded_sparkline, ChartGlyphs};
 use crate::ui::kit::card::{render_card, CardSpec};
-use crate::ui::kit::gauge::{gauge_color, GaugeSpec, GaugeThresholds};
+use crate::ui::kit::gauge::{render_gauge, GaugeSpec, GaugeThresholds, Severity};
 use crate::ui::kit::meter_row::{
     render_meter_row, render_meter_row_aligned, MeterColumns, MeterRow,
 };
 use crate::ui::kit::table::{
     render_table, Column, ColumnWidth, SortState, TableCell, TableRender, TableState,
 };
-
-/// 历史迷你图最多分多少个采样槽（盲文 256 列）；再宽的图右对齐留白。
-const HISTORY_SLOTS: usize = 512;
 
 /// 卡片双列布局的最小正文宽度（面板宽 96 列、去掉两侧边框后 94）；更窄时单列。
 const TWO_COLUMN_MIN_WIDTH: u16 = 94;
@@ -82,77 +86,66 @@ fn samples_per_column(glyphs: ChartGlyphs) -> usize {
     }
 }
 
-/// 把历史点按时间窗口均分到 `slots` 个桶写进栈上的 `out`（同桶取平均，空桶
-/// NaN → 迷你图留白），返回实际槽数。
-fn history_into(
-    state: &State,
-    slots: usize,
-    value: impl Fn(&HistoryPoint) -> Option<f32>,
-    out: &mut [f32; HISTORY_SLOTS],
-) -> usize {
-    let slots = slots.min(HISTORY_SLOTS);
+/// 把预分桶（`HISTORY_SLOTS` 个）按图宽合并成 `slots` 个槽写进 `out`：每槽取它覆盖
+/// 的桶里非空桶的平均，全空为 NaN（迷你图留白）。返回实际槽数。
+fn resample_buckets(buckets: &[f32], slots: usize, out: &mut [f32; HISTORY_SLOTS]) -> usize {
+    let slots = slots.min(HISTORY_SLOTS).min(buckets.len());
     if slots == 0 {
         return 0;
     }
-    let mut counts = [0u16; HISTORY_SLOTS];
-    out[..slots].fill(0.0);
-    let end = state
-        .history
-        .back()
-        .map_or(state.now_ms, |point| point.at)
-        .saturating_add(1);
-    let duration = u64::from(state.monitor.history_minutes.clamp(1, 60)) * 60_000;
-    let start = end.saturating_sub(duration);
-    for point in &state.history {
-        if point.at < start || point.at >= end {
-            continue;
-        }
-        let Some(value) = value(point).filter(|value| value.is_finite()) else {
-            continue;
-        };
-        let index = ((point.at - start) as u128 * slots as u128 / u128::from(duration)) as usize;
-        if index >= slots {
-            continue;
-        }
-        out[index] += value.clamp(0.0, 100.0);
-        counts[index] = counts[index].saturating_add(1);
-    }
-    for (sum, count) in out.iter_mut().zip(counts.iter()).take(slots) {
-        if *count > 0 {
-            *sum /= f32::from(*count);
+    let total = buckets.len();
+    for (slot, value) in out.iter_mut().enumerate().take(slots) {
+        let from = slot * total / slots;
+        let to = ((slot + 1) * total / slots).max(from + 1).min(total);
+        let (sum, count) = buckets[from..to]
+            .iter()
+            .filter(|value| value.is_finite())
+            .fold((0.0f32, 0u16), |(sum, count), value| {
+                (sum + value, count.saturating_add(1))
+            });
+        *value = if count > 0 {
+            sum / f32::from(count)
         } else {
-            *sum = f32::NAN;
-        }
+            f32::NAN
+        };
     }
     slots
 }
 
-/// 在 `area` 画一条 0..=100 定标的历史迷你图。
+/// 在 `area` 画一条 0..=100 定标的历史迷你图：读每份样本算好的预分桶，按图宽合并；
+/// 预分桶与历史对不上时（测试直接改了历史）退回现算。
 fn history_chart(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
-    value: impl Fn(&HistoryPoint) -> Option<f32>,
-    color: Color,
+    series: HistorySeries,
+    palette: &Palette,
 ) {
     if area.is_empty() {
         return;
     }
     let glyphs = state.chart_glyphs.chart();
+    let wanted = usize::from(area.width) * samples_per_column(glyphs);
     let mut samples = [0f32; HISTORY_SLOTS];
-    let slots = history_into(
-        state,
-        usize::from(area.width) * samples_per_column(glyphs),
-        value,
-        &mut samples,
-    );
-    render_sparkline(
+    let slots = match state.history_buckets.get(state, series) {
+        Some(buckets) => resample_buckets(buckets, wanted, &mut samples),
+        None => bucket_history(
+            &state.history,
+            state.now_ms,
+            state.monitor.history_minutes,
+            wanted,
+            |point| series.value(point, state.selected_core),
+            &mut samples,
+        ),
+    };
+    render_shaded_sparkline(
         buffer,
         area,
         &samples[..slots],
         Some(100.0),
         glyphs,
-        Style::default().fg(color),
+        Style::default().fg(chart_color(palette)),
+        Style::default().fg(palette.overlay0),
     );
 }
 
@@ -199,19 +192,38 @@ fn decimal_width(mut value: usize) -> u16 {
     width
 }
 
-/// 阈值着色：≥90% 红、≥75% 黄，其余不改色。
-fn load_color(ratio: f32, palette: &Palette) -> Option<Color> {
-    if ratio >= 0.9 {
-        Some(palette.red)
-    } else if ratio >= 0.75 {
-        Some(palette.yellow)
-    } else {
-        None
-    }
+/// 某个指标的着色阈值：与该指标的告警规则同一条线——规则阈值起算严重（红），
+/// 提前 15 个百分点算警告（黄）；没有规则的指标用 75 % / 90 %（`GaugeThresholds`
+/// 的默认值，正是默认 CPU / 内存 / 磁盘规则的那两条线）。
+fn thresholds(state: &State, metric: &str) -> GaugeThresholds {
+    state
+        .monitor
+        .alerts
+        .iter()
+        .find(|rule| rule.metric == metric)
+        .filter(|rule| rule.threshold.is_finite() && rule.threshold > 0.0)
+        .map_or_else(GaugeThresholds::default, |rule| {
+            let crit = (rule.threshold / 100.0) as f32;
+            GaugeThresholds {
+                warn: (crit - 0.15).max(0.0),
+                crit,
+            }
+        })
 }
 
-/// 主机摘要条：`主机名 · 系统 · 已运行 · 更新时间 · 采样间隔`，右端是
-/// 「编辑布局 / 完成」入口。
+/// 比例的语义色：警告黄、严重红，常态 `None`（调用方用自己的中性色）。
+fn severity_color(ratio: f32, thresholds: GaugeThresholds, palette: &Palette) -> Option<Color> {
+    Severity::of(ratio, None, thresholds).color(palette)
+}
+
+/// 历史曲线（轮廓）与网络曲线的中性色：说明色一档，比条形的 accent 安静；曲线
+/// 下方的填充再低一档（`overlay0`）。
+fn chart_color(palette: &Palette) -> Color {
+    palette.subtext0
+}
+
+/// 主机摘要条：粗体主机名，其后是说明色的 `系统 · 已运行 · 更新时间 · 采样间隔`，
+/// 右端是「编辑布局 / 完成」入口。非 Ready 的采样状态用状态色插在更新时间之后。
 fn summary_bar(
     buffer: &mut Buffer,
     area: Rect,
@@ -239,45 +251,79 @@ fn summary_bar(
         palette,
         hits,
     );
-    let mut summary = sample.hostname.clone();
+    let mut facts = String::new();
     let os = if sample.operating_system.is_empty() {
         sample.environment.as_str()
     } else {
         sample.operating_system.as_str()
     };
     if !os.is_empty() {
-        summary.push_str(" · ");
-        summary.push_str(os);
+        facts.push_str(" · ");
+        facts.push_str(os);
     }
     if sample.uptime_seconds > 0 {
-        summary.push_str(" · ");
-        summary.push_str(&crate::i18n::fill(
+        facts.push_str(" · ");
+        facts.push_str(&crate::i18n::fill(
             texts.uptime_fmt,
             &[("span", &span_text(sample.uptime_seconds))],
         ));
     }
-    summary.push_str(" · ");
-    summary.push_str(&age_text(state.now_ms, sample.sampled_at_ms, sample.status));
-    if sample.status != ObservationStatus::Ready {
-        summary.push_str(" · ");
-        summary.push_str(status(sample.status));
-    }
-    summary.push_str(" · ");
-    summary.push_str(&crate::i18n::fill(
-        texts.interval_fmt,
-        &[("ms", &sample.interval_ms.to_string())],
-    ));
-    text(
-        buffer,
-        Rect::new(
-            area.x,
-            area.y,
-            button_x.saturating_sub(area.x).saturating_sub(1),
-            1,
+    facts.push_str(" · ");
+    facts.push_str(&age_text(state.now_ms, sample.sampled_at_ms, sample.status));
+    let status_text = (sample.status != ObservationStatus::Ready)
+        .then(|| format!(" · {}", status(sample.status)));
+    let interval = format!(
+        " · {}",
+        crate::i18n::fill(
+            texts.interval_fmt,
+            &[("ms", &sample.interval_ms.to_string())]
+        )
+    );
+    let right = button_x.saturating_sub(1);
+    let mut x = area.x;
+    let spans: [(&str, Style); 4] = [
+        (sample.hostname.as_str(), crate::ui::design::title(palette)),
+        (facts.as_str(), crate::ui::design::meta(palette)),
+        (
+            status_text.as_deref().unwrap_or(""),
+            Style::default().fg(status_color(sample.status, palette)),
         ),
-        0,
-        &summary,
-        Style::default().fg(palette.overlay1),
+        (interval.as_str(), crate::ui::design::meta(palette)),
+    ];
+    for (value, style) in spans {
+        if value.is_empty() {
+            continue;
+        }
+        if x >= right {
+            break;
+        }
+        // 放不下的段以省略号收尾，后面的段不再画。
+        let width = right - x;
+        let fitted = crate::ui::truncate_end(value, usize::from(width));
+        let (end, _) = buffer.set_stringn(x, area.y, &fitted, usize::from(width), style);
+        if crate::ui::display_width(value) > usize::from(width) {
+            break;
+        }
+        x = end;
+    }
+}
+
+/// 还没有采样时的占位：页面正中一个安静的空状态——灰色字形、标题与一行说明，
+/// 不再是左上角的一行灰字。
+fn placeholder(buffer: &mut Buffer, area: Rect, title: &str, palette: &Palette) {
+    crate::ui::kit::empty_state::render_empty_state(
+        buffer,
+        area,
+        &crate::ui::kit::empty_state::EmptyState {
+            glyph: Some("◌"),
+            title,
+            body: Some(tr(
+                "Metrics appear here after the first sample.",
+                "收到第一份采样后在这里显示。",
+            )),
+            action: None,
+        },
+        palette,
     );
 }
 
@@ -308,22 +354,20 @@ pub(super) fn monitor(
 ) -> Option<PageScroll> {
     let palette = cx.palette;
     let Some(sample) = state.metrics.as_ref() else {
-        text(
+        placeholder(
             buffer,
             area,
-            1,
             tr("Connecting to the host sampler…", "正在连接主机采样器…"),
-            Style::default().fg(palette.overlay0),
+            palette,
         );
         return None;
     };
     if sample.sampled_at_ms == 0 {
-        text(
+        placeholder(
             buffer,
             area,
-            1,
             tr("Waiting for the first sample…", "等待第一份有效采样…"),
-            Style::default().fg(palette.overlay0),
+            palette,
         );
         return None;
     }
@@ -442,6 +486,62 @@ fn copy_cells(from: &Buffer, to: &mut Buffer, area: Rect) {
     }
 }
 
+/// 卡片的主读数（压在上边框右侧的粗体徽标）与它的颜色：CPU / 内存 / GPU / 磁盘
+/// 的占用、最高温度、进程数。越过阈值时转黄 / 红，常态正文色。
+fn headline(
+    id: &str,
+    state: &State,
+    sample: &SystemMetricsSnapshot,
+    palette: &Palette,
+) -> Option<(String, Color)> {
+    let ratio_badge = |ratio: Option<f32>, metric: &str| {
+        let ratio = ratio.filter(|ratio| ratio.is_finite())?;
+        let color =
+            severity_color(ratio, thresholds(state, metric), palette).unwrap_or(palette.text);
+        Some((format!("{:.1}%", ratio * 100.0), color))
+    };
+    match id {
+        "cpu" => ratio_badge(sample.cpu_percent.map(|value| value / 100.0), "cpu"),
+        "memory" => ratio_badge(
+            (sample.memory.total_bytes > 0)
+                .then(|| sample.memory.used_bytes as f32 / sample.memory.total_bytes as f32),
+            "memory",
+        ),
+        "gpu" => ratio_badge(
+            listed_gpus(state, sample)
+                .iter()
+                .filter_map(|gpu| gpu.usage_percent)
+                .reduce(f32::max)
+                .map(|value| value / 100.0),
+            "gpu",
+        ),
+        "disks" => ratio_badge(
+            listed_disks(state, sample)
+                .iter()
+                .map(|disk| {
+                    disk.total_bytes.saturating_sub(disk.available_bytes) as f32
+                        / disk.total_bytes as f32
+                })
+                .reduce(f32::max),
+            "disk",
+        ),
+        "sensors" => {
+            let chips = sensor_chips(state, sample);
+            let hottest = chips
+                .iter()
+                .filter(|chip| chip.count > 0)
+                .max_by(|a, b| a.max.total_cmp(&b.max))?;
+            let ratio = hottest.max / hottest.critical.unwrap_or(100.0);
+            let color =
+                severity_color(ratio, GaugeThresholds::default(), palette).unwrap_or(palette.text);
+            Some((format!("{:.0}°C", hottest.max), color))
+        }
+        "processes" => (!sample.processes.is_empty())
+            .then(|| (sample.processes.len().to_string(), palette.subtext0)),
+        _ => None,
+    }
+}
+
 /// 画一张系统页卡片：kit `card` 外框（编辑布局时顶边带 ↑↓）与卡片正文；卡片与
 /// 按钮的命中区写进 `hits`，可滚动卡片的滚动上界写进 `limits`。
 fn system_card(
@@ -461,9 +561,18 @@ fn system_card(
         .get(id)
         .copied()
         .unwrap_or(ObservationStatus::Ready);
-    // 非 Ready 的分组在顶边右侧挂状态徽标；编辑布局时那里放 ↑↓，不挂徽标。
-    let badge = (group_status != ObservationStatus::Ready && !state.layout_editing)
-        .then(|| (status(group_status), status_color(group_status, palette)));
+    // 顶边右侧：非 Ready 的分组挂状态徽标，否则是卡片的主读数；编辑布局时那里放
+    // ↑↓，两者都不挂。
+    let reading = headline(id, state, sample, palette);
+    let badge = if state.layout_editing {
+        None
+    } else if group_status != ObservationStatus::Ready {
+        Some((status(group_status), status_color(group_status, palette)))
+    } else {
+        reading
+            .as_ref()
+            .map(|(value, color)| (value.as_str(), *color))
+    };
     let spec = CardSpec {
         title: section_title(id),
         badge,
@@ -514,7 +623,50 @@ fn system_card(
     limits.set(id, max);
 }
 
-/// CPU 卡：总体 gauge（数字永不裁）、型号 / 选中核说明、历史迷你图。
+/// 一条铺满整行的占用条（主读数在卡片上边框，这里不再重复数字）。
+fn full_gauge(buffer: &mut Buffer, row: Rect, spec: GaugeSpec<'_>, stale: bool, palette: &Palette) {
+    if row.is_empty() {
+        return;
+    }
+    if stale {
+        // 过期数据：保留量值，但用灰色单段代替阈值色，不给旧数据画确定的语义色。
+        let share = spec.ratio.map_or_else(
+            || {
+                spec.segments.map_or(0.0, |segments| {
+                    segments.iter().map(|(share, _)| share).sum()
+                })
+            },
+            |ratio| ratio.clamp(0.0, 1.0),
+        );
+        let muted = [(share, palette.overlay0)];
+        render_gauge(
+            buffer,
+            row,
+            &GaugeSpec {
+                segments: Some(&muted),
+                ..spec
+            },
+            palette,
+        );
+    } else {
+        render_gauge(buffer, row, &spec, palette);
+    }
+}
+
+/// 卡片里的历史区：正文第 `from` 行起到底；比 3 行高时在说明与曲线之间空一行，
+/// 卡片读起来不挤。
+fn chart_area(inner: Rect, from: u16) -> Rect {
+    let top = inner.y.saturating_add(from);
+    if top >= inner.bottom() {
+        return Rect::default();
+    }
+    let height = inner.bottom() - top;
+    let gap = u16::from(height > 3);
+    Rect::new(inner.x, top + gap, inner.width, height - gap)
+}
+
+/// CPU 卡：整行占用条（数字在上边框）、型号与逻辑核数的说明（点选某个核后换成该核
+/// 的说明）、历史迷你图。
 fn cpu_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -523,26 +675,21 @@ fn cpu_card(
     palette: &Palette,
 ) {
     let texts = &crate::i18n::texts().monitor;
-    let value = percent(sample.cpu_percent);
-    let detail = crate::i18n::fill(
-        texts.logical_cpus_fmt,
-        &[("n", &sample.cores.len().to_string())],
-    );
-    render_meter_row(
+    full_gauge(
         buffer,
         Rect::new(inner.x, inner.y, inner.width, 1),
-        &MeterRow {
-            label: "CPU",
-            value: &value,
-            detail: Some(&detail),
-            gauge: GaugeSpec {
-                ratio: sample.cpu_percent.map(|value| value / 100.0),
-                ascii: state.chart_glyphs.ascii(),
-                ..GaugeSpec::default()
-            },
-            stale: sample.status == ObservationStatus::Stale,
+        GaugeSpec {
+            ratio: sample.cpu_percent.map(|value| value / 100.0),
+            thresholds: thresholds(state, "cpu"),
+            ascii: state.chart_glyphs.ascii(),
+            ..GaugeSpec::default()
         },
+        sample.status == ObservationStatus::Stale,
         palette,
+    );
+    let cores = crate::i18n::fill(
+        texts.logical_cpus_fmt,
+        &[("n", &sample.cores.len().to_string())],
     );
     match state.selected_core {
         Some(core) => text(
@@ -550,29 +697,30 @@ fn cpu_card(
             inner,
             1,
             &format!("CPU {core} · {} min", state.monitor.history_minutes),
-            Style::default().fg(palette.accent),
+            crate::ui::design::body(palette).add_modifier(Modifier::BOLD),
         ),
-        None => text(
-            buffer,
-            inner,
-            1,
-            &sample.cpu_brand,
-            Style::default().fg(palette.overlay0),
-        ),
+        None => {
+            let caption = if sample.cpu_brand.is_empty() {
+                cores
+            } else {
+                format!("{} · {cores}", sample.cpu_brand)
+            };
+            text(
+                buffer,
+                inner,
+                1,
+                &caption,
+                crate::ui::design::muted(palette),
+            );
+        }
     }
-    if inner.height > 2 {
-        history_chart(
-            buffer,
-            Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2),
-            state,
-            |point| {
-                state
-                    .selected_core
-                    .map_or(point.cpu, |core| point.cores.get(core).copied().flatten())
-            },
-            palette.teal,
-        );
-    }
+    history_chart(
+        buffer,
+        chart_area(inner, 2),
+        state,
+        HistorySeries::Cpu,
+        palette,
+    );
 }
 
 /// 逐核卡：每核一条迷你 meter row，按列铺开；点击选中该核的历史曲线。滚动
@@ -604,6 +752,7 @@ fn cores_card(
         .saturating_sub(usize::from(inner.height));
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
+    let cpu_thresholds = thresholds(state, "cpu");
     // 全卡统一列宽：标签按最大核号的位数、数字按「100%」预留，每格条形等长且
     // 起点对齐，滚动换屏时也不跳。
     let columns = MeterColumns {
@@ -639,6 +788,7 @@ fn cores_card(
                 detail: None,
                 gauge: GaugeSpec {
                     ratio: core.usage_percent.map(|value| value / 100.0),
+                    thresholds: cpu_thresholds,
                     ascii,
                     ..GaugeSpec::default()
                 },
@@ -648,14 +798,20 @@ fn cores_card(
             palette,
         );
         if state.selected_core == Some(core.id) {
-            buffer.set_style(rect, Style::default().bg(palette.hover_row_bg()));
+            buffer.set_style(
+                rect,
+                Style::default()
+                    .bg(palette.selection_row_bg())
+                    .add_modifier(Modifier::BOLD),
+            );
         }
         hits.push((rect, Action::Core(core.id)));
     }
     max
 }
 
-/// 内存卡：已用 / 缓存分段 gauge、Swap gauge、历史迷你图。
+/// 内存卡：整行的已用 / 缓存分段占用条（占用比例在上边框）、已用量与缓存量的说明、
+/// Swap 条、历史迷你图。
 fn memory_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -674,52 +830,56 @@ fn memory_card(
         .saturating_sub(memory.used_bytes)
         .saturating_sub(memory.available_bytes);
     let cache_ratio = (total > 0).then(|| cache as f32 / total as f32);
+    let memory_thresholds = thresholds(state, "memory");
+    let used_color = severity_color(used_ratio.unwrap_or(0.0), memory_thresholds, palette)
+        .unwrap_or(palette.accent);
+    // 已用段跟随严重程度（常态 accent），缓存段是低一档的中性灰。
     let segments = [
-        (
-            used_ratio.unwrap_or(0.0),
-            gauge_color(
-                used_ratio.unwrap_or(0.0),
-                None,
-                GaugeThresholds::default(),
-                palette,
-            ),
-        ),
-        (cache_ratio.unwrap_or(0.0), palette.mauve),
+        (used_ratio.unwrap_or(0.0), used_color),
+        (cache_ratio.unwrap_or(0.0), palette.overlay1),
     ];
-    let value = format!("{} / {}", bytes(memory.used_bytes), bytes(total));
-    let detail =
-        (cache > 0).then(|| crate::i18n::fill(texts.cache_fmt, &[("size", &bytes(cache))]));
-    let swap = format!(
-        "{} / {}",
-        bytes(memory.swap_used_bytes),
-        bytes(memory.swap_total_bytes)
-    );
-    // 已用与 Swap 两行共用列宽：条形起止对齐（Swap 行也占住缓存说明那一列）。
-    let mut columns = MeterColumns::default();
-    columns.fit(texts.mem_used, &value, detail.as_deref());
-    columns.fit(texts.swap, &swap, None);
-    render_meter_row_aligned(
+    full_gauge(
         buffer,
         Rect::new(inner.x, inner.y, inner.width, 1),
-        &MeterRow {
-            label: texts.mem_used,
-            value: &value,
-            detail: detail.as_deref(),
-            gauge: GaugeSpec {
-                ratio: used_ratio,
-                segments: Some(&segments),
-                ascii,
-                ..GaugeSpec::default()
-            },
-            stale,
+        GaugeSpec {
+            ratio: used_ratio,
+            segments: Some(&segments),
+            thresholds: memory_thresholds,
+            ascii,
+            ..GaugeSpec::default()
         },
-        columns,
+        stale,
         palette,
     );
-    if inner.height > 1 {
-        render_meter_row_aligned(
+    let mut caption = format!(
+        "{} {} / {}",
+        texts.mem_used,
+        bytes(memory.used_bytes),
+        bytes(total)
+    );
+    if cache > 0 {
+        caption.push_str(" · ");
+        caption.push_str(&crate::i18n::fill(
+            texts.cache_fmt,
+            &[("size", &bytes(cache))],
+        ));
+    }
+    text(
+        buffer,
+        inner,
+        1,
+        &caption,
+        crate::ui::design::muted(palette),
+    );
+    if inner.height > 2 {
+        let swap = format!(
+            "{} / {}",
+            bytes(memory.swap_used_bytes),
+            bytes(memory.swap_total_bytes)
+        );
+        render_meter_row(
             buffer,
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            Rect::new(inner.x, inner.y + 2, inner.width, 1),
             &MeterRow {
                 label: texts.swap,
                 value: &swap,
@@ -727,24 +887,22 @@ fn memory_card(
                 gauge: GaugeSpec {
                     ratio: (memory.swap_total_bytes > 0)
                         .then(|| memory.swap_used_bytes as f32 / memory.swap_total_bytes as f32),
+                    thresholds: memory_thresholds,
                     ascii,
                     ..GaugeSpec::default()
                 },
                 stale,
             },
-            columns,
             palette,
         );
     }
-    if inner.height > 2 {
-        history_chart(
-            buffer,
-            Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 2),
-            state,
-            |point| point.memory,
-            palette.mauve,
-        );
-    }
+    history_chart(
+        buffer,
+        chart_area(inner, 3),
+        state,
+        HistorySeries::Memory,
+        palette,
+    );
 }
 
 /// GPU 卡实际会列出的设备：隐藏的不进卡。
@@ -773,7 +931,7 @@ fn gpu_card(
             inner,
             0,
             tr("No GPU data available", "无可用 GPU 数据"),
-            Style::default().fg(palette.overlay0),
+            crate::ui::design::meta(palette),
         );
         return 0;
     }
@@ -785,6 +943,7 @@ fn gpu_card(
         .saturating_sub(usize::from(inner.height / 3).max(1));
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
+    let gpu_thresholds = thresholds(state, "gpu");
     // 利用率与显存两种行、所有 GPU 共用列宽：条形起止对齐，滚动换设备时也不跳。
     let vram_text = |gpu: &GpuMetric| match (gpu.memory_used_bytes, gpu.memory_total_bytes) {
         (Some(used), Some(total)) if total > 0 => {
@@ -814,11 +973,9 @@ fn gpu_card(
             buffer,
             Rect::new(inner.x, inner.y + row, inner.width, 1),
             &gpu.name,
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
+            crate::ui::design::body(palette),
             &temperature,
-            Style::default().fg(palette.overlay1),
+            crate::ui::design::meta(palette),
         );
         if row + 1 < inner.height {
             let value = percent(gpu.usage_percent);
@@ -831,6 +988,7 @@ fn gpu_card(
                     detail: None,
                     gauge: GaugeSpec {
                         ratio: gpu.usage_percent.map(|value| value / 100.0),
+                        thresholds: gpu_thresholds,
                         ascii,
                         ..GaugeSpec::default()
                     },
@@ -853,6 +1011,7 @@ fn gpu_card(
                             detail: None,
                             gauge: GaugeSpec {
                                 ratio: Some(used as f32 / total as f32),
+                                thresholds: gpu_thresholds,
                                 ascii,
                                 ..GaugeSpec::default()
                             },
@@ -868,9 +1027,9 @@ fn gpu_card(
                         buffer,
                         rect,
                         texts.vram,
-                        Style::default().fg(palette.subtext0),
+                        crate::ui::design::muted(palette),
                         note,
-                        Style::default().fg(palette.overlay0),
+                        crate::ui::design::meta(palette),
                     );
                 }
             }
@@ -913,10 +1072,11 @@ fn disks_card(
             inner,
             0,
             texts.no_disks,
-            Style::default().fg(palette.overlay0),
+            crate::ui::design::meta(palette),
         );
         return 0;
     }
+    let disk_thresholds = thresholds(state, "disk");
     let columns = [
         Column {
             title: texts.col_mount,
@@ -975,12 +1135,16 @@ fn disks_card(
             let ratio = used as f32 / disk.total_bytes as f32;
             match column {
                 0 => TableCell::from(disk.mount_point.as_str()),
-                1 => TableCell::from(disk.name.as_str()),
-                2 => TableCell::from(bytes(used)),
-                3 => TableCell::from(bytes(disk.total_bytes)),
+                1 => TableCell {
+                    fg: Some(palette.subtext0),
+                    ..TableCell::from(disk.name.as_str())
+                },
+                2 => TableCell::quantity(bytes(used)),
+                3 => TableCell::quantity(bytes(disk.total_bytes)),
                 _ => TableCell {
                     text: Cow::Owned(format!("{:.0}%", ratio * 100.0)),
-                    fg: load_color(ratio, palette),
+                    fg: severity_color(ratio, disk_thresholds, palette),
+                    dim_tail: 0,
                 },
             }
         },
@@ -1074,11 +1238,9 @@ fn network_card(
             buffer,
             Rect::new(inner.x, y, inner.width, 1),
             &net.id,
-            Style::default().fg(palette.subtext0),
+            crate::ui::design::muted(palette),
             &net_rates_text(net),
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
+            crate::ui::design::body(palette),
         );
         y += 1;
         if y < bottom {
@@ -1098,7 +1260,8 @@ fn network_card(
                     &[&rx[start..], &tx[start..]],
                     None,
                     glyphs,
-                    &[palette.teal, palette.blue],
+                    // 收 / 发两档中性灰：颜色只表达状态，方向靠速率文字的 ↓↑。
+                    &[chart_color(palette), palette.overlay0],
                 );
             }
             y += 1;
@@ -1115,7 +1278,7 @@ fn network_card(
             Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
             0,
             &note,
-            Style::default().fg(palette.overlay0),
+            crate::ui::design::meta(palette),
         );
     }
     max
@@ -1193,7 +1356,7 @@ fn sensors_card(
                 "Sensors unavailable in this environment",
                 "当前环境未提供温度传感器",
             ),
-            Style::default().fg(palette.overlay0),
+            crate::ui::design::meta(palette),
         );
         return 0;
     }
@@ -1268,7 +1431,7 @@ fn sensors_card(
                 tr("Hottest sensor", "最高温度"),
                 state.monitor.history_minutes
             ),
-            Style::default().fg(palette.overlay0),
+            crate::ui::design::muted(palette),
         );
         history_chart(
             buffer,
@@ -1279,36 +1442,80 @@ fn sensors_card(
                 inner.bottom() - caption - 1,
             ),
             state,
-            |point| point.temperature,
-            palette.peach,
+            HistorySeries::Temperature,
+            palette,
         );
     }
     max
 }
 
-/// 进程表的列顺序与 `ProcessSort` 的对应关系。
-const PROCESS_COLUMNS: [ProcessSort; 4] = [
-    ProcessSort::Pid,
-    ProcessSort::Name,
-    ProcessSort::Cpu,
-    ProcessSort::Memory,
+/// 进程表的列顺序与 `ProcessSort` 的对应关系（用户列不可排序）。
+const PROCESS_COLUMNS: [Option<ProcessSort>; 5] = [
+    Some(ProcessSort::Pid),
+    Some(ProcessSort::Name),
+    None,
+    Some(ProcessSort::Cpu),
+    Some(ProcessSort::Memory),
 ];
 
-/// 进程表实际会列出的进程：按筛选词过滤（排序不改变条数，排序在卡片里做）。
-fn listed_processes<'a>(
-    state: &State,
-    sample: &'a SystemMetricsSnapshot,
-) -> Vec<&'a ProcessMetric> {
-    let filter = state.process_filter.to_lowercase();
-    sample
-        .processes
-        .iter()
-        .filter(|process| process.name.to_lowercase().contains(&filter))
-        .collect()
+/// 进程表的行序：读每份样本排好的 `ProcessRows`；对不上（测试直接改了样本、排序或
+/// 筛选）时现算一次。
+fn listed_processes<'a>(state: &'a State, sample: &SystemMetricsSnapshot) -> Cow<'a, [usize]> {
+    match state.process_rows.get(state, sample) {
+        Some(rows) => Cow::Borrowed(rows),
+        None => Cow::Owned(sorted_process_rows(
+            sample,
+            state.process_sort,
+            &state.process_filter,
+        )),
+    }
+}
+
+/// 进程表的列：窄时按 `priority` 从大到小丢——先丢用户列，再丢内存，再丢 PID，
+/// 名称（至少 12 列）与 CPU 最后才让位；最窄时剩下 `top` 式的 PID · 名称 · CPU。
+fn process_columns(texts: &crate::i18n::MonitorTexts, pid_width: u16) -> [Column<'_>; 5] {
+    [
+        Column {
+            title: texts.proc_col_pid,
+            width: ColumnWidth::Min(pid_width),
+            align_right: true,
+            sortable: true,
+            priority: 2,
+        },
+        Column {
+            title: texts.proc_col_name,
+            width: ColumnWidth::FillAtLeast(12, 1),
+            align_right: false,
+            sortable: true,
+            priority: 0,
+        },
+        Column {
+            title: tr("User", "用户"),
+            width: ColumnWidth::Fixed(10),
+            align_right: false,
+            sortable: false,
+            priority: 4,
+        },
+        Column {
+            title: texts.proc_col_cpu,
+            width: ColumnWidth::Fixed(6),
+            align_right: true,
+            sortable: true,
+            priority: 1,
+        },
+        Column {
+            title: texts.proc_col_mem,
+            width: ColumnWidth::Fixed(10),
+            align_right: true,
+            sortable: true,
+            priority: 3,
+        },
+    ]
 }
 
 /// 进程卡：首行是筛选入口 + 当前筛选词 + 可见范围，其下是带表头的可排序表格
-/// （点击表头按列排序，点击行打开详情）。返回滚动上界。
+/// （点击表头按列排序，点击行打开详情；键盘焦点停在某一行或它的详情开着时，那一行
+/// 画在 `selection_bg` 上）。数字列右对齐、单位变暗。返回滚动上界。
 fn processes_card(
     buffer: &mut Buffer,
     inner: Rect,
@@ -1319,17 +1526,9 @@ fn processes_card(
     hits: &mut Vec<(Rect, Action)>,
 ) -> usize {
     let texts = &crate::i18n::texts().monitor;
-    let mut processes = listed_processes(state, sample);
-    processes.sort_by(|a, b| match state.process_sort {
-        ProcessSort::Memory => b.memory_bytes.cmp(&a.memory_bytes),
-        ProcessSort::Name => a.name.cmp(&b.name),
-        ProcessSort::Pid => a.identity.pid.cmp(&b.identity.pid),
-        ProcessSort::Cpu => b
-            .cpu_percent
-            .unwrap_or(-1.0)
-            .total_cmp(&a.cpu_percent.unwrap_or(-1.0)),
-    });
-    let filter_label = tr("Filter /", "筛选 /");
+    let rows = listed_processes(state, sample);
+    let process = |row: usize| rows.get(row).and_then(|index| sample.processes.get(*index));
+    let filter_label = tr("⌕ Filter", "⌕ 筛选");
     secondary_button(
         buffer,
         Rect::new(inner.x, inner.y, inner.width, 1),
@@ -1345,54 +1544,40 @@ fn processes_card(
     // PID 列按快照里最长的 PID 定宽（至少 6 列，放得下排序标记 + 表头）：Linux
     // 的 PID 可达 7 位，截成「40905…」后几行同名进程无法区分；按全表而不是
     // 可见行取宽，滚动时列宽不跳。
-    let pid_width = processes
+    let pid_width = sample
+        .processes
         .iter()
         .map(|process| decimal_width(usize::try_from(process.identity.pid).unwrap_or(usize::MAX)))
         .max()
         .unwrap_or(0)
         .max(6);
-    let columns = [
-        Column {
-            title: texts.proc_col_pid,
-            width: ColumnWidth::Min(pid_width),
-            align_right: true,
-            sortable: true,
-            priority: 2,
-        },
-        Column {
-            title: texts.proc_col_name,
-            width: ColumnWidth::Fill(1),
-            align_right: false,
-            sortable: true,
-            priority: 0,
-        },
-        Column {
-            title: texts.proc_col_cpu,
-            width: ColumnWidth::Fixed(6),
-            align_right: true,
-            sortable: true,
-            priority: 1,
-        },
-        Column {
-            title: texts.proc_col_mem,
-            width: ColumnWidth::Fixed(9),
-            align_right: true,
-            sortable: true,
-            priority: 1,
-        },
-    ];
+    let columns = process_columns(texts, pid_width);
     let sort = SortState {
         column: PROCESS_COLUMNS
             .iter()
-            .position(|sort| *sort == state.process_sort)
-            .unwrap_or(2),
+            .position(|sort| *sort == Some(state.process_sort))
+            .unwrap_or(3),
         descending: matches!(state.process_sort, ProcessSort::Cpu | ProcessSort::Memory),
     };
+    // 选中行：详情对话框正开着的那个进程，或键盘焦点（上一帧的命中区）停着的行。
+    let focused = state
+        .process_dialog
+        .as_ref()
+        .map(|dialog| &dialog.process.identity)
+        .or_else(|| match state.hits.get(state.selected_hit) {
+            Some((_, Action::Process(identity))) if state.page.is_some() => Some(identity),
+            _ => None,
+        });
+    let selected = focused.and_then(|identity| {
+        (0..rows.len())
+            .find(|row| process(*row).is_some_and(|process| process.identity == *identity))
+    });
+    let cpu_thresholds = thresholds(state, "cpu");
     let table = TableState {
         sort: Some(sort),
-        row_count: processes.len(),
+        row_count: rows.len(),
         scroll: offset,
-        selected: None,
+        selected,
         hovered: None,
         ascii: state.chart_glyphs.ascii(),
     };
@@ -1402,43 +1587,51 @@ fn processes_card(
         &columns,
         &table,
         |row, column| {
-            let Some(process) = processes.get(row) else {
+            let Some(process) = process(row) else {
                 return TableCell::from("");
             };
             match column {
-                0 => TableCell::from(process.identity.pid.to_string()),
+                0 => TableCell {
+                    fg: Some(palette.subtext0),
+                    ..TableCell::from(process.identity.pid.to_string())
+                },
                 1 => TableCell::from(process.name.as_str()),
                 2 => TableCell {
+                    fg: Some(palette.subtext0),
+                    ..TableCell::from(process.user.as_deref().unwrap_or("—"))
+                },
+                3 => TableCell {
                     text: Cow::Owned(percent(process.cpu_percent)),
                     fg: process
                         .cpu_percent
-                        .and_then(|value| load_color(value / 100.0, palette)),
+                        .and_then(|value| severity_color(value / 100.0, cpu_thresholds, palette)),
+                    dim_tail: 0,
                 },
-                _ => TableCell::from(bytes(process.memory_bytes)),
+                _ => TableCell::quantity(bytes(process.memory_bytes)),
             }
         },
         palette,
     );
     for (rect, column) in &render.header_cells {
-        if let Some(sort) = PROCESS_COLUMNS.get(*column) {
+        if let Some(Some(sort)) = PROCESS_COLUMNS.get(*column) {
             hits.push((*rect, Action::SortProcesses(*sort)));
         }
     }
     for (rect, row) in &render.rows {
-        if let Some(process) = processes.get(*row) {
+        if let Some(process) = process(*row) {
             hits.push((*rect, Action::Process(process.identity.clone())));
         }
     }
     // 首行右侧：筛选词（输入中带光标）与可见范围 `起–止 / 总数`。
     let shown = render.rows.len();
     let range = if shown == 0 {
-        format!("0 / {}", processes.len())
+        format!("0 / {}", rows.len())
     } else {
         format!(
             "{}–{} / {}",
             render.scroll + 1,
             render.scroll + shown,
-            processes.len()
+            rows.len()
         )
     };
     let filter_text = match (state.process_filter.is_empty(), state.filtering_processes) {
@@ -1455,9 +1648,9 @@ fn processes_card(
         buffer,
         rest,
         &filter_text,
-        Style::default().fg(palette.text),
+        crate::ui::design::body(palette),
         &range,
-        Style::default().fg(palette.overlay0),
+        crate::ui::design::meta(palette),
     );
     if render.rows.is_empty() && !render.body.is_empty() {
         text(
@@ -1465,10 +1658,10 @@ fn processes_card(
             render.body,
             0,
             texts.no_matching_processes,
-            Style::default().fg(palette.overlay0),
+            crate::ui::design::meta(palette),
         );
     }
-    table_scroll_max(processes.len(), &render)
+    table_scroll_max(rows.len(), &render)
 }
 
 /// 进程详情对话框：居中覆盖在页面与悬浮层之上，返回其矩形；`hits` 只含
@@ -1481,13 +1674,29 @@ pub(super) fn process_dialog(
     hits: &mut Vec<(Rect, Action)>,
 ) -> Rect {
     let palette = cx.palette;
-    let rect = crate::ui::centered_popup_rect(buffer.area, 66, 12).unwrap_or(buffer.area);
+    let rect = crate::ui::modal_rect(
+        buffer.area,
+        crate::ui::ModalSize::Content {
+            width: 66,
+            height: 14,
+        },
+    )
+    .unwrap_or(buffer.area);
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
             buffer[(x, y)].set_symbol(" ");
         }
     }
-    let inner = block(buffer, rect, tr(" PROCESS DETAILS ", " 进程详情 "), cx);
+    let inner = block(buffer, rect, tr(" Process details ", " 进程详情 "), cx);
+    if inner.is_empty() {
+        return rect;
+    }
+    let inner = Rect::new(
+        inner.x.saturating_add(1),
+        inner.y.saturating_add(1),
+        inner.width.saturating_sub(2),
+        inner.height.saturating_sub(2),
+    );
     let host = state
         .metrics
         .as_ref()
@@ -1501,9 +1710,7 @@ pub(super) fn process_dialog(
             "{host} · PID {} · {}",
             dialog.process.identity.pid, dialog.process.name
         ),
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::design::title(palette),
     );
     text(
         buffer,
@@ -1515,24 +1722,35 @@ pub(super) fn process_dialog(
             bytes(dialog.process.memory_bytes),
             dialog.process.status
         ),
-        Style::default().fg(palette.overlay1),
+        crate::ui::design::muted(palette),
     );
     text(
         buffer,
         inner,
         3,
         dialog.process.executable.as_deref().unwrap_or("—"),
-        Style::default().fg(palette.overlay0),
+        crate::ui::design::meta(palette),
     );
     let y = inner.bottom().saturating_sub(1);
+    let button_area = |x: u16| {
+        Rect::new(
+            x.min(inner.right()),
+            y,
+            inner.right().saturating_sub(x),
+            u16::from(inner.height > 0),
+        )
+    };
+    let width = |label: &str| crate::ui::display_width_u16(label).saturating_add(2);
+    let cancel = tr("Cancel", "取消");
     secondary_button(
         buffer,
-        Rect::new(inner.x, y, 16.min(inner.width), 1),
-        tr("Cancel", "取消"),
+        button_area(inner.x),
+        cancel,
         Action::CancelProcess,
         palette,
         hits,
     );
+    let next_x = inner.x.saturating_add(width(cancel)).saturating_add(2);
     if dialog.process.protected || dialog.process.action_token.is_none() {
         text(
             buffer,
@@ -1567,16 +1785,9 @@ pub(super) fn process_dialog(
             },
             Style::default().fg(palette.red),
         );
-        // 结束进程是破坏性操作：与浮层的 Danger 按钮同色，不再和「取消」
-        // 长相一样（C-29）。
         button(
             buffer,
-            Rect::new(
-                inner.x.saturating_add(18),
-                y,
-                inner.width.saturating_sub(18),
-                1,
-            ),
+            button_area(next_x),
             tr("Confirm", "确认执行"),
             crate::ui::ModalButtonTone::Danger,
             crate::ui::ModalButtonState::Normal,
@@ -1585,15 +1796,11 @@ pub(super) fn process_dialog(
             hits,
         );
     } else {
+        let terminate = tr("Terminate", "正常结束");
         button(
             buffer,
-            Rect::new(
-                inner.x.saturating_add(18),
-                y,
-                inner.width.saturating_sub(18).min(18),
-                1,
-            ),
-            tr("Terminate", "正常结束"),
+            button_area(next_x),
+            terminate,
             crate::ui::ModalButtonTone::Danger,
             crate::ui::ModalButtonState::Normal,
             Action::Terminate(false),
@@ -1602,12 +1809,7 @@ pub(super) fn process_dialog(
         );
         button(
             buffer,
-            Rect::new(
-                inner.x.saturating_add(38),
-                y,
-                inner.width.saturating_sub(38),
-                1,
-            ),
+            button_area(next_x.saturating_add(width(terminate)).saturating_add(2)),
             tr("Force", "强制结束"),
             crate::ui::ModalButtonTone::Danger,
             crate::ui::ModalButtonState::Normal,
@@ -1813,26 +2015,28 @@ mod tests {
                 );
             }
         }
-        // 宽：条形与数字都在。
+        // 宽：主读数压在卡片上边框右侧，首行是整行条形，其下是型号与逻辑核数。
         let (wide, output) = paint_page(&state, Page::Monitor, 120, 100);
         let cpu = card_rect(&output, "cpu");
+        assert!(row_has(&wide, cpu.y, "42.0%"), "{}", row_text(&wide, cpu.y));
         assert!(
             row_has(&wide, cpu.y + 1, "━"),
             "{}",
             row_text(&wide, cpu.y + 1)
         );
         assert!(
-            row_has(&wide, cpu.y + 1, "4 逻辑核"),
+            row_has(&wide, cpu.y + 2, "Test CPU · 4 逻辑核"),
             "{}",
-            row_text(&wide, cpu.y + 1)
+            row_text(&wide, cpu.y + 2)
         );
         assert!(buffer_has(&wide, "6.0 GiB / 16.0 GiB"));
-        // 极窄：CPU 行只剩标签与数字，条形整段让位。
+        // 极窄：数字仍在上边框上（徽标优先、标题让位），条形不与它抢列。
         let (tiny, output) = paint_page(&state, Page::Monitor, 14, 100);
         let cpu = card_rect(&output, "cpu");
+        let top = row_text(&tiny, cpu.y);
+        assert!(top.contains("42.0%"), "{top}");
         let row = row_text(&tiny, cpu.y + 1);
-        assert!(row.contains("42.0%"), "{row}");
-        assert!(!row.contains('━') && !row.contains('░'), "{row}");
+        assert!(!row.contains("42.0%"), "数字不在条形那一行重复：{row}");
     }
 
     #[test]
@@ -1996,8 +2200,8 @@ mod tests {
         let core = hit_rect(&output, |action| matches!(action, Action::Core(1))).expect("核 1");
         assert_eq!(
             buffer[(core.x, core.y)].style().bg,
-            Some(config().palette.hover_row_bg()),
-            "选中核高亮"
+            Some(config().palette.selection_row_bg()),
+            "选中核画在 selection_bg 上"
         );
         let cpu = card_rect(&output, "cpu");
         assert!(
@@ -2015,11 +2219,16 @@ mod tests {
         let used = (memory.x..memory.right())
             .find(|x| buffer[(*x, row)].symbol() == "━")
             .expect("已用段");
-        assert_eq!(buffer[(used, row)].style().fg, Some(palette.teal));
+        assert_eq!(
+            buffer[(used, row)].style().fg,
+            Some(palette.accent),
+            "常态用量是中性的 accent"
+        );
         let cache = (used..memory.right())
-            .find(|x| buffer[(*x, row)].style().fg == Some(palette.mauve))
+            .find(|x| buffer[(*x, row)].style().fg == Some(palette.overlay1))
             .expect("缓存段");
         assert_eq!(buffer[(cache, row)].symbol(), "━");
+        assert!(row_has(&buffer, memory.y, "37.5%"), "内存占用压在上边框");
         // GPU：名称 + 温度、利用率、显存。
         assert!(buffer_has(&buffer, "Test GPU"), "{text}");
         assert!(buffer_has(&buffer, "65°C"), "{text}");
@@ -2346,7 +2555,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} 在画面上"))
         };
         let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
-        for sort in PROCESS_COLUMNS {
+        for sort in PROCESS_COLUMNS.into_iter().flatten() {
             assert!(
                 has(
                     &output,
@@ -2385,6 +2594,242 @@ mod tests {
         state.process_filter = "nothing".into();
         let (buffer, _) = paint_page(&state, Page::Monitor, 120, 100);
         assert!(buffer_has(&buffer, "没有匹配的进程"));
+    }
+
+    /// 进程表窄时按优先级丢列：先丢用户列，再丢内存，再丢 PID，名称与 CPU 最后
+    /// 才让位；宽时五列都在。名称列至少 12 列，不会被低优先级的列挤成几个字符。
+    #[test]
+    fn process_table_drops_low_priority_columns_first() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = monitored();
+        state.monitor.visible = vec!["processes".into()];
+        if let Some(sample) = state.metrics.as_mut() {
+            for process in &mut sample.processes {
+                process.user = Some("dev".into());
+            }
+        }
+        let header = |width: u16| {
+            let (buffer, output) = paint_page(&state, Page::Monitor, width, 40);
+            let card = card_rect(&output, "processes");
+            row_text(&buffer, card.y + 2).replace(' ', "")
+        };
+        let has_all = |row: &str, names: &[&str]| names.iter().all(|name| row.contains(name));
+        let wide = header(90);
+        assert!(
+            has_all(&wide, &["PID", "名称", "用户", "CPU", "内存"]),
+            "{wide}"
+        );
+        // 46 列：卡片内容 40 列，五列要 6+12+10+6+10+4 = 48 → 先丢用户列（38）。
+        let medium = header(46);
+        assert!(
+            has_all(&medium, &["PID", "名称", "CPU", "内存"]),
+            "{medium}"
+        );
+        assert!(!medium.contains("用户"), "先丢用户列：{medium}");
+        let narrow = header(34);
+        assert!(has_all(&narrow, &["PID", "名称", "CPU"]), "{narrow}");
+        assert!(!narrow.contains("内存"), "再丢内存：{narrow}");
+        let tiny = header(26);
+        assert!(has_all(&tiny, &["名称", "CPU"]), "{tiny}");
+        assert!(!tiny.contains("PID"), "再丢 PID：{tiny}");
+        // 名称列保住至少 12 列：最长的名称在中等宽度下完整。
+        let (buffer, _) = paint_page(&state, Page::Monitor, 46, 40);
+        assert!(buffer_has(&buffer, "cargo"), "{}", buffer_text(&buffer));
+    }
+
+    /// 60 列（单列）时页面上没有互相压住的控件：页签、暂停标记、摘要条与「编辑
+    /// 布局」按钮、页脚提示各占各的列，所有命中区都在页面内、同一行的单行命中区
+    /// 互不重叠。
+    #[test]
+    fn nothing_overlaps_at_sixty_columns() {
+        for lang in [Lang::ZhCn, Lang::En] {
+            let _guard = lang_guard(lang);
+            let mut state = monitored();
+            state.paused = true;
+            let (buffer, output) = paint_page(&state, Page::Monitor, 60, 40);
+            let text = buffer_text(&buffer);
+            let columns = output
+                .hits
+                .iter()
+                .filter(|(_, action)| matches!(action, Action::Card(_)))
+                .map(|(rect, _)| rect.x)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(columns.len(), 1, "{lang:?}: 60 列卡片单列堆叠\n{text}");
+            let leaves = output
+                .hits
+                .iter()
+                .filter(|(rect, action)| {
+                    rect.height == 1
+                        && !matches!(
+                            action,
+                            Action::Card(_) | Action::Process(_) | Action::Core(_)
+                        )
+                })
+                .collect::<Vec<_>>();
+            for (index, (a, first)) in leaves.iter().enumerate() {
+                assert!(
+                    contains_rect(Rect::new(0, 0, 60, 40), *a),
+                    "{lang:?}: {first:?} {a:?} 越界\n{text}"
+                );
+                for (b, second) in &leaves[index + 1..] {
+                    assert!(
+                        a.intersection(*b).is_empty(),
+                        "{lang:?}: {first:?} {a:?} 与 {second:?} {b:?} 重叠\n{text}"
+                    );
+                }
+            }
+            // 暂停标记与页签同在首行、互不压住。
+            assert!(row_has(&buffer, 0, "‖"), "{lang:?}\n{text}");
+            // 摘要条的主机名与「编辑布局」按钮都完整。
+            let edit = hit_rect(&output, |action| matches!(action, Action::EditLayout))
+                .expect("编辑布局按钮");
+            assert!(row_has(&buffer, edit.y, "devbox"), "{lang:?}\n{text}");
+        }
+    }
+
+    /// 还没有采样时页面正中是一个安静的空状态：字形、标题与一行说明居中，没有
+    /// 卡片、没有页面滚动度量。
+    #[test]
+    fn empty_state_is_a_centered_placeholder() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let state = State::new(&config());
+        let (buffer, output) = paint_page(&state, Page::Monitor, 80, 30);
+        let text = buffer_text(&buffer);
+        let title = (0..30)
+            .find(|y| row_has(&buffer, *y, "正在连接主机采样器…"))
+            .unwrap_or_else(|| panic!("占位标题\n{text}"));
+        assert!(
+            title > 8 && title < 22,
+            "标题在页面中部：第 {title} 行\n{text}"
+        );
+        let row = row_text(&buffer, title);
+        let start = row.find('正').expect("标题");
+        let left = row[..start].chars().count();
+        let right = row.trim_end().chars().count();
+        assert!(left > 10, "标题水平居中：{row:?}");
+        assert!(right < 70, "{row:?}");
+        assert!(
+            (0..30).any(|y| row_has(&buffer, y, "收到第一份采样后")),
+            "说明\n{text}"
+        );
+        assert!(!has(&output, |action| matches!(action, Action::Card(_))));
+        assert_eq!(output.page_scroll_limits.get(Page::Monitor), None);
+    }
+
+    /// 颜色只表达严重程度，阈值与告警规则同一条线：GPU 规则是 95 %，所以 85 %
+    /// 只到警告（黄），96 % 才严重（红）；CPU 规则 90 %，42 % 保持中性。
+    #[test]
+    fn severity_colors_follow_the_alert_rule_thresholds() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let palette = config().palette;
+        for (usage, expected) in [
+            (60.0, palette.text),
+            (85.0, palette.yellow),
+            (96.0, palette.red),
+        ] {
+            let mut state = monitored();
+            if let Some(sample) = state.metrics.as_mut() {
+                sample.gpus[0].usage_percent = Some(usage);
+            }
+            let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
+            let gpu = card_rect(&output, "gpu");
+            let headline = format!("{usage:.1}%");
+            assert_eq!(
+                color_at(&buffer, gpu.y, &headline),
+                Some(expected),
+                "GPU {usage}%：{}",
+                row_text(&buffer, gpu.y)
+            );
+        }
+        // 改规则阈值，着色线跟着走：CPU 规则调到 40 %，42 % 就是严重。
+        let mut state = monitored();
+        if let Some(rule) = state
+            .monitor
+            .alerts
+            .iter_mut()
+            .find(|rule| rule.metric == "cpu")
+        {
+            rule.threshold = 40.0;
+        }
+        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
+        let cpu = card_rect(&output, "cpu");
+        assert_eq!(color_at(&buffer, cpu.y, "42.0%"), Some(palette.red));
+        let (buffer, output) = paint_page(&monitored(), Page::Monitor, 120, 100);
+        let cpu = card_rect(&output, "cpu");
+        assert_eq!(color_at(&buffer, cpu.y, "42.0%"), Some(palette.text));
+    }
+
+    /// 热路径：进程表的行序与历史曲线的桶在每份样本时算好，渲染只读。生产路径
+    /// （`refresh_*`）算出的进程表与渲染时现算的回退完全一致，预分桶按图宽合并后与
+    /// 直接分桶只差取整；样本、筛选或历史一变，旧缓存就不再被采用。
+    #[test]
+    fn per_sample_caches_match_the_fallback_and_expire_with_their_inputs() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let mut state = monitored();
+        state.history = (0..120u64)
+            .map(|index| HistoryPoint {
+                at: 200_000 + index * 1_000,
+                cpu: Some((index % 50) as f32),
+                memory: Some(40.0),
+                cores: Vec::new(),
+                temperature: Some(55.0),
+            })
+            .collect();
+        let (fallback, output) = paint_page(&state, Page::Monitor, 120, 100);
+        let processes = card_rect(&output, "processes");
+        state.refresh_history_buckets();
+        state.refresh_process_rows();
+        let sample = state.metrics.as_deref().expect("样本");
+        assert!(
+            state.process_rows.get(&state, sample).is_some(),
+            "行序已缓存"
+        );
+        let buckets = state
+            .history_buckets
+            .get(&state, HistorySeries::Cpu)
+            .expect("预分桶已缓存");
+        let (cached, _) = paint_page(&state, Page::Monitor, 120, 100);
+        assert_eq!(
+            card_text(&cached, processes),
+            card_text(&fallback, processes),
+            "进程表：缓存与现算一致"
+        );
+        let mut merged = [0f32; HISTORY_SLOTS];
+        let mut direct = [0f32; HISTORY_SLOTS];
+        let slots = resample_buckets(buckets, 64, &mut merged);
+        let direct_slots = bucket_history(
+            &state.history,
+            state.now_ms,
+            state.monitor.history_minutes,
+            64,
+            |point| point.cpu,
+            &mut direct,
+        );
+        assert_eq!(slots, direct_slots);
+        for (slot, (a, b)) in merged.iter().zip(&direct).take(slots).enumerate() {
+            assert_eq!(a.is_nan(), b.is_nan(), "第 {slot} 槽空与非空一致");
+            if !a.is_nan() {
+                assert!((a - b).abs() < 5.0, "第 {slot} 槽：{a} / {b}");
+            }
+        }
+        // 筛选词变了：旧行序作废，渲染退回现算，结果仍然正确。
+        state.process_filter = "zsh".into();
+        let sample = state.metrics.as_deref().expect("样本");
+        assert!(state.process_rows.get(&state, sample).is_none());
+        let (buffer, _) = paint_page(&state, Page::Monitor, 120, 100);
+        assert!(buffer_has(&buffer, "zsh") && !buffer_has(&buffer, "cargo"));
+        // 历史多了一个点：旧桶作废。
+        state.history.push_back(HistoryPoint {
+            at: 400_000,
+            cpu: Some(10.0),
+            memory: None,
+            cores: Vec::new(),
+            temperature: None,
+        });
+        assert!(state
+            .history_buckets
+            .get(&state, HistorySeries::Cpu)
+            .is_none());
     }
 
     #[test]
@@ -2495,11 +2940,15 @@ mod tests {
         assert!(!has(&output, |action| matches!(action, Action::Pause)));
     }
 
+    /// 面板里的两页是「系统 | 偏好」：面板头已经写着「监控」，第二页不再叫
+    /// 「监控偏好」，也不叫与全局设置浮层撞名的「设置」。
     #[test]
-    fn page_tabs_name_the_second_page_monitor_preferences() {
+    fn page_tabs_name_the_second_page_preferences() {
         let _guard = lang_guard(Lang::ZhCn);
         let (buffer, output) = paint_page(&monitored(), Page::Monitor, 120, 40);
-        assert!(buffer_has(&buffer, "监控偏好"));
+        assert!(row_has(&buffer, 0, "系统"), "{}", row_text(&buffer, 0));
+        assert!(row_has(&buffer, 0, "偏好"), "{}", row_text(&buffer, 0));
+        assert!(!buffer_has(&buffer, "监控偏好"));
         assert!(!buffer_has(&buffer, "设置"));
         assert!(has(&output, |action| matches!(
             action,
@@ -2525,21 +2974,21 @@ mod tests {
                     "宽 {width}: {page:?} 页签可点\n{text}"
                 );
             }
-            // 活动页签反色：被丢弃时 rect 为空，这一条就红。
+            // 活动页签画在浅一档的结构面上：被丢弃时 rect 为空，这一条就红。
             let active = hit_rect(&output, |action| {
                 matches!(action, Action::Page(Page::Settings))
             })
-            .expect("监控偏好页签命中区");
+            .expect("偏好页签命中区");
             assert_eq!(
                 buffer[(active.x, active.y)].style().bg,
-                Some(config().palette.accent),
-                "宽 {width}: 活动页签反色\n{text}"
+                Some(config().palette.hover_row_bg()),
+                "宽 {width}: 活动页签画在浅一档的结构面上\n{text}"
             );
         }
         // 宽面板仍是完整标签，截短只在放不下时发生。
         let (buffer, _) = paint_page(&state, Page::Settings, 120, 40);
         assert!(
-            buffer_has(&buffer, "Monitor preferences"),
+            row_has(&buffer, 0, "Preferences"),
             "{}",
             buffer_text(&buffer)
         );

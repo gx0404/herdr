@@ -1283,7 +1283,7 @@ fn a_card_cut_by_the_page_bottom_shows_its_top_rows_instead_of_an_empty_frame() 
             }
         }
         // 冒烟尺寸：两行卡片之下剩 3 行（1 行间隔 + 2 行），除最后一屏外都露出
-        // 下一张卡的顶边与首行；页顶露出的是内存卡的「已用」gauge。
+        // 下一张卡的顶边与首行；页顶露出的是内存卡：上边框带占用比例，首行是条形。
         assert_eq!(cut.len(), max, "{width}×{height}：{cut:?}");
         assert!(cut.iter().all(|(.., rows)| *rows == 2), "{cut:?}");
         state.observability.scroll = 0;
@@ -1296,7 +1296,7 @@ fn a_card_cut_by_the_page_bottom_shows_its_top_rows_instead_of_an_empty_frame() 
         let first = region_text(&state, Rect::new(memory.x, memory.y, memory.width, 2));
         let compact = first.replace(' ', "");
         assert!(
-            compact.contains("内存") && compact.contains("已用") && compact.contains("GiB"),
+            compact.contains("内存") && compact.contains("37.5%") && compact.contains('━'),
             "{width}×{height}：{first}"
         );
     }
@@ -1501,11 +1501,11 @@ fn preferences_page_scroll_is_clamped_on_write_so_reversing_moves_at_once() {
     assert_ne!(region_text(&state, page), bottom, "反向第一格画面就动");
 }
 
-/// `rect` 这一行里 gauge 格（`━` 已用 / `░` 空槽）的 (相对 `rect.x` 的起点, 格数)。
+/// `rect` 这一行里 gauge 格（`━` 已用 / `─` 空槽）的 (相对 `rect.x` 的起点, 格数)。
 fn gauge_span(state: &ClientShellState, rect: Rect) -> (u16, u16) {
     let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
     let cells = (rect.x..rect.right())
-        .filter(|x| matches!(buffer[(*x, rect.y)].symbol(), "━" | "░"))
+        .filter(|x| matches!(buffer[(*x, rect.y)].symbol(), "━" | "─"))
         .collect::<Vec<_>>();
     let (Some(first), Some(last)) = (cells.first(), cells.last()) else {
         panic!(
@@ -1590,6 +1590,7 @@ fn meter_rows_in_one_card_share_the_gauge_column() {
             |action| matches!(action, Action::Card(card) if card == "sensors"),
         )
         .expect("温度卡");
+        // 只量卡片边框以内：边框本身也是「─」。
         let row = |needle: &str| {
             let (_, y) = find_in(&state, sensors, needle)
                 .unwrap_or_else(|| panic!("{cols}x{rows}: 温度卡有 {needle}"));
@@ -1647,7 +1648,7 @@ fn process_table_shows_seven_digit_pids_in_full() {
     }
 }
 
-/// 冒烟 L12（133×32，默认主题）：仪表空槽「░」与卡片底色的对比度不低于
+/// 冒烟 L12（133×32，默认主题）：仪表空槽（细线「─」）与卡片底色的对比度不低于
 /// 1.5:1——原先用 `surface_dim`，与面板底色只有 1.07:1，条形总长看不出来。
 #[test]
 fn gauge_empty_track_is_visible_on_the_card_background() {
@@ -1663,9 +1664,9 @@ fn gauge_empty_track_is_visible_on_the_card_background() {
     )
     .expect("CPU 卡");
     let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
-    let track = (cpu.x..cpu.right())
+    let track = (cpu.x + 1..cpu.right() - 1)
         .map(|x| &buffer[(x, cpu.y + 1)])
-        .filter(|cell| cell.symbol() == "░")
+        .filter(|cell| cell.symbol() == "─")
         .collect::<Vec<_>>();
     assert!(!track.is_empty(), "CPU 42%：条形后半段是空槽");
     for cell in track {
@@ -1753,8 +1754,8 @@ fn core_card_slots_fill_the_card_width() {
     let right = slots.iter().map(|rect| rect.right()).max().expect("核");
     assert_eq!(
         right,
-        card.right() - 1,
-        "最右一格贴到卡片内缘\n{}",
+        card.right() - 1 - crate::ui::kit::card::CARD_PADDING,
+        "最右一格贴到卡片内边距\n{}",
         region_text(&state, card)
     );
 }
@@ -2004,6 +2005,46 @@ fn alert_threshold_stepper_follows_its_ladder() {
     let plus = find_plus(&state).expect("告警阈值的「+」画在偏好页上");
     click(&mut state, plus.x, plus.y);
     assert_eq!(state.observability.monitor.alerts[0].threshold, 50.0);
+}
+
+#[test]
+fn docked_monitor_pointer_hover_repaints_only_when_the_control_changes() {
+    let mut state = docked();
+    state.open_observation_page(Page::Monitor, &mut ClientShellInput::default());
+    state.compose(120, 40).expect("monitor");
+    let selected = state.observability.selected_hit;
+    let tab = state
+        .observability
+        .hits
+        .iter()
+        .find_map(|(rect, action)| matches!(action, Action::Page(Page::Settings)).then_some(*rect))
+        .expect("preferences tab");
+    let move_to = |state: &mut ClientShellState, point: (u16, u16)| {
+        let mut outcome = ClientShellInput::default();
+        state.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: point.0,
+                row: point.1,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut outcome,
+        );
+        outcome
+    };
+    let point = (tab.x + 1, tab.y);
+    assert!(move_to(&mut state, point).repaint);
+    assert_eq!(
+        state.observability.hovered_action,
+        Some(Action::Page(Page::Settings))
+    );
+    assert_eq!(state.observability.selected_hit, selected);
+    assert_eq!(state.observability.monitor_tab, Page::Monitor);
+    state.compose(120, 40).expect("hovered monitor");
+    assert!(!move_to(&mut state, point).repaint);
+    state.config.feedback.hover_effects = false;
+    assert!(move_to(&mut state, point).repaint);
+    assert_eq!(state.observability.hovered_action, None);
 }
 
 #[test]

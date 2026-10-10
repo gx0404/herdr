@@ -2591,6 +2591,8 @@ mod tests {
     }
 
     const LOADED_WAIT: Duration = Duration::from_secs(30);
+    #[cfg(windows)]
+    const IDLE_TRANSPORT_CPU_BUDGET: Duration = Duration::from_millis(100);
 
     #[test]
     fn client_writer_spawn_failure_releases_registered_transport_and_handshake_permit() {
@@ -3124,12 +3126,15 @@ mod tests {
         let mut idle = (0..16)
             .map(|_| LiveTransport::new(LOADED_WAIT, false))
             .collect::<Vec<_>>();
-        let cpu_before = crate::platform::client_transport_process_sample().2;
+        let cpu_before = crate::platform::client_transport_process_cpu_time();
         std::thread::sleep(Duration::from_millis(400));
-        let cpu = crate::platform::client_transport_process_sample().2 - cpu_before;
+        let cpu = crate::platform::client_transport_process_cpu_time() - cpu_before;
+        let sampler_before = crate::platform::client_transport_process_cpu_time();
+        crate::platform::client_transport_process_sample();
+        let sampler = crate::platform::client_transport_process_cpu_time() - sampler_before;
         assert!(
-            cpu < Duration::from_millis(100),
-            "idle transports used {cpu:?} CPU"
+            cpu < IDLE_TRANSPORT_CPU_BUDGET,
+            "idle transports used {cpu:?} CPU (resource sampler alone costs {sampler:?})"
         );
         let started = Instant::now();
         protocol::write_message(&mut idle[0].peer, &ClientMessage::Input { data: vec![7] })
@@ -3143,7 +3148,48 @@ mod tests {
             wake < Duration::from_secs(1),
             "event-driven reader wake is delayed"
         );
-        println!("transport resources: before={before:?} after_100={after:?}; idle_16_cpu_400ms={cpu:?}; reader_wake={wake:?}");
+        println!("transport resources: before={before:?} after_100={after:?}; idle_16_cpu_400ms={cpu:?}; resource_sampler_cpu={sampler:?}; reader_wake={wake:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_idle_cpu_probe_does_not_charge_its_own_work_to_the_window() {
+        let started = crate::platform::client_transport_process_cpu_time();
+        for _ in 0..64 {
+            std::hint::black_box(crate::platform::client_transport_process_cpu_time());
+        }
+        let cpu = crate::platform::client_transport_process_cpu_time() - started;
+        assert!(
+            cpu < IDLE_TRANSPORT_CPU_BUDGET / 4,
+            "64 idle CPU probes used {cpu:?} CPU; the probe must not enumerate host threads"
+        );
+        println!("64 idle CPU probes: cpu={cpu:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_idle_cpu_probe_observes_busy_worker_thread() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner_stop = stop.clone();
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let spinner_ready = ready.clone();
+        let spinner = std::thread::spawn(move || {
+            spinner_ready.wait();
+            while !spinner_stop.load(Ordering::Relaxed) {
+                std::hint::spin_loop();
+            }
+        });
+        ready.wait();
+        let started = crate::platform::client_transport_process_cpu_time();
+        std::thread::sleep(Duration::from_millis(400));
+        let observed = crate::platform::client_transport_process_cpu_time() - started;
+        stop.store(true, Ordering::Relaxed);
+        spinner.join().unwrap();
+        assert!(
+            observed >= IDLE_TRANSPORT_CPU_BUDGET,
+            "a spinning worker thread was not charged to the process: {observed:?}"
+        );
+        println!("busy worker CPU in the 400ms idle-test window: {observed:?}");
     }
 
     #[cfg(windows)]

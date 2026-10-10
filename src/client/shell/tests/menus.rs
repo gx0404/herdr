@@ -1811,8 +1811,7 @@ fn command_hint_spells_the_configured_keys_and_opens_command_search() {
 }
 
 /// 文档终审 D8：命令面板 / 主菜单里「监控」条目括注的页签，与监控面板上的
-/// 页签名一致（系统 · 监控偏好）。以前第二个还叫「设置」，而页签早已改名
-/// 「监控偏好 / Monitor preferences」。
+/// 页签名一致（系统 · 偏好）。以前第二个还叫「设置」，与全局设置撞名。
 #[test]
 fn monitor_menu_entry_names_the_monitor_tabs() {
     for lang in [crate::i18n::Lang::En, crate::i18n::Lang::ZhCn] {

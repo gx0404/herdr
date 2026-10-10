@@ -445,7 +445,7 @@ pub struct MonitorTexts {
     pub section_devices: &'static str,
     // ---- 页签与页脚 ----
     pub tab_system: &'static str,
-    /// 第三个页签：监控偏好（不再叫「设置」，与全局设置浮层区分）。
+    /// 第二个页签：偏好（面板头已写「监控」；不叫「设置」，与全局设置浮层区分）。
     pub tab_preferences: &'static str,
     pub hint_refresh: &'static str,
     pub hint_pause: &'static str,

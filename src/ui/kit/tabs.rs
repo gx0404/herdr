@@ -7,9 +7,15 @@ use ratatui::{
     style::{Modifier, Style},
 };
 
-use super::{ellipsis_width, fill_row, put_str, put_str_ellipsis, selected_style};
+use super::{active_segment_style, ellipsis_width, fill_row, put_str, put_str_ellipsis};
 use crate::app::state::Palette;
 use crate::ui::display_width_u16;
+
+/// 活动标签 / 活动分段的样式（Graphite：浅一档的结构面 + 粗体正文）。调用方给键盘
+/// 焦点叠标记时以它为底，不改前景与底色——否则焦点环会把字吞掉。
+pub(crate) fn active_tab_style(palette: &Palette) -> Style {
+    active_segment_style(palette)
+}
 
 /// 一个标签页：`badge` 是紧跟标签的小字（计数、状态），`enabled` 为假时置灰。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +35,9 @@ impl<'a> TabItem<'a> {
     }
 }
 
-/// 标签页行：` label badge ` 依次排开、项间 1 列。活动项 accent 反色加粗，悬浮项
-/// 弱底色，禁用项灰字。返回与 `items` 等长的命中矩形（放不下的为空）。
+/// 标签页行（Graphite 分段式标签条）：` label badge ` 依次排开、项间 1 列。活动项
+/// 浅一档的结构面上粗体正文，其余说明色字、无底色，悬浮项换正文色，禁用项灰字。
+/// 返回与 `items` 等长的命中矩形（放不下的为空）。
 pub(crate) fn render_tabs(
     buffer: &mut Buffer,
     area: Rect,
@@ -43,7 +50,6 @@ pub(crate) fn render_tabs(
     if area.is_empty() {
         return rects;
     }
-    let hover_bg = palette.hover_row_bg();
     let mut x = area.x;
     for (index, item) in items.iter().enumerate() {
         let label_w = display_width_u16(item.label);
@@ -55,11 +61,11 @@ pub(crate) fn render_tabs(
             break;
         }
         let style = if index == active {
-            selected_style(palette)
+            active_tab_style(palette)
         } else if !item.enabled {
             Style::default().fg(palette.overlay0)
         } else if hovered == Some(index) {
-            Style::default().fg(palette.text).bg(hover_bg)
+            Style::default().fg(palette.text)
         } else {
             Style::default().fg(palette.subtext0)
         };
@@ -87,9 +93,10 @@ pub(crate) fn render_tabs(
     rects
 }
 
-/// 分段选择：选项紧贴排开、无间隔，以 surface0 底色连成一整块；活动段 accent
-/// 反色。`enabled` 为假整块置灰、活动段只换 surface1 底。返回与 `options`
-/// 等长的命中矩形。
+/// 分段选择：选项紧贴排开、无间隔，以 surface0 底色连成一条轨道；活动段是轨道上
+/// 浅一档的「滑块」（与活动标签同一样式）。主题的滑块底色与轨道撞色时活动段退到
+/// accent 反色，保证看得出选中项。`enabled` 为假整块置灰、活动段只换 surface1 底。
+/// 返回与 `options` 等长的命中矩形。
 pub(crate) fn render_segmented(
     buffer: &mut Buffer,
     area: Rect,
@@ -103,7 +110,11 @@ pub(crate) fn render_segmented(
     if area.is_empty() {
         return rects;
     }
-    let hover_bg = palette.hover_row_bg();
+    let thumb = if Palette::row_bg_is_distinct(palette.surface0, palette.hover_row_bg()) {
+        active_tab_style(palette)
+    } else {
+        super::selected_style(palette)
+    };
     let mut x = area.x;
     for (index, option) in options.iter().enumerate() {
         let width = display_width_u16(option).saturating_add(2);
@@ -113,8 +124,8 @@ pub(crate) fn render_segmented(
         let style = match (enabled, index == active, hovered == Some(index)) {
             (false, true, _) => Style::default().fg(palette.overlay0).bg(palette.surface1),
             (false, false, _) => Style::default().fg(palette.overlay0).bg(palette.surface0),
-            (true, true, _) => selected_style(palette),
-            (true, false, true) => Style::default().fg(palette.text).bg(hover_bg),
+            (true, true, _) => thumb,
+            (true, false, true) => Style::default().fg(palette.text).bg(palette.surface0),
             (true, false, false) => Style::default().fg(palette.subtext0).bg(palette.surface0),
         };
         fill_row(buffer, x, area.y, width, " ", style);
@@ -246,9 +257,19 @@ mod tests {
             ]
         );
         let active = buffer[(11, 0)].style();
-        assert_eq!(active.bg, Some(palette.accent));
+        assert_eq!(
+            active.bg,
+            Some(palette.hover_row_bg()),
+            "活动标签是浅一档的结构面，不是 accent 反色"
+        );
+        assert_eq!(active.fg, Some(palette.text));
         assert!(active.add_modifier.contains(Modifier::BOLD));
         assert_eq!(buffer[(1, 0)].style().fg, Some(palette.subtext0));
+        assert_eq!(
+            buffer[(1, 0)].style().bg,
+            Some(Color::Reset),
+            "其余标签无底色"
+        );
         assert_eq!(
             buffer[(24, 0)].style().fg,
             Some(palette.overlay0),
@@ -292,8 +313,16 @@ mod tests {
         );
         assert_eq!(row_text(&buffer, 0), " Left  Right        ");
         assert_eq!(rects, vec![Rect::new(0, 0, 6, 1), Rect::new(6, 0, 7, 1)]);
-        assert_eq!(buffer[(1, 0)].style().bg, Some(palette.hover_row_bg()));
-        assert_eq!(buffer[(7, 0)].style().bg, Some(palette.accent));
+        let hovered = buffer[(1, 0)].style();
+        assert_eq!(hovered.bg, Some(palette.surface0), "悬浮段留在轨道上");
+        assert_eq!(hovered.fg, Some(palette.text), "悬浮段换正文色");
+        let thumb = buffer[(7, 0)].style();
+        assert_eq!(
+            thumb.bg,
+            Some(palette.hover_row_bg()),
+            "活动段是浅一档的滑块"
+        );
+        assert!(thumb.add_modifier.contains(Modifier::BOLD));
 
         let mut buffer = Buffer::empty(area);
         render_segmented(

@@ -47,6 +47,35 @@ fn selected_style(palette: &Palette) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// 叠在 `bg` 上读得清的字色：正文色够 4.5:1 就用正文色，否则按对比度挑
+/// （`crate::ui::color::contrast_fg`；`bg` 无从换算时也走它）。
+fn readable_fg(palette: &Palette, bg: ratatui::style::Color) -> ratatui::style::Color {
+    if super::color::contrast_ratio(palette.text, bg).is_some_and(|ratio| ratio >= 4.5) {
+        palette.text
+    } else {
+        super::color::contrast_fg(palette, bg)
+    }
+}
+
+/// Graphite 的活动标签 / 活动分段：浅一档的结构面（与面板底可辨的那一档，见
+/// `Palette::hover_row_bg`）上的粗体正文，不用彩色反色——选中靠底色与粗细。
+fn active_segment_style(palette: &Palette) -> Style {
+    let bg = palette.hover_row_bg();
+    Style::default()
+        .bg(bg)
+        .fg(readable_fg(palette, bg))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// 表格 / 列表的选中行：`selection_bg` 底上的粗体正文（Graphite：不反色）。
+fn selected_row_style(palette: &Palette) -> Style {
+    let bg = palette.selection_row_bg();
+    Style::default()
+        .bg(bg)
+        .fg(readable_fg(palette, bg))
+        .add_modifier(Modifier::BOLD)
+}
+
 /// 从 `(x, y)` 起写文本，最多占 `max_width` 列；起点落在缓冲区外或零宽直接
 /// 返回。宽字符放不下时停在它前面，不写半个字。返回实际占用的列数。
 fn put_str(buffer: &mut Buffer, x: u16, y: u16, max_width: u16, text: &str, style: Style) -> u16 {

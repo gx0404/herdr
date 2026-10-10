@@ -146,7 +146,7 @@ const ALERT_THRESHOLD_STEPS: [f64; 11] = [
     50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0,
 ];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     Page(Page),
     Close,
@@ -193,6 +193,201 @@ pub(super) struct HistoryPoint {
     pub cores: Vec<Option<f32>>,
     /// 采样时未隐藏的传感器里最高的温度（°C）：温度卡的历史迷你图。
     pub temperature: Option<f32>,
+}
+
+/// 历史迷你图预分桶的桶数，也是一张迷你图最多的采样槽数（盲文 256 列）；再宽的图
+/// 右对齐留白。
+pub(super) const HISTORY_SLOTS: usize = 512;
+
+/// 系统页的三条历史曲线。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HistorySeries {
+    /// CPU 总体；选中某个逻辑核时换成该核。
+    Cpu,
+    Memory,
+    Temperature,
+}
+
+impl HistorySeries {
+    fn value(self, point: &HistoryPoint, core: Option<usize>) -> Option<f32> {
+        match self {
+            Self::Cpu => core.map_or(point.cpu, |core| point.cores.get(core).copied().flatten()),
+            Self::Memory => point.memory,
+            Self::Temperature => point.temperature,
+        }
+    }
+}
+
+/// 把历史点按时间窗口（最近 `minutes` 分钟，以最新一点为终点）均分到 `slots` 个
+/// 桶写进 `out`（同桶取平均，空桶 NaN → 迷你图留白），返回实际槽数。
+pub(super) fn bucket_history(
+    history: &VecDeque<HistoryPoint>,
+    now_ms: u64,
+    minutes: u16,
+    slots: usize,
+    value: impl Fn(&HistoryPoint) -> Option<f32>,
+    out: &mut [f32],
+) -> usize {
+    let slots = slots.min(out.len());
+    if slots == 0 {
+        return 0;
+    }
+    let mut counts = [0u16; HISTORY_SLOTS];
+    let slots = slots.min(HISTORY_SLOTS);
+    out[..slots].fill(0.0);
+    let end = history
+        .back()
+        .map_or(now_ms, |point| point.at)
+        .saturating_add(1);
+    let duration = u64::from(minutes.clamp(1, 60)) * 60_000;
+    let start = end.saturating_sub(duration);
+    for point in history {
+        if point.at < start || point.at >= end {
+            continue;
+        }
+        let Some(value) = value(point).filter(|value| value.is_finite()) else {
+            continue;
+        };
+        let index = ((point.at - start) as u128 * slots as u128 / u128::from(duration)) as usize;
+        if index >= slots {
+            continue;
+        }
+        out[index] += value.clamp(0.0, 100.0);
+        counts[index] = counts[index].saturating_add(1);
+    }
+    for (sum, count) in out.iter_mut().zip(counts.iter()).take(slots) {
+        if *count > 0 {
+            *sum /= f32::from(*count);
+        } else {
+            *sum = f32::NAN;
+        }
+    }
+    slots
+}
+
+/// 预分桶的历史曲线：每份新样本（以及历史范围、选中的核变化）时把整段历史分进
+/// `HISTORY_SLOTS` 个桶算一次，渲染只按图宽合并相邻的桶，不再逐帧遍历历史。
+/// `key` 记下算它时的历史与条件；对不上（测试直接改了历史）时渲染退回现算。
+#[derive(Default)]
+pub(super) struct HistoryBuckets {
+    key: Option<HistoryKey>,
+    cpu: Vec<f32>,
+    memory: Vec<f32>,
+    temperature: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HistoryKey {
+    len: usize,
+    last_at: Option<u64>,
+    minutes: u16,
+    core: Option<usize>,
+}
+
+impl HistoryKey {
+    fn of(state: &State) -> Self {
+        Self {
+            len: state.history.len(),
+            last_at: state.history.back().map(|point| point.at),
+            minutes: state.monitor.history_minutes,
+            core: state.selected_core,
+        }
+    }
+}
+
+impl HistoryBuckets {
+    /// `series` 的预分桶（与当前历史对得上时）。
+    pub(super) fn get(&self, state: &State, series: HistorySeries) -> Option<&[f32]> {
+        if self.key != Some(HistoryKey::of(state)) {
+            return None;
+        }
+        Some(match series {
+            HistorySeries::Cpu => &self.cpu,
+            HistorySeries::Memory => &self.memory,
+            HistorySeries::Temperature => &self.temperature,
+        })
+    }
+}
+
+/// 进程表的行序：按筛选词过滤、按排序列排好的 `metrics.processes` 下标。每份新
+/// 样本、排序或筛选变化时重算一次（`State::refresh_process_rows`），渲染只读它；
+/// `key` 记下算它时的样本与条件，对不上（测试直接改了字段）时渲染退回现算。
+#[derive(Default)]
+pub(super) struct ProcessRows {
+    key: Option<ProcessRowsKey>,
+    rows: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProcessRowsKey {
+    boot_id: String,
+    sequence: u64,
+    sampled_at_ms: u64,
+    count: usize,
+    sort: ProcessSort,
+    filter: String,
+}
+
+impl ProcessRowsKey {
+    fn of(state: &State, sample: &SystemMetricsSnapshot) -> Self {
+        Self {
+            boot_id: sample.boot_id.clone(),
+            sequence: sample.sequence,
+            sampled_at_ms: sample.sampled_at_ms,
+            count: sample.processes.len(),
+            sort: state.process_sort,
+            filter: state.process_filter.clone(),
+        }
+    }
+
+    fn matches(&self, state: &State, sample: &SystemMetricsSnapshot) -> bool {
+        self.boot_id == sample.boot_id
+            && self.sequence == sample.sequence
+            && self.sampled_at_ms == sample.sampled_at_ms
+            && self.count == sample.processes.len()
+            && self.sort == state.process_sort
+            && self.filter == state.process_filter
+    }
+}
+
+impl ProcessRows {
+    /// 当前样本的行序（与当前样本、排序、筛选对得上时）。
+    pub(super) fn get(&self, state: &State, sample: &SystemMetricsSnapshot) -> Option<&[usize]> {
+        self.key
+            .as_ref()
+            .filter(|key| key.matches(state, sample))
+            .map(|_| self.rows.as_slice())
+    }
+}
+
+/// 按筛选词过滤、按排序列排好的进程下标（排序不改变条数）。
+pub(super) fn sorted_process_rows(
+    sample: &SystemMetricsSnapshot,
+    sort: ProcessSort,
+    filter: &str,
+) -> Vec<usize> {
+    let filter = filter.to_lowercase();
+    let mut rows = sample
+        .processes
+        .iter()
+        .enumerate()
+        .filter(|(_, process)| filter.is_empty() || process.name.to_lowercase().contains(&filter))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let processes = &sample.processes;
+    rows.sort_by(|a, b| {
+        let (a, b) = (&processes[*a], &processes[*b]);
+        match sort {
+            ProcessSort::Memory => b.memory_bytes.cmp(&a.memory_bytes),
+            ProcessSort::Name => a.name.cmp(&b.name),
+            ProcessSort::Pid => a.identity.pid.cmp(&b.identity.pid),
+            ProcessSort::Cpu => b
+                .cpu_percent
+                .unwrap_or(-1.0)
+                .total_cmp(&a.cpu_percent.unwrap_or(-1.0)),
+        }
+    });
+    rows
 }
 
 pub(super) struct ProcessDialog {
@@ -251,6 +446,7 @@ pub(super) struct State {
     /// 本帧全部命中区（页面或进程对话框的）：键盘 Tab / Enter 在其中循环。
     pub hits: Vec<(Rect, Action)>,
     pub selected_hit: usize,
+    pub hovered_action: Option<Action>,
     pub selected_card: Option<String>,
     pub selected_core: Option<usize>,
     /// 系统页「编辑布局」模式：卡片带 ↑↓ 按钮，↑↓ 键移动选中的卡片；离开
@@ -281,6 +477,10 @@ pub(super) struct State {
     pub filtering_processes: bool,
     pub process_sort: ProcessSort,
     pub message: Option<String>,
+    /// 历史曲线的预分桶（每份样本算一次，见 `HistoryBuckets`）。
+    pub history_buckets: HistoryBuckets,
+    /// 进程表的行序（每份样本 / 排序 / 筛选变化时算一次，见 `ProcessRows`）。
+    pub process_rows: ProcessRows,
     pub now_ms: u64,
     pub epoch: u64,
     /// 活动端点的 (端点, boot_id)；按引用比较，tick 内不分配（OBS-13）。
@@ -357,6 +557,7 @@ impl State {
             page_rect: Rect::default(),
             hits: Vec::new(),
             selected_hit: 0,
+            hovered_action: None,
             selected_card: None,
             selected_core: None,
             layout_editing: false,
@@ -374,6 +575,8 @@ impl State {
             filtering_processes: false,
             process_sort: ProcessSort::Cpu,
             message: None,
+            history_buckets: HistoryBuckets::default(),
+            process_rows: ProcessRows::default(),
             now_ms: 0,
             epoch: 0,
             source: None,
@@ -381,6 +584,59 @@ impl State {
             pending: HashSet::new(),
             alerts: HashMap::new(),
         }
+    }
+
+    fn update_hover(&mut self, point: (u16, u16), enabled: bool) -> bool {
+        let hovered = enabled
+            .then(|| {
+                self.hits.iter().rev().find_map(|(rect, action)| {
+                    (contains(*rect, point) && !matches!(action, Action::Card(_))).then_some(action)
+                })
+            })
+            .flatten();
+        if self.hovered_action.as_ref() == hovered {
+            return false;
+        }
+        self.hovered_action = hovered.cloned();
+        true
+    }
+
+    /// 重算历史曲线的预分桶：新样本进了历史、历史范围或选中的核变了时调用一次。
+    pub(super) fn refresh_history_buckets(&mut self) {
+        let key = HistoryKey::of(self);
+        let minutes = self.monitor.history_minutes;
+        let core = self.selected_core;
+        let mut buckets = std::mem::take(&mut self.history_buckets);
+        for (series, out) in [
+            (HistorySeries::Cpu, &mut buckets.cpu),
+            (HistorySeries::Memory, &mut buckets.memory),
+            (HistorySeries::Temperature, &mut buckets.temperature),
+        ] {
+            out.resize(HISTORY_SLOTS, f32::NAN);
+            bucket_history(
+                &self.history,
+                self.now_ms,
+                minutes,
+                HISTORY_SLOTS,
+                |point| series.value(point, core),
+                out,
+            );
+        }
+        buckets.key = Some(key);
+        self.history_buckets = buckets;
+    }
+
+    /// 重算进程表的行序：新样本、排序或筛选变化时调用一次。
+    pub(super) fn refresh_process_rows(&mut self) {
+        let Some(sample) = self.metrics.as_deref() else {
+            self.process_rows = ProcessRows::default();
+            return;
+        };
+        let rows = sorted_process_rows(sample, self.process_sort, &self.process_filter);
+        self.process_rows = ProcessRows {
+            key: Some(ProcessRowsKey::of(self, sample)),
+            rows,
+        };
     }
 
     /// 每帧绘制前复位上一帧的命中区与矩形；之后每次 `paint` 的结果经
@@ -407,19 +663,20 @@ impl State {
         painting_page: Option<Page>,
         framed: bool,
     ) -> Option<Painted> {
-        let palette = cx.palette;
         if painting_page.is_none() && self.process_dialog.is_none() {
             return None;
         }
         let output = render::paint(canvas.buffer(), area, self, cx, painting_page, framed);
-        if painting_page.is_some() {
+        canvas.clear_links_in(output.page_rect);
+        canvas.clear_links_in(output.dialog_rect);
+        // 键盘焦点环只在页面拥有键盘或全局进程对话框出现时画；只叠下划线，
+        // 避免覆盖活动页签或破坏性按钮自己的前景、底色。
+        if self.process_dialog.is_some() || (painting_page.is_some() && self.page.is_some()) {
             let selected = self.selected_hit.min(output.hits.len().saturating_sub(1));
             if let Some((rect, _)) = output.hits.get(selected) {
                 canvas.buffer().set_style(
-                    *rect,
-                    Style::default()
-                        .fg(palette.accent)
-                        .add_modifier(Modifier::UNDERLINED),
+                    Rect::new(rect.x, rect.y, rect.width, rect.height.min(1)),
+                    Style::default().add_modifier(Modifier::UNDERLINED),
                 );
             }
         }
@@ -540,6 +797,8 @@ impl State {
             }
         }
         self.metrics = Some(snapshot);
+        self.refresh_history_buckets();
+        self.refresh_process_rows();
     }
 
     fn alert(&mut self) -> Option<String> {
@@ -809,9 +1068,11 @@ impl ClientShellState {
                 );
             }
         }
+        // 告警只在越过规则阈值时触发，即系统页条形转红的那一档：通知走警告类，
+        // 与其它需要你处理的通知同一套严重色（`ClientToastLevel::Error`）。
         if let Some(body) = self.observability.alert() {
             outcome.repaint |= self.push_endpoint_notice(
-                ClientEndpointNoticeKind::Rejected,
+                ClientEndpointNoticeKind::Warning,
                 format!("monitor-{}", self.observability.now_ms),
                 tr("Resource alert", "资源告警"),
                 body,
@@ -915,7 +1176,8 @@ impl ClientShellState {
                     None
                 } else {
                     Some(core)
-                }
+                };
+                self.observability.refresh_history_buckets();
             }
             Action::CardMove(card, delta) => {
                 if let Some(index) = self
@@ -939,6 +1201,7 @@ impl ClientShellState {
                 let monitor = &mut self.observability.monitor;
                 monitor.history_minutes =
                     step_ladder(&HISTORY_STEPS, monitor.history_minutes, delta);
+                self.observability.refresh_history_buckets();
             }
             Action::ChartGlyphs(glyphs) => self.observability.chart_glyphs = glyphs,
             Action::Device(id) => {
@@ -1038,7 +1301,10 @@ impl ClientShellState {
                     );
                 }
             }
-            Action::SortProcesses(sort) => self.observability.process_sort = sort,
+            Action::SortProcesses(sort) => {
+                self.observability.process_sort = sort;
+                self.observability.refresh_process_rows();
+            }
             Action::FilterProcesses => {
                 self.observability.filtering_processes = !self.observability.filtering_processes
             }
@@ -1088,10 +1354,16 @@ impl ClientShellState {
         mouse: MouseEvent,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        let point = (mouse.column, mouse.row);
+        if mouse.kind == MouseEventKind::Moved {
+            let enabled = self.config.feedback.hover_effects
+                && self.overlay.is_none()
+                && self.popup_terminal_id.is_none();
+            outcome.repaint |= self.observability.update_hover(point, enabled);
+        }
         if self.overlay.is_some() || self.popup_terminal_id.is_some() {
             return false;
         }
-        let point = (mouse.column, mouse.row);
         if self.observability.process_dialog.is_some() {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some(action) =
@@ -1176,7 +1448,7 @@ impl ClientShellState {
         }
         // 拥有键盘的页面独占落在页面矩形里的其余指针事件（滚轮已在上面按落点分派）。
         if self.observability.page.is_some() && contains(self.observability.page_rect, point) {
-            outcome.repaint = true;
+            outcome.repaint |= mouse.kind != MouseEventKind::Moved;
             return true;
         }
         false
@@ -1203,11 +1475,13 @@ impl ClientShellState {
                 KeyCode::Esc | KeyCode::Enter => self.observability.filtering_processes = false,
                 KeyCode::Backspace => {
                     self.observability.process_filter.pop();
+                    self.observability.refresh_process_rows();
                 }
                 KeyCode::Char(ch)
                     if !ch.is_control() && self.observability.process_filter.len() < 256 =>
                 {
-                    self.observability.process_filter.push(ch)
+                    self.observability.process_filter.push(ch);
+                    self.observability.refresh_process_rows();
                 }
                 _ => {}
             }
