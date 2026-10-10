@@ -3,7 +3,7 @@ title: Integrations
 description: Install Herdr integrations for Pi, Claude Code, Codex, Kimi Code CLI, and OpenCode.
 ---
 
-See [Monitoring, account usage and docking](/docs/monitoring/) for host metrics, provider account bindings, and movable terminal groups.
+See [Monitoring and docking](/docs/monitoring/) for host metrics and movable terminal groups.
 
 
 Herdr detects supported agents automatically. Install official integrations when you want native agent session restore, direct lifecycle reports, or both. See [Agents](/docs/agents/) for the full status authority model.
@@ -24,7 +24,7 @@ After an install, the tab lists what each integration wrote, plus any warnings, 
 
 ## Pane report origin
 
-Herdr checks the process origin of bundled integration reports (`source` starts with `herdr:`) and all `account.usage.report` requests with a `pane_id`. A report from the pane's process tree is accepted. A background session or daemon that only inherited `HERDR_PANE_ID`, but no longer belongs to that tree, receives a successful response without changing pane state, session identity, activity, metadata, or usage. Account-level usage reports without a pane and third-party pane report sources keep their existing behavior.
+Herdr checks the process origin of bundled integration reports (`source` starts with `herdr:`). A report from the pane's process tree is accepted. A background session or daemon that only inherited `HERDR_PANE_ID`, but no longer belongs to that tree, receives a successful response without changing pane state, session identity, activity, or metadata. Third-party pane report sources keep their existing behavior.
 
 For tmux and screen, Herdr also accepts a report whose ancestors include the multiplexer server when a client of the same multiplexer is in the target pane's process tree. This is a process-name heuristic: it does not prove that the client and server belong to the same multiplexer session. If peer PID or process ancestry cannot be read, Herdr accepts the report. This includes some orphaned-process cases on Windows, where the departed parent's PID remains in the process record.
 
@@ -109,7 +109,7 @@ Herdr writes the bundled extension to:
 
 If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. Herdr creates the extensions directory when the Pi agent directory already exists. Uninstall removes only that extension file.
 
-From integration version `10`, the extension also reports two things from interactive (TUI) sessions: the session's usage, shown on the accounts page (see [Monitoring](/docs/monitoring/)), and an activity tree for the agent activity window. Pi has no built-in sub-agents, todos, or background jobs; extensions provide them. Every call to a tool that is not one of Pi's built-in tools becomes an activity item, with the tool's streamed output as its content, and the official `subagent` extension adds one child item per delegated agent. The tree keeps up to eight tool-call items (finished ones are dropped first when more arrive), up to eight child items under each, and the last 2,000 characters of each item's output. Pi keeps none of this on disk, so the extension sends the whole tree to Herdr. Reinstall the Pi integration after upgrading to get them.
+From integration version `10`, the extension also reports an activity tree from interactive (TUI) sessions for the agent activity window. Pi has no built-in sub-agents, todos, or background jobs; extensions provide them. Every call to a tool that is not one of Pi's built-in tools becomes an activity item, with the tool's streamed output as its content, and the official `subagent` extension adds one child item per delegated agent. The tree keeps up to eight tool-call items (finished ones are dropped first when more arrive), up to eight child items under each, and the last 2,000 characters of each item's output. Pi keeps none of this on disk, so the extension sends the whole tree to Herdr. Reinstall the Pi integration after upgrading to get it.
 
 ## Claude Code
 
@@ -218,10 +218,18 @@ This fork ships official integrations for Pi, Claude Code, Codex, Kimi Code CLI,
 - The CLI no longer accepts the retired names. `herdr integration install` and `herdr integration uninstall` answer a retired name such as `cursor` or `omp` with a retirement notice and the list of supported targets, and `herdr integration status` no longer lists them. The former experimental `letta` target never had an API name, so it gets the unknown-target error with the same list instead.
 - Older clients can still send a retired target to the `integration.install` or `integration.uninstall` API methods. The request parses as before and is answered with the `integration_retired` error; `integration.list` no longer returns retired targets.
 - Hooks or plugins that an earlier build installed into a retired agent's config directory are left untouched. Remove them by hand if you no longer want them; their session reports are treated as unofficial and are not used for restore. Since `herdr integration uninstall` also rejects retired names, this fork cannot remove them for you: open that agent's own config directory yourself and delete the hook or plugin file, using that agent's own documentation to find its exact location.
-- The usage status line callback is the one exception. An earlier build could wrap the status line in Antigravity CLI's `~/.gemini/antigravity-cli/settings.json` (or the account's `profile_dir`) to report usage. Herdr still recognizes that wrapper and only removes it: calling `account.usage.integration` with `enabled: false` for an account configured with `agent = "antigravity"` restores the original status line command, while `enabled: true` is rejected.
 - A retired agent running in a pane is an ordinary program: it is not detected automatically, and config keys that named it (such as `[ui.sound.agents]` overrides) are ignored.
 
-Any agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is supported as an external agent source rather than as a built-in integration: it is a desktop app that never runs in a pane, so Herdr lists its running recent sessions under the agents panel's External group (see [Agent](/docs/concepts/#agent)) and reads its local token usage (see [Monitoring](/docs/monitoring/)), without installing anything into ZCode.
+Any agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is supported as an external agent source rather than as a built-in integration: it is a desktop app that never runs in a pane, so Herdr lists its running recent sessions under the agents panel's External group (see [Agent](/docs/concepts/#agent)), without installing anything into ZCode.
+
+## Removed account usage monitoring
+
+This fork no longer tracks CLI or AI-account usage. The Monitor panel's Accounts page, the usage cards on agent rows, the **Usage** and **Bind account** menu items, `herdr api usage-report`, and the `account.usage.*` and `account.binding.set` socket methods are gone; host monitoring is unchanged (see [Monitoring and docking](/docs/monitoring/)).
+
+- If an earlier build turned on the official status line callback for Claude Code, the `statusLine` command in Claude Code's `settings.json` still runs `herdr api usage-report` in front of your own status line command. Claude integration v12 removes that wrapper and restores your original status line: run `herdr integration install claude`, or update the integration when Herdr reports that it needs updating. Uninstalling the Claude integration removes the wrapper too.
+- Pi integration version `11` no longer sends session usage. Update it with `herdr integration install pi`.
+- Herdr no longer removes the wrapper that an earlier build could add to Antigravity CLI's status line in `~/.gemini/antigravity-cli/settings.json`; restore the original `statusLine` command there by hand.
+- An `[account_usage]` section in the config file, including its `[[account_usage.accounts]]` entries, is ignored with a config warning. Delete it to silence the warning.
 
 ## Custom status labels
 

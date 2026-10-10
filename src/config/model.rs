@@ -4,8 +4,8 @@ use crossterm::event::KeyModifiers;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
-    AccountUsageConfig, ActionKeybinds, BindingConfig, CommandKeybindConfig, IndexedKeybind,
-    Keybinds, MonitorConfig, SidebarConfig, SoundConfig, TabBarRightEntryConfig, ThemeConfig,
+    ActionKeybinds, BindingConfig, CommandKeybindConfig, IndexedKeybind, Keybinds, MonitorConfig,
+    SidebarConfig, SoundConfig, TabBarRightEntryConfig, ThemeConfig,
     DEFAULT_MOBILE_WIDTH_THRESHOLD, DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
 };
 
@@ -339,7 +339,6 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
 #[serde(default)]
 pub struct Config {
     pub monitor: MonitorConfig,
-    pub account_usage: AccountUsageConfig,
     pub language: crate::i18n::Lang,
     pub onboarding: Option<bool>,
     pub theme: ThemeConfig,
@@ -1230,7 +1229,6 @@ pub struct ServerConfig {
     /// `herdr:*`) when the reporting process runs inside the target pane's
     /// process tree; reports from processes that merely inherited the pane's
     /// environment (background agent sessions, daemons) are dropped silently.
-    /// Pane-bound usage reports are checked too; account-only reports are unchanged.
     /// A same-kind tmux/screen client in the pane is accepted heuristically.
     /// Unknown origins are accepted. Default: true.
     pub verify_report_process: bool,

@@ -397,7 +397,7 @@ pub(super) fn monitor(
 }
 
 /// 页面底边只露出一截的卡片（最后一行卡片）：整张卡按完整卡高画进同位置的
-/// 暂存缓冲，再只拷回可见的几行——与账号页、偏好页一样裁在视口边缘，露出的是
+/// 暂存缓冲，再只拷回可见的几行——与偏好页一样裁在视口边缘，露出的是
 /// 卡片的标题与真实的首几行、没有下边框。把卡压扁画进剩下的几行会画出一张
 /// 「完整的矮卡」：只剩两行时是一张只有上下边框的空卡，高一点时正文按矮卡重排、
 /// 像是卡里没有更多数据，卡内滚动上界也按压扁后的高度算。命中区裁到可见部分；
@@ -1774,7 +1774,7 @@ mod tests {
         "▁▂▃▄▅▆▇█".contains(ch)
     }
 
-    /// 硬性版式约束：额度 / 指标数字在任意宽度可见——窄时先砍条形，数字不裁。
+    /// 硬性版式约束：指标数字在任意宽度可见——窄时先砍条形，数字不裁。
     #[test]
     fn system_cards_keep_numbers_visible_at_every_width() {
         let _guard = lang_guard(Lang::ZhCn);
@@ -2490,14 +2490,13 @@ mod tests {
         let (buffer, output) = paint_page(&state, Page::Monitor, 120, 40);
         assert!(buffer_has(&buffer, "hello footer"));
         assert!(!has(&output, |action| matches!(action, Action::Pause)));
-        // 账号页没有「暂停」。
-        let (_, output) = paint_page(&State::new(&config()), Page::Accounts, 120, 40);
+        // 偏好页没有「暂停」。
+        let (_, output) = paint_page(&State::new(&config()), Page::Settings, 120, 40);
         assert!(!has(&output, |action| matches!(action, Action::Pause)));
-        assert!(has(&output, |action| matches!(action, Action::Refresh)));
     }
 
     #[test]
-    fn page_tabs_name_the_third_page_monitor_preferences() {
+    fn page_tabs_name_the_second_page_monitor_preferences() {
         let _guard = lang_guard(Lang::ZhCn);
         let (buffer, output) = paint_page(&monitored(), Page::Monitor, 120, 40);
         assert!(buffer_has(&buffer, "监控偏好"));
@@ -2506,13 +2505,9 @@ mod tests {
             action,
             Action::Page(Page::Settings)
         )));
-        assert!(has(&output, |action| matches!(
-            action,
-            Action::Page(Page::Accounts)
-        )));
     }
 
-    /// 窄面板下三个页签都得留着：英文标签比中文长得多，放不下时截短而不是
+    /// 窄面板下两个页签都得留着：英文标签比中文长得多，放不下时截短而不是
     /// 整项丢弃，否则鼠标再也进不去那一页，活动页也不再高亮。
     #[test]
     fn narrow_panel_truncates_page_tabs_instead_of_dropping_them() {
@@ -2521,7 +2516,7 @@ mod tests {
         for width in [120_u16, 60, 40, 30, 24] {
             let (buffer, output) = paint_page(&state, Page::Settings, width, 40);
             let text = buffer_text(&buffer);
-            for page in [Page::Monitor, Page::Accounts, Page::Settings] {
+            for page in [Page::Monitor, Page::Settings] {
                 assert!(
                     has(
                         &output,

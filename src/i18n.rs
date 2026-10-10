@@ -434,65 +434,16 @@ pub struct SettingsTexts {
     pub unexpected_install_result: &'static str,
 }
 
-/// 监控 → 账号 / 设置页（本批新增文案；存量 `tr()` 的迁移留批次四）。
+/// 监控面板的系统页 / 偏好页文案（存量 `tr()` 的迁移留批次四）。
 pub struct MonitorTexts {
-    /// 账号页工具栏首个 chip：回到跨厂商总览。
-    pub all_providers: &'static str,
-    /// 折叠标记后的说明：还有 N 个厂商放不下。
-    pub more_fmt: &'static str, // args: n
-    pub callback_toggle: &'static str,
-    pub settings_button: &'static str,
-    pub format_dashboard: &'static str,
-    pub format_table: &'static str,
-    pub position_hover: &'static str,
-    pub position_page: &'static str,
-    pub position_both: &'static str,
-    pub scope_api_key: &'static str,
     pub updated_ago_fmt: &'static str, // args: age
     pub never_updated: &'static str,
-    pub resets_in_fmt: &'static str, // args: span
-    /// 汇总行账号数（n ≥ 2）；单账号用 `account_one`，避免英文「1 accounts」。
-    pub accounts_fmt: &'static str, // args: n
-    pub account_one: &'static str,
-    pub summary_ready_fmt: &'static str,     // args: n
-    pub summary_loading_fmt: &'static str,   // args: n
-    pub summary_attention_fmt: &'static str, // args: n
-    pub summary_failed_fmt: &'static str,    // args: n
-    pub col_reset: &'static str,
-    pub col_freshness: &'static str,
-    pub col_usage: &'static str,
-    pub detail_title: &'static str,
-    pub detail_auth: &'static str,
-    pub detail_provider: &'static str,
-    pub detail_source: &'static str,
-    pub detail_window: &'static str,
-    pub detail_updated: &'static str,
-    pub detail_docs: &'static str,
-    pub detail_history: &'static str,
-    pub detail_history_waiting: &'static str,
-    pub detail_history_fmt: &'static str,
-    pub detail_none: &'static str,
     pub section_monitor: &'static str,
-    pub section_usage: &'static str,
     pub section_cards: &'static str,
     pub section_alerts: &'static str,
-    pub section_providers: &'static str,
     pub section_devices: &'static str,
-    pub hover_delay: &'static str,
-    pub api_refresh: &'static str,
-    pub cli_refresh: &'static str,
-    pub interactive_probe: &'static str,
-    /// 设置页只读行的来源标注：这些值来自本机 config.toml，连远端 endpoint 时与实际
-    /// 生效值无关，文案必须说明「本机」。
-    pub config_value_hint: &'static str,
-    pub hover_closed_hint: &'static str,
-    /// 官方回调开关没有作用对象（多账号且未选）时的禁用态标注与动作提示。
-    pub select_account_first: &'static str,
-    pub on: &'static str,
-    pub off: &'static str,
     // ---- 页签与页脚 ----
     pub tab_system: &'static str,
-    pub tab_accounts: &'static str,
     /// 第三个页签：监控偏好（不再叫「设置」，与全局设置浮层区分）。
     pub tab_preferences: &'static str,
     pub hint_refresh: &'static str,
@@ -535,12 +486,6 @@ pub struct MonitorTexts {
     pub card_height: &'static str,
     pub history_range: &'static str,
     pub alerts_enabled: &'static str,
-    pub usage_enabled: &'static str,
-    pub usage_format: &'static str,
-    pub usage_position: &'static str,
-    pub restore_config: &'static str,
-    pub clear_overrides: &'static str,
-    pub no_overrides: &'static str,
     pub alert_rule_fmt: &'static str, // args: metric
     pub alert_duration: &'static str,
     pub alert_cooldown: &'static str,
@@ -550,326 +495,6 @@ pub struct MonitorTexts {
     pub alert_metric_memory: &'static str,
     pub alert_metric_gpu: &'static str,
     pub alert_metric_disk: &'static str,
-    // ---- 账号页厂商卡片 ----
-    /// 账号卡片（厂商专属）：额度窗口短标签。
-    pub quota_5h: &'static str,
-    pub quota_weekly: &'static str,
-    pub quota_spend: &'static str,
-    pub quota_primary: &'static str,
-    pub quota_secondary: &'static str,
-    pub quota_7d: &'static str,
-    pub quota_monthly: &'static str,
-    pub quota_monthly_code: &'static str,
-    pub quota_plan: &'static str,
-    /// codex 主 / 次窗口知道长度时的标签（`5h` / `7d`）。
-    pub window_fmt: &'static str, // args: span
-    /// 额度窗口已过重置时间、沿用上次值时的说明。
-    pub window_expired: &'static str,
-    /// 余额与钱包。
-    pub credits: &'static str,
-    pub balance_available: &'static str,
-    pub balance_voucher: &'static str,
-    pub balance_cash: &'static str,
-    pub section_extra_usage: &'static str,
-    pub extra_balance: &'static str,
-    pub extra_total: &'static str,
-    pub extra_month_used: &'static str,
-    pub extra_month_cap: &'static str,
-    /// 会话与本地统计。
-    pub cost: &'static str,
-    pub duration: &'static str,
-    pub api_duration: &'static str,
-    pub context: &'static str,
-    pub context_tokens: &'static str,
-    pub context_window: &'static str,
-    pub sessions: &'static str,
-    pub subagents: &'static str,
-    pub section_tokens: &'static str,
-    pub tokens_input: &'static str,
-    pub tokens_output: &'static str,
-    pub tokens_reasoning: &'static str,
-    pub tokens_cache_read: &'static str,
-    pub tokens_cache_write: &'static str,
-    pub tokens_total: &'static str,
-    pub tokens_main: &'static str,
-    pub tokens_subagents: &'static str,
-    pub tool_uses: &'static str,
-    pub stats_window: &'static str,
-    pub model: &'static str,
-    /// 卡片徽标：本机统计 / 会话统计不是账号额度。
-    pub local_stats_badge: &'static str,
-    pub session_stats_badge: &'static str,
-    /// 空态与未知值。
-    pub no_usage_data: &'static str,
-    pub no_session_data: &'static str,
-    pub no_data_yet: &'static str,
-    pub no_accounts: &'static str,
-}
-
-/// 服务端写进账号用量快照 `message` 的固定说明（文档终审 D2）。服务端按自己的语言
-/// 生成（`texts()`，与 toast、通知同一口径，随 config.toml 的 `language` 同步）；客户端
-/// 显示前经 [`localize_usage_notice`] 对照各语言的原文，认得的换成界面语言——远端机器
-/// 或 `HERDR_LANG` 不同的 server 发来的说明也跟着界面语言走；认不出的原样显示。
-pub struct UsageNoticeTexts {
-    pub signed_in: &'static str,
-    /// `claude auth status` 的输出解析不了时的登录态。
-    pub login_unknown: &'static str,
-    /// 官方回调已接入、等待第一次回调。
-    pub callback_on_fmt: &'static str, // args: login
-    /// 官方回调未接入：指引写账号页上「官方回调」开关的真实名字。
-    pub callback_off_fmt: &'static str, // args: login
-    /// 读不出官方回调的接入态（settings.json 无法解析等）。
-    pub callback_unknown_fmt: &'static str, // args: login
-    /// 交互探测的失败原因接在等待说明之后时的分隔语。
-    pub interactive_failure_sep: &'static str,
-    /// 支持官方回调的厂商停在目录信任对话、且没有稳定探测目录时的提示。
-    pub trust_callback_hint: &'static str,
-    /// 支持官方回调的厂商停在登录对话时的提示。
-    pub sign_in_callback_hint: &'static str,
-    /// 交互探测停在目录信任对话、有稳定探测目录时（claude 的生产路径）的提示：给出可以
-    /// 照抄的目录与命令。带参数，客户端按模板反解后换成界面语言（见 `templates`）。
-    pub trust_dir_fmt: &'static str, // args: dir, command
-    /// 不支持官方回调的厂商停在目录信任对话、且没有稳定探测目录时的提示。
-    pub trust_hint: &'static str,
-    /// 不支持官方回调的厂商停在登录对话时的提示。
-    pub sign_in_hint: &'static str,
-    /// 交互探测在截止时间前没等到就绪提示或用量输出。
-    pub probe_timeout: &'static str,
-    // ---- 账号卡与表格「说明」里的固定说明（文档终审 D7）----
-    /// 冷条目还没有查询过。
-    pub not_queried_yet: &'static str,
-    /// 该厂商在设置里被关闭。
-    pub provider_disabled: &'static str,
-    /// 官方回调超过闩锁时长没有更新，显示缓存样本。
-    pub callback_stale: &'static str,
-    /// 集成扩展（pi）超过闩锁时长没有推送，显示缓存的会话统计。
-    pub extension_push_stale: &'static str,
-    /// 未绑定窗格且无法推断账号时的占位。
-    pub binding_placeholder: &'static str,
-    /// claude 登录预检报告未登录。
-    pub claude_signed_out: &'static str,
-    /// pi 还没有推送会话用量。
-    pub pi_waiting: &'static str,
-    /// 官方输出里没有已验证的用量字段。
-    pub no_verified_fields: &'static str,
-    pub codex_ordinary_usage_allowed: &'static str,
-    pub codex_ordinary_usage_blocked: &'static str,
-    /// 官方账号身份变化、绑定已撤销。
-    pub identity_changed: &'static str,
-    /// zcode 本地统计卡的来源声明。
-    pub zcode_local: &'static str,
-    /// 按唯一账号自动绑定。
-    pub auto_bound: &'static str,
-    /// 官方回调暂无额度字段。
-    pub no_quota: &'static str,
-    /// 集成扩展的推送暂无用量字段。
-    pub no_push_usage: &'static str,
-    /// 上报被拒：窗格还没有绑定该厂商的账号（`account.usage.report` 的错误说明）。
-    pub binding_required: &'static str,
-    pub invalid_report: &'static str,
-    /// 本机数据库轮询型来源（zcode）收到上报时的拒绝说明。
-    pub local_source_report: &'static str,
-    pub binding_candidates_fmt: &'static str, // args: message, candidates
-    /// 候选账号之间的分隔符。
-    pub candidate_separator: &'static str,
-    pub binding_no_quota_fmt: &'static str, // args: message, account
-}
-
-/// 说明表里的一条说明：固定文案按下标，claude 的等待说明按登录态与回调接入态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UsageNotice {
-    Fixed(usize),
-    ClaudeWaiting {
-        login_known: bool,
-        callback: Option<bool>,
-    },
-}
-
-const CLAUDE_WAITING_VARIANTS: [(bool, Option<bool>); 6] = [
-    (true, Some(true)),
-    (true, Some(false)),
-    (true, None),
-    (false, Some(true)),
-    (false, Some(false)),
-    (false, None),
-];
-
-impl UsageNoticeTexts {
-    /// claude「已登录（或登录态未知）、等待官方回调」的占位说明。
-    pub fn claude_waiting(&self, login_known: bool, callback: Option<bool>) -> String {
-        let login = if login_known {
-            self.signed_in
-        } else {
-            self.login_unknown
-        };
-        let template = match callback {
-            Some(true) => self.callback_on_fmt,
-            Some(false) => self.callback_off_fmt,
-            None => self.callback_unknown_fmt,
-        };
-        fill(template, &[("login", login)])
-    }
-
-    /// 快照 `message` 里没有参数的固定说明，按下标与各语言对齐。只进上报应答的拒绝
-    /// 说明（`binding_required` 等）不在其中：客户端不显示它们。
-    fn fixed(&self) -> [&'static str; 20] {
-        [
-            self.trust_callback_hint,
-            self.sign_in_callback_hint,
-            self.trust_hint,
-            self.sign_in_hint,
-            self.probe_timeout,
-            self.not_queried_yet,
-            self.provider_disabled,
-            self.callback_stale,
-            self.extension_push_stale,
-            self.binding_placeholder,
-            self.claude_signed_out,
-            self.pi_waiting,
-            self.no_verified_fields,
-            self.codex_ordinary_usage_allowed,
-            self.codex_ordinary_usage_blocked,
-            self.identity_changed,
-            self.zcode_local,
-            self.auto_bound,
-            self.no_quota,
-            self.no_push_usage,
-        ]
-    }
-
-    /// 快照 `message` 里带参数的说明模板，按下标与各语言对齐：客户端按原语言的模板反解
-    /// 出参数，再用界面语言的同一模板重填。
-    fn templates(&self) -> [&'static str; 1] {
-        [self.trust_dir_fmt]
-    }
-
-    fn render(&self, notice: UsageNotice) -> std::borrow::Cow<'static, str> {
-        match notice {
-            UsageNotice::Fixed(index) => {
-                std::borrow::Cow::Borrowed(self.fixed().get(index).copied().unwrap_or_default())
-            }
-            UsageNotice::ClaudeWaiting {
-                login_known,
-                callback,
-            } => std::borrow::Cow::Owned(self.claude_waiting(login_known, callback)),
-        }
-    }
-}
-
-/// 各语言下每条说明的原文（进程内算一次）。
-fn usage_notice_catalog() -> &'static [(Lang, UsageNotice, String)] {
-    static CATALOG: std::sync::OnceLock<Vec<(Lang, UsageNotice, String)>> =
-        std::sync::OnceLock::new();
-    CATALOG.get_or_init(|| {
-        let mut entries = Vec::new();
-        for lang in [Lang::En, Lang::ZhCn] {
-            let texts = &texts_for(lang).usage_notice;
-            for (index, text) in texts.fixed().iter().enumerate() {
-                entries.push((lang, UsageNotice::Fixed(index), (*text).to_owned()));
-            }
-            for (login_known, callback) in CLAUDE_WAITING_VARIANTS {
-                entries.push((
-                    lang,
-                    UsageNotice::ClaudeWaiting {
-                        login_known,
-                        callback,
-                    },
-                    texts.claude_waiting(login_known, callback),
-                ));
-            }
-        }
-        entries
-    })
-}
-
-/// 把服务端生成的账号用量说明换成当前界面语言：整条认得的直接换；等待说明后面拼了
-/// 交互探测失败原因的，两段各自换（失败原因认不出就原样保留）；认不出的原样返回。
-pub fn localize_usage_notice(message: &str) -> std::borrow::Cow<'_, str> {
-    let target = &texts().usage_notice;
-    let current = lang();
-    let catalog = usage_notice_catalog();
-    if let Some((lang, notice, _)) = catalog.iter().find(|(_, _, text)| text == message) {
-        return if *lang == current {
-            std::borrow::Cow::Borrowed(message)
-        } else {
-            target.render(*notice)
-        };
-    }
-    if let Some(localized) = localize_templated_notice(message, current) {
-        return localized;
-    }
-    for (lang, notice, text) in catalog {
-        if !matches!(notice, UsageNotice::ClaudeWaiting { .. }) {
-            continue;
-        }
-        let separator = texts_for(*lang).usage_notice.interactive_failure_sep;
-        let Some(failure) = message
-            .strip_prefix(text.as_str())
-            .and_then(|rest| rest.strip_prefix(separator))
-        else {
-            continue;
-        };
-        if *lang == current {
-            return std::borrow::Cow::Borrowed(message);
-        }
-        return std::borrow::Cow::Owned(format!(
-            "{}{}{}",
-            target.render(*notice),
-            target.interactive_failure_sep,
-            localize_usage_notice(failure)
-        ));
-    }
-    std::borrow::Cow::Borrowed(message)
-}
-
-/// 带参数的说明（`UsageNoticeTexts::templates`）：按各语言的模板反解出参数；与界面同语言
-/// 的原样返回，否则用界面语言的同一模板重填。哪个模板都对不上返回 `None`。
-fn localize_templated_notice(message: &str, current: Lang) -> Option<std::borrow::Cow<'_, str>> {
-    for lang in [Lang::En, Lang::ZhCn] {
-        for (index, template) in texts_for(lang).usage_notice.templates().iter().enumerate() {
-            let Some(args) = unfill(template, message) else {
-                continue;
-            };
-            if lang == current {
-                return Some(std::borrow::Cow::Borrowed(message));
-            }
-            let target = texts_for(current).usage_notice.templates()[index];
-            return Some(std::borrow::Cow::Owned(fill(target, &args)));
-        }
-    }
-    None
-}
-
-/// [`fill`] 的逆运算：按模板的字面段切开 `message`，依次取出各占位（`{name}`）的值。字面段
-/// 对不上、或两个占位之间没有字面段（切分有歧义）时返回 `None`；值里又出现后一个字面段时按
-/// 第一次出现切分。
-fn unfill<'t, 'm>(template: &'t str, message: &'m str) -> Option<Vec<(&'t str, &'m str)>> {
-    let mut literals = Vec::new();
-    let mut names = Vec::new();
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        let close = open + rest[open..].find('}')?;
-        literals.push(&rest[..open]);
-        names.push(&rest[open + 1..close]);
-        rest = &rest[close + 1..];
-    }
-    if names.is_empty() {
-        return (message == template).then(Vec::new);
-    }
-    let mut body = message.strip_prefix(literals[0])?.strip_suffix(rest)?;
-    let mut values = Vec::with_capacity(names.len());
-    for (index, name) in names.iter().enumerate() {
-        match literals.get(index + 1) {
-            Some(&"") => return None,
-            Some(separator) => {
-                let (value, remainder) = body.split_once(separator)?;
-                values.push((*name, value));
-                body = remainder;
-            }
-            None => values.push((*name, body)),
-        }
-    }
-    Some(values)
 }
 
 pub struct SidebarTexts {
@@ -1479,13 +1104,7 @@ pub struct AgentPanelTexts {
     /// 重命名的是 agent 所在的 pane（`pane.rename`，改 pane 标签），文案照实写
     /// 「重命名窗格」，与 pane 右键菜单同名。
     pub menu_rename: &'static str,
-    pub menu_usage: &'static str,
-    pub menu_bind_account: &'static str,
     pub menu_close: &'static str,
-    /// agent 用量悬停卡的标题（指针悬浮与右键「用量」钉住的是同一张卡）。
-    pub usage_card_title_fmt: &'static str, // args: agent
-    /// 钉住的用量卡标题栏右侧的标记。
-    pub usage_pinned: &'static str,
 }
 
 /// 「Agent 活动」二级窗口的文案；节点种类 / 状态的标签 Agents 面板也读。
@@ -1656,8 +1275,6 @@ pub struct RuntimeMessageTexts {
     pub monitor_request_unsupported: &'static str,
     pub monitor_busy: &'static str,
     pub monitor_unavailable: &'static str,
-    /// 账号用量请求指向的窗格已不存在。
-    pub observation_pane_gone: &'static str,
     pub observation_start_failed_fmt: &'static str, // args: error
 }
 
@@ -1684,242 +1301,11 @@ pub struct PlatformMessageTexts {
     pub process_handle_unsupported: &'static str,
 }
 
-/// 账号用量里 herdr 自己写的说明（文档终审 D7）：探测失败写进快照 `message` 的文案、详情
-/// 面板的来源（`source`），以及账号请求与官方回调接入被拒时的错误说明。按 server 的界面语言
-/// 生成（与 toast、通知同一口径）；厂商原文（CLI 的 stderr 摘要、接口返回的内容）经
-/// `detail_fmt` 等原样拼在后面，不翻译。`*_fmt` 是 `fill` 模板，占位写在行尾。
-pub struct UsageProbeTexts {
-    // ---- 官方 CLI 进程与输出 ----
-    pub probe_isolation_failed: &'static str,
-    pub probe_dir_failed: &'static str,
-    pub stable_dir_failed: &'static str,
-    pub profile_unsupported: &'static str,
-    pub cli_missing: &'static str,
-    pub cli_start_failed: &'static str,
-    pub output_unavailable: &'static str,
-    pub cli_timed_out: &'static str,
-    pub cli_output_unreadable: &'static str,
-    pub cli_output_too_large: &'static str,
-    pub result_unavailable: &'static str,
-    pub cli_exit_timed_out: &'static str,
-    // ---- 失败分类（厂商原文摘要经 `detail_fmt` 拼在后面） ----
-    pub cli_help_empty: &'static str,
-    pub cli_signed_out: &'static str,
-    pub cli_signaled_fmt: &'static str,        // args: signal
-    pub cli_no_usage_output_fmt: &'static str, // args: code
-    pub cli_usage_error_fmt: &'static str,     // args: detail
-    /// 接在说明后的厂商原文摘要。
-    pub detail_fmt: &'static str, // args: summary
-    pub cli_failed_fmt: &'static str,          // args: code
-    pub cli_failed_summary_fmt: &'static str,  // args: code, summary
-    pub no_subcommand: &'static str,
-    pub subcommand_missing: &'static str,
-    pub claude_auth_status_unsupported: &'static str,
-    // ---- Codex app-server ----
-    pub codex_unsupported_fmt: &'static str, // args: detail
-    pub codex_signed_out_fmt: &'static str,  // args: detail
-    pub codex_failed_fmt: &'static str,      // args: detail
-    pub rpc_input_closed: &'static str,
-    pub rpc_input_failed: &'static str,
-    pub rpc_output_unavailable: &'static str,
-    pub codex_timed_out: &'static str,
-    pub codex_exited: &'static str,
-    pub codex_exited_fmt: &'static str,         // args: summary
-    pub token_refresh_failed_fmt: &'static str, // args: message, retry
-    pub codex_sign_in_first: &'static str,
-    pub codex_account_usage_unsupported: &'static str,
-    // ---- 交互探测（隔离终端与 Windows 辅助进程） ----
-    pub helper_missing: &'static str,
-    pub helper_config_failed: &'static str,
-    pub helper_send_failed: &'static str,
-    pub helper_output_unavailable: &'static str,
-    pub isolated_timed_out: &'static str,
-    pub isolated_unreadable: &'static str,
-    pub isolated_too_large: &'static str,
-    pub isolated_invalid: &'static str,
-    pub interactive_profile_unsupported: &'static str,
-    pub pty_create_failed: &'static str,
-    pub pty_spawn_failed: &'static str,
-    pub pty_input_unavailable: &'static str,
-    pub pty_output_unavailable: &'static str,
-    pub pty_screen_unreadable: &'static str,
-    pub pty_protocol_failed: &'static str,
-    pub pty_cursor_unavailable: &'static str,
-    pub pty_cli_exited: &'static str,
-    // ---- Kimi 本地服务（kimi web） ----
-    pub kimi_port_failed: &'static str,
-    pub kimi_port_unreadable: &'static str,
-    pub kimi_address_invalid: &'static str,
-    pub kimi_banner_timeout: &'static str,
-    pub kimi_banner_too_large: &'static str,
-    pub kimi_web_unsupported: &'static str,
-    pub kimi_signed_out: &'static str,
-    pub kimi_exited: &'static str,
-    pub kimi_exited_fmt: &'static str, // args: summary
-    pub kimi_not_ready: &'static str,
-    pub kimi_http_signed_out_fmt: &'static str, // args: status
-    pub kimi_http_forbidden_fmt: &'static str,  // args: status
-    pub kimi_http_missing_fmt: &'static str,    // args: status
-    pub kimi_http_error_fmt: &'static str,      // args: status
-    pub kimi_connect_failed: &'static str,
-    pub kimi_request_failed: &'static str,
-    pub kimi_response_unreadable: &'static str,
-    pub kimi_response_too_large: &'static str,
-    pub kimi_format_unsupported: &'static str,
-    pub kimi_query_failed: &'static str,
-    // ---- 官方 HTTP 接口（`auth_mode = "api"`） ----
-    pub api_credential_env_required: &'static str,
-    pub api_credential_missing: &'static str,
-    pub api_client_failed: &'static str,
-    pub api_kimi_base_required: &'static str,
-    pub api_provider_unsupported: &'static str,
-    pub api_query_unsupported: &'static str,
-    pub api_no_verified_fields: &'static str,
-    pub api_deadline: &'static str,
-    pub api_connect_failed: &'static str,
-    pub api_http_status_fmt: &'static str, // args: status, retry
-    pub api_retry_after_fmt: &'static str, // args: seconds
-    pub api_too_large: &'static str,
-    pub api_unreadable: &'static str,
-    pub api_unrecognized: &'static str,
-    pub api_base_invalid: &'static str,
-    pub api_base_has_credentials: &'static str,
-    pub api_base_unregistered: &'static str,
-    // ---- ZCode 本地数据库（只读外部来源） ----
-    pub zcode_no_home: &'static str,
-    pub zcode_no_database: &'static str,
-    pub zcode_non_utf8_path: &'static str,
-    pub zcode_profile_unsupported: &'static str,
-    pub zcode_sqlite_missing: &'static str,
-    pub zcode_query_failed: &'static str,
-    pub zcode_schema_mismatch: &'static str,
-    pub zcode_database_busy: &'static str,
-    pub zcode_database_unreadable: &'static str,
-    pub zcode_no_result: &'static str,
-    pub zcode_unparsable: &'static str,
-    // ---- 快照来源（详情面板的「来源」） ----
-    pub source_official_api: &'static str,
-    pub source_kimi_local_api: &'static str,
-    pub source_cli_fmt: &'static str, // args: command
-    pub source_claude_callback: &'static str,
-    pub source_local_stats_fmt: &'static str, // args: command
-    pub source_extension_push: &'static str,
-    pub source_cli_callback: &'static str,
-    pub source_extension_push_stats: &'static str,
-    pub source_zcode_local: &'static str,
-    // ---- 账号请求与探测方案 ----
-    pub callback_session_stats: &'static str,
-    pub agent_unsupported: &'static str,
-    pub subscription_limit: &'static str,
-    pub unknown_account: &'static str,
-    pub binding_limit: &'static str,
-    pub request_unsupported: &'static str,
-    pub busy: &'static str,
-    // ---- 官方回调（statusline）接入：`account.usage.integration` 的错误说明 ----
-    pub statusline_unsupported_provider: &'static str,
-    pub statusline_unknown_provider: &'static str,
-    pub statusline_retired: &'static str,
-    pub settings_invalid_json: &'static str,
-    pub settings_empty: &'static str,
-    pub settings_not_object: &'static str,
-    pub statusline_not_object: &'static str,
-    pub statusline_create_failed: &'static str,
-    pub statusline_invalid: &'static str,
-    pub statusline_not_command: &'static str,
-    pub statusline_unrecognized: &'static str,
-}
-
-/// 账号用量指标的名称、单位与文字值（快照里的 `label` / `unit` / `text_value`），按 server 的
-/// 界面语言生成（文档终审 D7）。客户端的厂商卡片与表格对认得的指标另用界面语言的槽位名
-/// （`MonitorTexts`），认不出的指标原样显示这里的名称。
-pub struct UsageMetricTexts {
-    // ---- 额度窗口 ----
-    pub quota_primary: &'static str,
-    pub quota_secondary: &'static str,
-    pub credits: &'static str,
-    pub quota_5h: &'static str,
-    pub quota_weekly: &'static str,
-    pub quota_spend: &'static str,
-    pub quota_plan: &'static str,
-    pub quota_7d: &'static str,
-    pub quota_monthly: &'static str,
-    pub quota_monthly_code: &'static str,
-    pub quota_window_fmt: &'static str, // args: n
-    /// 厂商没给单位时的计量单位。
-    pub quota_unit: &'static str,
-    // ---- 余额与费用 ----
-    pub balance_available: &'static str,
-    pub balance_voucher: &'static str,
-    pub balance_cash: &'static str,
-    /// 厂商没给币种的余额单位。
-    pub balance_unit: &'static str,
-    pub extra_balance: &'static str,
-    pub extra_total: &'static str,
-    pub extra_month_used: &'static str,
-    pub extra_month_cap: &'static str,
-    pub key_usage: &'static str,
-    pub key_usage_daily: &'static str,
-    pub key_usage_weekly: &'static str,
-    pub key_usage_monthly: &'static str,
-    pub key_limit_remaining: &'static str,
-    pub account_total_credits: &'static str,
-    pub account_total_usage: &'static str,
-    pub cost_report: &'static str,
-    // ---- Codex 官方账号使用统计（非额度） ----
-    pub codex_reset_credits_available: &'static str,
-    pub codex_lifetime_tokens: &'static str,
-    pub codex_peak_daily_tokens: &'static str,
-    pub codex_longest_turn: &'static str,
-    pub codex_current_streak: &'static str,
-    pub codex_longest_streak: &'static str,
-    pub codex_daily_tokens: &'static str,
-    // ---- 会话统计 ----
-    pub session_cost_estimate: &'static str,
-    pub session_duration: &'static str,
-    pub session_api_duration: &'static str,
-    pub context_used: &'static str,
-    pub context_tokens_input: &'static str,
-    pub context_tokens: &'static str,
-    pub context_window: &'static str,
-    pub session_cost: &'static str,
-    pub current_model: &'static str,
-    // ---- 本地统计（opencode / zcode） ----
-    pub sessions: &'static str,
-    pub subagent_sessions: &'static str,
-    pub messages: &'static str,
-    pub stats_days: &'static str,
-    pub total_cost: &'static str,
-    pub avg_cost_per_day: &'static str,
-    pub avg_tokens_per_session: &'static str,
-    pub median_tokens_per_session: &'static str,
-    pub tokens_input: &'static str,
-    pub tokens_output: &'static str,
-    pub tokens_reasoning: &'static str,
-    pub tokens_cache_read: &'static str,
-    pub tokens_cache_write: &'static str,
-    pub tokens_total: &'static str,
-    pub tokens_main: &'static str,
-    pub tokens_subagents: &'static str,
-    pub tool_uses: &'static str,
-    pub subagents: &'static str,
-    pub stats_window: &'static str,
-    // ---- 文字值（`text_value`） ----
-    /// claude 沿用的过期额度窗口。
-    pub stale_window: &'static str,
-    /// claude 上下文用量未知。
-    pub claude_context_pending: &'static str,
-    /// pi 上下文用量未知。
-    pub pi_context_pending: &'static str,
-}
-
-/// `[monitor]` 与 `[account_usage]` 配置的诊断（`herdr config check` 与界面的配置诊断共用）：
+/// `[monitor]` 配置的诊断（`herdr config check` 与界面的配置诊断共用）：
 /// 按调用进程的界面语言给出，同一份诊断里不再中英混杂（T1 服务端审查轻 3）。
 pub struct MonitorConfigTexts {
     pub interval_invalid: &'static str,
     pub history_invalid: &'static str,
-    pub account_id_invalid: &'static str,
-    pub credential_env_invalid: &'static str,
-    pub account_user_deprecated_fmt: &'static str, // args: account
 }
 
 /// 远端连接层（`src/remote`）写给用户看的错误说明（文档终审 D7）：主机密钥核对、远端安装
@@ -1994,10 +1380,6 @@ pub struct CliHelpTexts {
     pub server_reload_agent_manifests_about: &'static str,
     pub api_about: &'static str,
     pub api_snapshot_about: &'static str,
-    pub api_usage_report_about: &'static str,
-    pub api_usage_report_agent_help: &'static str,
-    pub api_usage_report_account_help: &'static str,
-    pub api_usage_report_passthrough_help: &'static str,
     pub api_schema_about: &'static str,
     pub api_activity_read_about: &'static str,
     pub api_activity_read_agent_help: &'static str,
@@ -2471,11 +1853,8 @@ pub struct CliErrorTexts {
     // src/cli/api.rs
     pub api_schema_usage: &'static str,
     pub api_snapshot_usage: &'static str,
-    pub api_usage_report_usage: &'static str,
     pub api_activity_read_usage: &'static str,
     pub api_activity_read_no_pane_id: &'static str,
-    pub usage_report_too_large: &'static str,
-    pub usage_report_needs_json: &'static str,
 
     // src/cli/agent.rs
     pub agent_list_usage: &'static str,
@@ -2735,9 +2114,6 @@ pub struct Texts {
     pub worktree: WorktreeTexts,
     pub settings: SettingsTexts,
     pub monitor: MonitorTexts,
-    pub usage_notice: UsageNoticeTexts,
-    pub usage_probe: UsageProbeTexts,
-    pub usage_metric: UsageMetricTexts,
     pub monitor_config: MonitorConfigTexts,
     pub remote: RemoteTexts,
     pub sidebar: SidebarTexts,
@@ -2811,182 +2187,6 @@ pub fn texts_for(lang: Lang) -> &'static Texts {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 文档终审 D2：claude 等待说明与交互探测提示的指引，写账号页上「官方回调」开关在
-    /// 该语言下的真实名字，不再指向「监控 → 设置」；英文表里不留中文。
-    #[test]
-    fn usage_notices_point_at_the_accounts_page_callback_toggle() {
-        for lang in [Lang::En, Lang::ZhCn] {
-            let texts = texts_for(lang);
-            let notices = &texts.usage_notice;
-            let mut guided: Vec<String> = [(true, Some(false)), (false, Some(false)), (true, None)]
-                .into_iter()
-                .map(|(login_known, callback)| notices.claude_waiting(login_known, callback))
-                .collect();
-            guided.push(notices.trust_callback_hint.to_owned());
-            guided.push(notices.sign_in_callback_hint.to_owned());
-            for notice in &guided {
-                assert!(
-                    notice.contains(texts.monitor.callback_toggle),
-                    "{lang:?}: {notice}"
-                );
-                assert!(
-                    notice.contains(texts.monitor.tab_accounts),
-                    "{lang:?}: {notice}"
-                );
-                assert!(!notice.contains("监控 → 设置"), "{lang:?}: {notice}");
-            }
-        }
-        let en = &texts_for(Lang::En).usage_notice;
-        for (login_known, callback) in CLAUDE_WAITING_VARIANTS {
-            let notice = en.claude_waiting(login_known, callback);
-            assert!(notice.is_ascii(), "{notice}");
-        }
-        assert!(en.trust_callback_hint.is_ascii() && en.sign_in_callback_hint.is_ascii());
-        assert!(en.interactive_failure_sep.is_ascii());
-    }
-
-    /// 同一语言里每条说明的原文互不相同，否则按原文反查会认错条目。
-    #[test]
-    fn usage_notice_catalog_is_unambiguous_per_language() {
-        for lang in [Lang::En, Lang::ZhCn] {
-            let texts: Vec<&str> = usage_notice_catalog()
-                .iter()
-                .filter(|(entry_lang, _, _)| *entry_lang == lang)
-                .map(|(_, _, text)| text.as_str())
-                .collect();
-            let unique: std::collections::HashSet<&str> = texts.iter().copied().collect();
-            assert_eq!(unique.len(), texts.len(), "{lang:?}: {texts:?}");
-            assert!(texts.iter().all(|text| !text.is_empty()), "{lang:?}");
-        }
-        let en = &texts_for(Lang::En).usage_notice;
-        assert!(
-            en.fixed().iter().all(|text| text.is_ascii()),
-            "英文表里不留中文"
-        );
-    }
-
-    /// 服务端按它自己的语言写说明，客户端按界面语言显示：整条认得的直接换；等待说明后
-    /// 拼了交互探测失败原因的两段各自换，原因认不出就原样保留；认不出的整条原样，且与
-    /// 界面同语言时不重新分配。
-    #[test]
-    fn usage_notices_follow_the_client_language_whatever_the_server_wrote() {
-        for server in [Lang::En, Lang::ZhCn] {
-            for ui in [Lang::En, Lang::ZhCn] {
-                let from = &texts_for(server).usage_notice;
-                let to = &texts_for(ui).usage_notice;
-                let _guard = lang_guard(ui);
-                for (login_known, callback) in CLAUDE_WAITING_VARIANTS {
-                    let waiting = from.claude_waiting(login_known, callback);
-                    let expected = to.claude_waiting(login_known, callback);
-                    assert_eq!(
-                        localize_usage_notice(&waiting),
-                        expected,
-                        "{server:?} → {ui:?}"
-                    );
-
-                    let with_hint = format!(
-                        "{waiting}{}{}",
-                        from.interactive_failure_sep, from.trust_callback_hint
-                    );
-                    assert_eq!(
-                        localize_usage_notice(&with_hint),
-                        format!(
-                            "{expected}{}{}",
-                            to.interactive_failure_sep, to.trust_callback_hint
-                        ),
-                        "{server:?} → {ui:?}"
-                    );
-                    let with_detail = format!(
-                        "{waiting}{}probe dir /x needs trust",
-                        from.interactive_failure_sep
-                    );
-                    assert_eq!(
-                        localize_usage_notice(&with_detail),
-                        format!(
-                            "{expected}{}probe dir /x needs trust",
-                            to.interactive_failure_sep
-                        ),
-                        "{server:?} → {ui:?}"
-                    );
-                }
-                for (source, target) in from.fixed().iter().zip(to.fixed()) {
-                    assert_eq!(localize_usage_notice(source), target, "{server:?} → {ui:?}");
-                }
-            }
-        }
-        let _guard = lang_guard(Lang::En);
-        let english = texts_for(Lang::En)
-            .usage_notice
-            .claude_waiting(true, Some(false));
-        assert!(matches!(
-            localize_usage_notice(&english),
-            std::borrow::Cow::Borrowed(_)
-        ));
-        for unknown in ["HTTP 429；retry_after=60", "", "Signed in"] {
-            assert_eq!(localize_usage_notice(unknown), unknown);
-        }
-    }
-
-    /// 审查中级：生产路径上带目录的信任提示是模板句。中文 server 写的「等待说明 + 分隔语 +
-    /// 带目录的信任句」在英文界面整句不含中文，目录与命令原样保留；反过来同理；与界面同
-    /// 语言时原样返回。
-    #[test]
-    fn templated_trust_notice_follows_the_client_language() {
-        let dir = "/home/u/.local/state/herdr/probe/claude default";
-        for server in [Lang::En, Lang::ZhCn] {
-            for ui in [Lang::En, Lang::ZhCn] {
-                let from = &texts_for(server).usage_notice;
-                let to = &texts_for(ui).usage_notice;
-                let _guard = lang_guard(ui);
-                let args = [("dir", dir), ("command", "claude")];
-                let trust = fill(from.trust_dir_fmt, &args);
-                let expected = fill(to.trust_dir_fmt, &args);
-                assert_eq!(
-                    localize_usage_notice(&trust),
-                    expected,
-                    "{server:?} → {ui:?}"
-                );
-                let waiting = from.claude_waiting(true, Some(false));
-                let composite = format!("{waiting}{}{trust}", from.interactive_failure_sep);
-                let localized = localize_usage_notice(&composite);
-                assert_eq!(
-                    localized,
-                    format!(
-                        "{}{}{expected}",
-                        to.claude_waiting(true, Some(false)),
-                        to.interactive_failure_sep
-                    ),
-                    "{server:?} → {ui:?}"
-                );
-                assert!(localized.contains(&format!("cd {dir} && claude")));
-                if ui == Lang::En {
-                    assert!(!has_cjk(&localized), "{localized}");
-                }
-                if server == ui {
-                    assert!(matches!(
-                        localize_usage_notice(&trust),
-                        std::borrow::Cow::Borrowed(_)
-                    ));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unfill_reverses_fill_and_rejects_other_text() {
-        let template = "run `cd {dir} && {command}` once";
-        let args = [("dir", "/a b"), ("command", "claude")];
-        assert_eq!(
-            unfill(template, &fill(template, &args)),
-            Some(args.to_vec())
-        );
-        assert_eq!(unfill(template, "run `cd /a b` once"), None);
-        assert_eq!(unfill(template, "something else"), None);
-        assert_eq!(unfill("{a}{b}", "xy"), None, "相邻占位无法切分");
-        assert_eq!(unfill("plain", "plain"), Some(Vec::new()));
-        assert_eq!(unfill("plain", "plain!"), None);
-    }
 
     #[test]
     fn lang_deserialize_falls_back_to_default_on_unknown_value() {
@@ -3092,7 +2292,6 @@ mod tests {
                 monitor_request_unsupported,
                 monitor_busy,
                 monitor_unavailable,
-                observation_pane_gone,
                 observation_start_failed_fmt,
             }
         )
@@ -3120,217 +2319,6 @@ mod tests {
         )
     }
 
-    /// `UsageProbeTexts` 的全部条目。
-    fn usage_probe_texts(t: &UsageProbeTexts) -> Vec<&'static str> {
-        all_entries!(
-            t,
-            UsageProbeTexts {
-                probe_isolation_failed,
-                probe_dir_failed,
-                stable_dir_failed,
-                profile_unsupported,
-                cli_missing,
-                cli_start_failed,
-                output_unavailable,
-                cli_timed_out,
-                cli_output_unreadable,
-                cli_output_too_large,
-                result_unavailable,
-                cli_exit_timed_out,
-                cli_help_empty,
-                cli_signed_out,
-                cli_signaled_fmt,
-                cli_no_usage_output_fmt,
-                cli_usage_error_fmt,
-                detail_fmt,
-                cli_failed_fmt,
-                cli_failed_summary_fmt,
-                no_subcommand,
-                subcommand_missing,
-                claude_auth_status_unsupported,
-                codex_unsupported_fmt,
-                codex_signed_out_fmt,
-                codex_failed_fmt,
-                rpc_input_closed,
-                rpc_input_failed,
-                rpc_output_unavailable,
-                codex_timed_out,
-                codex_exited,
-                codex_exited_fmt,
-                token_refresh_failed_fmt,
-                codex_sign_in_first,
-                codex_account_usage_unsupported,
-                helper_missing,
-                helper_config_failed,
-                helper_send_failed,
-                helper_output_unavailable,
-                isolated_timed_out,
-                isolated_unreadable,
-                isolated_too_large,
-                isolated_invalid,
-                interactive_profile_unsupported,
-                pty_create_failed,
-                pty_spawn_failed,
-                pty_input_unavailable,
-                pty_output_unavailable,
-                pty_screen_unreadable,
-                pty_protocol_failed,
-                pty_cursor_unavailable,
-                pty_cli_exited,
-                kimi_port_failed,
-                kimi_port_unreadable,
-                kimi_address_invalid,
-                kimi_banner_timeout,
-                kimi_banner_too_large,
-                kimi_web_unsupported,
-                kimi_signed_out,
-                kimi_exited,
-                kimi_exited_fmt,
-                kimi_not_ready,
-                kimi_http_signed_out_fmt,
-                kimi_http_forbidden_fmt,
-                kimi_http_missing_fmt,
-                kimi_http_error_fmt,
-                kimi_connect_failed,
-                kimi_request_failed,
-                kimi_response_unreadable,
-                kimi_response_too_large,
-                kimi_format_unsupported,
-                kimi_query_failed,
-                api_credential_env_required,
-                api_credential_missing,
-                api_client_failed,
-                api_kimi_base_required,
-                api_provider_unsupported,
-                api_query_unsupported,
-                api_no_verified_fields,
-                api_deadline,
-                api_connect_failed,
-                api_http_status_fmt,
-                api_retry_after_fmt,
-                api_too_large,
-                api_unreadable,
-                api_unrecognized,
-                api_base_invalid,
-                api_base_has_credentials,
-                api_base_unregistered,
-                zcode_no_home,
-                zcode_no_database,
-                zcode_non_utf8_path,
-                zcode_profile_unsupported,
-                zcode_sqlite_missing,
-                zcode_query_failed,
-                zcode_schema_mismatch,
-                zcode_database_busy,
-                zcode_database_unreadable,
-                zcode_no_result,
-                zcode_unparsable,
-                source_official_api,
-                source_kimi_local_api,
-                source_cli_fmt,
-                source_claude_callback,
-                source_local_stats_fmt,
-                source_extension_push,
-                source_cli_callback,
-                source_extension_push_stats,
-                source_zcode_local,
-                callback_session_stats,
-                agent_unsupported,
-                subscription_limit,
-                unknown_account,
-                binding_limit,
-                request_unsupported,
-                busy,
-                statusline_unsupported_provider,
-                statusline_unknown_provider,
-                statusline_retired,
-                settings_invalid_json,
-                settings_empty,
-                settings_not_object,
-                statusline_not_object,
-                statusline_create_failed,
-                statusline_invalid,
-                statusline_not_command,
-                statusline_unrecognized,
-            }
-        )
-    }
-
-    /// `UsageMetricTexts` 的全部条目。
-    fn usage_metric_texts(t: &UsageMetricTexts) -> Vec<&'static str> {
-        all_entries!(
-            t,
-            UsageMetricTexts {
-                quota_primary,
-                quota_secondary,
-                credits,
-                quota_5h,
-                quota_weekly,
-                quota_spend,
-                quota_plan,
-                quota_7d,
-                quota_monthly,
-                quota_monthly_code,
-                quota_window_fmt,
-                quota_unit,
-                balance_available,
-                balance_voucher,
-                balance_cash,
-                balance_unit,
-                extra_balance,
-                extra_total,
-                extra_month_used,
-                extra_month_cap,
-                key_usage,
-                key_usage_daily,
-                key_usage_weekly,
-                key_usage_monthly,
-                key_limit_remaining,
-                account_total_credits,
-                account_total_usage,
-                cost_report,
-                codex_reset_credits_available,
-                codex_lifetime_tokens,
-                codex_peak_daily_tokens,
-                codex_longest_turn,
-                codex_current_streak,
-                codex_longest_streak,
-                codex_daily_tokens,
-                session_cost_estimate,
-                session_duration,
-                session_api_duration,
-                context_used,
-                context_tokens_input,
-                context_tokens,
-                context_window,
-                session_cost,
-                current_model,
-                sessions,
-                subagent_sessions,
-                messages,
-                stats_days,
-                total_cost,
-                avg_cost_per_day,
-                avg_tokens_per_session,
-                median_tokens_per_session,
-                tokens_input,
-                tokens_output,
-                tokens_reasoning,
-                tokens_cache_read,
-                tokens_cache_write,
-                tokens_total,
-                tokens_main,
-                tokens_subagents,
-                tool_uses,
-                subagents,
-                stats_window,
-                stale_window,
-                claude_context_pending,
-                pi_context_pending,
-            }
-        )
-    }
-
     /// `MonitorConfigTexts` 的全部条目。
     fn monitor_config_texts(t: &MonitorConfigTexts) -> Vec<&'static str> {
         all_entries!(
@@ -3338,9 +2326,6 @@ mod tests {
             MonitorConfigTexts {
                 interval_invalid,
                 history_invalid,
-                account_id_invalid,
-                credential_env_invalid,
-                account_user_deprecated_fmt,
             }
         )
     }
@@ -3397,14 +2382,6 @@ mod tests {
         assert_translated(
             &platform_messages(&en::TEXTS.platform),
             &platform_messages(&zh_cn::TEXTS.platform),
-        );
-        assert_translated(
-            &usage_probe_texts(&en::TEXTS.usage_probe),
-            &usage_probe_texts(&zh_cn::TEXTS.usage_probe),
-        );
-        assert_translated(
-            &usage_metric_texts(&en::TEXTS.usage_metric),
-            &usage_metric_texts(&zh_cn::TEXTS.usage_metric),
         );
         assert_translated(
             &monitor_config_texts(&en::TEXTS.monitor_config),

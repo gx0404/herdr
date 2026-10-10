@@ -142,6 +142,8 @@ fork **照常同步上游**；本节只约束同步时怎样处理六家以外�
     generation-1 期望归上游维护，fork 只跟随、不自行重写。上游若改用独立冻结
     （参照同一测试里 `pane.link.resolve` 的内联摘要与
     `tests/fixtures/endpoint-observability-shapes-v1.json`），跟随上游的做法。
+    后者是 fork 自有 fixture：其中 8 个 `account.*` 摘要已随账号用量方法一并退役删除
+    （经用户批准的一次性例外；客户端按握手宣告门控，不会再请求这些方法），其余摘要不变。
   - **上游现行做法是不动冻结枚举**：letta 在上游走
     `src/cli/integration.rs::IntegrationCommandTarget` 与
     `src/integration/mod.rs::EXPERIMENTAL_INTEGRATION_TARGET_LABELS` 的 CLI-only

@@ -2286,13 +2286,11 @@ impl ClientShellState {
         let Some(agent) = self.endpoint_agent(&endpoint_id, &pane_id) else {
             return false;
         };
-        let agent_name = agent.agent.clone();
         let has_activity = agent.activity.total > 0 || !agent.activity.nodes.is_empty();
         let renamable = self.agent_pane_renamable(&endpoint_id, &pane_id);
         let target = ClientContextMenuTarget::Agent {
             endpoint_id,
             pane_id,
-            agent: agent_name,
             has_activity,
             renamable,
         };
@@ -2365,22 +2363,8 @@ impl ClientShellState {
             (Action::RenameAgent, AgentActivityOwner::Pane { pane_id }) => {
                 self.rename_agent_pane(endpoint_id, pane_id, outcome);
             }
-            (Action::BindAgentAccount, AgentActivityOwner::Pane { pane_id }) => {
-                self.bind_agent_account(endpoint_id, pane_id, outcome);
-            }
             (Action::CloseAgentPane, AgentActivityOwner::Pane { pane_id }) => {
                 self.close_agent_pane(endpoint_id, pane_id, outcome);
-            }
-            (Action::ShowAgentUsage, AgentActivityOwner::Pane { pane_id }) => {
-                // 打开并钉住该 agent 的用量卡；厂商取快照里的 agent 名，未识别
-                // （`None`）或不可绑定（退役名、未知名）时没有用量可看，无动作。
-                let agent = self
-                    .endpoint_agent(&endpoint_id, &pane_id)
-                    .and_then(|agent| agent.agent.clone())
-                    .filter(|name| super::observability::is_bindable_agent(name));
-                if let Some(agent) = agent {
-                    self.pin_agent_usage_card(endpoint_id, pane_id, agent, outcome);
-                }
             }
             _ => {}
         }
@@ -2483,53 +2467,4 @@ impl ClientShellState {
             outcome.repaint = true;
         }
     }
-
-    /// 「绑定账号」：打开监控 → 账号页，选中该 agent 的厂商，并把页面的待绑定
-    /// pane 设为这个 agent（账号页的「绑定」随即作用于它）。账号页的作用域是
-    /// 当前端点：其它端点的 agent 先切过去并聚焦该 pane，页面只选厂商，pane 由
-    /// 「绑定到聚焦 pane」接手。
-    fn bind_agent_account(
-        &mut self,
-        endpoint_id: ClientEndpointId,
-        pane_id: String,
-        outcome: &mut ClientShellInput,
-    ) {
-        let Some(agent) = self.endpoint_agent(&endpoint_id, &pane_id) else {
-            return;
-        };
-        let Some(provider) = agent
-            .agent
-            .clone()
-            .filter(|name| super::observability::is_bindable_agent(name))
-        else {
-            return;
-        };
-        let label = bind_candidate_label(agent);
-        let active = endpoint_id == self.active_endpoint_id;
-        if !active {
-            if !self.endpoint_is_online(&endpoint_id) {
-                self.focus_agent_pane(endpoint_id, pane_id, outcome);
-                return;
-            }
-            self.focus_agent_pane(endpoint_id, pane_id.clone(), outcome);
-        }
-        self.open_observation_page(super::observability::Page::Accounts, outcome);
-        self.observation_action(super::observability::Action::Provider(provider), outcome);
-        if active {
-            self.observability.selected_pane = Some(pane_id);
-            self.observability.selected_pane_label = Some(label);
-        }
-    }
-}
-
-/// 账号页绑定行里 pane 的显示名：agent 显示名 · pane id。与
-/// `observability.rs` 的私有同名函数同一格式（那边归监控车道，这里不改它）。
-fn bind_candidate_label(agent: &ClientShellAgent) -> String {
-    let name = agent
-        .name
-        .as_deref()
-        .or(agent.display_agent.as_deref())
-        .or(agent.agent.as_deref())
-        .unwrap_or("agent");
-    format!("{name} · {}", agent.pane_id)
 }

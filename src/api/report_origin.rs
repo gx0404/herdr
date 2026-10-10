@@ -19,14 +19,14 @@ use crate::platform::ProcessLineage;
 /// herdr 自带集成资产的 source 前缀；窗格上报只有这类 source 走校验。
 const BUNDLED_INTEGRATION_SOURCE_PREFIX: &str = "herdr:";
 
-/// 需要来源校验的上报：herdr 集成的窗格上报，或任何绑定窗格的用量上报。
+/// 需要来源校验的上报：herdr 集成的窗格上报。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReportTarget<'a> {
     pub(crate) pane_id: &'a str,
     pub(crate) source: &'a str,
 }
 
-/// 第三方窗格上报与账号级用量上报不校验；用量方法没有 source 字段。
+/// 第三方窗格上报不校验。
 pub(crate) fn report_target(method: &Method) -> Option<ReportTarget<'_>> {
     let (pane_id, source) = match method {
         Method::PaneReportAgent(params) => (&params.pane_id, Some(&params.source)),
@@ -35,12 +35,6 @@ pub(crate) fn report_target(method: &Method) -> Option<ReportTarget<'_>> {
         Method::PaneReportMetadata(params) => (&params.pane_id, Some(&params.source)),
         Method::PaneClearAgentAuthority(params) => (&params.pane_id, params.source.as_ref()),
         Method::PaneReleaseAgent(params) => (&params.pane_id, Some(&params.source)),
-        Method::AccountUsageReport(params) => {
-            return params.pane_id.as_deref().map(|pane_id| ReportTarget {
-                pane_id,
-                source: "account.usage.report",
-            })
-        }
         _ => return None,
     };
     let source = source?;
@@ -273,23 +267,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn pane_usage_is_verified_but_account_usage_is_not() {
-        use crate::api::schema::UsageReportParams;
-        let report = |pane: Option<&str>| {
-            Method::AccountUsageReport(UsageReportParams {
-                pane_id: pane.map(Into::into),
-                ..Default::default()
-            })
-        };
-        let bound = report(Some("w1:p1"));
-        assert_eq!(
-            report_target(&bound).map(|target| target.pane_id),
-            Some("w1:p1")
-        );
-        assert!(report_target(&report(None)).is_none());
     }
 
     #[test]

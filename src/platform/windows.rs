@@ -148,31 +148,11 @@ pub(crate) fn local_server_connection_error(error: std::io::Error) -> std::io::E
 }
 
 pub(crate) use command_search::{
-    cli_child_path_platform, cli_invocation_platform, command_availability_fallback_platform,
-    command_file_candidates_platform, command_search_dirs_platform,
+    command_availability_fallback_platform, command_file_candidates_platform,
+    command_search_dirs_platform,
 };
 #[cfg(test)]
 pub(crate) use command_search::{set_test_command_search_environment, CommandSearchEnvironment};
-
-/// 让出 stdout：把标准输出句柄换成 `NUL` 并关闭原句柄（管道写端）。statusline 回调回放完
-/// stdin 后调用，之后本进程再等上报也不会拖住管道另一端读 EOF。Rust 的 `std::io::stdout()`
-/// 每次写都重新取标准句柄，换掉后写入落到 `NUL`。
-pub(crate) fn detach_stdout() -> std::io::Result<()> {
-    use std::os::windows::io::IntoRawHandle as _;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_OUTPUT_HANDLE};
-
-    let null = std::fs::OpenOptions::new().write(true).open("NUL")?;
-    let previous = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-    // 新句柄成为进程的标准输出，随进程退出释放。
-    if unsafe { SetStdHandle(STD_OUTPUT_HANDLE, null.into_raw_handle()) } == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if !previous.is_null() && previous != INVALID_HANDLE_VALUE {
-        unsafe { CloseHandle(previous) };
-    }
-    Ok(())
-}
 
 /// 关机时 Windows shell 自报的可疑退出码。
 ///
@@ -7806,11 +7786,7 @@ mod tests {
                 format!("{quoted} server --handoff-import pipe token"),
                 false,
             ),
-            (
-                image,
-                format!("{quoted} api usage-report --agent claude"),
-                false,
-            ),
+            (image, format!("{quoted} api schema --json"), false),
             (image, String::new(), false),
             // argv[0] 指向别的程序，或映像名不以 herdr 开头。
             (image, r#""C:\tools\node.exe" server"#.to_owned(), false),

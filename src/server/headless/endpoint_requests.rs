@@ -11,24 +11,6 @@ impl HeadlessServer {
         request: api::schema::Request,
         reply: crate::server::observability::Reply,
     ) {
-        let pane = match &request.method {
-            api::schema::Method::AccountBindingSet(params) => Some(params.pane_id.as_str()),
-            api::schema::Method::AccountUsageReport(params) => params.pane_id.as_deref(),
-            api::schema::Method::AccountUsageGet(params)
-            | api::schema::Method::AccountUsageRefresh(params)
-            | api::schema::Method::AccountUsageSubscribe(params) => params.pane_id.as_deref(),
-            _ => None,
-        };
-        if pane.is_some_and(|pane| self.app.parse_pane_id(pane).is_none()) {
-            reply.response(
-                &request.id,
-                Err((
-                    "pane_not_found",
-                    crate::i18n::texts().runtime.observation_pane_gone.into(),
-                )),
-            );
-            return;
-        }
         if self.observability.is_none() {
             match crate::server::observability::Runtime::start(self.client_shell_boot_id.clone()) {
                 Ok(runtime) => self.observability = Some(runtime),
@@ -339,10 +321,7 @@ impl HeadlessServer {
             self.endpoint_control_result(client_id, &boot_id, &request_id, result);
             return false;
         }
-        if matches!(
-            &request.method,
-            Method::SystemMetricsUnsubscribe(_) | Method::AccountUsageUnsubscribe(_)
-        ) {
+        if matches!(&request.method, Method::SystemMetricsUnsubscribe(_)) {
             let target = self.clients.get_mut(&client_id).and_then(|client| {
                 let writer = client.writer.as_ref()?.control.clone();
                 client.endpoint_responses.admit_control(

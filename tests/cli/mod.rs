@@ -11,5 +11,4 @@ mod protocol;
 mod protocol_guard;
 mod sessions;
 mod surface;
-mod usage_report;
 mod workspace;

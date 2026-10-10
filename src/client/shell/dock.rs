@@ -9,6 +9,8 @@ pub(super) enum PanelId {
     Workspaces,
     Agents,
     Monitor,
+    /// 已退役的独立账号面板：只为解码旧版保存的布局而保留（`discard_accounts_panel`
+    /// 在加载时把它移出布局），不会再打开或绘制。
     Accounts,
     Terminal(u64),
 }

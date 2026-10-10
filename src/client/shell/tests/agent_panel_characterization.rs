@@ -2706,12 +2706,10 @@ fn tree_rows_follow_the_machine_workspace_tab_agent_activity_hierarchy() {
 }
 
 /// agent 行右键动作（W3 接上）：「重命名」沿用 pane 重命名浮层；「关闭窗格」发
-/// `pane.close`；「绑定账号」打开监控 → 账号页、选中该 agent 的厂商并把待绑定
-/// pane 设为它；「用量」打开并钉住该 agent 的用量卡。其它端点的
-/// agent：重命名先切端点并聚焦（不打开浮层），关闭直接发往该端点，绑定切过去
-/// 并打开账号页但不预设 pane。
+/// `pane.close`。其它端点的 agent：重命名打开同一浮层、目标带上端点，关闭直接
+/// 发往该端点；两者都不切换当前端点。
 #[test]
-fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
+fn tree_agent_context_actions_rename_and_close_the_agent_pane() {
     use super::super::agent_activity_overlay::AgentActivityOwner;
     let pane = |pane_id: &str| AgentActivityOwner::Pane {
         pane_id: pane_id.into(),
@@ -2803,72 +2801,6 @@ fn tree_agent_context_actions_rename_bind_and_close_the_agent_pane() {
         crate::api::schema::Method::PaneClose(target) if target.pane_id == "pane_2"
     ));
     assert!(state.active_endpoint_id.is_local());
-
-    // 用量：打开并钉住该 agent 的用量卡（不发端点请求、不开浮层）；同一 agent
-    // 再来一次即关闭。
-    let mut outcome = ClientShellInput::default();
-    state.activate_agent_context_action(
-        ClientEndpointId::Local,
-        pane("pane_1"),
-        ClientContextMenuAction::ShowAgentUsage,
-        &mut outcome,
-    );
-    assert!(state.overlay.is_none() && outcome.actions.is_empty());
-    let hover = state.observability.hover.as_ref().expect("用量卡已打开");
-    assert!(hover.visible && hover.pinned);
-    assert!(matches!(
-        &hover.target,
-        super::super::observability::HoverTarget::Agent { endpoint_id, pane, agent }
-            if endpoint_id.is_local() && pane == "pane_1" && agent == "pi"
-    ));
-    state.activate_agent_context_action(
-        ClientEndpointId::Local,
-        pane("pane_1"),
-        ClientContextMenuAction::ShowAgentUsage,
-        &mut outcome,
-    );
-    assert!(
-        state.observability.hover.is_none(),
-        "同一 agent 再来一次即关闭"
-    );
-
-    // 绑定账号（当前端点）：账号页 + 厂商 + 待绑定 pane。
-    let mut outcome = ClientShellInput::default();
-    state.activate_agent_context_action(
-        ClientEndpointId::Local,
-        pane("pane_2"),
-        ClientContextMenuAction::BindAgentAccount,
-        &mut outcome,
-    );
-    assert_eq!(
-        state.observability.page,
-        Some(super::super::observability::Page::Accounts)
-    );
-    assert_eq!(state.observability.selected_provider.as_deref(), Some("pi"));
-    assert_eq!(state.observability.selected_pane.as_deref(), Some("pane_2"));
-    assert_eq!(
-        state.observability.selected_pane_label.as_deref(),
-        Some("two · pane_2")
-    );
-
-    // 绑定账号（其它端点）：切过去并打开账号页，不预设 pane。
-    let mut outcome = ClientShellInput::default();
-    state.activate_agent_context_action(
-        remote.clone(),
-        pane("pane_1"),
-        ClientContextMenuAction::BindAgentAccount,
-        &mut outcome,
-    );
-    assert!(outcome.actions.iter().any(|action| matches!(
-        action,
-        ClientShellAction::ActivateEndpoint { endpoint_id, .. } if endpoint_id == &remote
-    )));
-    assert_eq!(
-        state.observability.page,
-        Some(super::super::observability::Page::Accounts)
-    );
-    assert_eq!(state.observability.selected_provider.as_deref(), Some("pi"));
-    assert_eq!(state.observability.selected_pane, None);
 }
 
 /// 冒烟 M10：没有任何 agent、也没有状态筛选时，列表区不再一片空白——kit 空状态
@@ -3369,86 +3301,35 @@ fn classic_agent_menu(
     (actions, rows)
 }
 
-/// 「用量」「绑定账号」的判据是正向的：只有 herdr 能跟踪账号用量的 agent（五家官方，
-/// `detect::parse_agent_label` 认得）才列。文档终审 D13 只排除了 muse；T1 审查轻 1：
-/// 旧上游钩子上报的 gemini、droid 等退役名与任意未知名以前照样列出，点了没反应。
-/// 窄 / 中 / 宽三档逐帧读出菜单文字：不列的两项画面上也没有。
+/// agent 行右键菜单与 agent 种类无关：五家官方 agent、退役名（muse、gemini、droid）
+/// 与未知名都列同样四项。窄 / 中 / 宽三档逐帧读出菜单文字，确认菜单确实画出来了。
 #[test]
-fn only_agents_whose_usage_herdr_tracks_list_usage_and_bind_account() {
+fn agent_context_menu_lists_the_same_actions_for_every_agent() {
     use ClientContextMenuAction as Action;
     let t = &crate::i18n::texts().agent_panel;
-    let (usage, bind) = (compact(t.menu_usage), compact(t.menu_bind_account));
     for size in [(80, 24), (106, 40), (200, 60)] {
-        for (agent, tracked) in [
-            ("muse", false),
-            ("gemini", false),
-            ("droid", false),
-            ("my-bot", false),
-            ("claude", true),
-            ("codex", true),
-            ("kimi", true),
-            ("opencode", true),
-            ("pi", true),
+        for agent in [
+            "muse", "gemini", "droid", "my-bot", "claude", "codex", "kimi", "opencode", "pi",
         ] {
             let mut projected = two_workspace_snapshot();
             projected.agents[1].agent = Some(agent.into());
             let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
             let (actions, rows) = classic_agent_menu(&mut state, "pane_2", size);
-            let listed = [Action::ShowAgentUsage, Action::BindAgentAccount]
-                .iter()
-                .filter(|action| actions.contains(action))
-                .count();
-            let drawn = rows
-                .iter()
-                .filter(|row| **row == usage || **row == bind)
-                .count();
-            if tracked {
-                assert_eq!(
-                    listed, 2,
-                    "{size:?} {agent}：列出用量 / 绑定账号：{actions:?}"
-                );
-                assert_eq!(drawn, 2, "{size:?} {agent}：两项画在菜单上：{rows:?}");
-            } else {
-                assert_eq!(
-                    actions,
-                    [
-                        Action::FocusAgent,
-                        Action::ViewAgentActivity,
-                        Action::RenameAgent,
-                        Action::CloseAgentPane,
-                    ],
-                    "{size:?} {agent}：不列用量 / 绑定账号"
-                );
-                assert_eq!(drawn, 0, "{size:?} {agent}：画面上也没有：{rows:?}");
-            }
+            assert_eq!(
+                actions,
+                [
+                    Action::FocusAgent,
+                    Action::ViewAgentActivity,
+                    Action::RenameAgent,
+                    Action::CloseAgentPane,
+                ],
+                "{size:?} {agent}"
+            );
             assert!(
                 rows.contains(&compact(t.menu_close)),
                 "{size:?} {agent}：菜单确实画出来了：{rows:?}"
             );
         }
-    }
-}
-
-/// 判据的单元层：五家官方 agent（大小写、别名都归一）可绑定；退役名单
-/// `RETIRED_AGENT_LABELS`（含 muse、gemini）与未知名一律不可绑定。悬浮层目标、
-/// 账号页 pane 选择器、右键菜单与动作处理都走这一处。
-#[test]
-fn bindable_agents_are_the_agents_whose_usage_herdr_tracks() {
-    use super::super::observability::is_bindable_agent;
-    for agent in crate::detect::Agent::ALL {
-        let label = crate::detect::agent_label(agent);
-        assert!(is_bindable_agent(label), "{label}");
-        assert!(
-            is_bindable_agent(&label.to_ascii_uppercase()),
-            "{label} 大写"
-        );
-    }
-    assert!(is_bindable_agent("claude-code") && is_bindable_agent("Kimi Code"));
-    for retired in crate::detect::RETIRED_AGENT_LABELS {
-        assert!(!is_bindable_agent(retired), "{retired} 已退役");
-    }
-    for unknown in ["", "my-bot", "herdr"] {
-        assert!(!is_bindable_agent(unknown), "{unknown:?} 未知");
     }
 }
 

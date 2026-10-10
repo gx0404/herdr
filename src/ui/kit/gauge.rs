@@ -1,4 +1,4 @@
-//! 额度 / 用量条：阈值色、溢出态、额度窗口进度刻度、分段填充与 ascii 降级。
+//! 占用比例条：阈值色、溢出态、时间窗口进度刻度、分段填充与 ascii 降级。
 //! 只画 `area` 的第一行；数字由调用方另画（见 `meter_row`），条本身不带文字。
 
 use ratatui::{
@@ -10,8 +10,7 @@ use ratatui::{
 use super::fill_row;
 use crate::app::state::Palette;
 
-/// 阈值：`ratio >= warn` 黄，`>= crit` 红，其余青。默认 0.75 / 0.90，与账号页
-/// `quota_color` 的既有口径一致。
+/// 阈值：`ratio >= warn` 黄，`>= crit` 红，其余青。默认 0.75 / 0.90。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GaugeThresholds {
     pub warn: f32,
@@ -31,8 +30,8 @@ impl Default for GaugeThresholds {
 ///
 /// - `ratio`：已用比例；`None` = 未知（与 0 区分，画全空底）；`> 1.0` = 溢出态
 ///   （条画满、末格画溢出标记）。
-/// - `window_progress`：额度窗口已过比例，画一格刻度；同时参与配色——用量
-///   跑在时间前面太多时提前转黄 / 红（同 `quota_color` 的 pace 判断）。
+/// - `window_progress`：时间窗口已过比例，画一格刻度；同时参与配色——占用
+///   跑在时间前面太多时提前转黄 / 红（见 `gauge_color`）。
 /// - `segments`：按顺序铺的分段 `(share, color)`（如内存 used / cache），存在时
 ///   填充完全由分段决定，`ratio` 只用于溢出判断。
 /// - `ascii`：字形降级，宿主字体缺方块 / 线段字形时用。

@@ -3,7 +3,7 @@ title: Socket API
 description: 从脚本、工具和编程智能体控制运行中的 Herdr 服务器。
 ---
 
-主机指标、厂商账号绑定和可拖动终端组参见[监控、账号用量与停靠布局](/zh-cn/docs/monitoring/)。
+主机指标和可拖动终端组参见[监控与停靠布局](/zh-cn/docs/monitoring/)。
 
 
 Herdr 为需要检查或控制运行中会话的脚本和智能体提供了一个本地 socket API。
@@ -109,7 +109,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 事件 | `events.subscribe`、`events.wait` |
 | 集成 | `integration.install`、`integration.uninstall` |
 | 插件 | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
-| 观测 | `system.metrics.get`、`system.metrics.subscribe`、`system.metrics.unsubscribe`、`system.process.list`、`system.process.get`、`system.process.terminate`、`account.usage.providers`、`account.usage.get`、`account.usage.refresh`、`account.usage.subscribe`、`account.usage.unsubscribe`、`account.usage.report`、`account.usage.integration`、`account.binding.set` |
+| 观测 | `system.metrics.get`、`system.metrics.subscribe`、`system.metrics.unsubscribe`、`system.process.list`、`system.process.get`、`system.process.terminate` |
 
 `agent.wait` 由服务器拥有并由事件驱动。它会固定到已解析的窗格占用者,因此替换后的智能体不能满足该等待。`agent.prompt` 接受可选的 `wait` 对象,其中包含 `until` 和 `timeout_ms`;这样可在一个请求中提交提示并开始等待,避免两个独立调用之间的竞态。如果解析出的智能体已经是 `blocked`,`agent.prompt` 不会发送输入或开始等待,而是返回 `agent_blocked`。
 
@@ -827,9 +827,9 @@ Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree
 
 生命周期事件用 `events.subscribe`。支持一次性等待时,专门的等待辅助命令会单独在文档中说明。
 
-观测数据走专用方法而不是 `events.subscribe`：`account.usage.subscribe` 的参数与 `account.usage.get` 相同，响应返回 `subscription_id`，之后向该连接推送 `account.usage.updated`（变化的账号快照及其 `refresh` 状态）和 `account.usage.refreshing`（探测刚派发时只推刷新状态），直到 `account.usage.unsubscribe`；`system.metrics.subscribe` 同样推送 `system.metrics.updated`。订阅者会驱动服务端在后台持续探测，数据不再展示时请退订。订阅随连接消亡，重连后需要重新订阅。generation-1 客户端端点以 `endpoint.observation.v1` 控制帧接收这些推送，帧内带 server 的 `boot_id` 与事件；未知事件种类会被忽略而不是拒绝。
+观测数据走专用方法而不是 `events.subscribe`：`system.metrics.subscribe` 的参数与 `system.metrics.get` 相同，响应返回 `subscription_id`，之后向该连接推送 `system.metrics.updated`，直到 `system.metrics.unsubscribe`。订阅者会驱动服务端在后台持续采样，数据不再展示时请退订。订阅随连接消亡，重连后需要重新订阅。generation-1 客户端端点以 `endpoint.observation.v1` 控制帧接收这些推送，帧内带 server 的 `boot_id` 与事件；未知事件种类会被忽略而不是拒绝。
 
-观测推送使用与 `events.subscribe` 相同的 `{"event": "<名称>", "data": {...}}` 信封。`account.usage.updated` 携带 `accounts`（变化的 `AccountUsageSnapshot` 条目）和可选的 `refresh` 列表；`account.usage.refreshing` 只携带 `refresh`；`system.metrics.updated` 携带 `snapshot`。`refresh` 条目（`UsageRefreshState`）同样出现在 `account.usage.get` 与 `account.usage.refresh` 的响应里，按 `account_id` 与 `accounts` 对齐；旧版 server 省略该列表。字段含义：`in_flight` 与 `queued`（探测已派发 / 仍在等待查询线程）；`requested_at_ms` 与 `attempted_at_ms`（最近一次显式刷新——含被防抖的——与最近一次真正启动的探测）；`next_allowed_at_ms`（下一次显式刷新会被接受的最早时间，缺省表示现在即可）；`retry_after_ms`（HTTP 429 等厂商退避，显式刷新也不豁免）；`binding_inferred`（请求带了未绑定窗格，数据按该厂商唯一配置的账号返回，绑定并未写入）；`trust_required`（交互探测停在了 CLI 的目录信任对话上，快照 `message` 给出目录）；`callback_only`（样本只来自推送：官方回调，或 Pi 的 Herdr 集成扩展）；`pending_binding`（未绑定窗格的回调被拒后留下的 `pane_id`、`agent`、`candidates`、`rejected_at_ms`）；`callback_enabled`（官方回调是否已接入 herdr，未知或厂商没有回调时——例如 Pi——缺省）。`binding_inferred` 与 `pending_binding` 按请求填写，事件里保持缺省，以 `account.usage.get` 的响应为准。
+观测推送使用与 `events.subscribe` 相同的 `{"event": "<名称>", "data": {...}}` 信封；`system.metrics.updated` 携带 `snapshot`。
 
 ## 读取窗格
 
@@ -940,7 +940,7 @@ herdr agent wait w1:p1 --until blocked
 
 第 1 代端点请求的请求体上限为 1 MiB，boot 和 request 标识符各自最多 128 字节。响应按最大 512 KiB 的块发送；客户端对单个响应最多接受 64 MiB 或 4,096 个块。超过任一预算时，该请求会以 `endpoint_response_too_large` 失败，但端点连接仍可处理后续请求。排队或执行中的端点动作 60 秒后会以 `endpoint_timeout` 过期。
 
-服务器暂存大响应，只在有界输出队列有余量时投递下一块，不会因为合法响应大于队列容量就断开慢读客户端。每个连接最多容纳 3 个、整个服务器最多容纳 6 个大响应，正在准备响应的操作也计入；超额请求在执行操作前返回 `endpoint_busy`。每个连接另有 1 个有界控制响应槽供指标或账号用量退订，停止订阅不必等待大响应额度；表面、视图和快照释放的小确认也保持可用。原有 4 MiB/4,096 条控制队列不扩容，并为普通控制消息预留余量。
+服务器暂存大响应，只在有界输出队列有余量时投递下一块，不会因为合法响应大于队列容量就断开慢读客户端。每个连接最多容纳 3 个、整个服务器最多容纳 6 个大响应，正在准备响应的操作也计入；超额请求在执行操作前返回 `endpoint_busy`。每个连接另有 1 个有界控制响应槽供指标退订，停止订阅不必等待大响应额度；表面、视图和快照释放的小确认也保持可用。原有 4 MiB/4,096 条控制队列不扩容，并为普通控制消息预留余量。
 
 64 MiB 上限针对关联 request ID 后的完整 JSON 响应体，而非仅 result 字段。服务器在发送成功响应前缀前拒绝超限响应体；此错误不会回滚已经执行的操作。这些传输额度不提高各方法自身的快照、行数或内容上限。客户端本地超时同样不能撤销已执行动作：第 1 代协议没有单请求取消消息，因此待发送数据仍受预算限制，直到发送完成或连接关闭。
 

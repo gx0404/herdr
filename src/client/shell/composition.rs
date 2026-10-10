@@ -462,9 +462,7 @@ impl ClientShellState {
         }
         self.paint_shell_feedback(&mut canvas, layout, &mut occlusion)?;
         if let Some(covered) = self.paint_observability(&mut canvas, layout.pane_surface) {
-            for rect in covered {
-                occlusion.cover(rect);
-            }
+            occlusion.cover(covered);
         }
         let snapshot = self.snapshot.as_deref()?;
         let surface = self.pane_surface.as_ref()?;

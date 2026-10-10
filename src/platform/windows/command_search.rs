@@ -39,20 +39,6 @@ const EXPANSION_DEPTH: u8 = 4;
 /// package folders never contribute a `claude.exe`; its virtualised roaming folder holds the
 /// bundled Claude Code builds.
 const CLAUDE_MSIX_PACKAGE_FAMILY: &str = "Claude_pzs8sxrjxfjjc";
-/// PowerShell shims run through Windows PowerShell, non-interactively and with the
-/// `-ExecutionPolicy Bypass` herdr's own hook scripts use (`integration::command`): the default
-/// client policy refuses every script, while a policy set by Group Policy still wins over the
-/// flag.
-const POWERSHELL_SCRIPT_HOST: &str = "powershell.exe";
-const POWERSHELL_SCRIPT_ARGS: [&str; 6] = [
-    "-NoLogo",
-    "-NoProfile",
-    "-NonInteractive",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-];
-
 /// Inputs of the search. Production reads them from the process environment and the registry
 /// ([`CommandSearchEnvironment::from_system`]); tests inject temporary directories.
 #[derive(Debug, Clone, Default)]
@@ -164,52 +150,6 @@ pub(crate) fn command_availability_fallback_platform(dir: &Path, command: &str) 
         .extension()
         .is_none()
         .then(|| dir.join(command))
-}
-
-/// How to start a resolved CLI: PowerShell shims through `powershell.exe -File`, everything
-/// else directly.
-pub(crate) fn cli_invocation_platform(executable: &Path) -> (OsString, Vec<OsString>) {
-    let powershell_script = executable
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case(&POWERSHELL_EXTENSION[1..]));
-    if !powershell_script {
-        return (executable.as_os_str().to_os_string(), Vec::new());
-    }
-    let mut args = POWERSHELL_SCRIPT_ARGS
-        .iter()
-        .map(OsString::from)
-        .collect::<Vec<_>>();
-    args.push(executable.as_os_str().to_os_string());
-    (OsString::from(POWERSHELL_SCRIPT_HOST), args)
-}
-
-pub(crate) fn cli_child_path_platform() -> Option<OsString> {
-    child_path_in(&current_environment())
-}
-
-/// The process `PATH` followed by the current registry `PATH` entries it lacks, so a CLI the
-/// server starts finds interpreters installed after the server started (npm `.cmd` shims run
-/// `node`). `None` when nothing is missing and the inherited `PATH` can stay.
-pub(crate) fn child_path_in(environment: &CommandSearchEnvironment) -> Option<OsString> {
-    let process_entries = environment
-        .process_path
-        .as_deref()
-        .map(|path| std::env::split_paths(path).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let mut seen = process_entries
-        .iter()
-        .map(|dir| path_key(dir))
-        .collect::<std::collections::HashSet<_>>();
-    let missing = environment
-        .registry_path
-        .iter()
-        .flat_map(std::env::split_paths)
-        .filter(|dir| dir.is_absolute() && seen.insert(path_key(dir)))
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return None;
-    }
-    std::env::join_paths(process_entries.into_iter().chain(missing)).ok()
 }
 
 /// Case-insensitive identity of a directory spelling, ignoring trailing separators.

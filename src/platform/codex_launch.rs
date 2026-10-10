@@ -158,7 +158,7 @@ pub(crate) fn configure_probe(command: &mut Command) {
         command.process_group(0);
     }
     #[cfg(not(unix))]
-    super::configure_usage_probe_command(command);
+    super::configure_helper_process_command(command);
 }
 
 pub(crate) fn stop_probe(child: &mut Child) {
@@ -169,7 +169,7 @@ pub(crate) fn stop_probe(child: &mut Child) {
             libc::kill(-(child.id() as i32), libc::SIGKILL);
         }
     }
-    super::terminate_usage_probe(child);
+    super::terminate_helper_process(child);
 }
 
 #[cfg(unix)]

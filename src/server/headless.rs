@@ -416,6 +416,7 @@ impl HeadlessServer {
     /// - Renders virtually and streams frames to clients
     pub async fn run(&mut self) -> io::Result<()> {
         crate::logging::startup("server");
+        crate::server::observability::remove_retired_usage_state_dir();
 
         let server_stop = self.server_stop.clone();
         let quit_notify = self.server_event_tx.clone();

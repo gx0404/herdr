@@ -1054,23 +1054,18 @@ async fn response_matrix_control_identity_is_bounded_and_not_bulk_starved() {
         subscription_id: Some("sub".into()),
         ..Default::default()
     };
-    for method in [
-        api::schema::Method::SystemMetricsUnsubscribe(params.clone()),
-        api::schema::Method::AccountUsageUnsubscribe(params),
-    ] {
-        server.handle_client_shell_endpoint_request(
-            1,
-            boot.clone(),
-            Box::new(api::schema::Request {
-                id: "second".into(),
-                method,
-            }),
-        );
-        assert_eq!(
-            take_response(&writer, "second")["error"]["code"],
-            "endpoint_busy"
-        );
-    }
+    server.handle_client_shell_endpoint_request(
+        1,
+        boot.clone(),
+        Box::new(api::schema::Request {
+            id: "second".into(),
+            method: api::schema::Method::SystemMetricsUnsubscribe(params),
+        }),
+    );
+    assert_eq!(
+        take_response(&writer, "second")["error"]["code"],
+        "endpoint_busy"
+    );
     assert!(
         server.observability.is_none(),
         "rejected control cannot create a background runtime"

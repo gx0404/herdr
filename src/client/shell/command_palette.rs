@@ -1551,7 +1551,7 @@ mod tests {
     #[test]
     fn fuzzy_match_query_whitespace_starts_a_new_word() {
         assert_eq!(
-            indices("mon sys", "Monitor (system · accounts · settings)"),
+            indices("mon sys", "Monitor (System · Monitor preferences)"),
             Some(vec![0, 1, 2, 9, 10, 11])
         );
         assert_eq!(indices("new tab", "New tab"), Some(vec![0, 1, 2, 4, 5, 6]));

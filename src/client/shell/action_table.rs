@@ -113,8 +113,6 @@ pub(super) enum ActionId {
     AgentFocus,
     AgentViewActivity,
     AgentRename,
-    AgentUsage,
-    AgentBindAccount,
     AgentClose,
 }
 
@@ -1062,28 +1060,6 @@ pub(super) static ACTIONS: &[ActionSpec] = &[
     },
     ActionSpec {
         palette: PaletteMode::Hidden,
-        context: Some((Kind::Agent, Ctx::ShowAgentUsage)),
-        ..spec(
-            Id::AgentUsage,
-            "agent:usage",
-            |t| t.agent_panel.menu_usage,
-            Cat::Workspaces,
-            3,
-        )
-    },
-    ActionSpec {
-        palette: PaletteMode::Hidden,
-        context: Some((Kind::Agent, Ctx::BindAgentAccount)),
-        ..spec(
-            Id::AgentBindAccount,
-            "agent:bind-account",
-            |t| t.agent_panel.menu_bind_account,
-            Cat::Workspaces,
-            3,
-        )
-    },
-    ActionSpec {
-        palette: PaletteMode::Hidden,
         context: Some((Kind::Agent, Ctx::CloseAgentPane)),
         danger: true,
         ..spec(
@@ -1659,8 +1635,6 @@ impl ClientShellState {
             ActionId::AgentFocus
             | ActionId::AgentViewActivity
             | ActionId::AgentRename
-            | ActionId::AgentUsage
-            | ActionId::AgentBindAccount
             | ActionId::AgentClose => {
                 let ActionTarget::Agent { endpoint_id, owner } = target else {
                     return;
@@ -1840,8 +1814,6 @@ mod tests {
         ActionId::AgentFocus,
         ActionId::AgentViewActivity,
         ActionId::AgentRename,
-        ActionId::AgentUsage,
-        ActionId::AgentBindAccount,
         ActionId::AgentClose,
     ];
 
@@ -1917,8 +1889,6 @@ mod tests {
             | ActionId::AgentFocus
             | ActionId::AgentViewActivity
             | ActionId::AgentRename
-            | ActionId::AgentUsage
-            | ActionId::AgentBindAccount
             | ActionId::AgentClose => ALL_IDS.contains(&id),
         }
     }

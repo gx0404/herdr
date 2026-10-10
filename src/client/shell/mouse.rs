@@ -836,7 +836,6 @@ impl ClientShellState {
         let point = (mouse.column, mouse.row);
         if self.config.mouse_capture
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && !contains(self.observability.hover_rect, point)
             && self.observability.process_dialog.is_none()
             && contains(self.hits.global_launcher, point)
             && !contains(self.hits.overlay_bounds, point)

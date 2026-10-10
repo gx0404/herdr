@@ -13,34 +13,25 @@ pub(crate) fn monitor_environment() -> String {
     std::env::consts::OS.into()
 }
 
-pub(crate) fn configure_usage_probe_command(command: &mut std::process::Command) {
+/// 短命辅助子进程（如 codex `--help` 探测）的启动配置；unix 平台由调用方自建进程组。
+#[cfg(not(unix))]
+pub(crate) fn configure_helper_process_command(command: &mut std::process::Command) {
     crate::platform::configure_background_command(command);
 }
 
-pub(crate) struct UsageProbeGuard;
-impl UsageProbeGuard {
+/// 辅助子进程的监管：回退平台没有可托管的进程容器，守卫本身不持有资源。
+pub(crate) struct HelperProcessGuard;
+impl HelperProcessGuard {
     pub(crate) fn new(_child: &std::process::Child) -> std::io::Result<Self> {
         Ok(Self)
     }
     pub(crate) fn terminate(&mut self) {}
 }
-pub(crate) fn usage_probe_exit(
-    child: &mut std::process::Child,
-) -> std::io::Result<Option<crate::platform::UsageProbeExit>> {
-    child
-        .try_wait()
-        .map(|status| status.map(crate::platform::UsageProbeExit::from_status))
-}
 
-pub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {
+pub(crate) fn terminate_helper_process(child: &mut std::process::Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-pub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -71,36 +62,26 @@ impl MonitoredProcess {
     }
 }
 
-pub(crate) fn usage_probe_needs_job_helper() -> bool {
-    false
-}
-
 pub(crate) fn monitor_cpu_inventory() -> Option<String> {
     std::thread::available_parallelism()
         .ok()
         .map(|count| count.to_string())
 }
 
-/// unix 回退平台（macOS 等）的 statusline 包装与 Linux 共用 POSIX sh 实现；其它平台尚无
-/// 可靠的 shell 形态，拼装返回 `Unsupported`，剥离只做保守判断。
+#[cfg(all(test, unix))]
+pub(crate) use crate::platform::unix_common::marked_legacy_statusline_wrapper;
+/// unix 回退平台（macOS 等）的旧 statusline 包装与 Linux 共用 POSIX sh 剥离实现；其它平台
+/// 从未生成过包装，只做保守判断：带 herdr 包装特征的命令报可识别错误，调用方原样保留。
 #[cfg(unix)]
-pub(crate) use crate::platform::unix_common::{strip_usage_statusline, usage_statusline_pipeline};
+pub(crate) use crate::platform::unix_common::unwrap_legacy_statusline;
 
 #[cfg(not(unix))]
-pub(crate) fn usage_statusline_pipeline(_agent: &str, _original: &str) -> std::io::Result<String> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "本平台尚未提供 statusline 用量回调的包装形态",
-    ))
-}
-
-#[cfg(not(unix))]
-pub(crate) fn strip_usage_statusline(
+pub(crate) fn unwrap_legacy_statusline(
     _agent: &str,
     command: &str,
 ) -> std::io::Result<Option<String>> {
-    if crate::platform::looks_like_usage_wrapper(command) {
-        return Err(crate::platform::unrecognized_usage_statusline_error());
+    if crate::platform::looks_like_legacy_statusline_wrapper(command) {
+        return Err(crate::platform::unrecognized_legacy_statusline_error());
     }
     Ok(None)
 }

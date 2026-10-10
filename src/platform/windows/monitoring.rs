@@ -346,12 +346,14 @@ pub(crate) fn monitor_environment() -> String {
     texts().environment_windows.into()
 }
 
-pub(crate) fn configure_usage_probe_command(command: &mut std::process::Command) {
+/// 短命辅助子进程（如 codex `--help` 探测）的启动配置：与状态命令一样不弹控制台窗口。
+pub(crate) fn configure_helper_process_command(command: &mut std::process::Command) {
     crate::platform::configure_status_command(command);
 }
 
-pub(crate) struct UsageProbeGuard(super::StatusCommandGuard);
-impl UsageProbeGuard {
+/// 辅助子进程的监管：Job 对象随守卫释放，保证整棵子进程树在调用方放弃时被回收。
+pub(crate) struct HelperProcessGuard(super::StatusCommandGuard);
+impl HelperProcessGuard {
     pub(crate) fn new(child: &std::process::Child) -> io::Result<Self> {
         super::StatusCommandGuard::from_std_child(child).map(Self)
     }
@@ -359,28 +361,12 @@ impl UsageProbeGuard {
         self.0.terminate();
     }
 }
-/// Windows 没有信号语义：只有退出码（`from_status` 在非 Unix 上不会填 `signal`）。
-pub(crate) fn usage_probe_exit(
-    child: &mut std::process::Child,
-) -> io::Result<Option<crate::platform::UsageProbeExit>> {
-    child
-        .try_wait()
-        .map(|status| status.map(crate::platform::UsageProbeExit::from_status))
-}
 
-pub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {
+pub(crate) fn terminate_helper_process(child: &mut std::process::Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
     terminate_process_tree(child.id());
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-pub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {
-    if let Some(root) = child.process_id() {
-        terminate_process_tree(root);
-    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -498,88 +484,53 @@ pub(crate) fn terminate_monitored_process(pid: u32, expected: &str, force: bool)
     }
 }
 
-pub(crate) fn usage_probe_needs_job_helper() -> bool {
-    true
-}
-
 pub(crate) fn monitor_cpu_inventory() -> Option<String> {
     let count = unsafe { windows_sys::Win32::System::Threading::GetActiveProcessorCount(0xffff) };
     (count > 0).then(|| count.to_string())
 }
 
-/// Windows 的 statusline 回调是 `-EncodedCommand` 形态的 PowerShell 脚本：settings 里不含
-/// `api usage-report` 明文，标记（`# herdr-usage v1`）放在脚本首行，识别时解码后按标记
-/// 判断。`original` 非空时接在管道末端；分组形态与 POSIX 一致（Claude Code 在 Windows
-/// 上经 bash 运行 statusline），`cmd.exe` 下的可靠性仍是待验证的跨平台风险。`original`
-/// 为空时同样走 `--passthrough`（热路径、fire-and-forget、静默），回放丢到 `$null`。
-pub(crate) fn usage_statusline_pipeline(agent: &str, original: &str) -> io::Result<String> {
-    let callback = format!(
-        "{ENCODED_COMMAND_PREFIX}{}",
-        encode_powershell_command(&usage_callback_script(agent, !original.is_empty()))
-    );
-    if original.is_empty() {
-        Ok(callback)
-    } else {
-        Ok(format!(
-            "{callback}{STATUSLINE_PIPE_OPEN}{original}{STATUSLINE_PIPE_CLOSE}"
-        ))
-    }
-}
-
-/// 从 statusline 命令里剥离 herdr 用量回调，返回原渲染命令（可能为空串）；`Ok(None)` 表示
-/// 命令不是 herdr 包装（自定义渲染器或用户手写的 `herdr api usage-report …`）。识别顺序：
-/// 解码 `-EncodedCommand` 脚本后按标记 → 标记之前的旧脚本（整串比对）→ 明文或脚本带 herdr
-/// 包装特征（herdr 前缀、`HERDR_ENV` 判定、POSIX 形态）却都不匹配时报可识别错误。
-pub(crate) fn strip_usage_statusline(agent: &str, command: &str) -> io::Result<Option<String>> {
+/// 已移除的用量回调在 Windows 上写下的 statusline 包装是 `-EncodedCommand` 形态的 PowerShell
+/// 脚本：settings 里不含明文，标记放在脚本首行，识别时解码后按标记判断；原渲染命令（若有）
+/// 以 ` | (` 分组接在管道末端。返回原渲染命令（可能为空串）；`Ok(None)` 表示命令不是 herdr
+/// 包装（自定义渲染器或用户手写的命令）。识别顺序：解码脚本后按标记 → 标记之前的旧脚本
+/// （整串比对）→ 明文或脚本带 herdr 包装特征（herdr 前缀、`HERDR_ENV` 判定、POSIX 形态）却都
+/// 不匹配时报可识别错误，调用方据此原样保留。
+pub(crate) fn unwrap_legacy_statusline(agent: &str, command: &str) -> io::Result<Option<String>> {
     if let Some(rest) = command.strip_prefix(ENCODED_COMMAND_PREFIX) {
         let (token, tail) = rest
             .split_once(' ')
             .map_or((rest, None), |(token, tail)| (token, Some(tail)));
         if let Some(script) = decode_powershell_command(token) {
-            let ours = script.starts_with(crate::platform::USAGE_STATUSLINE_MARKER)
-                || script == legacy_usage_callback_script(agent, tail.is_some());
-            if ours && crate::platform::usage_statusline_agent(&script) == Some(agent) {
+            let ours = script.starts_with(crate::platform::LEGACY_STATUSLINE_MARKER)
+                || script == unmarked_legacy_callback_script(agent, tail.is_some());
+            if ours && crate::platform::legacy_statusline_agent(&script) == Some(agent) {
                 return match tail {
                     None => Ok(Some(String::new())),
                     Some(tail) => tail
                         .strip_prefix(STATUSLINE_PIPE_OPEN.trim_start())
                         .and_then(|rest| rest.strip_suffix(STATUSLINE_PIPE_CLOSE))
                         .map(|original| Some(original.to_owned()))
-                        .ok_or_else(crate::platform::unrecognized_usage_statusline_error),
+                        .ok_or_else(crate::platform::unrecognized_legacy_statusline_error),
                 };
             }
-            if crate::platform::looks_like_usage_wrapper(&script) {
-                return Err(crate::platform::unrecognized_usage_statusline_error());
+            if crate::platform::looks_like_legacy_statusline_wrapper(&script) {
+                return Err(crate::platform::unrecognized_legacy_statusline_error());
             }
         }
     }
     // herdr 前缀却解不出可识别的脚本、或 POSIX 形态的 herdr 包装（从 Unix 同步来的 settings）。
-    if crate::platform::looks_like_usage_wrapper(command) {
-        return Err(crate::platform::unrecognized_usage_statusline_error());
+    if crate::platform::looks_like_legacy_statusline_wrapper(command) {
+        return Err(crate::platform::unrecognized_legacy_statusline_error());
     }
     Ok(None)
 }
 
-const ENCODED_COMMAND_PREFIX: &str = crate::platform::POWERSHELL_ENCODED_COMMAND_PREFIX;
+const ENCODED_COMMAND_PREFIX: &str = crate::platform::LEGACY_POWERSHELL_PREFIX;
 const STATUSLINE_PIPE_OPEN: &str = " | (\n";
 const STATUSLINE_PIPE_CLOSE: &str = "\n)";
 
-/// 新脚本：标记行 + 回调。`piped` 为 true 时 herdr 回放 stdin 给管道末端的渲染命令、herdr
-/// 之外把 stdin 原样写回；为 false（独立形态）时回放丢弃、herdr 之外什么都不做。
-fn usage_callback_script(agent: &str, piped: bool) -> String {
-    let (redirect, otherwise) = if piped {
-        ("", "[Console]::Out.Write([Console]::In.ReadToEnd())")
-    } else {
-        (" > $null", "")
-    };
-    format!(
-        "{}\n$enc=[System.Text.UTF8Encoding]::new($false);[Console]::InputEncoding=$enc;[Console]::OutputEncoding=$enc;$OutputEncoding=$enc;if($env:HERDR_ENV -eq '1' -and $env:HERDR_BIN_PATH){{& $env:HERDR_BIN_PATH api usage-report --agent {agent} --passthrough{redirect}}}else{{{otherwise}}}",
-        crate::platform::USAGE_STATUSLINE_MARKER
-    )
-}
-
-/// 标记之前的旧脚本（逐字保留，不再生成）：旧 settings 按整串比对识别与解除。
-fn legacy_usage_callback_script(agent: &str, passthrough: bool) -> String {
+/// 标记之前的旧脚本（逐字保留）：旧 settings 按整串比对识别。
+fn unmarked_legacy_callback_script(agent: &str, passthrough: bool) -> String {
     let args = if passthrough { " --passthrough" } else { "" };
     let otherwise = if passthrough {
         "[Console]::Out.Write([Console]::In.ReadToEnd())"
@@ -587,15 +538,6 @@ fn legacy_usage_callback_script(agent: &str, passthrough: bool) -> String {
         ""
     };
     format!("$enc=[System.Text.UTF8Encoding]::new($false);[Console]::InputEncoding=$enc;[Console]::OutputEncoding=$enc;$OutputEncoding=$enc;if($env:HERDR_ENV -eq '1' -and $env:HERDR_BIN_PATH){{& $env:HERDR_BIN_PATH api usage-report --agent {agent}{args}}}else{{{otherwise}}}")
-}
-
-fn encode_powershell_command(script: &str) -> String {
-    use base64::Engine;
-    let bytes = script
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn decode_powershell_command(token: &str) -> Option<String> {
@@ -611,6 +553,36 @@ fn decode_powershell_command(token: &str) -> Option<String> {
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
     String::from_utf16(&units).ok()
+}
+
+/// 旧版 herdr 写下的带标记包装（逐字复现当时的生成逻辑）：只给测试构造任意渲染命令的输入，
+/// 生产代码不再生成包装。
+#[cfg(test)]
+pub(crate) fn marked_legacy_statusline_wrapper(agent: &str, original: &str) -> String {
+    use base64::Engine;
+    let piped = !original.is_empty();
+    let (redirect, otherwise) = if piped {
+        ("", "[Console]::Out.Write([Console]::In.ReadToEnd())")
+    } else {
+        (" > $null", "")
+    };
+    let script = format!(
+        "{}\n$enc=[System.Text.UTF8Encoding]::new($false);[Console]::InputEncoding=$enc;[Console]::OutputEncoding=$enc;$OutputEncoding=$enc;if($env:HERDR_ENV -eq '1' -and $env:HERDR_BIN_PATH){{& $env:HERDR_BIN_PATH api usage-report --agent {agent} --passthrough{redirect}}}else{{{otherwise}}}",
+        crate::platform::LEGACY_STATUSLINE_MARKER
+    );
+    let bytes = script
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let callback = format!(
+        "{ENCODED_COMMAND_PREFIX}{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    );
+    if piped {
+        format!("{callback}{STATUSLINE_PIPE_OPEN}{original}{STATUSLINE_PIPE_CLOSE}")
+    } else {
+        callback
+    }
 }
 
 #[cfg(test)]
@@ -703,45 +675,30 @@ mod tests {
     }
 
     #[test]
-    fn usage_statusline_pipeline_hides_the_marker_inside_the_encoded_script() {
-        let standalone = usage_statusline_pipeline("claude", "").unwrap();
-        assert!(standalone.starts_with(ENCODED_COMMAND_PREFIX));
-        assert!(
-            !standalone.contains("api usage-report"),
-            "settings 里不含明文"
-        );
-        let script =
-            decode_powershell_command(standalone.strip_prefix(ENCODED_COMMAND_PREFIX).unwrap())
-                .unwrap();
-        assert!(script.starts_with("# herdr-usage v1\n$enc="));
-        assert!(
-            script.ends_with("api usage-report --agent claude --passthrough > $null}else{}"),
-            "独立形态也走 --passthrough，回放丢弃：{script}"
-        );
-
-        let piped = usage_statusline_pipeline("claude", "node status.js").unwrap();
-        assert!(piped.ends_with(" | (\nnode status.js\n)"));
-        let script = decode_powershell_command(
-            piped
-                .strip_prefix(ENCODED_COMMAND_PREFIX)
-                .and_then(|rest| rest.split_once(' '))
-                .map(|(token, _)| token)
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(script.ends_with(
-            "api usage-report --agent claude --passthrough}else{[Console]::Out.Write([Console]::In.ReadToEnd())}"
-        ));
+    fn marked_legacy_wrappers_unwrap_to_the_original_renderer() {
         for original in ["", "node status.js", "a & b\nc"] {
-            let wrapped = usage_statusline_pipeline("claude", original).unwrap();
+            let wrapped = marked_legacy_statusline_wrapper("claude", original);
+            assert!(wrapped.starts_with(ENCODED_COMMAND_PREFIX));
+            assert!(!wrapped.contains("api usage-report"), "settings 里不含明文");
             assert_eq!(
-                strip_usage_statusline("claude", &wrapped)
+                unwrap_legacy_statusline("claude", &wrapped)
                     .unwrap()
                     .as_deref(),
                 Some(original),
                 "{original:?}"
             );
         }
+        let wrapped = marked_legacy_statusline_wrapper("antigravity", "python custom.py");
+        assert_eq!(
+            unwrap_legacy_statusline("antigravity", &wrapped)
+                .unwrap()
+                .as_deref(),
+            Some("python custom.py")
+        );
+        assert!(
+            unwrap_legacy_statusline("claude", &wrapped).is_err(),
+            "别的厂商的回调是可识别错误"
+        );
     }
 
     /// 旧二进制写进用户 settings.json 的命令串（前缀 + base64 逐字钉住，与识别逻辑解耦）：
@@ -751,34 +708,34 @@ mod tests {
         "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand JABlAG4AYwA9AFsAUwB5AHMAdABlAG0ALgBUAGUAeAB0AC4AVQBUAEYAOABFAG4AYwBvAGQAaQBuAGcAXQA6ADoAbgBlAHcAKAAkAGYAYQBsAHMAZQApADsAWwBDAG8AbgBzAG8AbABlAF0AOgA6AEkAbgBwAHUAdABFAG4AYwBvAGQAaQBuAGcAPQAkAGUAbgBjADsAWwBDAG8AbgBzAG8AbABlAF0AOgA6AE8AdQB0AHAAdQB0AEUAbgBjAG8AZABpAG4AZwA9ACQAZQBuAGMAOwAkAE8AdQB0AHAAdQB0AEUAbgBjAG8AZABpAG4AZwA9ACQAZQBuAGMAOwBpAGYAKAAkAGUAbgB2ADoASABFAFIARABSAF8ARQBOAFYAIAAtAGUAcQAgACcAMQAnACAALQBhAG4AZAAgACQAZQBuAHYAOgBIAEUAUgBEAFIAXwBCAEkATgBfAFAAQQBUAEgAKQB7ACYAIAAkAGUAbgB2ADoASABFAFIARABSAF8AQgBJAE4AXwBQAEEAVABIACAAYQBwAGkAIAB1AHMAYQBnAGUALQByAGUAcABvAHIAdAAgAC0ALQBhAGcAZQBuAHQAIABhAG4AdABpAGcAcgBhAHYAaQB0AHkAfQBlAGwAcwBlAHsAfQA=";
 
     #[test]
-    fn strip_usage_statusline_recognizes_legacy_encoded_commands() {
+    fn unmarked_legacy_encoded_commands_still_unwrap() {
         assert_eq!(
-            strip_usage_statusline("claude", LEGACY_PIPELINE)
+            unwrap_legacy_statusline("claude", LEGACY_PIPELINE)
                 .unwrap()
                 .as_deref(),
             Some("node status.js")
         );
         assert_eq!(
-            strip_usage_statusline("antigravity", LEGACY_STANDALONE)
+            unwrap_legacy_statusline("antigravity", LEGACY_STANDALONE)
                 .unwrap()
                 .as_deref(),
             Some("")
         );
         assert!(
-            strip_usage_statusline("claude", LEGACY_STANDALONE).is_err(),
+            unwrap_legacy_statusline("claude", LEGACY_STANDALONE).is_err(),
             "别的厂商的回调是可识别错误"
         );
         assert_eq!(
-            strip_usage_statusline("claude", "node status.js").unwrap(),
+            unwrap_legacy_statusline("claude", "node status.js").unwrap(),
             None
         );
-        // 文档推荐的手写集成没有 herdr 包装特征，按自定义渲染器处理。
+        // 用户手写的命令没有 herdr 包装特征，按自定义渲染器处理。
         assert_eq!(
-            strip_usage_statusline("claude", "herdr api usage-report --agent claude").unwrap(),
+            unwrap_legacy_statusline("claude", "herdr api usage-report --agent claude").unwrap(),
             None
         );
         assert_eq!(
-            strip_usage_statusline(
+            unwrap_legacy_statusline(
                 "claude",
                 "powershell.exe -NoLogo -EncodedCommand AAAA api usage-report --agent claude"
             )
@@ -787,12 +744,12 @@ mod tests {
             "不是 herdr 的前缀、也没有环境判定"
         );
         // herdr 前缀却解不出脚本、从 Unix 同步来的 POSIX 包装：可识别错误。
-        assert!(strip_usage_statusline(
+        assert!(unwrap_legacy_statusline(
             "claude",
             "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand AAAA"
         )
         .is_err());
-        assert!(strip_usage_statusline(
+        assert!(unwrap_legacy_statusline(
             "claude",
             "(if [ \"${HERDR_ENV:-}\" = 1 ] && [ -n \"${HERDR_BIN_PATH:-}\" ]; then exec \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough; else exec cat; fi) | (\nbash x.sh\n)"
         )

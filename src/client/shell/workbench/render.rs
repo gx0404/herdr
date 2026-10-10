@@ -1,5 +1,5 @@
 use super::super::feedback::ChromeHover;
-use super::super::observability::{tr, Page};
+use super::super::observability::tr;
 use super::interaction::Action;
 use super::*;
 use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
@@ -94,8 +94,8 @@ fn panel_title(dock: &DockLayout, snapshot: &ClientShellSnapshot, panel: &PanelI
     match panel {
         PanelId::Workspaces => tr("WORKSPACES", "工作区").to_owned(),
         PanelId::Agents => "Agents".to_owned(),
-        PanelId::Monitor => tr("MONITOR", "监控").to_owned(),
-        PanelId::Accounts => tr("ACCOUNTS", "账号用量").to_owned(),
+        // 已退役的账号面板只为解码旧布局保留（加载时即被丢弃），不会画出来。
+        PanelId::Monitor | PanelId::Accounts => tr("MONITOR", "监控").to_owned(),
         PanelId::Terminal(id) => {
             // The strip holds one workspace's tabs; name the panel after that
             // workspace so each terminal page is identifiable. Same-named
@@ -403,9 +403,9 @@ impl ClientShellState {
             canvas
                 .buffer()
                 .set_style(header, Style::default().bg(palette.surface0));
-            // 监控 / 账号面板头部带显式关闭按钮：终端聚焦时 Esc 进终端，
-            // 用户仍能一键关掉停靠面板。
-            let closable = matches!(panel, PanelId::Monitor | PanelId::Accounts);
+            // 监控面板头部带显式关闭按钮：终端聚焦时 Esc 进终端，用户仍能一键
+            // 关掉停靠面板。
+            let closable = *panel == PanelId::Monitor;
             let controls = if closable { 6 } else { 3 };
             self.workbench
                 .hits
@@ -739,17 +739,11 @@ impl ClientShellState {
                         path: split.path.clone(),
                         topology_signature: signature,
                     }));
-            } else if matches!(panel, PanelId::Monitor | PanelId::Accounts) {
+            } else if *panel == PanelId::Monitor {
                 // The monitor panel hosts all observation pages and always
                 // paints the tab the user last selected, whether or not the
-                // panel is focused; rendering never rewrites `page`. Legacy
-                // accounts panels keep rendering the accounts page.
-                let tab = if *panel == PanelId::Accounts {
-                    Page::Accounts
-                } else {
-                    self.observability.monitor_tab
-                };
-                // 面板 pass 不画悬浮层：悬浮层由下方的全局 pass 画一次。
+                // panel is focused; rendering never rewrites `page`.
+                let tab = self.observability.monitor_tab;
                 let cx = super::super::feedback::ChromeContext {
                     page_bounds: None,
                     palette,
@@ -765,9 +759,7 @@ impl ClientShellState {
                     self.observability
                         .paint(&mut canvas, area, &cx, Some(tab), false)
                 {
-                    for rect in painted.covered {
-                        occlusion.cover(rect);
-                    }
+                    occlusion.cover(painted.covered);
                     self.observability.commit_paint(painted);
                 }
             }
@@ -945,13 +937,7 @@ impl ClientShellState {
                 });
             }
         }
-        if self.observability.process_dialog.is_some()
-            || self
-                .observability
-                .hover
-                .as_ref()
-                .is_some_and(|hover| hover.visible)
-        {
+        if self.observability.process_dialog.is_some() {
             // 全局浮层在终端内容、把手与选择高亮之后绘制，保持视觉与输入层级一致。
             let cx = super::super::feedback::ChromeContext {
                 page_bounds: None,
@@ -965,9 +951,7 @@ impl ClientShellState {
                     .unwrap_or_else(std::time::Instant::now),
             };
             if let Some(painted) = self.observability.paint(&mut canvas, full, &cx, None, true) {
-                for rect in painted.covered {
-                    occlusion.cover(rect);
-                }
+                occlusion.cover(painted.covered);
                 self.observability.commit_paint(painted);
             }
         }

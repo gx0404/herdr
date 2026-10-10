@@ -321,7 +321,7 @@ mod machines;
 mod menus;
 mod mobile;
 mod mouse_selection;
-mod observability_usage;
+mod observability_system;
 mod popup_focus_projection;
 mod scenes;
 mod snippets;

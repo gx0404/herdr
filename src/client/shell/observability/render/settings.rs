@@ -46,14 +46,6 @@ enum Row<'a> {
         down: Action,
         up: Action,
     },
-    /// 按钮 + 右侧说明；`action` 为 `None` 时是禁用态。
-    Button {
-        label: &'a str,
-        note: &'a str,
-        action: Option<Action>,
-    },
-    /// 只读说明行。
-    Note(String),
 }
 
 struct Card<'a> {
@@ -78,31 +70,10 @@ fn toggle<'a>(label: impl Into<Cow<'a, str>>, on: bool, action: Action) -> Row<'
     }
 }
 
-/// 用量样式的显示名（走文案表，不再 `{:?}`）。
-pub(super) fn usage_format_label(format: UsageDisplayFormat) -> &'static str {
-    let texts = &crate::i18n::texts().monitor;
-    match format {
-        UsageDisplayFormat::Dashboard => texts.format_dashboard,
-        UsageDisplayFormat::Table => texts.format_table,
-    }
-}
-
-/// 用量位置的显示名（走文案表，不再 `{:?}`）。
-pub(super) fn usage_position_label(position: UsageDisplayPosition) -> &'static str {
-    let texts = &crate::i18n::texts().monitor;
-    match position {
-        UsageDisplayPosition::Hover => texts.position_hover,
-        UsageDisplayPosition::Page => texts.position_page,
-        UsageDisplayPosition::Both => texts.position_both,
-    }
-}
-
-/// 分区：监控 / 账号用量 / 显示项 / 告警（有规则时）/ 厂商（有列出时）/ 设备
-/// （有采样时）。
+/// 分区：监控 / 显示项 / 告警（有规则时）/ 设备（有采样时）。
 fn build_cards(state: &State) -> Vec<Card<'_>> {
     let texts = &crate::i18n::texts().monitor;
     let monitor = &state.monitor;
-    let usage = &state.usage;
     let mut cards = Vec::new();
 
     let glyph_active = match state.chart_glyphs {
@@ -149,85 +120,6 @@ fn build_cards(state: &State) -> Vec<Card<'_>> {
         ],
     });
 
-    let mut usage_rows = vec![
-        toggle(texts.usage_enabled, usage.enabled, Action::UsageEnabled),
-        Row::Segmented {
-            label: texts.usage_format,
-            options: vec![
-                usage_format_label(UsageDisplayFormat::Dashboard),
-                usage_format_label(UsageDisplayFormat::Table),
-            ],
-            active: match usage.format {
-                UsageDisplayFormat::Dashboard => 0,
-                UsageDisplayFormat::Table => 1,
-            },
-            actions: vec![
-                Action::UsageFormat(UsageDisplayFormat::Dashboard),
-                Action::UsageFormat(UsageDisplayFormat::Table),
-            ],
-        },
-        Row::Segmented {
-            label: texts.usage_position,
-            options: vec![
-                usage_position_label(UsageDisplayPosition::Hover),
-                usage_position_label(UsageDisplayPosition::Page),
-                usage_position_label(UsageDisplayPosition::Both),
-            ],
-            active: match usage.position {
-                UsageDisplayPosition::Hover => 0,
-                UsageDisplayPosition::Page => 1,
-                UsageDisplayPosition::Both => 2,
-            },
-            actions: vec![
-                Action::UsagePosition(UsageDisplayPosition::Hover),
-                Action::UsagePosition(UsageDisplayPosition::Page),
-                Action::UsagePosition(UsageDisplayPosition::Both),
-            ],
-        },
-    ];
-    if usage.position == UsageDisplayPosition::Page {
-        usage_rows.push(Row::Note(format!("↳ {}", texts.hover_closed_hint)));
-    }
-    usage_rows.push(stepper(
-        texts.hover_delay,
-        format!("{} ms", usage.hover_delay_ms),
-        Action::HoverDelay(-1),
-        Action::HoverDelay(1),
-    ));
-    usage_rows.push(Row::Button {
-        label: texts.restore_config,
-        note: if state.usage_overridden {
-            texts.clear_overrides
-        } else {
-            texts.no_overrides
-        },
-        action: state
-            .usage_overridden
-            .then_some(Action::RestoreUsagePreferences),
-    });
-    usage_rows.push(Row::Note(format!(
-        "{}: {} s ({})",
-        texts.api_refresh, usage.api_refresh_seconds, texts.config_value_hint
-    )));
-    usage_rows.push(Row::Note(format!(
-        "{}: {} s ({})",
-        texts.cli_refresh, usage.cli_refresh_seconds, texts.config_value_hint
-    )));
-    usage_rows.push(Row::Note(format!(
-        "{}: {} ({})",
-        texts.interactive_probe,
-        if usage.interactive_probe {
-            texts.on
-        } else {
-            texts.off
-        },
-        texts.config_value_hint
-    )));
-    cards.push(Card {
-        title: texts.section_usage,
-        rows: usage_rows,
-    });
-
     cards.push(Card {
         title: texts.section_cards,
         rows: CARD_IDS
@@ -270,25 +162,6 @@ fn build_cards(state: &State) -> Vec<Card<'_>> {
         cards.push(Card {
             title: texts.section_alerts,
             rows,
-        });
-    }
-
-    let providers = state
-        .providers
-        .iter()
-        .filter(|provider| provider_listed(provider))
-        .map(|provider| {
-            toggle(
-                provider.label.as_str(),
-                !usage.disabled_providers.contains(&provider.agent),
-                Action::ProviderEnabled(provider.agent.clone()),
-            )
-        })
-        .collect::<Vec<_>>();
-    if !providers.is_empty() {
-        cards.push(Card {
-            title: texts.section_providers,
-            rows: providers,
         });
     }
 
@@ -400,34 +273,6 @@ fn draw_row(
                 hits.push((plus, up.clone()));
             }
         }
-        Row::Button {
-            label,
-            note,
-            action,
-        } => {
-            match action {
-                Some(action) => {
-                    secondary_button(buffer, rect, label, action.clone(), palette, hits);
-                }
-                None => {
-                    disabled_button(buffer, rect, label, palette);
-                }
-            }
-            let width = crate::ui::modal_button_width(&format!(" {label} "));
-            text(
-                buffer,
-                Rect::new(
-                    rect.x.saturating_add(width + 1),
-                    rect.y,
-                    rect.width.saturating_sub(width + 1),
-                    1,
-                ),
-                0,
-                note,
-                Style::default().fg(palette.overlay0),
-            );
-        }
-        Row::Note(note) => text(buffer, rect, 0, note, Style::default().fg(palette.overlay0)),
     }
 }
 
@@ -528,21 +373,10 @@ mod tests {
         state
     }
 
-    /// 带一条告警规则、一个厂商与几个设备的状态。
+    /// 带一条告警规则与几个设备的状态。
     fn populated_state() -> State {
         let mut state = preferences_state();
         state.monitor.alerts = crate::config::MonitorConfig::default().alerts;
-        state.providers = vec![UsageProviderInfo {
-            agent: "claude".into(),
-            label: "Claude Code".into(),
-            source_url: "https://example.invalid/docs".into(),
-            method: "cli".into(),
-            account_scope: "account".into(),
-            minimum_interval_seconds: 300,
-            configured_accounts: vec!["claude:default".into()],
-            installed: Some(true),
-            supports_callback: true,
-        }];
         state.metrics = Some(Box::new(SystemMetricsSnapshot {
             sampled_at_ms: 10_000,
             gpus: vec![GpuMetric {
@@ -568,7 +402,7 @@ mod tests {
     #[test]
     fn preferences_page_lays_out_cards_with_kit_controls() {
         let _guard = lang_guard(Lang::ZhCn);
-        let mut state = preferences_state();
+        let state = preferences_state();
         let (buffer, output) = paint_page(&state, Page::Settings, 120, 60);
         let text = buffer_text(&buffer);
         for needle in [
@@ -582,16 +416,8 @@ mod tests {
             "盲文",
             "方块",
             "ASCII",
-            "账号用量",
-            "仪表盘",
-            "表格",
-            "悬浮延时",
-            "400 ms",
             "显示项",
             "CPU 逐核",
-            "恢复配置文件值",
-            "无本机覆盖",
-            "本机配置文件值",
         ] {
             assert!(buffer_has(&buffer, needle), "{needle}\n{text}");
         }
@@ -611,47 +437,29 @@ mod tests {
             |a: &Action| matches!(a, Action::ToggleAlerts),
             |a: &Action| matches!(a, Action::ChartGlyphs(ChartGlyphsPreference::Blocks)),
             |a: &Action| matches!(a, Action::ChartGlyphs(ChartGlyphsPreference::Ascii)),
-            |a: &Action| matches!(a, Action::UsageEnabled),
-            |a: &Action| matches!(a, Action::UsageFormat(UsageDisplayFormat::Table)),
-            |a: &Action| matches!(a, Action::UsagePosition(UsageDisplayPosition::Page)),
-            |a: &Action| matches!(a, Action::HoverDelay(1)),
             |a: &Action| matches!(a, Action::Metric(id) if id == "processes"),
         ] {
             assert!(has(&output, wanted), "缺少控件命中区\n{text}");
         }
-        assert!(
-            !has(&output, |a| matches!(a, Action::RestoreUsagePreferences)),
-            "无本机覆盖时不可点"
-        );
         for (rect, action) in &output.hits {
             assert!(
                 contains_rect(Rect::new(0, 0, 120, 60), *rect),
                 "命中区 {rect:?}（{action:?}）越界"
             );
         }
-        // 有本机覆盖：按钮可点；位置为「页面」：常驻提示行。
-        state.usage_overridden = true;
-        state.usage.position = UsageDisplayPosition::Page;
-        let (buffer, output) = paint_page(&state, Page::Settings, 120, 60);
-        assert!(has(&output, |a| matches!(
-            a,
-            Action::RestoreUsagePreferences
-        )));
-        assert!(buffer_has(&buffer, "清除本机覆盖"));
-        assert!(buffer_has(&buffer, "悬浮浮层已关闭"));
         // 活动段反色：分段控件的活动项底色是 accent。
-        let page = hit_rect(&output, |a| {
-            matches!(a, Action::UsagePosition(UsageDisplayPosition::Page))
+        let braille = hit_rect(&output, |a| {
+            matches!(a, Action::ChartGlyphs(ChartGlyphsPreference::Braille))
         })
-        .expect("页面段");
+        .expect("盲文段");
         assert_eq!(
-            buffer[(page.x, page.y)].style().bg,
+            buffer[(braille.x, braille.y)].style().bg,
             Some(config().palette.accent)
         );
     }
 
     #[test]
-    fn alerts_providers_and_devices_get_their_own_cards() {
+    fn alerts_and_devices_get_their_own_cards() {
         let _guard = lang_guard(Lang::ZhCn);
         let state = populated_state();
         let (buffer, output) = paint_page(&state, Page::Settings, 120, 80);
@@ -667,8 +475,6 @@ mod tests {
             "30 s",
             "冷却",
             "60 s",
-            "厂商",
-            "Claude Code",
             "设备",
             "Test GPU",
             "coretemp Core 0",
@@ -682,10 +488,6 @@ mod tests {
         assert!(has(&output, |a| matches!(a, Action::AlertThreshold(0, 1))));
         assert!(has(&output, |a| matches!(a, Action::AlertDuration(0, -1))));
         assert!(has(&output, |a| matches!(a, Action::AlertCooldown(0, 1))));
-        assert!(has(
-            &output,
-            |a| matches!(a, Action::ProviderEnabled(agent) if agent == "claude")
-        ));
         assert!(has(
             &output,
             |a| matches!(a, Action::Device(id) if id == "gpu0")
@@ -728,7 +530,7 @@ mod tests {
         state.settings_scroll = 8;
         let (buffer, output) = paint_page(&state, Page::Settings, 100, 14);
         assert!(!buffer_has(&buffer, "采样间隔"), "滚过监控卡的首行");
-        assert!(buffer_has(&buffer, "账号用量") || buffer_has(&buffer, "厂商账号用量"));
+        assert!(buffer_has(&buffer, "显示项"), "{}", buffer_text(&buffer));
         for (rect, action) in &output.hits {
             assert!(
                 contains_rect(Rect::new(0, 0, 100, 14), *rect),

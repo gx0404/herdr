@@ -350,7 +350,6 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
                     endpoint_id: ClientEndpointId::Local,
                     ref pane_id,
                     has_activity: false,
-                    agent: Some(_),
                     ..
                 } if pane_id == "pane_1"
             ));
@@ -359,34 +358,23 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
         other => panic!("agent 行右键应打开菜单: {other:?}"),
     };
     let actions = items.iter().map(|item| item.action).collect::<Vec<_>>();
-    assert_eq!(
-        actions,
-        [
-            ClientContextMenuAction::FocusAgent,
-            ClientContextMenuAction::ViewAgentActivity,
-            ClientContextMenuAction::RenameAgent,
-            ClientContextMenuAction::ShowAgentUsage,
-            ClientContextMenuAction::BindAgentAccount,
-            ClientContextMenuAction::CloseAgentPane,
-        ]
-    );
+    let expected = [
+        ClientContextMenuAction::FocusAgent,
+        ClientContextMenuAction::ViewAgentActivity,
+        ClientContextMenuAction::RenameAgent,
+        ClientContextMenuAction::CloseAgentPane,
+    ];
+    assert_eq!(actions, expected);
     let view_activity = items
         .iter()
         .position(|item| item.action == ClientContextMenuAction::ViewAgentActivity)
         .expect("查看活动项");
     assert!(!items[view_activity].enabled, "没有活动时禁用");
-    // 动作未接通的条目灰显：否则点了只会关掉菜单、什么都不发生。重命名 / 绑定
-    // 账号 / 关闭已在 `agent_tree.rs` 接上（见 `agent_panel_characterization.rs`
-    // 的 `tree_agent_context_actions_*`），「用量」接上 observability 的
-    // `pin_agent_usage_card`，菜单条目随之可点。
-    let usage = items
-        .iter()
-        .position(|item| item.action == ClientContextMenuAction::ShowAgentUsage)
-        .expect("缺少条目: ShowAgentUsage");
+    // 动作未接通的条目灰显：否则点了只会关掉菜单、什么都不发生。重命名 / 关闭
+    // 已在 `agent_tree.rs` 接上（见 `agent_panel_characterization.rs` 的
+    // `tree_agent_context_actions_*`），菜单条目随之可点。
     for action in [
         ClientContextMenuAction::RenameAgent,
-        ClientContextMenuAction::ShowAgentUsage,
-        ClientContextMenuAction::BindAgentAccount,
         ClientContextMenuAction::CloseAgentPane,
     ] {
         let index = items
@@ -434,38 +422,7 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
         crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_1"
     ));
 
-    // 「用量」：激活后菜单关闭，该 agent 的用量卡立即可见并钉住，画在屏幕上。
-    state.compose(106, 24).expect("focused frame");
-    let (row, _) = state.hits.agents[0].clone();
-    state.handle_raw_events(vec![mouse(
-        MouseEventKind::Down(MouseButton::Right),
-        row.x + 1,
-        row.y,
-    )]);
-    state.compose(106, 24).expect("context menu frame");
-    let usage_row = row_of(&state, usage).expect("「用量」行可点");
-    state.handle_raw_events(vec![mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        usage_row.x + 1,
-        usage_row.y,
-    )]);
-    assert!(state.overlay.is_none(), "激活后菜单关闭");
-    let hover = state.observability.hover.as_ref().expect("用量卡已打开");
-    assert!(hover.visible && hover.pinned, "立即可见并钉住");
-    assert!(matches!(
-        &hover.target,
-        super::super::observability::HoverTarget::Agent { pane, agent, .. }
-            if pane == "pane_1" && agent == "pi"
-    ));
-    state.compose(106, 24).expect("pinned usage card frame");
-    assert!(
-        !state.observability.hover_rect.is_empty(),
-        "钉住的用量卡画在屏幕上"
-    );
-    state.handle_raw_events(vec![key(KeyCode::Esc)]);
-    assert!(state.observability.hover.is_none(), "Esc 关闭钉住的卡");
-
-    // 未识别 agent 的行：没有用量 / 绑定账号两项。
+    // 未识别 agent 的行：条目与已识别 agent 相同。
     let mut projected = snapshot();
     let mut anonymous = agent("pane_1", 0);
     anonymous.agent = None;
@@ -486,8 +443,7 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
             .collect::<Vec<_>>(),
         other => panic!("agent 行右键应打开菜单: {other:?}"),
     };
-    assert!(!actions.contains(&ClientContextMenuAction::ShowAgentUsage));
-    assert!(!actions.contains(&ClientContextMenuAction::BindAgentAccount));
+    assert_eq!(actions, expected);
 }
 
 /// 有活动的 agent：「查看 Agent 活动」打开只读窗口；Esc 关闭、点窗外关闭，

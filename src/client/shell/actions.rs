@@ -717,10 +717,7 @@ impl ClientShellState {
             if pending.boot_id != boot_id || current_boot != Some(boot_id) {
                 return (false, Vec::new());
             }
-            return (
-                self.receive_observation_from(&endpoint_id, epoch, purpose, result),
-                Vec::new(),
-            );
+            return (self.receive_observation(epoch, purpose, result), Vec::new());
         }
         // Cross-endpoint requests (snippet runs, broadcast fan-out, pane
         // actions on another machine) carry their target endpoint's boot id;

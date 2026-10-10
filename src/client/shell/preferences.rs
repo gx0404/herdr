@@ -35,29 +35,8 @@ pub(super) struct ClientChromePreferences {
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) monitor: Option<crate::config::MonitorConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) usage_enabled: Option<bool>,
-    /// 未知枚举值 → None（枚举本体不加 `#[serde(other)]`，config.toml 的拼写错误
-    /// 仍由配置诊断报出）。
-    #[serde(
-        default,
-        deserialize_with = "lenient::usage_format",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub(super) usage_format: Option<crate::config::UsageDisplayFormat>,
-    #[serde(
-        default,
-        deserialize_with = "lenient::usage_position",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub(super) usage_position: Option<crate::config::UsageDisplayPosition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) usage_disabled_providers: Option<Vec<String>>,
-    /// 监控 → 设置 里改过的悬浮延时（ms）；未改过时沿用 config.toml 的
-    /// `account_usage.hover_delay_ms`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) usage_hover_delay_ms: Option<u64>,
-    /// 监控面板里用户选中的 tab；未知值按未设置处理，不让整份偏好失效。
+    /// 监控面板里用户选中的 tab；未知值（含已移除账号页的 `accounts`）按未设置处理，
+    /// 回落到系统页，不让整份偏好失效。
     #[serde(
         default,
         deserialize_with = "lenient::monitor_tab",
@@ -96,28 +75,6 @@ pub(super) struct ClientChromePreferences {
     /// Command palette MRU ids (newest first), capped on write.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) palette_recent: Vec<String>,
-}
-
-impl ClientChromePreferences {
-    /// usage_* 影子键里是否有本机覆盖：这些键分别遮住 config.toml `[account_usage]`
-    /// 的 enabled / format / position / disabled_providers / hover_delay_ms，任一为
-    /// Some 即该键不再跟随配置文件。
-    pub(super) fn usage_overridden(&self) -> bool {
-        self.usage_enabled.is_some()
-            || self.usage_format.is_some()
-            || self.usage_position.is_some()
-            || self.usage_disabled_providers.is_some()
-            || self.usage_hover_delay_ms.is_some()
-    }
-
-    /// 「恢复配置文件值」：整组清空 usage_* 影子键，让它们重新跟随 config.toml。
-    pub(super) fn clear_usage_overrides(&mut self) {
-        self.usage_enabled = None;
-        self.usage_format = None;
-        self.usage_position = None;
-        self.usage_disabled_providers = None;
-        self.usage_hover_delay_ms = None;
-    }
 }
 
 fn read_pages<'de, D: serde::Deserializer<'de>>(
@@ -194,14 +151,7 @@ macro_rules! lenient_fields {
     };
 }
 
-lenient_fields!(
-    monitor,
-    usage_format,
-    usage_position,
-    monitor_tab,
-    monitor_chart_glyphs,
-    agent_panel_sort,
-);
+lenient_fields!(monitor, monitor_tab, monitor_chart_glyphs, agent_panel_sort,);
 
 fn read_layouts<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -374,11 +324,15 @@ mod tests {
         assert_eq!(preferences.monitor_tab, None);
         assert_eq!(preferences.sidebar_width, Some(30));
         let preferences: ClientChromePreferences =
-            serde_json::from_str(r#"{"monitor_tab":"accounts"}"#).expect("已知 tab 值");
+            serde_json::from_str(r#"{"monitor_tab":"settings"}"#).expect("已知 tab 值");
         assert_eq!(
             preferences.monitor_tab,
-            Some(super::super::observability::Page::Accounts)
+            Some(super::super::observability::Page::Settings)
         );
+        // 已移除的账号页：按未设置处理，客户端回落到系统页。
+        let preferences: ClientChromePreferences =
+            serde_json::from_str(r#"{"monitor_tab":"accounts"}"#).expect("旧 tab 值");
+        assert_eq!(preferences.monitor_tab, None);
     }
 
     /// 把当前线程上的 tracing 输出收进内存，断言诊断内容用。
@@ -422,22 +376,17 @@ mod tests {
     fn dropped_lenient_values_are_logged_with_key_and_value_type_only() {
         let logs = capture_logs(|| {
             let preferences: ClientChromePreferences = serde_json::from_str(
-                r#"{"usage_format":"sk-looks-secret","agent_panel_sort":42,"monitor":{"interval_ms":"interval-looks-secret"},"monitor_chart_glyphs":["x"],"usage_position":"hover","monitor_tab":null,"sidebar_width":30}"#,
+                r#"{"monitor_tab":"sk-looks-secret","agent_panel_sort":42,"monitor":{"interval_ms":"interval-looks-secret"},"monitor_chart_glyphs":["x"],"sidebar_width":30}"#,
             )
             .expect("坏值不应让整份偏好失效");
-            assert_eq!(preferences.usage_format, None);
+            assert_eq!(preferences.monitor_tab, None);
             assert_eq!(preferences.agent_panel_sort, None);
             assert!(preferences.monitor.is_none());
             assert!(preferences.monitor_chart_glyphs.is_none());
-            assert_eq!(
-                preferences.usage_position,
-                Some(crate::config::UsageDisplayPosition::Hover)
-            );
-            assert_eq!(preferences.monitor_tab, None);
             assert_eq!(preferences.sidebar_width, Some(30));
         });
         for (key, value_type) in [
-            ("usage_format", "string"),
+            ("monitor_tab", "string"),
             ("agent_panel_sort", "number"),
             ("monitor", "object"),
             ("monitor_chart_glyphs", "array"),
@@ -462,18 +411,18 @@ mod tests {
         ));
         std::fs::write(
             &path,
-            r#"{"usage_format":"weird-format","sidebar_width":"wide","sidebar_collapsed":true}"#,
+            r#"{"agent_panel_sort":"weird-format","sidebar_width":"wide","sidebar_collapsed":true}"#,
         )
         .expect("write preferences");
         let logs = capture_logs(|| {
             let loaded = load(&path).expect("坏字段只丢自己");
-            assert_eq!(loaded.usage_format, None);
+            assert_eq!(loaded.agent_panel_sort, None);
             assert_eq!(loaded.sidebar_width, None);
             assert_eq!(loaded.sidebar_collapsed, Some(true));
         });
         std::fs::remove_file(&path).expect("remove preferences");
         assert_eq!(
-            logs.matches("key=\"usage_format\"").count(),
+            logs.matches("key=\"agent_panel_sort\"").count(),
             1,
             "同一个键只记一次：{logs}"
         );
@@ -490,22 +439,22 @@ mod tests {
     #[test]
     fn bad_enum_values_only_drop_their_own_field() {
         let preferences: ClientChromePreferences = serde_json::from_str(
-            r#"{"usage_format":"weird","usage_position":"hover","agent_panel_sort":"nope","monitor":{"interval_ms":"fast"},"usage_hover_dashboard":false,"sidebar_width":30}"#,
+            r#"{"monitor_tab":"weird","monitor_chart_glyphs":"blocks","agent_panel_sort":"nope","monitor":{"interval_ms":"fast"},"usage_hover_dashboard":false,"sidebar_width":30}"#,
         )
         .expect("坏枚举值不应让整份偏好失效");
-        assert_eq!(preferences.usage_format, None);
+        assert_eq!(preferences.monitor_tab, None);
         assert_eq!(
-            preferences.usage_position,
-            Some(crate::config::UsageDisplayPosition::Hover)
+            preferences.monitor_chart_glyphs,
+            Some(super::super::observability::ChartGlyphsPreference::Blocks)
         );
         assert_eq!(preferences.agent_panel_sort, None);
         assert!(preferences.monitor.is_none());
         assert_eq!(preferences.sidebar_width, Some(30));
     }
 
-    /// 用量入口拆除后旧偏好文件里的残留键：`usage_hover_dashboard` 已无对应字段，
-    /// `pages.usage_dashboard` 已无对应浮层——都只被忽略，其余字段照常恢复，
-    /// 下一次写盘不再带它们。
+    /// 用量功能拆除后旧偏好文件里的残留键：`usage_hover_dashboard` 与 `usage_*` 影子键
+    /// 已无对应字段，`pages.usage_dashboard` 已无对应浮层——都只被忽略，其余字段照常
+    /// 恢复，下一次写盘不再带它们。
     #[test]
     fn load_ignores_keys_of_the_removed_usage_entry_points() {
         let path = std::env::temp_dir().join(format!(
@@ -514,16 +463,13 @@ mod tests {
         ));
         std::fs::write(
             &path,
-            r#"{"usage_hover_dashboard":false,"sidebar_width":31,"usage_position":"both","pages":{"usage_dashboard":{"x":0.1,"y":0.1,"width":0.5,"height":0.5},"settings":{"x":0.1,"y":0.1,"width":0.5,"height":0.5}},"palette_recent":["observation:usage-dashboard"]}"#,
+            r#"{"usage_hover_dashboard":false,"sidebar_width":31,"usage_enabled":true,"usage_format":"table","usage_position":"both","usage_disabled_providers":["codex"],"usage_hover_delay_ms":800,"monitor_tab":"accounts","pages":{"usage_dashboard":{"x":0.1,"y":0.1,"width":0.5,"height":0.5},"settings":{"x":0.1,"y":0.1,"width":0.5,"height":0.5}},"palette_recent":["observation:usage-dashboard"]}"#,
         )
         .expect("write preferences");
         let loaded = load(&path).expect("残留键不应让整份偏好失效");
         let _ = std::fs::remove_file(&path);
         assert_eq!(loaded.sidebar_width, Some(31));
-        assert_eq!(
-            loaded.usage_position,
-            Some(crate::config::UsageDisplayPosition::Both)
-        );
+        assert_eq!(loaded.monitor_tab, None, "旧的账号页 tab 回落到系统页");
         assert!(
             !loaded.pages.contains_key("usage_dashboard"),
             "已移除浮层的窗口位置被丢弃"
@@ -533,6 +479,16 @@ mod tests {
         let saved = serde_json::to_string(&loaded).expect("serialize preferences");
         assert!(!saved.contains("usage_hover_dashboard"), "saved: {saved}");
         assert!(!saved.contains("\"usage_dashboard\""), "saved: {saved}");
+        for key in [
+            "usage_enabled",
+            "usage_format",
+            "usage_position",
+            "usage_disabled_providers",
+            "usage_hover_delay_ms",
+            "monitor_tab",
+        ] {
+            assert!(!saved.contains(key), "{key} 不再写回：{saved}");
+        }
     }
 
     #[test]
@@ -543,7 +499,7 @@ mod tests {
         ));
         std::fs::write(
             &path,
-            r#"{"sidebar_width":"wide","sidebar_collapsed":true,"monitor_tab":"accounts","palette_recent":["a"]}"#,
+            r#"{"sidebar_width":"wide","sidebar_collapsed":true,"monitor_tab":"settings","palette_recent":["a"]}"#,
         )
         .expect("write preferences");
         let loaded = load(&path).expect("坏字段只丢自己，文件仍可用");
@@ -551,54 +507,11 @@ mod tests {
         assert_eq!(loaded.sidebar_collapsed, Some(true));
         assert_eq!(
             loaded.monitor_tab,
-            Some(super::super::observability::Page::Accounts)
+            Some(super::super::observability::Page::Settings)
         );
         assert_eq!(loaded.palette_recent, ["a"]);
         std::fs::write(&path, "[1,2,3]").expect("write preferences");
         assert!(load(&path).is_none(), "不是对象的文件视为不可用");
-        std::fs::remove_file(path).expect("remove preferences");
-    }
-
-    /// usage_* 键是 config.toml `[account_usage]` 的本机影子：任一为 Some 即「有本机
-    /// 覆盖」；「恢复配置文件值」整组清空，非 usage 键不动。
-    #[test]
-    fn usage_overrides_are_detected_and_cleared_as_a_group() {
-        let mut preferences = ClientChromePreferences {
-            usage_format: Some(crate::config::UsageDisplayFormat::Table),
-            sidebar_width: Some(30),
-            ..ClientChromePreferences::default()
-        };
-        assert!(preferences.usage_overridden());
-        preferences.clear_usage_overrides();
-        assert!(!preferences.usage_overridden());
-        assert_eq!(preferences.usage_format, None);
-        assert_eq!(preferences.sidebar_width, Some(30), "非 usage 键不动");
-        preferences.usage_disabled_providers = Some(Vec::new());
-        assert!(preferences.usage_overridden(), "空列表也是显式覆盖");
-        preferences.clear_usage_overrides();
-        preferences.usage_hover_delay_ms = Some(800);
-        assert!(preferences.usage_overridden(), "悬浮延时同属影子键");
-    }
-
-    /// 类型不对的 `usage_disabled_providers` 只丢自己，同文件里的其它 usage 键照常恢复。
-    #[test]
-    fn bad_disabled_providers_value_only_drops_its_own_field() {
-        let path = std::env::temp_dir().join(format!(
-            "herdr-shell-bad-disabled-providers-{}.json",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
-            r#"{"usage_disabled_providers":"claude","usage_position":"page","usage_enabled":true}"#,
-        )
-        .expect("write preferences");
-        let loaded = load(&path).expect("坏字段只丢自己");
-        assert_eq!(loaded.usage_disabled_providers, None);
-        assert_eq!(
-            loaded.usage_position,
-            Some(crate::config::UsageDisplayPosition::Page)
-        );
-        assert_eq!(loaded.usage_enabled, Some(true));
         std::fs::remove_file(path).expect("remove preferences");
     }
 

@@ -270,7 +270,7 @@ fn supports_no_daemon(
         .env(ACTIVE, "1");
     crate::platform::codex_launch::configure_probe(&mut command);
     let mut child = command.spawn().map_err(|_| "probe could not start")?;
-    let mut guard = match crate::platform::UsageProbeGuard::new(&child) {
+    let mut guard = match crate::platform::HelperProcessGuard::new(&child) {
         Ok(guard) => guard,
         Err(_) => {
             crate::platform::codex_launch::stop_probe(&mut child);

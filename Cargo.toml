@@ -44,7 +44,6 @@ png = "0.17"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 regex = "1"
 ruzstd = "0.9.0"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network", "component", "user"] }
 nvml-wrapper = "0.12"
 serde = { version = "1", features = ["derive"] }
@@ -75,8 +74,6 @@ zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
-# Windows 使用系统 TLS，保留现有无需 MSVC C 编译器的交叉检查流程。
-reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 # UTF-16 SDDL input for interprocess security descriptors.
 widestring = "1.2"
 wmi = { version = "0.18.4", default-features = false }
@@ -113,6 +110,3 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-[target.'cfg(not(windows))'.dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

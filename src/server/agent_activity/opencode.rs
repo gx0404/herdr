@@ -134,7 +134,7 @@ use crate::api::schema::{
 
 pub(super) struct OpenCode;
 
-/// 官方 CLI 名；与用量服务商注册表里 opencode 的 `command` 一致，按 PATH 解析。
+/// 官方 CLI 名，按 PATH 解析。
 const OPENCODE_COMMAND: &str = "opencode";
 const DATABASE_FILE: &str = "opencode.db";
 
@@ -243,7 +243,7 @@ fn xdg_data_home() -> Option<OsString> {
 }
 
 /// 数据目录：`XDG_DATA_HOME/opencode`（开头的 `~` 按 `home` 展开）优先，否则
-/// `<home>/.local/share/opencode`，与 `integration::env::opencode_data_dir` 同口径。
+/// `<home>/.local/share/opencode`（OpenCode 的 XDG 数据目录约定）。
 fn data_dir(home: &Path, xdg_data_home: Option<OsString>) -> PathBuf {
     match xdg_data_home.filter(|value| !value.is_empty()) {
         Some(value) => {

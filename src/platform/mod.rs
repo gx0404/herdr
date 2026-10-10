@@ -14,61 +14,54 @@ mod monitoring;
 #[cfg(not(any(target_os = "linux", windows)))]
 #[path = "monitoring_fallback.rs"]
 mod monitoring;
+#[cfg(not(unix))]
+pub(crate) use monitoring::configure_helper_process_command;
+#[cfg(all(test, any(unix, windows)))]
+pub(crate) use monitoring::marked_legacy_statusline_wrapper;
 pub(crate) use monitoring::monitor_cpu_inventory;
-pub(crate) use monitoring::terminate_usage_pty;
-pub(crate) use monitoring::usage_probe_needs_job_helper;
+pub(crate) use monitoring::unwrap_legacy_statusline;
 pub(crate) use monitoring::MonitoredProcess;
-pub(crate) use monitoring::{configure_usage_probe_command, terminate_usage_probe};
 pub(crate) use monitoring::{monitor_environment, process_instance_token, NativeGpuCollector};
-pub(crate) use monitoring::{strip_usage_statusline, usage_statusline_pipeline};
-pub(crate) use monitoring::{usage_probe_exit, UsageProbeGuard};
+pub(crate) use monitoring::{terminate_helper_process, HelperProcessGuard};
 
-/// statusline 包装串里的不变标记。各平台的包装形态都嵌入它（POSIX sh 是首行注释，Windows
-/// 在 `-EncodedCommand` 脚本首行），识别与剥离按标记而不是按整串相等比对：包装形态升级后
-/// 旧版本写下的包装仍能被识别与解除。`v1` 是标记版本，形态不兼容时新增标记并保留旧标记
-/// 的解析。
-pub(crate) const USAGE_STATUSLINE_MARKER: &str = "# herdr-usage v1";
+/// 已移除的用量回调曾写进 Claude `statusLine` 的包装标记：POSIX sh 形态是首行注释，Windows
+/// 在 `-EncodedCommand` 脚本首行。herdr 不再生成包装，只为把残留包装剥掉保留识别；识别按标记
+/// 而不是整串相等比对，不同版本写下的包装都能剥离。
+const LEGACY_STATUSLINE_MARKER: &str = "# herdr-usage v1";
 
-/// herdr 用量回调在包装串里的调用片段；各平台从它后面取厂商名。
-pub(crate) const USAGE_REPORT_INVOCATION: &str = "api usage-report";
+/// 旧包装里 herdr 回调的调用片段；各平台从它后面取厂商名。
+const LEGACY_STATUSLINE_INVOCATION: &str = "api usage-report";
 
-/// herdr 写下的 Windows 包装串前缀（`-EncodedCommand` 形态）。POSIX 平台上遇到它说明 settings
-/// 是从 Windows 同步来的：按「无法识别的 herdr 回调」处理，而不是当成自定义渲染器再包一层。
-pub(crate) const POWERSHELL_ENCODED_COMMAND_PREFIX: &str =
+/// 旧版 herdr 写下的 Windows 包装串前缀（`-EncodedCommand` 形态）。POSIX 平台上遇到它说明
+/// settings 是从 Windows 同步来的：按「无法识别的旧包装」处理，原样保留。
+const LEGACY_POWERSHELL_PREFIX: &str =
     "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ";
 
-/// 文本（包装串或其解码后的脚本）是否带 herdr 包装的特征：标记行、herdr 的 Windows 编码前缀，
-/// 或回调调用与 `HERDR_ENV` / `HERDR_BIN_PATH` 环境判定同时出现。用户按文档手写的
-/// `herdr api usage-report --agent <agent>` 没有这些特征，按自定义渲染器处理（启用时接在
-/// 管道末端、解除时不动）。带特征却剥不出包装的命令才是「无法识别的 herdr 回调」。
-pub(crate) fn looks_like_usage_wrapper(text: &str) -> bool {
-    text.starts_with(USAGE_STATUSLINE_MARKER)
-        || text.starts_with(POWERSHELL_ENCODED_COMMAND_PREFIX)
-        || (text.contains(USAGE_REPORT_INVOCATION)
+/// 文本（包装串或其解码后的脚本）是否带旧 herdr 包装的特征：标记行、herdr 的 Windows 编码
+/// 前缀，或回调调用与 `HERDR_ENV` / `HERDR_BIN_PATH` 环境判定同时出现。用户手写的
+/// `herdr api usage-report --agent <agent>` 没有这些特征，按自定义渲染器处理（原样保留）。
+/// 带特征却剥不出包装的命令才是「无法识别的旧包装」。
+fn looks_like_legacy_statusline_wrapper(text: &str) -> bool {
+    text.starts_with(LEGACY_STATUSLINE_MARKER)
+        || text.starts_with(LEGACY_POWERSHELL_PREFIX)
+        || (text.contains(LEGACY_STATUSLINE_INVOCATION)
             && (text.contains(crate::HERDR_ENV_VAR) || text.contains("HERDR_BIN_PATH")))
 }
 
-/// `unrecognized_usage_statusline_error` 的说明（按调用进程的界面语言取，文档终审 D7）；调用方
-/// 与测试按它识别这类错误。
-pub(crate) fn unrecognized_usage_statusline_message() -> &'static str {
-    crate::i18n::texts().usage_probe.statusline_unrecognized
-}
-
-/// 命令含 `api usage-report` 却不是本平台可识别的 herdr 包装（其它平台或更早版本的形态、
-/// 手工改过的包装、别的厂商的回调）时的错误：调用方据此提示手动清理，不再盲目再包一层或
-/// 静默放过。
-pub(crate) fn unrecognized_usage_statusline_error() -> std::io::Error {
+/// 命令带旧 herdr 包装特征、却不是本平台可识别的形态（其它平台或更早版本的形态、手工改过的
+/// 包装、别的厂商的回调）：调用方原样保留并记日志，不盲目改写。
+fn unrecognized_legacy_statusline_error() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
-        unrecognized_usage_statusline_message(),
+        "statusLine looks like a legacy herdr usage wrapper this version cannot unwrap",
     )
 }
 
 /// 从包装串（或其解码后的脚本）里取出 `api usage-report --agent <agent>` 的厂商名；`None`
 /// 表示不含 herdr 回调调用。厂商名到空白或 shell / PowerShell 分隔符为止，各平台共用。
-pub(crate) fn usage_statusline_agent(text: &str) -> Option<&str> {
+fn legacy_statusline_agent(text: &str) -> Option<&str> {
     let rest = text
-        .split_once(USAGE_REPORT_INVOCATION)?
+        .split_once(LEGACY_STATUSLINE_INVOCATION)?
         .1
         .strip_prefix(" --agent ")?;
     let end = rest
@@ -76,44 +69,6 @@ pub(crate) fn usage_statusline_agent(text: &str) -> Option<&str> {
         .unwrap_or(rest.len());
     let agent = &rest[..end];
     (!agent.is_empty()).then_some(agent)
-}
-
-/// 用量探测子进程的退出形态。平台差异（Unix 的信号终止、Windows 只有退出码）在
-/// `usage_probe_exit` 里收敛，核心模块只看两个事实：正常退出的退出码，或终止它的信号。
-/// 被信号终止（OOM、外部 kill、崩溃）不是 CLI 的结论，调用方应归为可重试的瞬时错误。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct UsageProbeExit {
-    /// 正常退出时的退出码；被信号终止时为 `None`。
-    pub code: Option<i32>,
-    /// 终止信号编号（仅 Unix 有意义）；正常退出时为 `None`。
-    pub signal: Option<i32>,
-}
-
-impl UsageProbeExit {
-    /// 退出码 0 才算成功；被信号终止不算。
-    pub(crate) fn success(self) -> bool {
-        self.code == Some(0)
-    }
-
-    /// 由 `std::process::ExitStatus` 换算：非 Linux 平台的 `try_wait` 路径共用（Linux 用
-    /// `waitid` 的 siginfo 直接构造）。
-    #[cfg(not(target_os = "linux"))]
-    pub(crate) fn from_status(status: std::process::ExitStatus) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(signal) = status.signal() {
-                return Self {
-                    code: None,
-                    signal: Some(signal),
-                };
-            }
-        }
-        Self {
-            code: status.code(),
-            signal: None,
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -387,10 +342,10 @@ pub(crate) fn configure_background_command(command: &mut std::process::Command) 
     configure_background_command_platform(command);
 }
 
-/// Ordered directories that may hold the agent CLI `command` (integration and account usage
-/// availability, usage probes). Every platform searches the process `PATH` first; Windows adds
-/// the current registry `PATH` and known per-user install locations, because a long-running
-/// server keeps the `PATH` it started with (`windows/command_search.rs`).
+/// Ordered directories that may hold the agent CLI `command` (integration availability). Every
+/// platform searches the process `PATH` first; Windows adds the current registry `PATH` and
+/// known per-user install locations, because a long-running server keeps the `PATH` it started
+/// with (`windows/command_search.rs`).
 pub(crate) fn command_search_dirs(command: &str) -> Vec<std::path::PathBuf> {
     #[cfg(test)]
     if let Some(paths) = crate::config::test_dirs::search_path() {
@@ -408,22 +363,9 @@ pub(crate) fn command_file_candidates(
     command_file_candidates_platform(dir, command)
 }
 
-/// First candidate across [`command_search_dirs`] that `accept` takes, in search order: the
-/// executable to start for `command`.
-pub(crate) fn find_command(
-    command: &str,
-    accept: impl Fn(&std::path::Path) -> bool,
-) -> Option<std::path::PathBuf> {
-    command_search_dirs(command).into_iter().find_map(|dir| {
-        command_file_candidates(&dir, command)
-            .into_iter()
-            .find(|path| accept(path))
-    })
-}
-
-/// Whether `command` is installed: a candidate [`find_command`] would start, or, as the last
-/// resort and for availability only, a platform fallback name that cannot be started directly
-/// (Windows: an extensionless shell shim).
+/// Whether `command` is installed: a candidate in [`command_search_dirs`] that `accept` takes,
+/// or, as the last resort and for availability only, a platform fallback name that cannot be
+/// started directly (Windows: an extensionless shell shim).
 pub(crate) fn command_installed(command: &str, accept: impl Fn(&std::path::Path) -> bool) -> bool {
     let dirs = command_search_dirs(command);
     dirs.iter().any(|dir| {
@@ -434,21 +376,6 @@ pub(crate) fn command_installed(command: &str, accept: impl Fn(&std::path::Path)
         .iter()
         .filter_map(|dir| command_availability_fallback_platform(dir, command))
         .any(|path| accept(&path))
-}
-
-/// Program and leading arguments that start a resolved CLI executable (Windows runs PowerShell
-/// shims through `powershell.exe -File`).
-pub(crate) fn cli_invocation(
-    executable: &std::path::Path,
-) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
-    cli_invocation_platform(executable)
-}
-
-/// `PATH` for CLIs the server starts on the user's behalf (usage probes): Windows adds the
-/// current registry `PATH` entries the long-running server lacks, so interpreters installed
-/// after it started resolve; `None` keeps the inherited `PATH`.
-pub(crate) fn cli_child_path() -> Option<std::ffi::OsString> {
-    cli_child_path_platform()
 }
 
 #[cfg(not(windows))]
@@ -471,18 +398,6 @@ fn command_availability_fallback_platform(
     _dir: &std::path::Path,
     _command: &str,
 ) -> Option<std::path::PathBuf> {
-    None
-}
-
-#[cfg(not(windows))]
-fn cli_invocation_platform(
-    executable: &std::path::Path,
-) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
-    (executable.as_os_str().to_os_string(), Vec::new())
-}
-
-#[cfg(not(windows))]
-fn cli_child_path_platform() -> Option<std::ffi::OsString> {
     None
 }
 
@@ -758,9 +673,9 @@ pub(crate) mod unix_image_files;
 pub(crate) use unix_common::remote_bridge_endpoint_path_under;
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    begin_cli_output, default_known_hosts_path, detach_stdout, end_cli_output,
-    forward_remote_bridge_stdio, ignore_server_hangup, local_stream_peer_description,
-    peek_unix_stream, spawn_server_signal_monitor, ssh_auth_sock_path_is_live, RemoteBridgeWake,
+    begin_cli_output, default_known_hosts_path, end_cli_output, forward_remote_bridge_stdio,
+    ignore_server_hangup, local_stream_peer_description, peek_unix_stream,
+    spawn_server_signal_monitor, ssh_auth_sock_path_is_live, RemoteBridgeWake,
 };
 
 /// Windows 的 SSH agent 是命名管道（Win32-OpenSSH 服务），不走文件系统 socket 路径；
@@ -788,12 +703,6 @@ pub(crate) fn begin_cli_output() {}
 
 #[cfg(not(unix))]
 pub(crate) fn end_cli_output() {}
-
-/// 没有 stdout 句柄语义的平台：让不出去，调用方退回到等待上报结束。
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn detach_stdout() -> std::io::Result<()> {
-    Ok(())
-}
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -1346,66 +1255,66 @@ test "$sid" = "$$"
         );
     }
 
-    /// 厂商名解析是各平台包装串识别的共同判据：到空白或 shell / PowerShell 分隔符为止，
+    /// 厂商名解析是各平台旧包装识别的共同判据：到空白或 shell / PowerShell 分隔符为止，
     /// 没有 `--agent` 或厂商名为空都视为不含回调。
     #[test]
-    fn usage_statusline_agent_stops_at_shell_delimiters() {
+    fn legacy_statusline_agent_stops_at_shell_delimiters() {
         assert_eq!(
-            usage_statusline_agent(
+            legacy_statusline_agent(
                 "exec \"$HERDR_BIN_PATH\" api usage-report --agent claude --passthrough; else"
             ),
             Some("claude")
         );
         assert_eq!(
-            usage_statusline_agent(
+            legacy_statusline_agent(
                 "\"$HERDR_BIN_PATH\" api usage-report --agent antigravity; else :; fi)"
             ),
             Some("antigravity")
         );
         assert_eq!(
-            usage_statusline_agent("& $env:HERDR_BIN_PATH api usage-report --agent claude}else{}"),
+            legacy_statusline_agent("& $env:HERDR_BIN_PATH api usage-report --agent claude}else{}"),
             Some("claude")
         );
         assert_eq!(
-            usage_statusline_agent("herdr api usage-report --agent codex"),
+            legacy_statusline_agent("herdr api usage-report --agent codex"),
             Some("codex")
         );
         assert_eq!(
-            usage_statusline_agent("herdr api usage-report --passthrough"),
+            legacy_statusline_agent("herdr api usage-report --passthrough"),
             None
         );
         assert_eq!(
-            usage_statusline_agent("herdr api usage-report --agent "),
+            legacy_statusline_agent("herdr api usage-report --agent "),
             None
         );
-        assert_eq!(usage_statusline_agent("python custom.py"), None);
+        assert_eq!(legacy_statusline_agent("python custom.py"), None);
     }
 
     #[test]
-    fn usage_wrapper_features_distinguish_herdr_wrappers_from_hand_written_commands() {
-        assert!(looks_like_usage_wrapper(
+    fn legacy_wrapper_features_distinguish_herdr_wrappers_from_hand_written_commands() {
+        assert!(looks_like_legacy_statusline_wrapper(
             "# herdr-usage v1\n(if true; then :; fi)"
         ));
-        assert!(looks_like_usage_wrapper(
+        assert!(looks_like_legacy_statusline_wrapper(
             "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand AAAA"
         ));
-        assert!(looks_like_usage_wrapper(
+        assert!(looks_like_legacy_statusline_wrapper(
             "(if [ \"${HERDR_ENV:-}\" = 1 ]; then \"$HERDR_BIN_PATH\" api usage-report --agent claude; fi)"
         ));
-        assert!(looks_like_usage_wrapper(
+        assert!(looks_like_legacy_statusline_wrapper(
             "if($env:HERDR_ENV -eq '1'){& $env:HERDR_BIN_PATH api usage-report --agent claude}"
         ));
-        // 文档推荐的手写集成：不是 herdr 写下的包装，按自定义渲染器处理。
-        assert!(!looks_like_usage_wrapper(
+        // 用户手写的命令：不是 herdr 写下的包装，按自定义渲染器处理。
+        assert!(!looks_like_legacy_statusline_wrapper(
             "herdr api usage-report --agent claude"
         ));
-        assert!(!looks_like_usage_wrapper(
+        assert!(!looks_like_legacy_statusline_wrapper(
             "cat | herdr api usage-report --agent claude --passthrough | bash status.sh"
         ));
-        assert!(!looks_like_usage_wrapper(
+        assert!(!looks_like_legacy_statusline_wrapper(
             "powershell.exe -NoLogo -EncodedCommand AAAA api usage-report --agent claude"
         ));
-        assert!(!looks_like_usage_wrapper("python custom.py"));
-        assert!(!looks_like_usage_wrapper(""));
+        assert!(!looks_like_legacy_statusline_wrapper("python custom.py"));
+        assert!(!looks_like_legacy_statusline_wrapper(""));
     }
 }

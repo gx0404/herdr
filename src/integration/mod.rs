@@ -7,17 +7,12 @@ mod config_edit;
 mod config_file;
 mod env;
 mod file_ops;
+mod legacy_statusline;
 mod opencode_config;
 mod registry;
 mod targets;
 mod types;
-mod usage;
 mod version;
-pub(crate) use usage::configure as configure_usage;
-pub(crate) use usage::settings_path as usage_settings_path;
-pub(crate) use usage::statusline_enabled as usage_statusline_enabled;
-pub(crate) use usage::supports_extension_push as usage_supports_extension_push;
-pub(crate) use usage::supports_statusline as usage_supports_statusline;
 
 pub(crate) use actions::{install_target, uninstall_target};
 #[cfg(test)]
@@ -25,13 +20,16 @@ pub(crate) use actions::{CODEX_HOOKS_DISABLED_HINT, CODEX_HOOKS_REVIEW_HINTS};
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
 pub(crate) use env::{
-    apply_pane_base_env, claude_dir, claude_state_file, codex_dir, kimi_dir, opencode_data_dir,
-    HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
+    apply_pane_base_env, HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
 };
+#[cfg(test)]
+pub(crate) use env::{claude_dir, codex_dir, kimi_dir};
+#[cfg(test)]
+pub(crate) use registry::integration_target_available;
 pub(crate) use registry::{
-    codex_layout_binary_path, command_available, command_path_candidates, executable_file_exists,
-    installed_integration_statuses, integration_recommendations, integration_target_available,
-    integration_target_label, print_outdated_update_notice, retired_integration_error,
+    command_path_candidates, executable_file_exists, installed_integration_statuses,
+    integration_recommendations, integration_target_label, print_outdated_update_notice,
+    retired_integration_error,
 };
 pub(crate) use types::{
     IntegrationRecommendation, IntegrationStatus, IntegrationStatusKind, IntegrationStatusNote,
@@ -39,7 +37,7 @@ pub(crate) use types::{
 
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
-const PI_INTEGRATION_VERSION: u32 = 10;
+const PI_INTEGRATION_VERSION: u32 = 11;
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -50,7 +48,7 @@ const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/claude/herdr-agent-state.sh")
 };
-const CLAUDE_INTEGRATION_VERSION: u32 = 11;
+const CLAUDE_INTEGRATION_VERSION: u32 = 12;
 const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {

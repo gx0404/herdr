@@ -14,7 +14,6 @@ pub(crate) enum ClientShellKeybindingSource {
 
 pub(crate) struct ClientShellConfig {
     pub(super) monitor: crate::config::MonitorConfig,
-    pub(super) account_usage: crate::config::AccountUsageConfig,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_min_width: u16,
     pub(super) sidebar_max_width: u16,
@@ -933,8 +932,6 @@ pub(super) enum ClientContextMenuAction {
     FocusAgent,
     ViewAgentActivity,
     RenameAgent,
-    ShowAgentUsage,
-    BindAgentAccount,
     CloseAgentPane,
 }
 
@@ -972,8 +969,6 @@ pub(super) enum ClientContextMenuTarget {
     Agent {
         endpoint_id: ClientEndpointId,
         pane_id: String,
-        /// 识别出的 agent 名；`None` 时不提供用量 / 绑定账号。
-        agent: Option<String>,
         has_activity: bool,
         /// 打开菜单时这个窗格能否从这里重命名：当前端点，或在线且宣告了
         /// `pane.rename` 的其它端点。否则「重命名窗格」置灰。
@@ -2723,7 +2718,6 @@ impl ClientShellState {
             .chain(self.selection_repaint_deadline)
             .chain(self.chrome_feedback_deadline())
             .chain(self.preferences_flush_deadline())
-            .chain(self.observability.hover_deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

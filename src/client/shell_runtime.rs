@@ -20,8 +20,7 @@ pub(super) fn dispatch_client_shell_actions(
                 coalesce,
             } => {
                 if let Some(connection) = endpoints.connection(&endpoint_id).filter(|connection| {
-                    crate::api::api_method_name(&request.method).starts_with("account.")
-                        || crate::api::api_method_name(&request.method).starts_with("system.")
+                    crate::api::api_method_name(&request.method).starts_with("system.")
                         || (endpoints.active_id() == &endpoint_id
                             && (endpoints.active_surface_available()
                                 // The coherent target is visible before its input fence opens.

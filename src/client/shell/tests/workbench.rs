@@ -89,7 +89,6 @@ fn compact_projection_preserves_dock_tree_and_every_size_is_safe() {
     let mut state = ready();
     assert!(state.workbench.enabled);
     state.workbench_open(PanelId::Monitor);
-    state.workbench_open(PanelId::Accounts);
     let layout = state.workbench.dock.clone();
     for (cols, rows) in [(1, 1), (12, 4), (28, 10), (80, 24), (160, 50)] {
         let frame = state.compose(cols, rows).expect("窄屏也可组合");
@@ -99,175 +98,7 @@ fn compact_projection_preserves_dock_tree_and_every_size_is_safe() {
 }
 
 #[test]
-fn account_hover_remains_visible_over_a_focused_monitor_panel() {
-    use crate::client::shell::observability::{Hover, HoverTarget, Page};
-    let mut state = ready();
-    state.workbench_open(PanelId::Monitor);
-    state.compose(120, 40).expect("监控面板");
-    let page = state.observability.page_rect;
-    assert!(!page.is_empty(), "用例前提：监控面板已画出");
-    // 悬浮层按 kit 定位从锚点下方左对齐展开：锚点放在监控面板左上角，卡片
-    // 必然与面板重叠。
-    state.observability.hover = Some(Hover {
-        target: HoverTarget::Agent {
-            endpoint_id: state.active_endpoint_id.clone(),
-            pane: "pane_1".into(),
-            agent: "claude".into(),
-        },
-        anchor: Rect::new(page.x, page.y, 24, 1),
-        since: std::time::Instant::now(),
-        visible: true,
-        leave_at: None,
-        pinned: false,
-    });
-    state.compose(120, 40).expect("监控与悬浮层可同时显示");
-    // 聚焦的监控面板拥有键盘并画出用户选中的 tab（默认系统页）；渲染期不改写。
-    assert_eq!(state.observability.monitor_tab, Page::Monitor);
-    assert_eq!(
-        state.observability.page,
-        Some(state.observability.monitor_tab)
-    );
-    assert!(!state.observability.page_rect.is_empty());
-    assert!(!state.observability.hover_rect.is_empty());
-    assert!(state.observability.hits.iter().any(|(rect, action)| {
-        matches!(
-            action,
-            crate::client::shell::observability::Action::Page(Page::Accounts)
-        ) && state
-            .observability
-            .hover_rect
-            .contains((rect.x, rect.y).into())
-    }));
-    let overlap = state
-        .observability
-        .hover_rect
-        .intersection(state.observability.page_rect);
-    assert!(!overlap.is_empty());
-    state.observability.hover.as_mut().unwrap().leave_at = Some(std::time::Instant::now());
-    let mut outcome = ClientShellInput::default();
-    state.handle_mouse(
-        MouseEvent {
-            kind: MouseEventKind::Moved,
-            column: overlap.x,
-            row: overlap.y,
-            modifiers: KeyModifiers::NONE,
-        },
-        &mut outcome,
-    );
-    assert!(state
-        .observability
-        .hover
-        .as_ref()
-        .unwrap()
-        .leave_at
-        .is_none());
-}
-
-#[test]
-fn hover_blank_space_and_wheel_cannot_reach_background_processes_or_cards() {
-    use crate::client::shell::observability::{Action, Hover, HoverTarget};
-    let mut state = ready();
-    state.set_endpoint_methods(Some(vec![
-        "client.views.set".into(),
-        "system.process.get".into(),
-    ]));
-    // 悬浮层滚动按悬浮层作用域上一帧画出的上界夹取（冒烟 N5）：数据注入
-    // hover_scope 而非页面，且三张账号卡（各 6 个指标）合起来高过卡片上限，滚轮
-    // 才滚得动（单张卡在悬浮层里按视口封顶，一张卡滚不动）。
-    state.observability.hover_scope.accounts = (0..3)
-        .map(|account| crate::api::schema::AccountUsageSnapshot {
-            account_id: format!("claude:{account}"),
-            metrics: (0..6)
-                .map(|index| crate::api::schema::UsageMetric {
-                    label: format!("metric-{index:02}"),
-                    scope: "account".into(),
-                    used_percent: Some(50.0),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        })
-        .collect();
-    state.workbench_open(PanelId::Monitor);
-    state.observability.hover = Some(Hover {
-        target: HoverTarget::Agent {
-            endpoint_id: state.active_endpoint_id.clone(),
-            pane: "pane_1".into(),
-            agent: "claude".into(),
-        },
-        anchor: Rect::new(0, 20, 24, 2),
-        since: std::time::Instant::now(),
-        visible: true,
-        leave_at: None,
-        pinned: false,
-    });
-    state.compose(120, 40).unwrap();
-    let hover = state.observability.hover_rect;
-    let blank = Rect::new(hover.x + 3, hover.y + 3, 1, 1);
-    assert!(!state
-        .observability
-        .hover_hits
-        .iter()
-        .any(|(rect, _)| rect.intersects(blank)));
-    state
-        .observability
-        .hits
-        .push((blank, Action::Card("processes".into())));
-    state
-        .observability
-        .hits
-        .push((blank, Action::Process(Default::default())));
-    let mut outcome = ClientShellInput::default();
-    for kind in [
-        MouseEventKind::Down(MouseButton::Left),
-        MouseEventKind::ScrollDown,
-    ] {
-        state.handle_mouse(
-            MouseEvent {
-                kind,
-                column: blank.x,
-                row: blank.y,
-                modifiers: KeyModifiers::NONE,
-            },
-            &mut outcome,
-        );
-    }
-    assert!(outcome.actions.is_empty(), "浮层空白不能请求底层进程详情");
-    assert!(state.observability.card_scroll.is_empty());
-    // 悬浮层滚轮写悬浮层自己的滚动位置，页面的 account_scroll 不动。
-    assert_eq!(state.observability.hover_scope.scroll, 1);
-    assert_eq!(state.observability.account_scroll, 0);
-}
-
-#[test]
-fn dashboard_can_scroll_to_quota_windows_below_the_viewport() {
-    let mut state = ready();
-    state.workbench_open(PanelId::Accounts);
-    state.workbench.dock.maximized = Some(PanelId::Accounts);
-    state.observability.accounts = vec![crate::api::schema::AccountUsageSnapshot {
-        account_label: "account".into(),
-        // 仪表盘每指标一行（额度条内联），30 个指标才会超出 24 行的视口。
-        metrics: (0..30)
-            .map(|index| crate::api::schema::UsageMetric {
-                label: format!("metric-{index:02}"),
-                scope: "account".into(),
-                used_percent: Some(50.0),
-                ..Default::default()
-            })
-            .collect(),
-        ..Default::default()
-    }];
-    let before = state.compose(120, 24).unwrap();
-    assert!(!frame_rows(&before).join("\n").contains("metric-29"));
-    for _ in 0..12 {
-        state.handle_input_bytes(b"\x1b[6~");
-    }
-    let after = state.compose(120, 24).unwrap();
-    assert!(frame_rows(&after).join("\n").contains("metric-29"));
-}
-
-#[test]
-fn captured_dock_drag_finishes_even_when_released_inside_hover_bounds() {
+fn captured_dock_drag_finishes_before_the_next_menu_click() {
     let mut state = ready();
     state.compose(120, 40).unwrap();
     let mut outcome = ClientShellInput::default();
@@ -281,8 +112,6 @@ fn captured_dock_drag_finishes_even_when_released_inside_hover_bounds() {
         mouse(MouseEventKind::Down(MouseButton::Left), 2, 1),
         &mut outcome,
     );
-    // 模拟拖动期间浮层已占据落点，已有捕获必须仍能收到释放事件。
-    state.observability.hover_rect = Rect::new(60, 8, 30, 20);
     state.handle_mouse(
         mouse(MouseEventKind::Drag(MouseButton::Left), 61, 10),
         &mut outcome,
@@ -291,7 +120,6 @@ fn captured_dock_drag_finishes_even_when_released_inside_hover_bounds() {
         mouse(MouseEventKind::Up(MouseButton::Left), 61, 10),
         &mut outcome,
     );
-    state.observability.hover_rect = Rect::default();
     state.compose(120, 40).unwrap();
     state.handle_mouse(
         mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
@@ -446,7 +274,6 @@ fn workbench_drop_preview_border_follows_the_border_style() {
 fn process_dialog_blocks_background_panels_and_page_shortcuts() {
     use crate::client::shell::observability::{Action, Page, ProcessDialog};
     let mut state = ready();
-    state.workbench_open(PanelId::Accounts);
     state.workbench_open(PanelId::Monitor);
     state.observability.process_dialog = Some(ProcessDialog {
         process: Default::default(),
@@ -939,94 +766,6 @@ fn focusing_another_workspace_swaps_the_primary_terminal_strip() {
     assert!(
         !state.hits.tabs.iter().any(|(_, id)| id == "tab_1"),
         "另一工作区的标签不再出现在终端条"
-    );
-}
-
-fn frame_text(frame: &crate::protocol::FrameData) -> String {
-    frame
-        .cells
-        .chunks(frame.width as usize)
-        .map(|row| {
-            row.iter()
-                .map(|cell| cell.symbol.as_str())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn usage_provider(
-    agent: &str,
-    label: &str,
-    installed: Option<bool>,
-    configured_accounts: Vec<String>,
-) -> crate::api::schema::UsageProviderInfo {
-    crate::api::schema::UsageProviderInfo {
-        agent: agent.into(),
-        label: label.into(),
-        source_url: "https://example.com".into(),
-        method: "usage".into(),
-        account_scope: "account".into(),
-        minimum_interval_seconds: 300,
-        configured_accounts,
-        installed,
-        supports_callback: false,
-    }
-}
-
-#[test]
-fn accounts_page_lists_only_installed_or_configured_providers() {
-    use crate::client::shell::observability::Page;
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-    state.set_snapshot(Box::new(snapshot()));
-    state.set_pane_surface(surface());
-    // 经典布局下账号页铺满整个 pane 区：工具栏 chip 行（≥60 列）列出每个厂商。
-    state.observability.page = Some(Page::Accounts);
-    state.observability.providers = vec![
-        usage_provider("codex", "Codex", Some(true), Vec::new()),
-        usage_provider("kimi", "Kimi Code", Some(false), Vec::new()),
-        usage_provider("grok", "Grok", Some(false), vec!["grok-main".into()]),
-        usage_provider("letta", "Letta", None, Vec::new()),
-    ];
-    let frame = state.compose(120, 40).expect("账号页");
-    let text = frame_text(&frame);
-    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    assert!(
-        compact.contains("Codex"),
-        "installed provider listed: {text}"
-    );
-    assert!(
-        compact.contains("Grok"),
-        "explicitly configured account keeps the provider listed: {text}"
-    );
-    assert!(
-        compact.contains("Letta"),
-        "unknown availability (older server) stays listed: {text}"
-    );
-    assert!(
-        !compact.contains("Kimi"),
-        "missing CLI without configured accounts is hidden: {text}"
-    );
-    let chips = state
-        .observability
-        .hits
-        .iter()
-        .filter_map(|(_, action)| match action {
-            crate::client::shell::observability::Action::Provider(agent) => Some(agent.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        chips,
-        vec!["codex", "grok", "letta"],
-        "chip 行按厂商顺序给出选中动作，隐藏的厂商没有 chip"
-    );
-    assert!(
-        state.observability.hits.iter().any(|(_, action)| matches!(
-            action,
-            crate::client::shell::observability::Action::Overview
-        )),
-        "首个 chip「全部厂商」回到总览"
     );
 }
 

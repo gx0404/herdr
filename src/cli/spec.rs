@@ -260,13 +260,6 @@ fn api_command() -> Command {
     let t = &crate::i18n::texts().cli_help;
     Command::new("api")
         .about(t.api_about)
-        .subcommand(
-            Command::new("usage-report")
-                .about(t.api_usage_report_about)
-                .arg(option("agent", "AGENT").help(t.api_usage_report_agent_help))
-                .arg(option("account", "ID").help(t.api_usage_report_account_help))
-                .arg(flag("passthrough").help(t.api_usage_report_passthrough_help)),
-        )
         .subcommand(Command::new("snapshot").about(t.api_snapshot_about))
         .subcommand(
             Command::new("activity-read")
@@ -1502,50 +1495,6 @@ mod tests {
             errors.machine_label_ambiguous_fmt,
         ] {
             assert!(text.contains(name) && !text.contains("标签"), "{text}");
-        }
-    }
-
-    /// 文档终审 D7：`herdr api usage-report --help` 的说明曾是写死的中文。
-    #[test]
-    fn api_usage_report_help_follows_the_cli_language() {
-        use crate::i18n::{has_cjk, lang_guard, texts, Lang};
-        for (lang, chinese) in [(Lang::En, false), (Lang::ZhCn, true)] {
-            let _guard = lang_guard(lang);
-            let mut help = Vec::new();
-            super::write_requested_help(
-                &[
-                    "herdr".to_string(),
-                    "api".to_string(),
-                    "usage-report".to_string(),
-                    "--help".to_string(),
-                ],
-                &mut help,
-                || {},
-            )
-            .unwrap();
-            let help = String::from_utf8(help).unwrap();
-            let about = help.lines().next().unwrap_or_default();
-            assert!(!about.is_empty(), "{help}");
-            assert_eq!(has_cjk(about), chinese, "{lang:?}: {help}");
-            if !chinese {
-                assert!(help.is_ascii(), "{help}");
-            }
-            // T1 服务端审查轻 4：三个选项都带说明，按界面语言写。
-            let t = &texts().cli_help;
-            for (option, text) in [
-                ("--agent", t.api_usage_report_agent_help),
-                ("--account", t.api_usage_report_account_help),
-                ("--passthrough", t.api_usage_report_passthrough_help),
-            ] {
-                assert!(
-                    help.lines()
-                        .any(|line| line.trim_start().starts_with(option)),
-                    "{option} 不在帮助里：{help}"
-                );
-                let head: String = text.chars().take(8).collect();
-                assert!(help.contains(&head), "{lang:?} {option}: {help}");
-                assert_eq!(has_cjk(text), chinese, "{lang:?}: {text}");
-            }
         }
     }
 

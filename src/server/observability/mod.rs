@@ -1,7 +1,5 @@
 //! server 拥有的后台观测服务。请求、采集及订阅不占用终端焦点通道。
 
-mod accounts;
-pub(crate) use accounts::run_probe_helper;
 mod gpu;
 mod system;
 
@@ -24,8 +22,33 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 pub(crate) fn is_background_method(method: &Method) -> bool {
-    let name = crate::api::api_method_name(method);
-    name.starts_with("system.") || name.starts_with("account.")
+    crate::api::api_method_name(method).starts_with("system.")
+}
+
+/// 已移除的账号用量功能在 `<state_dir>/account-usage/` 留下的绑定与探测目录：server 启动时
+/// 尽力删除，只删这一个目录；不存在即已清理，其它错误只记日志。
+pub(crate) fn remove_retired_usage_state_dir() {
+    remove_retired_usage_state_dir_in(&crate::config::state_dir());
+}
+
+fn remove_retired_usage_state_dir_in(state_dir: &std::path::Path) {
+    let dir = state_dir.join("account-usage");
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => tracing::info!(
+            event = "observation.retired_state.removed",
+            subsystem = "observability",
+            path = %dir.display(),
+            "已删除退役用量功能遗留的状态目录"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            event = "observation.retired_state.remove_failed",
+            subsystem = "observability",
+            %error,
+            path = %dir.display(),
+            "删除退役用量功能遗留的状态目录失败"
+        ),
+    }
 }
 
 #[derive(Clone)]
@@ -190,7 +213,6 @@ struct Subscription {
 pub(crate) struct Runtime {
     system: mpsc::SyncSender<SystemJob>,
     processes: system::ProcessWorker,
-    accounts: accounts::Service,
 }
 
 impl Runtime {
@@ -365,7 +387,6 @@ impl Runtime {
         Ok(Self {
             system: sender,
             processes,
-            accounts: accounts::Service::start()?,
         })
     }
 
@@ -379,30 +400,25 @@ impl Runtime {
             self.processes.submit(request, reply);
             return;
         }
-        if crate::api::api_method_name(&request.method).starts_with("account.") {
-            self.accounts.submit(request, reply);
-        } else {
-            let id = request.id.clone();
-            if let Err(error) = self
-                .system
-                .try_send(SystemJob::Request(Box::new(RequestJob {
-                    request,
-                    reply: reply.clone(),
-                })))
-            {
-                let texts = &crate::i18n::texts().runtime;
-                let message = match error {
-                    mpsc::TrySendError::Full(_) => texts.monitor_busy,
-                    mpsc::TrySendError::Disconnected(_) => texts.monitor_unavailable,
-                };
-                reply.response(&id, Err(("server_busy", message.into())));
-            }
+        let id = request.id.clone();
+        if let Err(error) = self
+            .system
+            .try_send(SystemJob::Request(Box::new(RequestJob {
+                request,
+                reply: reply.clone(),
+            })))
+        {
+            let texts = &crate::i18n::texts().runtime;
+            let message = match error {
+                mpsc::TrySendError::Full(_) => texts.monitor_busy,
+                mpsc::TrySendError::Disconnected(_) => texts.monitor_unavailable,
+            };
+            reply.response(&id, Err(("server_busy", message.into())));
         }
     }
 
     pub(crate) fn release(&self, client_id: u64) {
         let _ = self.system.try_send(SystemJob::Release(client_id));
-        self.accounts.release(client_id);
     }
 }
 
@@ -467,6 +483,28 @@ fn aggregate_demand<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 退役用量功能的状态目录：只删 `account-usage` 这一个目录（含其中的文件与子目录），
+    /// 同级其它状态不动；目录不存在时是无害的空操作。
+    #[test]
+    fn retired_usage_state_dir_is_removed_without_touching_siblings() {
+        let root = crate::config::test_dirs::TempDir::new("retired-usage-state");
+        let state = root.path();
+        let retired = state.join("account-usage");
+        std::fs::create_dir_all(retired.join("probe").join("claude-default")).unwrap();
+        std::fs::write(retired.join("abc.json"), b"{}").unwrap();
+        let sibling = state.join("codex-shims");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(state.join("account-usage.json"), b"{}").unwrap();
+
+        remove_retired_usage_state_dir_in(state);
+        assert!(!retired.exists());
+        assert!(sibling.is_dir(), "同级目录不受影响");
+        assert!(state.join("account-usage.json").is_file(), "只删同名目录");
+
+        remove_retired_usage_state_dir_in(state);
+        assert!(!retired.exists());
+    }
 
     /// 无订阅、无近期需求时阻塞到下一个请求，不再每 100 ms 醒一次；有需求时按采样节拍返回。
     #[test]
@@ -616,18 +654,12 @@ mod tests {
             active: None,
             latest: None,
         };
-        let event = ObservationEventEnvelope::AccountUsageUpdated(AccountUsageUpdatedEvent {
-            accounts: vec![AccountUsageSnapshot {
-                account_id: "claude:default".into(),
-                ..Default::default()
-            }],
-            refresh: None,
-        });
+        let event = metrics_event(5);
         assert!(reply.event(&event));
         let text = receiver.try_recv().unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["event"], "account.usage.updated");
-        assert_eq!(value["data"]["accounts"][0]["account_id"], "claude:default");
+        assert_eq!(value["event"], "system.metrics.updated");
+        assert_eq!(value["data"]["snapshot"]["sequence"], 5);
         assert_eq!(value.as_object().map(|object| object.len()), Some(2));
 
         // 有 latest 槽的流式订阅：只保留最后一帧，不经 sender。

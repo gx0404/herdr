@@ -884,6 +884,53 @@ fn install_claude_writes_hook_and_updates_settings() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// 已移除的用量功能留在 statusLine 里的 herdr 包装：重装集成时还原原渲染命令，其余设置不动；
+/// 卸载同样剥离独立回调。
+#[cfg(any(unix, windows))]
+#[test]
+fn install_and_uninstall_claude_strip_the_legacy_statusline_wrapper() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    let wrapped =
+        crate::platform::marked_legacy_statusline_wrapper("claude", "bash ~/.claude/status.sh");
+    fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::json!({
+            "permissions": {"allow": ["Read"]},
+            "statusLine": {"type": "command", "command": wrapped, "padding": 0},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let _home = override_home_dir(&home);
+
+    let installed = install_claude().unwrap();
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+    assert_eq!(
+        settings["statusLine"],
+        serde_json::json!({"type": "command", "padding": 0, "command": "bash ~/.claude/status.sh"})
+    );
+    assert!(settings["permissions"]["allow"].is_array());
+    assert!(settings["hooks"]["SessionStart"].is_array(), "钩子照常安装");
+
+    let standalone = crate::platform::marked_legacy_statusline_wrapper("claude", "");
+    let mut settings = settings;
+    settings["statusLine"] = serde_json::json!({"type": "command", "command": standalone});
+    fs::write(&installed.settings_path, settings.to_string()).unwrap();
+    let removed = uninstall_claude().unwrap();
+    assert!(removed.updated_settings);
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+    assert!(settings.get("statusLine").is_none(), "{settings}");
+    assert!(settings["permissions"]["allow"].is_array());
+
+    let _ = fs::remove_dir_all(base);
+}
+
 #[test]
 fn install_claude_uses_claude_config_dir_env() {
     let _lock = integration_env_lock();

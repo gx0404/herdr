@@ -95,12 +95,8 @@ pub(crate) fn monitor_environment() -> String {
     }
 }
 
-pub(crate) fn configure_usage_probe_command(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-}
-
-pub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {
+/// 终止短命辅助子进程（如 codex `--help` 探测）：调用方已让它独占进程组，整组一起结束。
+pub(crate) fn terminate_helper_process(child: &mut std::process::Child) {
     if child.id() > 1 {
         unsafe {
             libc::kill(-(child.id() as i32), libc::SIGKILL);
@@ -110,57 +106,13 @@ pub(crate) fn terminate_usage_probe(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-pub(crate) struct UsageProbeGuard;
-impl UsageProbeGuard {
+/// 辅助子进程的监管：Linux 靠私有进程组回收，守卫本身不持有资源。
+pub(crate) struct HelperProcessGuard;
+impl HelperProcessGuard {
     pub(crate) fn new(_child: &std::process::Child) -> io::Result<Self> {
         Ok(Self)
     }
     pub(crate) fn terminate(&mut self) {}
-}
-
-/// 非阻塞地观察探测子进程是否结束；结束时给出退出码或终止信号（`CLD_KILLED` /
-/// `CLD_DUMPED` 的 `si_status` 是信号编号）。
-pub(crate) fn usage_probe_exit(
-    child: &mut std::process::Child,
-) -> io::Result<Option<crate::platform::UsageProbeExit>> {
-    // 保留组长的僵尸记录，清理进程组前不能回收并复用其 PID。
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    if unsafe {
-        libc::waitid(
-            libc::P_PID,
-            child.id(),
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe { info.si_pid() } == 0 {
-        return Ok(None);
-    }
-    let status = unsafe { info.si_status() };
-    Ok(Some(if info.si_code == libc::CLD_EXITED {
-        crate::platform::UsageProbeExit {
-            code: Some(status),
-            signal: None,
-        }
-    } else {
-        crate::platform::UsageProbeExit {
-            code: None,
-            signal: Some(status),
-        }
-    }))
-}
-
-pub(crate) fn terminate_usage_pty(child: &mut dyn portable_pty::Child) {
-    if let Some(pid) = child.process_id().filter(|pid| *pid > 1) {
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 pub(crate) fn process_instance_token(pid: u32) -> io::Result<String> {
@@ -277,74 +229,18 @@ pub(crate) fn terminate_monitored_process(pid: u32, expected: &str, force: bool)
     }
 }
 
-pub(crate) fn usage_probe_needs_job_helper() -> bool {
-    false
-}
-
 pub(crate) fn monitor_cpu_inventory() -> Option<String> {
     std::fs::read_to_string("/sys/devices/system/cpu/online").ok()
 }
 
-/// statusline 包装串是 POSIX sh 形态，与 unix 回退平台共用同一实现。
-pub(crate) use crate::platform::unix_common::{strip_usage_statusline, usage_statusline_pipeline};
+#[cfg(test)]
+pub(crate) use crate::platform::unix_common::marked_legacy_statusline_wrapper;
+/// 旧 statusline 包装是 POSIX sh 形态，与 unix 回退平台共用同一份剥离实现。
+pub(crate) use crate::platform::unix_common::unwrap_legacy_statusline;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn wait_probe_exit(child: &mut std::process::Child) -> crate::platform::UsageProbeExit {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if let Some(exit) = usage_probe_exit(child).unwrap() {
-                let _ = child.wait();
-                return exit;
-            }
-            assert!(std::time::Instant::now() < deadline, "子进程未在期限内退出");
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-
-    #[test]
-    fn usage_probe_exit_distinguishes_exit_codes_from_signals() {
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "exit 3"])
-            .spawn()
-            .unwrap();
-        assert_eq!(
-            wait_probe_exit(&mut child),
-            crate::platform::UsageProbeExit {
-                code: Some(3),
-                signal: None
-            }
-        );
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .unwrap();
-        let exit = wait_probe_exit(&mut child);
-        assert!(exit.success());
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "kill -9 $$"])
-            .spawn()
-            .unwrap();
-        let exit = wait_probe_exit(&mut child);
-        assert_eq!(
-            exit,
-            crate::platform::UsageProbeExit {
-                code: None,
-                signal: Some(libc::SIGKILL)
-            }
-        );
-        assert!(!exit.success(), "被信号终止不算成功");
-        // 未退出的子进程观察为 None，且不回收其记录。
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "sleep 5"])
-            .spawn()
-            .unwrap();
-        assert_eq!(usage_probe_exit(&mut child).unwrap(), None);
-        let _ = child.kill();
-        let _ = child.wait();
-    }
 
     #[test]
     fn current_process_identity_is_stable_and_cannot_be_terminated() {

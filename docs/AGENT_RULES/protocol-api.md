@@ -60,8 +60,8 @@ herdr 正在向 server 拥有的 runtime 协议 + TUI 作为客户端之一迁�
   之前准入，许可贯穿 preparing/worker/待发事件/cursor。关联 request ID 后的完整 JSON body
   最多 64 MiB，超限在首块前变为请求级错误，不承诺回滚已执行操作；保留 body 最多 384 MiB
   不等于总 RSS 上限。相同 active ID 不重复执行或产生第二个 final。
-  两个异步 unsubscribe 另有每连接 1 个小控制身份，小 body 有独立上限；订阅推送仍是原有
-  droppable 语义，不借克隆长期持有一次响应许可。
+  异步的 `system.metrics.unsubscribe` 另有每连接 1 个小控制身份，小 body 有独立上限；
+  订阅推送仍是原有 droppable 语义，不借克隆长期持有一次响应许可。
 - 大响应帧最多 512 KiB，队列 Full 只暂停生产，不能当作控制洪泛而 Abort；为普通 control
   预留 2 MiB 加长度头及 64 个槽，不扩总队列。每次 pump 至多一块，每外层循环合计最多四块，
   render/endpoint credit 分开确认，沿用合并通知和 64 事件预算。只有 final 成功入队才清对应

@@ -73,19 +73,6 @@ pub enum ResponseResult {
         identity: super::ProcessIdentity,
         force: bool,
     },
-    AccountUsageProviders {
-        providers: Vec<super::UsageProviderInfo>,
-    },
-    AccountUsage {
-        accounts: Vec<super::AccountUsageSnapshot>,
-        /// 与 `accounts` 按 `account_id` 对齐的刷新状态；旧 server 省略。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        refresh: Option<Vec<super::UsageRefreshState>>,
-    },
-    AccountBinding {
-        pane_id: String,
-        account_id: String,
-    },
     ObservationSubscription {
         subscription_id: String,
         active: bool,

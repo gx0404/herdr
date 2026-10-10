@@ -104,7 +104,6 @@ pub(super) fn sync_observation_page(
     }
     observability.page = match workbench.dock.focused {
         PanelId::Monitor => Some(observability.monitor_tab),
-        PanelId::Accounts => Some(super::super::observability::Page::Accounts),
         _ => None,
     };
 }
@@ -166,8 +165,8 @@ impl ClientShellState {
         self.focus_workbench_panel(PanelId::Terminal(group.id));
     }
 
-    /// 停靠工作台下 `observability.page` 与 `dock.focused` 同步：监控 / 账号面板
-    /// 聚焦时页面拥有键盘，否则键盘归终端。所有改写 `dock.focused` 的入口在
+    /// 停靠工作台下 `observability.page` 与 `dock.focused` 同步：监控面板聚焦时
+    /// 页面拥有键盘，否则键盘归终端。所有改写 `dock.focused` 的入口在
     /// 输入 / tick 阶段调用，渲染期不再改写。
     pub(in crate::client::shell) fn sync_observation_page_with_focus(&mut self) {
         sync_observation_page(&self.workbench, &mut self.observability);
@@ -217,10 +216,7 @@ impl ClientShellState {
         if !self.workbench.dock.close_panel(&panel) {
             return false;
         }
-        if matches!(panel, PanelId::Monitor | PanelId::Accounts) {
-            // hover 与悬浮层作用域同生共死：统一走 clear_hover，不留残留数据与
-            // 在途请求。
-            self.observability.clear_hover();
+        if panel == PanelId::Monitor {
             self.observability.process_dialog = None;
         }
         self.cancel_frozen_selection();
@@ -359,31 +355,19 @@ impl ClientShellState {
         if mouse.kind == MouseEventKind::Moved {
             // 调整布局页脚可点提示的悬浮（复审轻级 B2）：按上一帧记下的命中区算
             // 下标，变了才重绘；移动事件照常往下传给其它悬浮逻辑。
-            let hovered = (self.workbench.arranging
-                && self.config.feedback.hover_effects
-                && !contains(self.observability.hover_rect, point))
-            .then(|| {
-                self.workbench
-                    .footer_hits
-                    .iter()
-                    .find(|(rect, _)| contains(*rect, point))
-                    .map(|(_, index)| *index)
-            })
-            .flatten();
+            let hovered = (self.workbench.arranging && self.config.feedback.hover_effects)
+                .then(|| {
+                    self.workbench
+                        .footer_hits
+                        .iter()
+                        .find(|(rect, _)| contains(*rect, point))
+                        .map(|(_, index)| *index)
+                })
+                .flatten();
             if hovered != self.workbench.footer_hover {
                 self.workbench.footer_hover = hovered;
                 outcome.repaint = true;
             }
-        }
-        // 悬浮层内部的事件透传给 observability：不能在这里清 hover，也不能落到
-        // 下方的面板聚焦兜底（那会顺带把监控页 `page` 清空）。
-        if contains(self.observability.hover_rect, point) {
-            return false;
-        }
-        if matches!(mouse.kind, MouseEventKind::Down(_)) {
-            self.observability.clear_hover();
-            self.observability.hover_rect = Rect::default();
-            self.observability.hover_hits.clear();
         }
         if matches!(
             mouse.kind,
@@ -451,14 +435,15 @@ impl ClientShellState {
                     // 焦点上报与偏好持久化由本派发块末尾统一完成。
                     self.close_workbench_panel_state(panel, outcome);
                 }
-                Action::Open(panel) => self.open_observation_page(
+                Action::Open(panel) => {
+                    // 只有监控面板能从这里打开（已退役的账号面板不会再出现）。
                     if panel == PanelId::Monitor {
-                        super::super::observability::Page::Monitor
-                    } else {
-                        super::super::observability::Page::Accounts
-                    },
-                    outcome,
-                ),
+                        self.open_observation_page(
+                            super::super::observability::Page::Monitor,
+                            outcome,
+                        );
+                    }
+                }
                 Action::Arrange => self.workbench.arranging = !self.workbench.arranging,
                 Action::Lock => self.workbench.dock.locked = !self.workbench.dock.locked,
                 Action::Reset => {

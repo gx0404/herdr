@@ -823,95 +823,6 @@ fn success_response_round_trips() {
 }
 
 #[test]
-fn account_usage_response_round_trips_with_optional_refresh_state() {
-    // 旧 server 不带 refresh：字段缺省为 None，快照本体不受影响。
-    let legacy = serde_json::json!({
-        "id": "req_1",
-        "result": {
-            "type": "account_usage",
-            "accounts": [{
-                "account_id": "claude:default",
-                "account_label": "Claude Code",
-                "agent": "claude",
-                "provider": "claude",
-                "auth_mode": "cli",
-                "plan": null,
-                "status": "ready",
-                "source": "官方 CLI 回调",
-                "source_url": "https://example.test",
-                "observed_at_ms": 5,
-                "metrics": [],
-                "message": null
-            }]
-        }
-    });
-    let restored: SuccessResponse = serde_json::from_value(legacy).unwrap();
-    let ResponseResult::AccountUsage { accounts, refresh } = restored.result else {
-        panic!("not an account_usage result");
-    };
-    assert_eq!(accounts.len(), 1);
-    assert_eq!(refresh, None);
-
-    // None 时序列化省略字段；Some 时并行结构随快照往返，可选字段各自缺省。
-    let bare = SuccessResponse {
-        id: "req_2".into(),
-        result: ResponseResult::AccountUsage {
-            accounts: Vec::new(),
-            refresh: None,
-        },
-    };
-    let json = serde_json::to_value(&bare).unwrap();
-    assert!(json["result"].get("refresh").is_none());
-
-    let response = SuccessResponse {
-        id: "req_3".into(),
-        result: ResponseResult::AccountUsage {
-            accounts: vec![AccountUsageSnapshot {
-                account_id: "claude:default".into(),
-                ..Default::default()
-            }],
-            refresh: Some(vec![UsageRefreshState {
-                account_id: "claude:default".into(),
-                in_flight: true,
-                queued: false,
-                requested_at_ms: Some(10),
-                attempted_at_ms: Some(9),
-                next_allowed_at_ms: Some(40_009),
-                retry_after_ms: None,
-                binding_inferred: true,
-                trust_required: false,
-                callback_only: true,
-                pending_binding: Some(UsagePendingBinding {
-                    pane_id: "wT:p9".into(),
-                    agent: "claude".into(),
-                    candidates: vec!["claude:work".into(), "claude:home".into()],
-                    rejected_at_ms: 7,
-                }),
-                callback_enabled: Some(true),
-            }]),
-        },
-    };
-    let json = serde_json::to_string(&response).unwrap();
-    assert!(!json.contains("retry_after_ms"), "None 字段应省略: {json}");
-    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, response);
-
-    let minimal: UsageRefreshState =
-        serde_json::from_value(serde_json::json!({"account_id": "x"})).unwrap();
-    assert_eq!(
-        minimal,
-        UsageRefreshState {
-            account_id: "x".into(),
-            ..Default::default()
-        }
-    );
-    // 旧 server 不带 callback_only：缺省 false 表示「显式刷新可用」，不会误禁用按钮。
-    assert!(!minimal.callback_only);
-    // 旧 server 不带账号级回调态：缺省 None = 未知，客户端仍提供「启用」入口。
-    assert_eq!(minimal.callback_enabled, None);
-}
-
-#[test]
 fn session_snapshot_request_and_response_round_trip() {
     let request = Request {
         id: "req_snapshot".into(),
@@ -1717,31 +1628,6 @@ fn pane_link_resolve_round_trips() {
 
 #[test]
 fn observation_event_envelope_keeps_the_legacy_wire_shape() {
-    let snapshot = AccountUsageSnapshot {
-        account_id: "claude:default".into(),
-        agent: "claude".into(),
-        status: ObservationStatus::Ready,
-        ..Default::default()
-    };
-    let updated = ObservationEventEnvelope::AccountUsageUpdated(AccountUsageUpdatedEvent {
-        accounts: vec![snapshot],
-        refresh: None,
-    });
-    let json = serde_json::to_value(&updated).unwrap();
-    // 顶层只有 event/data 两个键，与类型化之前的裸 JSON 完全一致；data 不带 serde 标签。
-    assert_eq!(json["event"], "account.usage.updated");
-    assert_eq!(json.as_object().map(|object| object.len()), Some(2));
-    assert_eq!(json["data"]["accounts"][0]["account_id"], "claude:default");
-    assert!(json["data"].get("type").is_none());
-    assert!(
-        json["data"].get("refresh").is_none(),
-        "缺省的 refresh 不占键"
-    );
-    assert_eq!(
-        serde_json::from_value::<ObservationEventEnvelope>(json).unwrap(),
-        updated
-    );
-
     let metrics = ObservationEventEnvelope::SystemMetricsUpdated(SystemMetricsUpdatedEvent {
         snapshot: Box::new(SystemMetricsSnapshot {
             sequence: 7,
@@ -1749,48 +1635,23 @@ fn observation_event_envelope_keeps_the_legacy_wire_shape() {
         }),
     });
     let json = serde_json::to_value(&metrics).unwrap();
+    // 顶层只有 event/data 两个键，与类型化之前的裸 JSON 完全一致；data 不带 serde 标签。
     assert_eq!(json["event"], "system.metrics.updated");
+    assert_eq!(json.as_object().map(|object| object.len()), Some(2));
     assert_eq!(json["data"]["snapshot"]["sequence"], 7);
+    assert!(json["data"].get("type").is_none());
     assert_eq!(
         serde_json::from_value::<ObservationEventEnvelope>(json).unwrap(),
         metrics
-    );
-
-    let refreshing =
-        ObservationEventEnvelope::AccountUsageRefreshing(AccountUsageRefreshingEvent {
-            refresh: vec![UsageRefreshState {
-                account_id: "claude:default".into(),
-                in_flight: true,
-                queued: true,
-                ..Default::default()
-            }],
-        });
-    let json = serde_json::to_value(&refreshing).unwrap();
-    assert_eq!(json["event"], "account.usage.refreshing");
-    assert_eq!(json["data"]["refresh"][0]["in_flight"], true);
-    assert!(json["data"].get("accounts").is_none(), "探测开始不带快照");
-    assert_eq!(
-        serde_json::from_value::<ObservationEventEnvelope>(json).unwrap(),
-        refreshing
     );
 }
 
 #[test]
 fn observation_event_kinds_match_envelope_tags() {
-    let cases = [
-        (
-            ObservationEventKind::AccountUsageUpdated,
-            ObservationEventEnvelope::AccountUsageUpdated(AccountUsageUpdatedEvent::default()),
-        ),
-        (
-            ObservationEventKind::AccountUsageRefreshing,
-            ObservationEventEnvelope::AccountUsageRefreshing(AccountUsageRefreshingEvent::default()),
-        ),
-        (
-            ObservationEventKind::SystemMetricsUpdated,
-            ObservationEventEnvelope::SystemMetricsUpdated(SystemMetricsUpdatedEvent::default()),
-        ),
-    ];
+    let cases = [(
+        ObservationEventKind::SystemMetricsUpdated,
+        ObservationEventEnvelope::SystemMetricsUpdated(SystemMetricsUpdatedEvent::default()),
+    )];
     for (kind, envelope) in cases {
         let json = serde_json::to_value(&envelope).unwrap();
         assert_eq!(json["event"], kind.dot_name(), "{kind:?} 的 event 标签");
@@ -1807,7 +1668,7 @@ fn observation_event_kinds_match_envelope_tags() {
     }
     // 未知种类回落为 Unknown，客户端据此忽略新 server 的事件。
     assert_eq!(
-        serde_json::from_str::<ObservationEventKind>(r#""account.usage.future""#).unwrap(),
+        serde_json::from_str::<ObservationEventKind>(r#""system.future""#).unwrap(),
         ObservationEventKind::Unknown
     );
     assert_eq!(ObservationEventKind::Unknown.dot_name(), "unknown");
@@ -1849,14 +1710,7 @@ fn protocol_schema_registers_observation_events() {
         .iter()
         .map(|branch| branch["properties"]["event"]["const"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        tags,
-        [
-            "account.usage.updated",
-            "account.usage.refreshing",
-            "system.metrics.updated",
-        ]
-    );
+    assert_eq!(tags, ["system.metrics.updated"]);
     // 每个分支都要求 event 与 data 同时存在，data 引用类型化负载。
     for branch in entry["oneOf"].as_array().unwrap() {
         assert_eq!(
@@ -1870,8 +1724,6 @@ fn protocol_schema_registers_observation_events() {
             .is_some_and(|reference| reference.starts_with("#/schemas/observation_event/")));
     }
     let defs = entry["$defs"].as_object().unwrap();
-    assert!(defs.contains_key("AccountUsageSnapshot"));
-    assert!(defs.contains_key("UsageRefreshState"));
     assert!(defs.contains_key("SystemMetricsSnapshot"));
     // Unknown 回落只在解码侧存在：种类枚举单独生成 schema 时也不列出它。
     let kind = serde_json::to_value(schemars::schema_for!(ObservationEventKind)).unwrap();

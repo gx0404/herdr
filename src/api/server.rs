@@ -292,6 +292,40 @@ fn retired_pane_graphics_method_error(line: &str, id: &str) -> Option<ErrorRespo
     })
 }
 
+/// 随账号用量监控一并移除的方法名。它们不再进入 `Method`，旧调用方按名字请求时回明确的
+/// `unknown_method`，而不是笼统的 `invalid_request`。
+const RETIRED_ACCOUNT_METHODS: &[&str] = &[
+    "account.binding.set",
+    "account.usage.get",
+    "account.usage.integration",
+    "account.usage.providers",
+    "account.usage.refresh",
+    "account.usage.report",
+    "account.usage.subscribe",
+    "account.usage.unsubscribe",
+];
+
+fn retired_account_method_error(line: &str, id: &str) -> Option<ErrorResponse> {
+    #[derive(serde::Deserialize)]
+    struct RequestMethod {
+        method: String,
+    }
+
+    let envelope = serde_json::from_str::<RequestMethod>(line).ok()?;
+    let method = envelope.method.as_str();
+    if !RETIRED_ACCOUNT_METHODS.contains(&method) {
+        return None;
+    }
+
+    Some(ErrorResponse {
+        id: id.into(),
+        error: ErrorBody {
+            code: "unknown_method".into(),
+            message: format!("unknown method: {method}; account usage monitoring has been removed"),
+        },
+    })
+}
+
 fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
     crate::ipc::prepare_socket_path(path, |path| {
         format!(
@@ -365,8 +399,9 @@ fn handle_connection_with_stop(
             } else {
                 String::new()
             };
-            let response =
-                retired_pane_graphics_method_error(line, &id).unwrap_or_else(|| ErrorResponse {
+            let response = retired_pane_graphics_method_error(line, &id)
+                .or_else(|| retired_account_method_error(line, &id))
+                .unwrap_or_else(|| ErrorResponse {
                     id,
                     error: ErrorBody {
                         code: "invalid_request".into(),
@@ -389,15 +424,6 @@ fn handle_connection_with_stop(
             Request {
                 id: request_id,
                 method: Method::SystemMetricsSubscribe(params),
-            },
-            api_tx,
-            running,
-        ),
-        Method::AccountUsageSubscribe(params) => stream_observations(
-            stream,
-            Request {
-                id: request_id,
-                method: Method::AccountUsageSubscribe(params),
             },
             api_tx,
             running,
@@ -652,14 +678,6 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::SystemProcessList(_) => "system.process.list",
         Method::SystemProcessGet(_) => "system.process.get",
         Method::SystemProcessTerminate(_) => "system.process.terminate",
-        Method::AccountUsageProviders(_) => "account.usage.providers",
-        Method::AccountUsageGet(_) => "account.usage.get",
-        Method::AccountUsageIntegration(_) => "account.usage.integration",
-        Method::AccountUsageRefresh(_) => "account.usage.refresh",
-        Method::AccountUsageSubscribe(_) => "account.usage.subscribe",
-        Method::AccountUsageUnsubscribe(_) => "account.usage.unsubscribe",
-        Method::AccountUsageReport(_) => "account.usage.report",
-        Method::AccountBindingSet(_) => "account.binding.set",
         Method::ClientViewsSet(_) => "client.views.set",
         Method::Ping(_) => "ping",
         Method::ServerStop(_) => "server.stop",
@@ -1560,12 +1578,12 @@ mod tests {
 
     #[test]
     fn api_response_outcome_keeps_the_error_code_but_never_the_message() {
-        let rejected = r#"{"id":"usage-report","error":{"code":"usage_binding_required","message":"请先在账号用量页面为此窗格绑定对应厂商账号"}}"#;
+        let rejected = r#"{"id":"process-terminate","error":{"code":"process_identity_changed","message":"进程身份已经变化，请刷新进程列表"}}"#;
         let outcome = api_response_details(rejected);
         assert_eq!(outcome.outcome, "error");
         assert_eq!(
             outcome.error_code.as_deref(),
-            Some("usage_binding_required")
+            Some("process_identity_changed")
         );
     }
 
@@ -1602,6 +1620,42 @@ mod tests {
             assert!(response["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains(method)));
+            assert!(response.get("result").is_none(), "{method}");
+            assert!(api_rx.try_recv().is_err(), "{method} reached the app");
+        }
+    }
+
+    /// 随账号用量监控移除的 8 个方法：按名字请求（参数形状任意）都回 `unknown_method` 并
+    /// 说明功能已移除，请求不进入 app，也不升级成流式订阅。
+    #[test]
+    fn retired_account_methods_return_unknown_method_without_reaching_the_app() {
+        assert_eq!(RETIRED_ACCOUNT_METHODS.len(), 8);
+        for method in RETIRED_ACCOUNT_METHODS {
+            let (mut client, server, _path) = local_stream_pair("retired-account");
+            let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+            writeln!(
+                client,
+                "{{\"id\":\"retired\",\"method\":\"{method}\",\"params\":{{\"pane_id\":\"p1\",\"account_id\":\"claude:default\"}}}}"
+            )
+            .unwrap();
+            client.flush().unwrap();
+
+            handle_connection(
+                server,
+                &api_tx,
+                &EventHub::default(),
+                &Arc::new(AtomicBool::new(true)),
+                None,
+            )
+            .unwrap();
+
+            let response = read_line(&mut client);
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["id"], "retired", "{method}");
+            assert_eq!(response["error"]["code"], "unknown_method", "{method}");
+            let message = response["error"]["message"].as_str().unwrap_or_default();
+            assert!(message.contains(method), "{method}: {message}");
+            assert!(message.contains("removed"), "{method}: {message}");
             assert!(response.get("result").is_none(), "{method}");
             assert!(api_rx.try_recv().is_err(), "{method} reached the app");
         }

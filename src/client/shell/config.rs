@@ -135,32 +135,6 @@ impl ClientShellState {
                 .monitor
                 .as_ref()
                 .map(|_| self.observability.monitor.clone()),
-            usage_enabled: self
-                .config
-                .preferences
-                .usage_enabled
-                .map(|_| self.observability.usage.enabled),
-            usage_format: self
-                .config
-                .preferences
-                .usage_format
-                .map(|_| self.observability.usage.format),
-            usage_position: self
-                .config
-                .preferences
-                .usage_position
-                .map(|_| self.observability.usage.position),
-            usage_disabled_providers: self
-                .config
-                .preferences
-                .usage_disabled_providers
-                .as_ref()
-                .map(|_| self.observability.usage.disabled_providers.clone()),
-            usage_hover_delay_ms: self
-                .config
-                .preferences
-                .usage_hover_delay_ms
-                .map(|_| self.observability.usage.hover_delay_ms),
             monitor_tab: self
                 .config
                 .preferences
@@ -267,7 +241,6 @@ impl ClientShellConfig {
         let resolved = crate::app::client_resolved_theme(&theme_runtime, None, host_color_depth);
         Self {
             monitor: config.monitor.clone(),
-            account_usage: config.account_usage.clone(),
             sidebar_width: config.ui.sidebar_width,
             sidebar_min_width: config.ui.sidebar_min_width,
             sidebar_max_width: config.ui.sidebar_max_width,

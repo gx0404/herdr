@@ -29,7 +29,7 @@ pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
 pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
-/// 后台观测事件（账号用量 / 系统指标订阅推送）的可选控制帧；客户端不认识时忽略。
+/// 后台观测事件（系统指标订阅推送）的可选控制帧；客户端不认识时忽略。
 pub const OBSERVATION_EVENT_KIND: &str = "endpoint.observation.v1";
 /// 前台焦点 pane 的 cwd 上送（HOST-INT-02）：server 只在焦点或 cwd 变化时推送，
 /// 客户端据此向宿主终端写 OSC 7。可选控制帧，旧客户端忽略。
@@ -238,30 +238,29 @@ mod tests {
     #[test]
     fn observation_event_frames_flatten_the_envelope_next_to_boot_id() {
         use crate::api::schema::{
-            AccountUsageRefreshingEvent, ObservationEventEnvelope, UsageRefreshState,
+            ObservationEventEnvelope, SystemMetricsSnapshot, SystemMetricsUpdatedEvent,
         };
         let frame = EndpointObservationEvent {
             boot_id: "boot".into(),
-            event: ObservationEventEnvelope::AccountUsageRefreshing(AccountUsageRefreshingEvent {
-                refresh: vec![UsageRefreshState {
-                    account_id: "claude:default".into(),
-                    in_flight: true,
+            event: ObservationEventEnvelope::SystemMetricsUpdated(SystemMetricsUpdatedEvent {
+                snapshot: Box::new(SystemMetricsSnapshot {
+                    sequence: 9,
                     ..Default::default()
-                }],
+                }),
             }),
         };
         let text = serde_json::to_string(&frame).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         // 与 generation 1 之前的裸 JSON 同形：boot_id / event / data 三个顶层键。
         assert_eq!(value["boot_id"], "boot");
-        assert_eq!(value["event"], "account.usage.refreshing");
-        assert_eq!(value["data"]["refresh"][0]["account_id"], "claude:default");
+        assert_eq!(value["event"], "system.metrics.updated");
+        assert_eq!(value["data"]["snapshot"]["sequence"], 9);
         assert_eq!(value.as_object().map(|object| object.len()), Some(3));
         let restored: EndpointObservationEvent = serde_json::from_str(&text).unwrap();
         assert_eq!(restored, frame);
         // 未知事件种类整帧解码失败，客户端按可选控制帧忽略。
         assert!(serde_json::from_str::<EndpointObservationEvent>(
-            r#"{"boot_id":"boot","event":"account.usage.future","data":{}}"#
+            r#"{"boot_id":"boot","event":"system.metrics.future","data":{}}"#
         )
         .is_err());
     }

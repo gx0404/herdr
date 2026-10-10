@@ -120,68 +120,6 @@ fn extensionless_shims_only_count_for_availability() {
 }
 
 #[test]
-fn powershell_shims_start_through_the_script_host() {
-    for shim in [
-        r"C:\Users\me\AppData\Roaming\npm\claude.ps1",
-        r"C:\tools\CLAUDE.PS1",
-    ] {
-        let (program, args) = cli_invocation_platform(Path::new(shim));
-        assert_eq!(program, OsString::from(POWERSHELL_SCRIPT_HOST));
-        assert_eq!(
-            args,
-            POWERSHELL_SCRIPT_ARGS
-                .iter()
-                .map(OsString::from)
-                .chain([OsString::from(shim)])
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(args[args.len() - 2], OsString::from("-File"));
-    }
-    for direct in [
-        r"C:\Users\me\AppData\Roaming\npm\claude.cmd",
-        r"C:\tools\codex.exe",
-    ] {
-        let (program, args) = cli_invocation_platform(Path::new(direct));
-        assert_eq!(program, OsString::from(direct));
-        assert!(args.is_empty(), "{direct} starts directly");
-    }
-}
-
-#[test]
-fn child_path_appends_only_the_registry_entries_the_process_path_lacks() {
-    let environment = CommandSearchEnvironment {
-        process_path: Some(OsString::from(r"C:\Windows\System32;C:\tools")),
-        registry_path: vec![
-            // Another spelling (case, trailing backslash) of a process entry, a relative entry.
-            OsString::from(r"c:\windows\system32\;C:\Program Files\nodejs\;relative"),
-            OsString::from(r"C:\Users\me\AppData\Roaming\npm;C:\TOOLS"),
-        ],
-        ..CommandSearchEnvironment::default()
-    };
-    let path = child_path_in(&environment).expect("registry entries are missing");
-    assert_eq!(
-        std::env::split_paths(&path).collect::<Vec<_>>(),
-        [
-            PathBuf::from(r"C:\Windows\System32"),
-            PathBuf::from(r"C:\tools"),
-            PathBuf::from(r"C:\Program Files\nodejs\"),
-            PathBuf::from(r"C:\Users\me\AppData\Roaming\npm"),
-        ]
-    );
-
-    let complete = CommandSearchEnvironment {
-        registry_path: vec![OsString::from(r"C:\WINDOWS\system32\;C:\tools\")],
-        ..environment
-    };
-    assert_eq!(
-        child_path_in(&complete),
-        None,
-        "the inherited PATH stays when nothing is missing"
-    );
-    assert_eq!(child_path_in(&CommandSearchEnvironment::default()), None);
-}
-
-#[test]
 fn expand_environment_strings_substitutes_known_variables_and_keeps_unknown_ones() {
     let mut lookup = |name: &OsStr| match name.to_str() {
         Some("USERPROFILE") => Some(wide(r"C:\Users\me")),

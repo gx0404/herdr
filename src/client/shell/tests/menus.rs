@@ -1492,8 +1492,8 @@ fn narrow_chinese_top_bar_measures_buttons_by_display_width() {
 }
 
 /// 文档终审 D8：命令面板 / 主菜单里「监控」条目括注的页签，与监控面板上的
-/// 页签名一致（系统 · 账号 · 监控偏好）。以前第三个还叫「设置」，而页签早已
-/// 改名「监控偏好 / Monitor preferences」。
+/// 页签名一致（系统 · 监控偏好）。以前第二个还叫「设置」，而页签早已改名
+/// 「监控偏好 / Monitor preferences」。
 #[test]
 fn monitor_menu_entry_names_the_monitor_tabs() {
     for lang in [crate::i18n::Lang::En, crate::i18n::Lang::ZhCn] {
@@ -1507,10 +1507,18 @@ fn monitor_menu_entry_names_the_monitor_tabs() {
             .find(|item| item.id == "observation:monitor")
             .expect("命令面板有「监控」条目");
         let tabs = &crate::i18n::texts().monitor;
-        for tab in [tabs.tab_system, tabs.tab_accounts, tabs.tab_preferences] {
+        for tab in [tabs.tab_system, tabs.tab_preferences] {
             assert!(
                 entry.title.contains(tab),
                 "{lang:?}：「{}」应写出页签「{tab}」",
+                entry.title
+            );
+        }
+        // 账号页已移除：条目不再提它。
+        for retired in ["Accounts", "账号"] {
+            assert!(
+                !entry.title.contains(retired),
+                "{lang:?}：「{}」不应再提「{retired}」",
                 entry.title
             );
         }

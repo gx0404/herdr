@@ -31,17 +31,6 @@ pub(crate) fn claude_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CLAUDE_CONFIG_DIR_ENV_VAR, &[".claude"])
 }
 
-/// Claude Code 的主状态文件（`oauthAccount`、目录信任、启动计数等）：设置
-/// `CLAUDE_CONFIG_DIR` 时位于该目录内，否则是主目录下的 `~/.claude.json`。
-pub(crate) fn claude_state_file() -> io::Result<PathBuf> {
-    if let Some(value) =
-        std::env::var_os(CLAUDE_CONFIG_DIR_ENV_VAR).filter(|value| !value.is_empty())
-    {
-        return expand_tilde_path(PathBuf::from(value)).map(|dir| dir.join(".claude.json"));
-    }
-    Ok(home_dir()?.join(".claude.json"))
-}
-
 pub(crate) fn codex_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(CODEX_HOME_ENV_VAR, &[".codex"])
 }
@@ -87,16 +76,6 @@ pub(crate) fn expand_tilde_path(path: PathBuf) -> io::Result<PathBuf> {
 
 pub(crate) fn opencode_dir() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".config/opencode"))
-}
-
-/// OpenCode 的数据目录（`auth.json` 等登录态）：`XDG_DATA_HOME` 覆盖，否则
-/// `~/.local/share/opencode`。与 `opencode_state_dir` 同一范式。
-pub(crate) fn opencode_data_dir() -> io::Result<PathBuf> {
-    if let Some(value) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-        return expand_tilde_path(PathBuf::from(value)).map(|path| path.join("opencode"));
-    }
-
-    Ok(home_dir()?.join(".local/share/opencode"))
 }
 
 pub(crate) fn opencode_state_dir() -> io::Result<PathBuf> {
@@ -168,49 +147,6 @@ mod tests {
         match original {
             Some(value) => std::env::set_var("XDG_STATE_HOME", value),
             None => std::env::remove_var("XDG_STATE_HOME"),
-        }
-    }
-
-    #[test]
-    fn opencode_data_dir_expands_tilde_in_xdg_data_home() {
-        let _lock = integration_env_lock();
-        let original = std::env::var_os("XDG_DATA_HOME");
-        std::env::set_var("XDG_DATA_HOME", "~/data");
-        assert_eq!(
-            opencode_data_dir().unwrap(),
-            home_dir().unwrap().join("data").join("opencode")
-        );
-        std::env::remove_var("XDG_DATA_HOME");
-        assert_eq!(
-            opencode_data_dir().unwrap(),
-            home_dir().unwrap().join(".local/share/opencode")
-        );
-        match original {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-
-    #[test]
-    fn claude_state_file_follows_the_config_dir_override() {
-        let _lock = integration_env_lock();
-        let original = std::env::var_os(CLAUDE_CONFIG_DIR_ENV_VAR);
-        std::env::set_var(CLAUDE_CONFIG_DIR_ENV_VAR, "~/profiles/work");
-        assert_eq!(
-            claude_state_file().unwrap(),
-            home_dir()
-                .unwrap()
-                .join("profiles/work")
-                .join(".claude.json")
-        );
-        std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
-        assert_eq!(
-            claude_state_file().unwrap(),
-            home_dir().unwrap().join(".claude.json")
-        );
-        match original {
-            Some(value) => std::env::set_var(CLAUDE_CONFIG_DIR_ENV_VAR, value),
-            None => std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR),
         }
     }
 

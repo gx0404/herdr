@@ -65,22 +65,6 @@ pub enum Method {
     SystemProcessGet(ProcessGetParams),
     #[serde(rename = "system.process.terminate")]
     SystemProcessTerminate(ProcessTerminateParams),
-    #[serde(rename = "account.usage.providers")]
-    AccountUsageProviders(EmptyParams),
-    #[serde(rename = "account.usage.get")]
-    AccountUsageGet(UsageParams),
-    #[serde(rename = "account.usage.integration")]
-    AccountUsageIntegration(UsageIntegrationParams),
-    #[serde(rename = "account.usage.refresh")]
-    AccountUsageRefresh(UsageParams),
-    #[serde(rename = "account.usage.subscribe")]
-    AccountUsageSubscribe(UsageParams),
-    #[serde(rename = "account.usage.unsubscribe")]
-    AccountUsageUnsubscribe(ObservationSubscriptionParams),
-    #[serde(rename = "account.usage.report")]
-    AccountUsageReport(UsageReportParams),
-    #[serde(rename = "account.binding.set")]
-    AccountBindingSet(AccountBindingParams),
     #[serde(rename = "client.views.set")]
     ClientViewsSet(ClientViewsSetParams),
     #[serde(rename = "ping")]

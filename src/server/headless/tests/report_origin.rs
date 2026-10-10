@@ -204,22 +204,6 @@ async fn verification_switch_off_accepts_detached_reports() {
 }
 
 #[tokio::test]
-async fn detached_usage_is_acknowledged_before_observation_runtime_is_started() {
-    let mut fixture = ReportFixture::new(Some(PANE_ROOT));
-    let method = api::schema::Method::AccountUsageReport(api::schema::UsageReportParams {
-        pane_id: Some(fixture.public_pane_id.clone()),
-        ..Default::default()
-    });
-    assert!(fixture.server.observability.is_none());
-    let response = fixture.request(method, Some(origin(Some(detached()))));
-    assert_eq!(response["result"]["type"], "ok", "{response}");
-    assert!(
-        fixture.server.observability.is_none(),
-        "detached usage must not reach storage or start the observation worker"
-    );
-}
-
-#[tokio::test]
 async fn unknown_pane_keeps_its_error_instead_of_being_silently_dropped() {
     let mut fixture = ReportFixture::new(Some(PANE_ROOT));
     fixture.public_pane_id = "missing:p1".into();

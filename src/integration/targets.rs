@@ -19,6 +19,7 @@ use super::env::{
 use super::file_ops::{
     make_executable, remove_dir_all_if_exists, remove_file_if_exists, remove_legacy_bash_hook_file,
 };
+use super::legacy_statusline::strip_claude_statusline;
 use super::opencode_config::{
     add_cli_plugin, add_tui_plugin, remove_cli_plugin, remove_tui_plugin,
     validate_tui_plugin_config,
@@ -81,6 +82,7 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         "{}".to_string()
     };
     let updated_settings = install_claude_settings(&existing_settings, &settings_path, &hook_path)?;
+    let updated_settings = strip_claude_statusline(&updated_settings, &settings_path);
     remove_legacy_bash_hook_file(&hook_path)?;
 
     if updated_settings != existing_settings {
@@ -290,6 +292,7 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
         let existing_settings = fs::read_to_string(&settings_path)?;
         let new_settings =
             uninstall_claude_settings(&existing_settings, &settings_path, &hook_path)?;
+        let new_settings = strip_claude_statusline(&new_settings, &settings_path);
         updated_settings = new_settings != existing_settings;
         if updated_settings {
             write_config(&settings_path, new_settings)?;

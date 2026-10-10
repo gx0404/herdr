@@ -272,14 +272,6 @@ pub(crate) fn response_text(
 }
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
-    "account.binding.set",
-    "account.usage.get",
-    "account.usage.integration",
-    "account.usage.providers",
-    "account.usage.refresh",
-    "account.usage.report",
-    "account.usage.subscribe",
-    "account.usage.unsubscribe",
     "agent.activity.read",
     "agent.external.list",
     "client.views.set",
@@ -586,7 +578,6 @@ mod tests {
             .keys()
             .filter(|name| {
                 name.starts_with("system.")
-                    || name.starts_with("account.")
                     || name.as_str() == "client.views.set"
                     || name.as_str() == "pane.move"
             })

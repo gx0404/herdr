@@ -9512,13 +9512,12 @@ fn no_handle_internal_event_bypass_in_module() {
     );
 }
 
-/// 文档终审 D7：阅读快照与账号用量请求在服务端被拒时，错误说明按 server 的界面语言给出——
+/// 文档终审 D7：阅读快照请求在服务端被拒时，错误说明按 server 的界面语言给出——
 /// 英文界面不含 CJK，中文界面是中文；错误码不随语言变化。
 #[test]
-fn snapshot_and_observation_rejections_follow_the_interface_language() {
+fn snapshot_rejections_follow_the_interface_language() {
     use crate::api::schema::{
-        Method, Request, TextSnapshotCaptureParams, TextSnapshotReadParams, TextSnapshotTarget,
-        UsageParams,
+        Method, TextSnapshotCaptureParams, TextSnapshotReadParams, TextSnapshotTarget,
     };
     use crate::i18n::{has_cjk, lang_guard, Lang};
     let mut server = test_headless_server();
@@ -9552,26 +9551,5 @@ fn snapshot_and_observation_rejections_follow_the_interface_language() {
             assert_eq!(code, expected);
             assert_eq!(has_cjk(&message), chinese, "{lang:?} {code}: {message}");
         }
-        let (sender, responses) = std::sync::mpsc::channel();
-        server.submit_observation(
-            Request {
-                id: "usage".into(),
-                method: Method::AccountUsageGet(UsageParams {
-                    agent: None,
-                    account_id: None,
-                    pane_id: Some(missing()),
-                }),
-            },
-            crate::server::observability::Reply::Api {
-                sender,
-                active: None,
-                latest: None,
-            },
-        );
-        let response: serde_json::Value =
-            serde_json::from_str(&responses.recv().expect("同步应答")).expect("JSON 应答");
-        assert_eq!(response["error"]["code"], "pane_not_found");
-        let message = response["error"]["message"].as_str().unwrap_or_default();
-        assert_eq!(has_cjk(message), chinese, "{lang:?}: {message}");
     }
 }

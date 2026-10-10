@@ -11,7 +11,7 @@ pub(crate) enum EndpointControlMessage {
     AgentViewProjection(DecodedAgentViewProjection),
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
-    /// 后台观测订阅推送的 `endpoint.observation.v1` 事件（账号用量 / 系统指标）。
+    /// 后台观测订阅推送的 `endpoint.observation.v1` 事件（系统指标）。
     Observation(Box<crate::protocol::endpoint::EndpointObservationEvent>),
     /// 前台焦点 pane 的 cwd 上送（`endpoint.terminal-cwd.v1`），客户端写 OSC 7。
     TerminalCwd(Option<String>),
@@ -222,16 +222,15 @@ mod tests {
     #[test]
     fn observation_events_decode_into_typed_frames_and_unknown_kinds_are_ignored() {
         use crate::api::schema::{
-            AccountUsageRefreshingEvent, ObservationEventEnvelope, UsageRefreshState,
+            ObservationEventEnvelope, SystemMetricsSnapshot, SystemMetricsUpdatedEvent,
         };
         let frame = crate::protocol::endpoint::EndpointObservationEvent {
             boot_id: "boot".into(),
-            event: ObservationEventEnvelope::AccountUsageRefreshing(AccountUsageRefreshingEvent {
-                refresh: vec![UsageRefreshState {
-                    account_id: "claude:default".into(),
-                    in_flight: true,
+            event: ObservationEventEnvelope::SystemMetricsUpdated(SystemMetricsUpdatedEvent {
+                snapshot: Box::new(SystemMetricsSnapshot {
+                    sequence: 4,
                     ..Default::default()
-                }],
+                }),
             }),
         };
         let decoded = decode_endpoint_control(
@@ -245,7 +244,7 @@ mod tests {
         assert_eq!(*decoded, frame);
         // 未来的事件种类与坏载荷都按可选控制忽略，不拒绝端点。
         for data in [
-            r#"{"boot_id":"boot","event":"account.usage.future","data":{}}"#,
+            r#"{"boot_id":"boot","event":"system.metrics.future","data":{}}"#,
             "not json",
         ] {
             assert!(matches!(

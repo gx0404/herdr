@@ -5,7 +5,6 @@ use tracing::warn;
 use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 
 const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
-    "account_usage",
     "advanced",
     "experimental",
     "keys",
@@ -21,6 +20,10 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "update",
     "worktrees",
 ];
+
+/// 已退役的顶层段：旧配置里残留时只给一条非致命的提示并整段忽略，不报成未知段，
+/// 也不让配置回退默认值。
+const RETIRED_TOP_LEVEL_CONFIG_SECTIONS: &[&str] = &["account_usage"];
 
 pub fn app_dir_name() -> &'static str {
     if cfg!(debug_assertions) {
@@ -979,19 +982,8 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut invalid_sections,
         |section| config.monitor = section,
     );
-    load_live_section(
-        table,
-        "account_usage",
-        "account usage config",
-        &mut diagnostics,
-        &mut invalid_sections,
-        |section| config.account_usage = section,
-    );
     diagnostics.extend(config.theme.diagnostics());
-    diagnostics.extend(super::observability::diagnostics(
-        &config.monitor,
-        &config.account_usage,
-    ));
+    diagnostics.extend(super::observability::diagnostics(&config.monitor));
 
     Ok(LoadedConfig {
         config,
@@ -1031,6 +1023,11 @@ fn unknown_top_level_section_diagnostics(
 fn unknown_top_level_section_diagnostic(key: &str, value: &toml::Value) -> Option<String> {
     if KNOWN_TOP_LEVEL_CONFIG_KEYS.contains(&key) {
         return None;
+    }
+    if RETIRED_TOP_LEVEL_CONFIG_SECTIONS.contains(&key) {
+        return Some(format!(
+            "{key} has been removed; this section is ignored and can be deleted"
+        ));
     }
 
     let header = if value.is_table() {
@@ -1863,6 +1860,51 @@ delivery = "system"
         assert_eq!(
             loaded.config.ui.toast.delivery,
             super::super::ToastDelivery::System
+        );
+    }
+
+    /// 旧配置里残留的已退役 `[account_usage]` 段（含子表）：启动与热重载都只给一条
+    /// 「已移除、可删除」的提示，同文件其余设置照常生效，不回退默认、不拒收任何段。
+    const RETIRED_ACCOUNT_USAGE_CONFIG: &str = r#"
+[ui]
+mouse_capture = false
+
+[account_usage]
+enabled = true
+format = "table"
+disabled_providers = ["codex"]
+
+[[account_usage.accounts]]
+id = "work"
+agent = "claude"
+"#;
+
+    fn assert_retired_account_usage_was_only_ignored(loaded: &LoadedConfig) {
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["account_usage has been removed; this section is ignored and can be deleted"]
+        );
+        assert!(loaded.invalid_sections.is_empty(), "{loaded:?}");
+        assert!(!loaded.config.ui.mouse_capture, "同文件其余设置照常生效");
+    }
+
+    #[test]
+    fn startup_config_ignores_retired_account_usage_section_with_one_notice() {
+        let loaded = load_startup_config("retired-account-usage", RETIRED_ACCOUNT_USAGE_CONFIG);
+
+        assert_retired_account_usage_was_only_ignored(&loaded);
+    }
+
+    #[test]
+    fn live_reload_ignores_retired_account_usage_section_with_one_notice() {
+        let loaded = load_live_config_from_str(RETIRED_ACCOUNT_USAGE_CONFIG).unwrap();
+
+        assert_retired_account_usage_was_only_ignored(&loaded);
+        // 形状不对的残留值同样只提示，不报未知键。
+        let loaded = load_live_config_from_str("account_usage = 1\n").unwrap();
+        assert_eq!(
+            loaded.diagnostics,
+            vec!["account_usage has been removed; this section is ignored and can be deleted"]
         );
     }
 

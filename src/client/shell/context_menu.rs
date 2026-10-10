@@ -138,13 +138,12 @@ impl ClientContextMenuOverlay {
             // agent 行的条目由接缝定稿：面板车道只接动作，菜单车道只重写渲染与
             // 键盘导航，都不改条目语义。
             ClientContextMenuTarget::Agent {
-                agent,
                 has_activity,
                 renamable,
                 ..
             } => {
                 let t = &crate::i18n::texts().agent_panel;
-                let mut items = vec![
+                vec![
                     item(t.menu_focus, Action::FocusAgent),
                     ClientContextMenuItem {
                         enabled: *has_activity,
@@ -156,21 +155,8 @@ impl ClientContextMenuOverlay {
                         enabled: *renamable,
                         ..item(t.menu_rename, Action::RenameAgent)
                     },
-                ];
-                // 只有 herdr 能跟踪账号用量的 agent 才列这两项（正向判据，与
-                // 动作处理同一处）：muse 等已退役的 agent 与未知名没有用量可看、
-                // 也不能绑定，列出来点了没反应（文档终审 D13、T1 审查轻 1）。
-                if agent
-                    .as_deref()
-                    .is_some_and(super::observability::is_bindable_agent)
-                {
-                    // 「用量」打开并钉住该 agent 的用量悬停卡
-                    // （`ClientShellState::pin_agent_usage_card`）。
-                    items.push(item(t.menu_usage, Action::ShowAgentUsage));
-                    items.push(item(t.menu_bind_account, Action::BindAgentAccount));
-                }
-                items.push(item(t.menu_close, Action::CloseAgentPane));
-                items
+                    item(t.menu_close, Action::CloseAgentPane),
+                ]
             }
             ClientContextMenuTarget::ExternalAgent { .. } => vec![item(
                 crate::i18n::texts().agent_panel.menu_view_activity,

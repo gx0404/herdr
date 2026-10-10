@@ -1,5 +1,5 @@
 //! 设计系统原语：`gauge`、`meter_row`、`braille_chart`、`card`、`tabs`、
-//! `form_field`、`tree`、`menu`、`hover_card`、`footer_hints`、`empty_state`、
+//! `form_field`、`tree`、`menu`、`footer_hints`、`empty_state`、
 //! `table` 各占一个子模块（`src/ui/kit/<name>.rs`）。
 //!
 //! 统一约定：自由函数；**只画不改状态**；可交互原语返回命中矩形，由调用方写进
@@ -27,7 +27,6 @@ pub(crate) mod empty_state;
 pub(crate) mod footer_hints;
 pub(crate) mod form_field;
 pub(crate) mod gauge;
-pub(crate) mod hover_card;
 pub(crate) mod menu;
 pub(crate) mod meter_row;
 pub(crate) mod table;

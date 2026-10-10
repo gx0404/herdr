@@ -45,7 +45,7 @@
           "key": "server.verify_report_process",
           "type": "boolean",
           "default": "true",
-          "description": "Check process origins for bundled pane reports (source starts with herdr:) and all pane-bound account.usage.report requests. Accept the target pane's process tree, or a tmux/screen server ancestor paired heuristically with a same-kind client in that tree. Account-level usage without pane_id is unchanged. Reports from processes that inherited a pane's environment but run outside it, such as an agent's background sessions or daemons, are answered as successful and ignored. Reports whose origin cannot be determined are accepted. Set false to accept all reports. Config reloads apply changes."
+          "description": "Check process origins for bundled pane reports (source starts with herdr:). Accept the target pane's process tree, or a tmux/screen server ancestor paired heuristically with a same-kind client in that tree. Reports from processes that inherited a pane's environment but run outside it, such as an agent's background sessions or daemons, are answered as successful and ignored. Reports whose origin cannot be determined are accepted. Set false to accept all reports. Config reloads apply changes."
         }
       ]
     },
@@ -1591,75 +1591,6 @@
           "type": "boolean",
           "default": "false",
           "description": "Resource alerts while a TUI is connected. See monitoring for the monitor.alerts array."
-        }
-      ]
-    },
-    {
-      "id": "account_usage",
-      "title": "Provider account usage",
-      "keys": [
-        {
-          "key": "account_usage.enabled",
-          "type": "boolean",
-          "default": "true",
-          "description": "Enable account usage queries and display. Changes made in Monitor → Settings are saved as a client preference that overrides this key on that machine until \"Restore config file values\" is used."
-        },
-        {
-          "key": "account_usage.format",
-          "type": "string",
-          "default": "\"dashboard\"",
-          "description": "Dashboard gauges or a usage table. Changes made in Monitor → Settings are saved as a client preference that overrides this key on that machine.",
-          "values": [
-            "dashboard",
-            "table"
-          ]
-        },
-        {
-          "key": "account_usage.position",
-          "type": "string",
-          "default": "\"hover\"",
-          "description": "Hover popover, account page, or both. Changes made in Monitor → Settings are saved as a client preference that overrides this key on that machine.",
-          "values": [
-            "hover",
-            "page",
-            "both"
-          ]
-        },
-        {
-          "key": "account_usage.hover_delay_ms",
-          "type": "integer",
-          "default": "400",
-          "description": "Hover delay, clamped to 200–2000 ms. Changes made in Monitor → Settings are saved as a client preference that overrides this key on that machine."
-        },
-        {
-          "key": "account_usage.api_refresh_seconds",
-          "type": "integer",
-          "default": "60",
-          "description": "Minimum API refresh interval, at least 60 seconds."
-        },
-        {
-          "key": "account_usage.cli_refresh_seconds",
-          "type": "integer",
-          "default": "300",
-          "description": "Minimum isolated CLI refresh interval, at least 300 seconds."
-        },
-        {
-          "key": "account_usage.probe_timeout_seconds",
-          "type": "integer",
-          "default": "20",
-          "description": "Total query deadline, clamped to 5–30 seconds."
-        },
-        {
-          "key": "account_usage.interactive_probe",
-          "type": "boolean",
-          "default": "false",
-          "description": "Allow the isolated interactive CLI probe (typing /usage in a hidden PTY) on explicit refresh; Claude runs it in a stable probe directory that you must trust once in the CLI. Off by default: it reuses the real login state and can rotate credentials; automatic polling never opens a PTY. Independent of this switch, Claude's non-interactive `claude auth status --json` precheck stays on, reads the real login store read-only and backs off on the slow terminal schedule while waiting for the callback."
-        },
-        {
-          "key": "account_usage.disabled_providers",
-          "type": "array",
-          "default": "[]",
-          "description": "Agent IDs the server never probes: the server-side baseline for every client. Providers turned off in Monitor → Settings are saved as a client preference layered on top: that client stops requesting and displaying them, but the server may still refresh them while that client's overview subscription is active — use this key to stop probing entirely. \"Restore config file values\" drops the override. See monitoring for the account_usage.accounts array."
         }
       ]
     }

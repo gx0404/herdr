@@ -121,7 +121,6 @@ impl EndpointCommands {
         let lanes = if name.starts_with("pane.text_snapshot.") {
             &mut self.reading
         } else if name.starts_with("system.")
-            || name.starts_with("account.")
             || name == "client.views.set"
             // 「Agent 活动」窗口跟随时每秒读取，server 在后台线程作答；走后台泳道，
             // 慢读取（opencode / zcode 走外部 CLI）不堵用户动作泳道。
@@ -1365,7 +1364,7 @@ mod tests {
     #[test]
     fn workspace_fence_preserves_independent_work_and_rejects_stale_navigation() {
         use crate::api::schema::{
-            AgentActivityReadParams, EmptyParams, Method, PaneSendTextParams, SystemMetricsParams,
+            AgentActivityReadParams, Method, PaneSendTextParams, SystemMetricsParams,
             TextSnapshotTarget, WorkspaceTarget,
         };
         use crate::client::endpoint::{EndpointNegotiation, EndpointTransport, ProfileId};
@@ -1436,10 +1435,6 @@ mod tests {
                 (
                     "activity",
                     Method::AgentActivityRead(AgentActivityReadParams::default()),
-                ),
-                (
-                    "account",
-                    Method::AccountUsageProviders(EmptyParams::default()),
                 ),
                 (
                     "system",

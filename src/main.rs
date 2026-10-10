@@ -547,30 +547,6 @@ card_height = 10
 hidden_devices = []
 alerts_enabled = false
 
-# Account references belong to the server running the corresponding agent.
-# Store only environment variable names in credential_env, never the credential.
-# Changes made in Monitor -> Settings are saved as client preferences and
-# override enabled / format / position / hover_delay_ms / disabled_providers on
-# this machine; "Restore config file values" there drops those overrides.
-[account_usage]
-enabled = true
-format = "dashboard"
-position = "hover"
-hover_delay_ms = 400
-api_refresh_seconds = 60
-cli_refresh_seconds = 300
-probe_timeout_seconds = 20
-# Interactive CLI probe (typing /usage in a hidden PTY) reuses the real login
-# state and may rotate credentials; off by default, explicit refresh only.
-# Claude's read-only `claude auth status --json` precheck runs regardless.
-interactive_probe = false
-# Providers the server never probes (server-side baseline). Providers turned
-# off in Monitor -> Settings are a client preference layered on top: that
-# client stops requesting and displaying them, but the server may still
-# refresh them while that client's overview subscription is active; use this
-# key to stop probing entirely.
-disabled_providers = []
-
 "##;
 
 // Bundled at build time so the printed skill always matches this binary's release.
@@ -664,27 +640,7 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
-    // statusline 回调（`api usage-report --passthrough`）每次刷新都会跑：不读配置文件做
-    // 语言初始化、不解析远程参数，直接派发，尽快把 stdin 交还给原渲染器。会话参数解析只读
-    // env 与 args（`HERDR_SESSION` 的校验与默认 socket 归属），与完整路径保持一致。
-    if cli::is_usage_report_passthrough(&raw_args) {
-        let args = match session::configure_from_args(&raw_args) {
-            Ok(args) => args,
-            Err(err) => {
-                eprintln!("error: {err}");
-                eprintln!("run 'herdr --help' for usage");
-                std::process::exit(2);
-            }
-        };
-        return finish_cli(cli::maybe_run(&args));
-    }
     i18n::init_early();
-    if raw_args
-        .get(1)
-        .is_some_and(|arg| arg == "--internal-usage-probe")
-    {
-        return server::observability::run_probe_helper();
-    }
     #[cfg(windows)]
     if let Some(result) = platform::maybe_activate_desktop_notification(&raw_args) {
         return result;
@@ -1026,7 +982,7 @@ mod tests {
 
     #[test]
     fn default_config_template_parses_to_config_default() {
-        // 模板里未注释的键（`[monitor]`、`[account_usage]`）必须与代码默认值一致，
+        // 模板里未注释的键（`[monitor]`）必须与代码默认值一致，
         // 否则 `herdr --default-config` 打印出来的文件一落盘就改变行为。`Config` 没有
         // 派生 `PartialEq`（子配置有手写反序列化），所以用 Debug 输出整体比对，
         // 不给整棵配置树加派生。
