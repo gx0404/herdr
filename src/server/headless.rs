@@ -3557,6 +3557,7 @@ impl HeadlessServer {
                     suppress_completion,
                     interrupted_recently: interrupted,
                     failed_latched: failed,
+                    failure_announced: terminal_after.failure_announced(),
                     body: body.as_deref(),
                 });
             let Some(kind) = decision.kind else {

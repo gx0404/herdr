@@ -7,6 +7,8 @@
 //
 // Reports to Herdr over the pane socket, from interactive (TUI) sessions only:
 // - pane.report_agent / pane.report_agent_session: lifecycle and session identity
+// - pane.report_agent_attention: a settled run whose last turn ended with an
+//   error, with the error message
 // - pane.report_agent_activity: extension tool activity, sent as a
 //   `herdr.activity.snapshot` version 1 hint (see "Activity snapshot" below)
 
@@ -830,11 +832,42 @@ async function drainActivityQueue(): Promise<void> {
   }
 }
 
+// Herdr rejects an attention detail over 2000 characters.
+const FAILURE_DETAIL_CHARS = 2_000;
+
+type QueuedFailure = { detail?: string };
+
+function sendFailure(failure: QueuedFailure): Promise<boolean> {
+  return sendRequest({
+    id: `${source}:attention:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    method: "pane.report_agent_attention",
+    params: {
+      pane_id: paneId,
+      source,
+      agent: "pi",
+      kind: "failed",
+      detail: failure.detail,
+      seq: nextReportSeq(),
+    },
+  });
+}
+
 let sendInFlight = false;
 let queuedState: QueuedState | undefined;
+let queuedFailure: QueuedFailure | undefined;
 
 function queueState(state: AgentState, message?: string): void {
   queuedState = { state, message, seq: nextReportSeq() };
+  if (!sendInFlight) {
+    void drainStateQueue();
+  }
+}
+
+// A failure goes out before any queued state: Herdr holds the notice of a
+// failure reported while the agent works and announces it with the next state
+// change, so a failed run is announced once, as a failure.
+function queueFailure(failure: QueuedFailure): void {
+  queuedFailure = failure;
   if (!sendInFlight) {
     void drainStateQueue();
   }
@@ -847,14 +880,20 @@ async function drainStateQueue(): Promise<void> {
 
   sendInFlight = true;
   try {
-    while (queuedState) {
+    while (queuedFailure || queuedState) {
+      if (queuedFailure) {
+        const failure = queuedFailure;
+        queuedFailure = undefined;
+        await sendFailure(failure);
+        continue;
+      }
       const next = queuedState;
       queuedState = undefined;
       await sendState(next.state, next.message, next.seq);
     }
   } finally {
     sendInFlight = false;
-    if (queuedState) {
+    if (queuedFailure || queuedState) {
       void drainStateQueue();
     }
   }
@@ -871,6 +910,9 @@ export default function (pi) {
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let rootSession = false;
+  // The latest turn of the current run ended with an error (provider, network,
+  // authentication). Pi may still retry or continue; the settled run decides.
+  let failedTurn: QueuedFailure | undefined;
 
   const activity = createActivityTracker(pi);
   let activityTimer: ReturnType<typeof setTimeout> | undefined;
@@ -966,15 +1008,33 @@ export default function (pi) {
     }
     updateSessionRef(ctx);
     void reportSession();
+    failedTurn = undefined;
     agentActive = true;
     publishState();
   });
 
-  pi.on("agent_settled", (_event, ctx) => {
+  // Never awaited on the socket: Pi awaits turn_end handlers before it goes on.
+  pi.on("turn_end", (event) => {
+    if (!rootSession || event?.message?.role !== "assistant") {
+      return;
+    }
+    failedTurn =
+      event.message.stopReason === "error"
+        ? { detail: oneLine(event.message.errorMessage, FAILURE_DETAIL_CHARS) }
+        : undefined;
+  });
+
+  pi.on("agent_settled", (event, ctx) => {
     if (!rootSession || ctx?.isIdle?.() !== true) {
       return;
     }
 
+    // An aborted run (Escape) was stopped by the user; it did not fail.
+    const failure = failedTurn;
+    failedTurn = undefined;
+    if (failure && event?.aborted !== true) {
+      queueFailure(failure);
+    }
     agentActive = false;
     publishState();
   });

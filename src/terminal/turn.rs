@@ -45,6 +45,13 @@ pub(crate) struct TurnTracker {
     failed_attention: Option<FailureLatch>,
     /// 已发出的失败通知次数（API 路径按前后差判断本次请求是否锁存了失败）。
     failure_notices: u64,
+    /// 本回合已经发过失败通知。一个失败的回合只通知一次：同一回合里之后再报的失败
+    /// （钩子报过之后会话洞察又读到同一个错误等）不再锁存，之后进入 Idle / Blocked 也不
+    /// 再发「已完成」「需要处理」。进入 Working 开始新回合时清掉，agent 被释放或被别的
+    /// agent 取代时也清掉。
+    failure_announced: bool,
+    /// 那次失败通知所属的 agent（锁存被用户看过、清掉之后仍要知道它属于谁）。
+    announced_agent: Option<String>,
     /// 最近一次只带载荷的 needs_input 上报；状态离开 Blocked 时清掉。
     needs_input: Option<AgentAttention>,
     /// `pane.report_agent_attention` 的逐来源序号。
@@ -76,6 +83,7 @@ impl TurnTracker {
             // 中断与会话错误都只对当前回合有意义；重新开始工作也就不再「失败」。
             self.last_interrupt_input_at = None;
             self.observed_error = None;
+            self.forget_announced_failure();
             self.clear_failure();
         } else if previous == AgentState::Working {
             self.last_turn_ms = self
@@ -130,7 +138,8 @@ impl TurnTracker {
         self.last_completion_interrupted
     }
 
-    /// 锁存一次失败。同一失败重复上报不算变化（也不再通知）。
+    /// 锁存一次失败。同一失败重复上报不算变化（也不再通知）；本回合已经通知过失败时
+    /// 不再锁存。
     pub(crate) fn latch_failure(
         &mut self,
         title: Option<String>,
@@ -138,10 +147,10 @@ impl TurnTracker {
         agent_label: Option<&str>,
         now_ms: u64,
     ) -> bool {
-        if self
-            .failed_attention
-            .as_ref()
-            .is_some_and(|latch| latch.attention.title == title && latch.attention.detail == detail)
+        if self.failure_announced
+            || self.failed_attention.as_ref().is_some_and(|latch| {
+                latch.attention.title == title && latch.attention.detail == detail
+            })
         {
             return false;
         }
@@ -195,6 +204,8 @@ impl TurnTracker {
         };
         latch.notice_pending = false;
         self.failure_notices = self.failure_notices.wrapping_add(1);
+        self.failure_announced = true;
+        self.announced_agent = latch.agent_label.clone();
         true
     }
 
@@ -202,29 +213,46 @@ impl TurnTracker {
         self.failure_notices
     }
 
+    /// 本回合已经发过失败通知（规则见同名字段）。
+    pub(crate) fn failure_announced(&self) -> bool {
+        self.failure_announced
+    }
+
+    fn forget_announced_failure(&mut self) {
+        self.failure_announced = false;
+        self.announced_agent = None;
+    }
+
     /// agent 被释放：与它绑定的待处理事项一并作废。
     pub(crate) fn forget_agent(&mut self) {
         let failure = self.failed_attention.take().is_some();
         let needs_input = self.needs_input.take().is_some();
         self.observed_error = None;
+        self.forget_announced_failure();
         if failure || needs_input {
             self.bump();
         }
     }
 
-    /// 有效 agent 换成了另一个：失败锁存属于原来的 agent 时作废。
+    /// 有效 agent 换成了另一个：失败锁存与「本回合已通知过失败」属于原来的 agent 时作废。
     pub(crate) fn reconcile_agent(&mut self, agent_label: Option<&str>) {
-        let replaced = match (
-            self.failed_attention
-                .as_ref()
-                .and_then(|latch| latch.agent_label.as_deref()),
-            agent_label,
-        ) {
-            (Some(latched), Some(current)) => latched != current,
-            _ => false,
+        let Some(current) = agent_label else {
+            return;
         };
-        if replaced {
+        if self
+            .failed_attention
+            .as_ref()
+            .and_then(|latch| latch.agent_label.as_deref())
+            .is_some_and(|latched| latched != current)
+        {
             self.clear_failure();
+        }
+        if self
+            .announced_agent
+            .as_deref()
+            .is_some_and(|announced| announced != current)
+        {
+            self.forget_announced_failure();
         }
     }
 
@@ -279,7 +307,8 @@ impl TurnTracker {
     /// 会话洞察带来的错误：不在 Working、错误记录自己的时刻不早于本回合开始、本回合还
     /// 没处理过同一错误时锁存失败。没有错误时刻的不锁存——证明不了它属于本回合，更早
     /// 回合留下的错误绝不能算成这一回合的失败；本 server 从没见过这个 agent 工作时也不
-    /// 锁存（启动时读到的旧错误不算失败）。
+    /// 锁存（启动时读到的旧错误不算失败）。集成已经为本回合报过并通知过失败时（钩子
+    /// 先报，会话文件稍后才读到同一个错误）也不再锁存。
     pub(crate) fn observe_error(
         &mut self,
         error: &str,
@@ -381,7 +410,78 @@ mod tests {
             !tracker.observe_error("boom", Some(120), AgentState::Idle, None, 300),
             "同一错误确认后不再锁存"
         );
-        assert!(tracker.observe_error("other", Some(130), AgentState::Idle, None, 300));
+        assert!(
+            !tracker.observe_error("other", Some(130), AgentState::Idle, None, 300),
+            "本回合已经通知过失败"
+        );
+        let now = Instant::now();
+        tracker.on_state_change(AgentState::Idle, AgentState::Working, now, 400);
+        tracker.on_state_change(AgentState::Working, AgentState::Idle, now, 450);
+        assert!(tracker.observe_error("other", Some(420), AgentState::Idle, None, 500));
+    }
+
+    /// 一个失败的回合只通知一次：钩子报的失败通知过之后，会话文件稍后读到的同一个错误、
+    /// 用户看过之后迟到的上报都不再锁存；新的 Working 开始新回合。
+    #[test]
+    fn a_failed_turn_is_announced_once_until_the_next_turn() {
+        let mut tracker = TurnTracker::default();
+        let now = Instant::now();
+        tracker.on_state_change(AgentState::Idle, AgentState::Working, now, 100);
+        assert!(tracker.latch_failure(
+            Some("provider_error".into()),
+            Some("hook".into()),
+            Some("kimi"),
+            150
+        ));
+        assert!(!tracker.take_failure_notice(AgentState::Working));
+        assert!(!tracker.failure_announced(), "还没通知");
+        tracker.on_state_change(AgentState::Working, AgentState::Idle, now, 200);
+        assert!(tracker.take_failure_notice(AgentState::Idle));
+        assert!(tracker.failure_announced());
+
+        assert!(
+            !tracker.observe_error("insight", Some(180), AgentState::Idle, Some("kimi"), 300),
+            "钩子之后会话洞察读到的同一失败"
+        );
+        assert!(!tracker.take_failure_notice(AgentState::Idle));
+        assert_eq!(
+            tracker
+                .attention(AgentState::Idle, None)
+                .and_then(|attention| attention.detail)
+                .as_deref(),
+            Some("hook"),
+            "保留先报的详情"
+        );
+        assert!(tracker.acknowledge());
+        assert!(
+            !tracker.latch_failure(None, Some("late".into()), Some("kimi"), 400),
+            "看过之后迟到的上报不再亮起"
+        );
+        assert_eq!(tracker.attention(AgentState::Idle, None), None);
+        tracker.on_state_change(AgentState::Idle, AgentState::Blocked, now, 450);
+        assert!(tracker.failure_announced(), "进入 Blocked 仍是同一回合");
+
+        tracker.on_state_change(AgentState::Blocked, AgentState::Working, now, 500);
+        assert!(!tracker.failure_announced(), "新回合");
+        assert!(tracker.latch_failure(None, Some("again".into()), Some("kimi"), 550));
+    }
+
+    #[test]
+    fn a_released_or_replaced_agent_does_not_inherit_the_announced_failure() {
+        let mut tracker = TurnTracker::default();
+        tracker.latch_failure(None, Some("x".into()), Some("claude"), 1);
+        assert!(tracker.take_failure_notice(AgentState::Idle));
+        tracker.forget_agent();
+        assert!(!tracker.failure_announced(), "释放");
+
+        tracker.latch_failure(None, Some("y".into()), Some("claude"), 2);
+        assert!(tracker.take_failure_notice(AgentState::Idle));
+        assert!(tracker.acknowledge());
+        tracker.reconcile_agent(None);
+        tracker.reconcile_agent(Some("claude"));
+        assert!(tracker.failure_announced(), "还是同一个 agent");
+        tracker.reconcile_agent(Some("codex"));
+        assert!(!tracker.failure_announced(), "换成别的 agent");
     }
 
     /// 更早回合留下的错误永远不能锁存成当前回合的失败：没有时刻的错误不锁存，早于本

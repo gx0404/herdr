@@ -62,6 +62,8 @@ Herdr 对 Linux/macOS 上的集成配置和所有平台的新文件使用原子�
 | 生命周期权威 | Pi、Kimi Code CLI、OpenCode | 已安装且在为该窗格主动上报时,由钩子或插件事件决定 `idle`、`working` 和 `blocked`。对同一个生命周期权威,Herdr 不再使用屏幕清单兜底。 |
 | 会话身份 | Claude Code、Codex | 集成上报用于恢复的原生会话引用。状态仍来自 Herdr 的屏幕清单检测。在使用 `--no-daemon` 运行时，Codex 也会上报回合状态，屏幕检测仍负责处理可见的阻塞提示。 |
 
+集成还会上报智能体需要你处理的事项的详情（`pane.report_agent_attention`）：等你时的问题或权限请求，以及回合失败的原因。详情从不改变由哪一方决定状态。问题只在窗格处于 `blocked` 时显示，而 Claude Code 和 Codex 仍经屏幕检测进入 `blocked`；失败会一直保留，直到你查看该窗格或智能体重新开始工作。Herdr 如何显示它们见[智能体](/zh-cn/docs/agents/)。Claude Code（集成版本 `12`）上报权限请求、提问和 MCP 输入表单；Codex（`10`）上报审批请求；Kimi Code CLI（`9`）、OpenCode（`14`）和 Pi（`11`）上报失败的回合。从这些版本起，Claude Code、Codex 和 Kimi Code CLI 的 Windows 钩子也会经 `herdr pane report-agent-activity` 发送 macOS 和 Linux 钩子发送的活动信号。
+
 原生会话恢复需要最新的 Herdr 集成: Pi 集成版本 `2`、OMP 版本 `3`、Claude Code 版本 `6`、Codex 版本 `5`、GitHub Copilot CLI 版本 `2`、Devin CLI 版本 `2`、Droid 版本 `2`、Kimi Code CLI 版本 `3`、Qoder CLI 版本 `2`、Qwen Code 版本 `1`、Letta Code 版本 `1`、Cursor Agent CLI 版本 `1`、Grok CLI 版本 `2`、OpenCode 版本 `5`、Kilo Code CLI 版本 `1`、Hermes Agent 版本 `5`、MastraCode 版本 `1`、Antigravity CLI 版本 `1`。用 `herdr integration status` 查看已安装版本。
 
 ## 集成你自己的智能体
@@ -113,6 +115,8 @@ Herdr 把内置扩展写入:
 
 从集成版本 `10` 起,扩展还会在交互式(TUI)会话里上报供 Agent 活动窗口使用的活动树。Pi 本身没有内置的子 agent、待办或后台任务,这些都由扩展提供。每次调用不属于 Pi 内置工具的工具都会成为一个活动项,内容是该工具的流式输出;官方 `subagent` 扩展还会为每个被委派的 agent 加一个子项。这棵树最多保留八个工具调用项(有新项时先丢已结束的)、每项之下最多八个子项,每项的输出只保留最后 2,000 个字符。Pi 不在磁盘上保留这些记录,所以扩展把整棵树发给 Herdr。升级后请重新安装 Pi 集成以启用它。
 
+从集成版本 `11` 起,一次运行结束且其最后一个回合以错误告终时,扩展会在上报 `idle` 之前先上报失败及 Pi 的错误信息,因此 Herdr 把它作为一次失败的运行而不是完成来通知。你用 Escape 停下的运行,或经重试恢复的运行,都不算失败。
+
 ## Claude Code
 
 安装 Claude Code 钩子:
@@ -125,7 +129,9 @@ herdr integration install claude
 
 Claude 集成 v10 仅匹配文档列出的 `SessionStart` 来源: `startup`、`resume`、`clear`、`compact` 和 `fork`。这会阻止导入 Claude 钩子的第三方工具用其他来源值触发导入的 Herdr Claude 钩子,而不会禁用其他 Claude 兼容钩子。升级后请重新安装 Claude 集成,以迁移原有的通配匹配规则。Claude 新增来源值时需要更新集成。
 
-Claude 集成 v11 在 macOS 和 Linux 上还会订阅 `SubagentStart`、`SubagentStop`(matcher 为 `*`)以及 `TaskCreated`、`TaskCompleted`。这些钩子只向本地 Herdr socket 通知 Claude Code 的子 agent 或任务发生了变化,不上报 agent 状态。Windows 上不安装这些钩子。升级后请重新安装 Claude 集成以添加它们。
+Claude 集成 v11 还会订阅 `SubagentStart`、`SubagentStop`(matcher 为 `*`)以及 `TaskCompleted`。这些钩子只向本地 Herdr socket 通知 Claude Code 的子 agent 或任务发生了变化,不上报 agent 状态。v11 只在 macOS 和 Linux 上安装它们,另外还有 `TaskCreated`。从 v12 起 Windows 上也安装这些钩子,由 PowerShell 钩子经 `herdr pane report-agent-activity` 发送;Claude Code 在后台运行它们(`"async": true`),不等它们结束。v12 不再订阅 `TaskCreated`:Claude Code 从 2.1.84 起才有这个事件,更早的 Claude Code 看到 `settings.json` 里有它不认识的钩子事件时会忽略整个文件,连同你自己的设置。更新集成会移除这个条目。升级后请重新安装 Claude 集成以添加它们。
+
+Claude 集成 v12 还会上报等你处理的提示是关于什么的。`PermissionRequest` 钩子上报工具和其输入的一行摘要,例如 `Bash: cargo test`;对 `AskUserQuestion` 则上报问题及其选项。`Notification` 钩子上报 `permission_prompt` 和 `elicitation_dialog` 通知的消息。两者都在后台运行,从不替你回答提示。Claude Code 只在 6 秒没有输入后才发这些通知,而权限通知只写出工具名,所以它不会替换此前 10 分钟内权限请求的详情。详情只是补充窗格显示的内容:Claude Code 的状态仍来自屏幕检测,详情只在窗格处于 `blocked` 时显示。Herdr 不订阅 `StopFailure`(Claude Code 从 2.1.78 起才有),所以 Claude Code 的失败不来自钩子。
 
 Claude Code 后台会话(用 `claude --bg` 启动或由 Claude Code daemon 托管的会话)不向 Herdr 上报。它们继承了启动 daemon 的那个窗格的变量,上报会被显示成那个窗格的 agent。钩子根据 daemon 设置的 `CLAUDE_JOB_DIR` 或 `CLAUDE_CODE_SESSION_KIND=bg` 变量识别后台会话。如仍要上报,在它们的环境中设置 `HERDR_REPORT_BG_SESSIONS=1`。Herdr 会从新窗格的环境中去掉这两个变量,因此即使 Herdr server 是从后台会话中启动的,窗格里的 Claude Code 仍会上报。
 
@@ -133,7 +139,7 @@ Herdr 从 Claude Code 自己的会话文件构建它的活动树。Claude Code �
 
 在 Agent 活动窗口里,Claude Code 子 agent 的输出为每个工具调用附上主要参数,例如 Bash 命令、文件路径或搜索词;每个工具结果显示输出的前五行,其余只标出剩余行数。失败的工具结果标为 `[tool error]`。
 
-Herdr 默认使用 `~/.claude`,设置了 `CLAUDE_CONFIG_DIR` 时使用后者。Claude 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`,并向 `settings.json` 添加 Herdr 钩子条目。卸载会移除匹配的钩子条目并删除钩子脚本。
+Herdr 默认使用 `~/.claude`,设置了 `CLAUDE_CONFIG_DIR` 时使用后者。Claude 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`(Windows 上为 `hooks/herdr-agent-state.ps1`),并向 `settings.json` 添加 Herdr 钩子条目。卸载会移除匹配的钩子条目并删除钩子脚本。
 
 ## Codex
 
@@ -145,7 +151,9 @@ herdr integration install codex
 
 Codex 钩子通过与其他集成相同的本地 socket API 上报会话身份。Codex 的状态来自 Herdr 的屏幕清单检测。
 
-Codex 集成 v9 在 macOS 和 Linux 上还会订阅 `SubagentStart` 和 `SubagentStop`。这些钩子只向本地 Herdr socket 通知 Codex 的子 agent 线程启动或结束,不上报 agent 状态;Herdr 会从 Codex 自己的会话文件重建活动树。Codex 0.157 默认启用钩子。Herdr 仍会显式写入 `[features] hooks = true` 以兼容旧版本；显式设为 false 会禁用钩子。Windows 上不安装这些活动钩子。升级后请重新安装 Codex 集成以添加它们。
+Codex 集成 v9 还会订阅 `SubagentStart` 和 `SubagentStop`。这些钩子只向本地 Herdr socket 通知 Codex 的子 agent 线程启动或结束,不上报 agent 状态;Herdr 会从 Codex 自己的会话文件重建活动树。Codex 0.157 默认启用钩子。Herdr 仍会显式写入 `[features] hooks = true` 以兼容旧版本；显式设为 false 会禁用钩子。从 v10 起 Windows 上也安装这些活动钩子,由 PowerShell 钩子经 `herdr pane report-agent-activity` 发送。升级后请重新安装 Codex 集成以添加它们。
+
+Codex 集成 v10 还会订阅 `PermissionRequest`。Codex 请求审批时,钩子上报工具和一行摘要,例如 `Bash: cargo test` 或某次 `apply_patch` 涉及的文件,Codex 给出理由时一并上报。它从不替你回答审批:Codex 的状态仍来自屏幕检测和回合钩子,详情只在窗格处于 `blocked` 时显示。Codex 会等待它的钩子,所以在 Windows 上每次审批提示以及每次子 agent 启动或结束,都要多等 PowerShell 启动钩子的时间,约半秒。
 
 Codex 子 agent 以「昵称 · 任务名」标注,任务名取 agent 路径的最后一段,例如 `Boyle · herdr_probe`;摘要显示完整的 agent 路径,子 agent 失败或被中断时改为显示原因。没有昵称的子 agent 只显示任务名。
 
@@ -153,7 +161,7 @@ Codex 子 agent 以「昵称 · 任务名」标注,任务名取 agent 路径的�
 
 Codex 只运行你信任过的钩子。安装集成后,或更新改动了钩子后,Codex 下次启动会显示「Hooks need review」。请选「Trust all and continue」,或进入「Review hooks」信任 Herdr 的钩子。如果选「Continue without trusting」,Herdr 的钩子不会运行,Herdr 也拿不到 Codex 的会话身份和活动信号。Codex 还没信任当前的 Herdr 钩子时,`herdr integration install codex` 会输出这条提醒,`herdr integration status` 也会在 Codex 那一行下面附一条提示;你在 Codex 里用 `/hooks` 停用了 Herdr 的钩子时,这两条命令同样会提示。
 
-Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配置目录必须已经存在。安装会写入 `herdr-agent-state.sh`、更新 `hooks.json`,并确保 `config.toml` 中有 `[features] hooks = true`。如果存在已弃用的顶层 `codex_hooks` 标志,它也会一并移除。卸载会从 `hooks.json` 中移除 Herdr 条目并删除钩子脚本,但不改动 `config.toml`。
+Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配置目录必须已经存在。安装会写入 `herdr-agent-state.sh`(Windows 上为 `herdr-agent-state.ps1`)、更新 `hooks.json`,并确保 `config.toml` 中有 `[features] hooks = true`。如果存在已弃用的顶层 `codex_hooks` 标志,它也会一并移除。卸载会从 `hooks.json` 中移除 Herdr 条目并删除钩子脚本,但不改动 `config.toml`。
 
 会话钩子会随会话 ID 转发 Codex 的转录路径,上报后活动发现即可跟随仅在该窗格设置的 `CODEX_HOME`。请在同一配置目录安装集成,并重启 Codex 加载更新后的钩子。恢复仍使用会话 ID。归档布局与有界压缩转录支持见[智能体活动](/zh-cn/socket-api/#智能体活动)。
 
@@ -179,9 +187,11 @@ herdr integration install kimi
 
 集成版本 `8` 还把 Kimi 回合的每种结束方式都映射为 `idle`:回合完成时的 `Stop`、被打断时的 `Interrupt`,以及回合出错(例如 provider 报错或鉴权失败)时的 `StopFailure`。因此出错的回合不会再让窗格一直停在 `working`,直到 Kimi 退出。Herdr 支持的所有 Kimi Code CLI 版本都有 `StopFailure`;升级后请重新安装 Kimi 集成以添加它。
 
-集成版本 `8` 还会从钩子自身的绝对 `KIMI_CODE_HOME`（未设置时用钩子的用户目录）补报会话目录,因此每个窗格的活动树都能跟随自己的配置目录,即使它与服务器不同。若 `SessionStart` 早于会话落盘,后续生命周期和活动事件会重新查找。只有唯一且与会话 ID 匹配的目录才会被接受;恢复仍使用 ID。空值、相对路径、字面量 `~`、重复目录,或超过 256 个工作目录条目的查找会省略路径,保留正常状态上报。Windows 同样补报目录,活动更新仍依靠轮询。请重新安装 Kimi 集成以更新脚本。
+从集成版本 `9` 起,`StopFailure` 还会在窗格回到 `idle` 之前先上报失败及 Kimi 的错误类型和信息,因此 Herdr 把它作为一个失败的回合而不是完成来通知。
 
-Herdr 默认使用 `~/.kimi-code`,设置了 `KIMI_CODE_HOME` 时使用后者。Kimi Code 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`,并在 `config.toml` 中追加 Herdr 管理的 `[[hooks]]` 条目。卸载会移除 Herdr 管理的配置块并删除钩子脚本。
+集成版本 `8` 还会从钩子自身的绝对 `KIMI_CODE_HOME`（未设置时用钩子的用户目录）补报会话目录,因此每个窗格的活动树都能跟随自己的配置目录,即使它与服务器不同。若 `SessionStart` 早于会话落盘,后续生命周期和活动事件会重新查找。只有唯一且与会话 ID 匹配的目录才会被接受;恢复仍使用 ID。空值、相对路径、字面量 `~`、重复目录,或超过 256 个工作目录条目的查找会省略路径,保留正常状态上报。Windows 同样补报目录,并且从版本 `9` 起其钩子也会经 `herdr pane report-agent-activity` 发送活动通知。请重新安装 Kimi 集成以更新脚本。
+
+Herdr 默认使用 `~/.kimi-code`,设置了 `KIMI_CODE_HOME` 时使用后者。Kimi Code 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`(Windows 上为 `hooks/herdr-agent-state.ps1`),并在 `config.toml` 中追加 Herdr 管理的 `[[hooks]]` 条目。卸载会移除 Herdr 管理的配置块并删除钩子脚本。
 
 安装和卸载都会在修改配置或托管钩子文件前校验 TOML 与管理块标记。标记缺失、逆序、嵌套或重复时会拒绝操作,不修改这些文件。TOML 字符串中形似标记的文本不算管理块;无关注释和 LF/CRLF 换行会保留。请先修复或还原损坏的 `config.toml`,再重试。当前安装要求没有 `hooks` 字段,或使用 `[[hooks]]` 表;已有 `hooks = []` 或内联钩子数组会被拒绝,不会自动转换。原文件没有末尾换行时,会补上追加管理块所需的分隔换行,卸载后该换行仍会保留。
 
@@ -210,6 +220,8 @@ V1 TUI 跟踪窗格选中的会话及其后代。只要其中任何会话仍在�
 该插件在 OpenCode 运行于 Herdr 窗格内时上报生命周期状态和会话身份。在 OpenCode 发出携带会话信息的事件后,Herdr 可以用上报的会话 id 通过 `opencode --session <id>` 恢复该窗格。插件未安装时,屏幕清单检测仍然可用。
 
 从集成版本 `13` 起,V1 的服务端插件还会在会话或其待办变化时通知 Herdr,子 agent 会话也一样;V2 的 TUI 插件不发这类通知。这些通知不携带会话内容:活动树由 Herdr 自己经 `opencode db` 只读查得,来自该会话派生的子 agent 会话(各自的消息与工具调用作为内容)以及该会话的待办。最后一条回复以错误告终的子 agent 会话显示为失败,摘要以错误名与说明开头,例如 `APIError: Rate limit exceeded`。OpenCode 并不保存所有错误:配置的模型已不存在时,它只在自己的界面里报错,会话里只留下提示词,所以 Herdr 把这个子 agent 显示为运行中,直到最后一次更新 30 分钟后改为未知。
+
+从集成版本 `14` 起,`opencode run` 和 `opencode --mini` 使用的 V1 服务端插件把会话错误作为失败的回合上报,带上错误名与说明,紧接在结束这一回合的 `idle` 之前,并且不再把错误报成 `blocked`:OpenCode 在错误之后立即把会话设为空闲,没有什么在等你处理。回合能恢复过来的错误(例如 OpenCode 压缩上下文后继续的上下文溢出)和被中止的回合(`MessageAbortedError`)都不算失败。TUI 插件暂不上报失败详情。
 
 ## 已退役的集成
 

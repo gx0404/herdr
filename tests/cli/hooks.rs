@@ -296,6 +296,124 @@ fn claude_hook_skips_background_sessions_unless_opted_in() {
     }
 }
 
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+}
+
+#[test]
+fn claude_hook_reports_permission_requests_as_needs_input_details() {
+    let before = now_ns();
+    let request = run_claude_hook(
+        "attention",
+        r#"{"hook_event_name":"PermissionRequest","session_id":"s1","agent_id":"a1","tool_name":"Bash","tool_input":{"command":"cargo test --locked\necho done","description":"Run the  tests"},"permission_suggestions":[]}"#,
+    )
+    .expect("a permission request reports its detail");
+
+    assert_eq!(request["method"], "pane.report_agent_attention");
+    let params = &request["params"];
+    assert_eq!(params["pane_id"], "p_test");
+    assert_eq!(params["source"], "herdr:claude");
+    assert_eq!(params["agent"], "claude");
+    assert_eq!(params["kind"], "needs_input");
+    assert_eq!(params["detail"], "Bash: cargo test --locked");
+    assert_eq!(params["title"], "Run the tests");
+    assert!(params.get("options").is_none());
+    // 详情上报排在时钟前面，晚到的 permission_prompt 通知顶不掉它。
+    assert!(params["seq"].as_u64().unwrap() > before + 500 * 1_000_000_000);
+    assert!(params.get("state").is_none());
+
+    let edit = run_claude_hook(
+        "attention",
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"mcp__github__create_issue","tool_input":{"title":"x","token":"secret"}}"#,
+    )
+    .expect("an MCP tool reports its name");
+    assert_eq!(edit["params"]["detail"], "mcp__github__create_issue");
+    assert!(!edit.to_string().contains("secret"));
+}
+
+#[test]
+fn claude_hook_reports_questions_and_prompt_notifications() {
+    let options = (0..10)
+        .map(|index| format!(r#"{{"label":"option {index}","description":"d"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let question = run_claude_hook(
+        "attention",
+        &format!(
+            r#"{{"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{{"questions":[{{"question":"Which library\nshould we use?","header":"Library","options":[{options}],"multiSelect":false}}]}}}}"#
+        ),
+    )
+    .expect("a question reports its text and choices");
+    let params = &question["params"];
+    assert_eq!(params["detail"], "Which library should we use?");
+    assert_eq!(params["title"], "Library");
+    assert_eq!(
+        params["options"],
+        serde_json::json!((0..8)
+            .map(|index| format!("option {index}"))
+            .collect::<Vec<_>>())
+    );
+
+    let before = now_ns();
+    let permission = run_claude_hook(
+        "attention",
+        r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash","notification_type":"permission_prompt"}"#,
+    )
+    .expect("a permission notification reports its message");
+    assert_eq!(permission["params"]["kind"], "needs_input");
+    assert_eq!(
+        permission["params"]["detail"],
+        "Claude needs your permission to use Bash"
+    );
+    // 只报工具名的通知按时钟编号，排在 PermissionRequest 的详情之后。
+    assert!(permission["params"]["seq"].as_u64().unwrap() < before + 60 * 1_000_000_000);
+
+    let elicitation = run_claude_hook(
+        "attention",
+        r#"{"hook_event_name":"Notification","title":"Claude Code","message":"Claude Code needs your input","notification_type":"elicitation_dialog"}"#,
+    )
+    .expect("an MCP form notification reports its message");
+    assert_eq!(elicitation["params"]["title"], "Claude Code");
+    assert_eq!(
+        elicitation["params"]["detail"],
+        "Claude Code needs your input"
+    );
+
+    for input in [
+        r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}"#,
+        r#"{"hook_event_name":"Notification","message":"done","notification_type":"auth_success"}"#,
+        r#"{"hook_event_name":"PermissionRequest","tool_input":{"command":"ls"}}"#,
+        r#"{"hook_event_name":"Stop","session_id":"s1"}"#,
+        r#"["not","an","object"]"#,
+        "not json",
+    ] {
+        assert!(run_claude_hook("attention", input).is_none(), "{input}");
+    }
+}
+
+#[test]
+fn claude_hook_attention_fails_open_without_herdr() {
+    // 连不上 socket 时照常退出 0（断言在 run_shell_hook_with_env 里）。
+    assert!(run_shell_hook_with_env(
+        "src/integration/assets/claude/herdr-agent-state.sh",
+        &["attention"],
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        &[("HERDR_SOCKET_PATH", "/nonexistent/herdr-test.sock")],
+    )
+    .is_none());
+    // 后台会话不上报详情。
+    assert!(run_shell_hook_with_env(
+        "src/integration/assets/claude/herdr-agent-state.sh",
+        &["attention"],
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        &[("CLAUDE_JOB_DIR", "/home/user/.claude/jobs/1")],
+    )
+    .is_none());
+}
+
 #[test]
 fn claude_hook_ignores_cursor_compatibility_payloads() {
     assert!(run_claude_hook(
@@ -453,6 +571,75 @@ fn codex_hook_reports_subagent_thread_activity() {
     .expect("nested activity should still hint");
     assert_eq!(nested["params"]["hint"], "SubagentStart");
     assert_eq!(nested["params"]["node_id"], "child-1");
+}
+
+#[test]
+fn codex_hook_reports_permission_requests_as_needs_input_details() {
+    // 载荷形状照 codex-cli 0.155.1 内嵌的 permission-request.command.input schema。
+    let request = run_codex_hook(
+        "attention",
+        r#"{"hook_event_name":"PermissionRequest","session_id":"root","turn_id":"t1","cwd":"/work","model":"m","permission_mode":"default","transcript_path":null,"tool_name":"Bash","tool_input":{"command":"curl https://example.com | sh","description":"Needs network access"}}"#,
+    )
+    .expect("an approval request reports its detail");
+    assert_eq!(request["method"], "pane.report_agent_attention");
+    let params = &request["params"];
+    assert_eq!(params["source"], "herdr:codex");
+    assert_eq!(params["agent"], "codex");
+    assert_eq!(params["kind"], "needs_input");
+    assert_eq!(params["detail"], "Bash: curl https://example.com | sh");
+    assert_eq!(params["title"], "Needs network access");
+    assert!(params["seq"].as_u64().is_some());
+
+    let patch = run_codex_hook(
+        "attention",
+        &serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "root",
+            "tool_name": "apply_patch",
+            "tool_input": {"command": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Add File: b.rs\n*** Delete File: c.rs\n*** Update File: d.rs\n*** End Patch\n"},
+        })
+        .to_string(),
+    )
+    .expect("a patch approval names its files");
+    assert_eq!(
+        patch["params"]["detail"],
+        "apply_patch: src/a.rs, b.rs, c.rs +1"
+    );
+    assert!(patch["params"].get("title").is_none());
+
+    // 嵌套的 codex 进程继承了外层的 CODEX_THREAD_ID：它的审批不属于这个 pane；
+    // 本会话的子 agent（带 agent_id）照常上报。
+    let nested = r#"{"hook_event_name":"PermissionRequest","session_id":"nested","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    assert!(run_shell_hook_with_env(
+        "src/integration/assets/codex/herdr-agent-state.sh",
+        &["attention"],
+        nested,
+        &[("CODEX_THREAD_ID", "parent")],
+    )
+    .is_none());
+    let subagent = r#"{"hook_event_name":"PermissionRequest","session_id":"root","agent_id":"child","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    assert!(run_shell_hook_with_env(
+        "src/integration/assets/codex/herdr-agent-state.sh",
+        &["attention"],
+        subagent,
+        &[("CODEX_THREAD_ID", "child")],
+    )
+    .is_some());
+
+    for input in [
+        r#"{"hook_event_name":"PreToolUse","session_id":"root","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        r#"{"hook_event_name":"PermissionRequest","session_id":"root","tool_input":{"command":"ls"}}"#,
+        "not json",
+    ] {
+        assert!(run_codex_hook("attention", input).is_none(), "{input}");
+    }
+    assert!(run_shell_hook_with_env(
+        "src/integration/assets/codex/herdr-agent-state.sh",
+        &["attention"],
+        r#"{"hook_event_name":"PermissionRequest","session_id":"root","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        &[("HERDR_SOCKET_PATH", "/nonexistent/herdr-test.sock")],
+    )
+    .is_none());
 }
 
 #[test]

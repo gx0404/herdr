@@ -77,6 +77,9 @@ pub(crate) struct AttentionInput<'a> {
     pub interrupted_recently: bool,
     /// 这次更新新锁存了一次失败。
     pub failed_latched: bool,
+    /// 本回合已经发过失败通知（`TerminalState::failure_announced`）：一个失败的回合只
+    /// 通知一次，之后进入 Idle / Blocked 都不再通知，新的 Working 才是新回合。
+    pub failure_announced: bool,
     /// 正文原文（问题、失败原因或最后一条消息）。
     pub body: Option<&'a str>,
 }
@@ -126,7 +129,7 @@ fn classify(input: &AttentionInput<'_>) -> Option<AttentionKind> {
     if input.failed_latched {
         return Some(AttentionKind::Failed);
     }
-    if input.state == input.previous_state {
+    if input.failure_announced || input.state == input.previous_state {
         return None;
     }
     match (input.previous_state, input.state) {
@@ -153,6 +156,7 @@ mod tests {
             suppress_completion: false,
             interrupted_recently: false,
             failed_latched: false,
+            failure_announced: false,
             body: None,
         }
     }
@@ -160,6 +164,7 @@ mod tests {
     type Row = (
         AgentState,
         AgentState,
+        bool,
         bool,
         bool,
         bool,
@@ -172,35 +177,68 @@ mod tests {
     #[test]
     fn decision_table() {
         use AttentionKind::{Failed, Finished, NeedsAttention};
-        // (前状态, 新状态, 正看着, 抑制完成, 刚中断, 新失败) → (种类, toast, 声音)
+        // (前状态, 新状态, 正看着, 抑制完成, 刚中断, 新失败, 本回合已通知过失败)
+        //   → (种类, toast, 声音)
         #[rustfmt::skip]
         let rows: &[Row] = &[
-            (Working, Blocked, false, false, false, false, Some(NeedsAttention), Some(ToastKind::NeedsAttention), Some(Sound::Request)),
-            (Idle, Blocked, true, false, false, false, Some(NeedsAttention), None, Some(Sound::Request)),
-            (Blocked, Blocked, false, false, false, false, None, None, None),
-            (Working, Idle, false, false, false, false, Some(Finished), Some(ToastKind::Finished), Some(Sound::Done)),
-            (Blocked, Idle, false, false, false, false, Some(Finished), Some(ToastKind::Finished), Some(Sound::Done)),
-            (Working, Idle, true, false, false, false, Some(Finished), None, None),
-            (Working, Idle, false, true, false, false, None, None, None),
-            (Working, Idle, false, false, true, false, None, None, None),
-            (Blocked, Idle, false, false, true, false, None, None, None),
-            (Unknown, Idle, false, false, false, false, None, None, None),
-            (Idle, Working, false, false, false, false, None, None, None),
-            (Working, Unknown, false, false, false, false, None, None, None),
-            (Working, Idle, false, false, false, true, Some(Failed), Some(ToastKind::Failed), Some(Sound::Request)),
-            (Idle, Idle, false, false, false, true, Some(Failed), Some(ToastKind::Failed), Some(Sound::Request)),
-            (Working, Idle, true, false, true, true, Some(Failed), None, Some(Sound::Request)),
-            (Working, Idle, false, true, false, true, None, None, None),
+            (Working, Blocked, false, false, false, false, false, Some(NeedsAttention), Some(ToastKind::NeedsAttention), Some(Sound::Request)),
+            (Idle, Blocked, true, false, false, false, false, Some(NeedsAttention), None, Some(Sound::Request)),
+            (Blocked, Blocked, false, false, false, false, false, None, None, None),
+            (Working, Idle, false, false, false, false, false, Some(Finished), Some(ToastKind::Finished), Some(Sound::Done)),
+            (Blocked, Idle, false, false, false, false, false, Some(Finished), Some(ToastKind::Finished), Some(Sound::Done)),
+            (Working, Idle, true, false, false, false, false, Some(Finished), None, None),
+            (Working, Idle, false, true, false, false, false, None, None, None),
+            (Working, Idle, false, false, true, false, false, None, None, None),
+            (Blocked, Idle, false, false, true, false, false, None, None, None),
+            (Unknown, Idle, false, false, false, false, false, None, None, None),
+            (Idle, Working, false, false, false, false, false, None, None, None),
+            (Working, Unknown, false, false, false, false, false, None, None, None),
+            (Working, Idle, false, false, false, true, false, Some(Failed), Some(ToastKind::Failed), Some(Sound::Request)),
+            (Idle, Idle, false, false, false, true, false, Some(Failed), Some(ToastKind::Failed), Some(Sound::Request)),
+            (Working, Idle, true, false, true, true, false, Some(Failed), None, Some(Sound::Request)),
+            (Working, Idle, false, true, false, true, false, None, None, None),
+            // 宣告失败的那次更新本身（取走通知的同时记下「本回合已通知」）。
+            (Working, Idle, false, false, false, true, true, Some(Failed), Some(ToastKind::Failed), Some(Sound::Request)),
+            (Working, Blocked, false, false, false, true, true, Some(Failed), Some(ToastKind::Failed), Some(Sound::Request)),
+            (Idle, Idle, true, false, false, true, true, Some(Failed), None, Some(Sound::Request)),
+            // 同一回合之后的迁移：不再「已完成」「需要处理」，也不响。
+            (Blocked, Idle, false, false, false, false, true, None, None, None),
+            (Idle, Blocked, false, false, false, false, true, None, None, None),
+            (Working, Blocked, false, false, false, false, true, None, None, None),
+            (Working, Idle, false, false, false, false, true, None, None, None),
+            (Blocked, Idle, true, false, false, false, true, None, None, None),
+            (Unknown, Blocked, false, false, false, false, true, None, None, None),
         ];
-        for &(previous, state, active, suppress, interrupted, failed, kind, toast, sound) in rows {
+        for &(
+            previous,
+            state,
+            active,
+            suppress,
+            interrupted,
+            failed,
+            announced,
+            kind,
+            toast,
+            sound,
+        ) in rows
+        {
             let decision = decide(&AttentionInput {
                 suppress_active_tab: active,
                 suppress_completion: suppress,
                 interrupted_recently: interrupted,
                 failed_latched: failed,
+                failure_announced: announced,
                 ..input(previous, state)
             });
-            let row = (previous, state, active, suppress, interrupted, failed);
+            let row = (
+                previous,
+                state,
+                active,
+                suppress,
+                interrupted,
+                failed,
+                announced,
+            );
             assert_eq!(decision.kind, kind, "{row:?}");
             assert_eq!(decision.toast, toast, "{row:?}");
             assert_eq!(decision.sound, sound, "{row:?}");

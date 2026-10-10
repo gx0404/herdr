@@ -40,13 +40,35 @@ fn extract_version_triple_orders_versions() {
 }
 
 #[test]
-fn agent_version_requirement_only_set_for_kimi() {
-    let requirement = agent_version_requirement(crate::api::schema::IntegrationTarget::Kimi)
+fn agent_version_requirements_cover_kimi_and_claude() {
+    use crate::api::schema::IntegrationTarget;
+    let requirement = agent_version_requirement(IntegrationTarget::Kimi)
         .expect("kimi must have a version requirement");
     assert_eq!(requirement.binary, "kimi");
     assert_eq!(requirement.min_version, KIMI_MIN_VERSION);
-    assert!(agent_version_requirement(crate::api::schema::IntegrationTarget::Claude).is_none());
-    assert!(agent_version_requirement(crate::api::schema::IntegrationTarget::Codex).is_none());
+    let requirement = agent_version_requirement(IntegrationTarget::Claude)
+        .expect("claude must have a version requirement");
+    assert_eq!(
+        (requirement.label, requirement.binary, requirement.args),
+        ("claude code", "claude", &["--version"][..])
+    );
+    assert_eq!(requirement.min_version, CLAUDE_MIN_VERSION);
+    // `claude --version` prints e.g. `2.1.76 (Claude Code)`.
+    assert_eq!(
+        extract_version_triple("2.1.76 (Claude Code)"),
+        Some((2, 1, 76))
+    );
+    assert!(
+        extract_version_triple("2.1.32 (Claude Code)").unwrap()
+            < extract_version_triple(CLAUDE_MIN_VERSION).unwrap()
+    );
+    for target in [
+        IntegrationTarget::Codex,
+        IntegrationTarget::Opencode,
+        IntegrationTarget::Pi,
+    ] {
+        assert!(agent_version_requirement(target).is_none(), "{target:?}");
+    }
 }
 
 #[test]
@@ -866,18 +888,34 @@ fn install_claude_writes_hook_and_updates_settings() {
         .contains(" session"));
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
-    assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
-    // SubagentStop 只挂活动信号钩子（Windows 上不装），旧的 working 动作不得复活。
-    assert!(settings["hooks"]["SubagentStop"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
-        .all(|hook| hook["command"]
-            .as_str()
-            .is_some_and(|command| command.ends_with(" activity"))));
+    // 待处理事项与活动信号钩子各平台都装，都在后台跑；旧的 blocked / working 动作不得复活。
+    for (event, action) in [
+        ("Notification", " attention"),
+        ("PermissionRequest", " attention"),
+        ("SubagentStart", " activity"),
+        ("SubagentStop", " activity"),
+        ("TaskCompleted", " activity"),
+    ] {
+        let handlers = settings["hooks"][event]
+            .as_array()
+            .unwrap_or_else(|| panic!("{event} must be installed"))
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+            .collect::<Vec<_>>();
+        assert_eq!(handlers.len(), 1, "{event}");
+        assert!(
+            handlers[0]["command"]
+                .as_str()
+                .is_some_and(|command| command.ends_with(action)),
+            "{event}"
+        );
+        assert_eq!(handlers[0]["async"], true, "{event}");
+    }
+    // claude 不认识的事件会让整份 settings 作废（2.1.76 没有这两个事件）。
+    assert!(settings["hooks"].get("TaskCreated").is_none());
+    assert!(settings["hooks"].get("StopFailure").is_none());
     assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
@@ -972,21 +1010,23 @@ fn install_claude_is_idempotent_for_hook_entries() {
     );
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
-    assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
-    // 重复安装不叠加活动信号钩子（Windows 上不装）。
+    // 重复安装不叠加待处理事项与活动信号钩子。
     for event in [
+        "Notification",
+        "PermissionRequest",
         "SubagentStart",
         "SubagentStop",
-        "TaskCreated",
         "TaskCompleted",
     ] {
-        assert!(
-            settings["hooks"][event].as_array().map_or(0, Vec::len) <= 1,
+        assert_eq!(
+            settings["hooks"][event].as_array().map_or(0, Vec::len),
+            1,
             "{event}"
         );
     }
+    assert!(settings["hooks"].get("TaskCreated").is_none());
     assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
@@ -1159,9 +1199,28 @@ fn uninstall_claude_removes_herdr_hooks_and_preserves_others() {
                     {"type": "command", "command": "echo keep", "timeout": 10}
                 ]
             }],
-            "PermissionRequest": [{
-                "matcher": "*",
-                "hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]
+            "PermissionRequest": [
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]
+                },
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' attention", hook_path.display()), "timeout": 10, "async": true}]
+                }
+            ],
+            "Notification": [
+                {
+                    "matcher": "^(permission_prompt|elicitation_dialog)$",
+                    "hooks": [{"type": "command", "command": format!("bash '{}' attention", hook_path.display()), "timeout": 10, "async": true}]
+                },
+                {
+                    "matcher": "idle_prompt",
+                    "hooks": [{"type": "command", "command": "echo keep-notification"}]
+                }
+            ],
+            "TaskCreated": [{
+                "hooks": [{"type": "command", "command": format!("bash '{}' activity", hook_path.display()), "timeout": 10}]
             }],
             "PostToolUse": [{
                 "matcher": "*",
@@ -1212,6 +1271,11 @@ fn uninstall_claude_removes_herdr_hooks_and_preserves_others() {
         "echo keep"
     );
     assert!(settings["hooks"].get("PermissionRequest").is_none());
+    assert!(settings["hooks"].get("TaskCreated").is_none());
+    assert_eq!(
+        settings["hooks"]["Notification"],
+        serde_json::json!([{"matcher": "idle_prompt", "hooks": [{"type": "command", "command": "echo keep-notification"}]}])
+    );
     assert!(settings["hooks"].get("SessionStart").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
@@ -1290,27 +1354,31 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
         .as_str()
         .unwrap()
         .contains(" session"));
-    // 活动钩子只在 Unix 安装（Windows 资产没有活动信号通道），且不带 matcher。
-    for event in ["SubagentStart", "SubagentStop"] {
-        if cfg!(windows) {
-            assert!(hooks["hooks"].get(event).is_none(), "{event}");
-        } else {
-            assert!(
-                hooks["hooks"][event][0]["hooks"][0]["command"]
-                    .as_str()
-                    .unwrap()
-                    .contains(" activity"),
-                "{event}"
-            );
-            assert!(hooks["hooks"][event][0].get("matcher").is_none(), "{event}");
-        }
+    // 活动钩子与审批详情钩子各平台都装（Windows 资产经 herdr CLI 上报），都不带 matcher。
+    for (event, action) in [
+        ("SubagentStart", " activity"),
+        ("SubagentStop", " activity"),
+        ("PermissionRequest", " attention"),
+    ] {
+        assert!(
+            hooks["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with(action),
+            "{event}"
+        );
+        assert!(hooks["hooks"][event][0].get("matcher").is_none(), "{event}");
+        // codex 的信任哈希按 herdr 写的朴素形状计算：不带 async。
+        assert!(
+            hooks["hooks"][event][0]["hooks"][0].get("async").is_none(),
+            "{event}"
+        );
     }
     assert!(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
         .contains(" working"));
     assert!(hooks["hooks"].get("PreToolUse").is_none());
-    assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap()
@@ -1368,16 +1436,20 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
 
     assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
-    if !cfg!(windows) {
-        assert_eq!(hooks["hooks"]["SubagentStart"].as_array().unwrap().len(), 1);
-        assert_eq!(hooks["hooks"]["SubagentStop"].as_array().unwrap().len(), 1);
-    }
+    assert_eq!(hooks["hooks"]["SubagentStart"].as_array().unwrap().len(), 1);
+    assert_eq!(hooks["hooks"]["SubagentStop"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        hooks["hooks"]["PermissionRequest"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         hooks["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
         1
     );
     assert!(hooks["hooks"].get("PreToolUse").is_none());
-    assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 1);
     assert_eq!(hooks["hooks"]["Interrupt"].as_array().unwrap().len(), 1);
     assert_eq!(config.matches("hooks = true").count(), 1);
@@ -1662,7 +1734,13 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
                 {"type": "command", "command": "echo keep", "timeout": 10}
             ]}],
             "PreToolUse": [{"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]}],
-            "PermissionRequest": [{"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]}],
+            "PermissionRequest": [
+                {"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]},
+                {"hooks": [
+                    {"type": "command", "command": format!("bash '{}' attention", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep-permission", "timeout": 10}
+                ]}
+            ],
             "Stop": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}],
             "SubagentStart": [{"hooks": [{"type": "command", "command": format!("bash '{}' activity", hook_path.display()), "timeout": 10}]}],
             "SubagentStop": [{"hooks": [
@@ -1694,7 +1772,10 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
     assert!(!result.hook_path.exists());
     assert!(hooks["hooks"].get("SessionStart").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
-    assert!(hooks["hooks"].get("PermissionRequest").is_none());
+    assert_eq!(
+        hooks["hooks"]["PermissionRequest"],
+        serde_json::json!([{"hooks": [{"type": "command", "command": "echo keep-permission", "timeout": 10}]}])
+    );
     assert!(hooks["hooks"].get("Stop").is_none());
     assert!(hooks["hooks"].get("SubagentStart").is_none());
     assert_eq!(
@@ -1790,6 +1871,7 @@ fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
             "SessionStart" => "session_start",
             "UserPromptSubmit" => "user_prompt_submit",
             "Stop" => "stop",
+            "PermissionRequest" => "permission_request",
             "SubagentStart" => "subagent_start",
             "SubagentStop" => "subagent_stop",
             // Interrupt/SessionEnd：codex 不为其持久化信任状态（hash 为 None）。

@@ -1,7 +1,7 @@
 #!/bin/sh
 # managed by herdr; reinstalling the integration replaces this file.
 # HERDR_INTEGRATION_ID=kimi
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 action="${1:-}"
 case "$action" in
@@ -148,5 +148,17 @@ if action != "session" and session_path is not None:
         "seq": seq, "agent_session_id": session_id, "agent_session_path": session_path,
     })
     params["seq"] = seq + 1
+# A turn that fails (provider or authentication errors) ends with StopFailure.
+# It reports idle like the other turn endings, and before that the failure with
+# its error type and message, so Herdr announces a failed turn rather than a
+# finished one. Attention reports keep their own sequence per source.
+if action == "idle" and payload.get("hook_event_name") == "StopFailure":
+    failure = {"pane_id": params["pane_id"], "source": "herdr:kimi", "agent": "kimi", "kind": "failed", "seq": seq}
+    for name, keys, limit in (("title", ("error_type", "errorType"), 200), ("detail", ("error_message", "errorMessage"), 2000)):
+        value = next((payload[key] for key in keys if isinstance(payload.get(key), str)), "")
+        text = " ".join(value.split())
+        if text:
+            failure[name] = text if len(text) <= limit else text[: limit - 1] + "\u2026"
+    send_report("pane.report_agent_attention", failure)
 send_report(method, params)
 ' "$action" 2>/dev/null || true

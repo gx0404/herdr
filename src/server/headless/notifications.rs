@@ -184,6 +184,7 @@ impl HeadlessServer {
         let mut suppress_completion = false;
         let mut interrupted = false;
         let mut failed = false;
+        let mut failure_announced = false;
         for update in pane_updates
             .iter()
             .filter(|update| update.pane_id == pane_id)
@@ -191,6 +192,7 @@ impl HeadlessServer {
             suppress_completion |= update.suppress_completion;
             interrupted |= update.interrupted;
             failed |= update.failed;
+            failure_announced |= update.failure_announced;
             self.forward_semantic_agent_notification(update);
         }
 
@@ -214,6 +216,7 @@ impl HeadlessServer {
                 suppress_completion,
                 interrupted_recently: interrupted,
                 failed_latched: failed,
+                failure_announced,
                 body: None,
             });
 

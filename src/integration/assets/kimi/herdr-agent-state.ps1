@@ -2,16 +2,22 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=kimi
-# HERDR_INTEGRATION_VERSION=8
+# HERDR_INTEGRATION_VERSION=9
 
 param([string]$Action = "")
+
+# A failing report must never break Kimi.
+trap { exit 0 }
 
 if (@("session", "working", "blocked", "idle", "activity") -notcontains $Action) { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
 
-$inputText = [Console]::In.ReadToEnd()
+# Read the hook input as UTF-8 bytes; the console input code page may differ.
 try {
+    $buffer = New-Object IO.MemoryStream
+    [Console]::OpenStandardInput().CopyTo($buffer)
+    $inputText = [Text.Encoding]::UTF8.GetString($buffer.ToArray()).TrimStart([char]0xFEFF)
     $payload = if ([string]::IsNullOrWhiteSpace($inputText)) { $null } else { $inputText | ConvertFrom-Json }
 } catch {
     $payload = $null
@@ -77,6 +83,22 @@ function Get-KimiSessionDirectory {
     } catch { return $null }
 }
 
+# One line of at most $Max characters that survives Windows PowerShell's native
+# argument passing: it does not escape embedded double quotes, so they become
+# single quotes, and a trailing backslash would escape the closing quote.
+function ConvertTo-HerdrText($Value, [int]$Max) {
+    if ($Value -isnot [string]) { return $null }
+    $text = (($Value -replace '\s+', ' ').Trim()) -replace '"', "'"
+    if ($text.Length -eq 0) { return $null }
+    if ($text.Length -gt $Max) {
+        $cut = $Max - 1
+        if ([char]::IsHighSurrogate($text[$cut - 1])) { $cut-- }
+        $text = $text.Substring(0, $cut) + [char]0x2026
+    }
+    if ($text.EndsWith('\')) { $text += ' ' }
+    return $text
+}
+
 $sessionPath = Get-KimiSessionDirectory
 try {
     if ($Action -eq "session" -or $null -ne $sessionPath) {
@@ -87,9 +109,38 @@ try {
         & $herdr @sessionArgs 2>$null | Out-Null
         $seq++
     }
-    # Activity has no CLI subcommand; the path supplement lets normal polling
-    # find the pane-specific session even if SessionStart preceded its creation.
-    if ($Action -eq "session" -or $Action -eq "activity") { exit 0 }
+    if ($Action -eq "session") { exit 0 }
+    if ($Action -eq "activity") {
+        # Activity hints only tell herdr to re-read the Kimi session files. The
+        # hook event name is the hint; background task ids map to "task:<id>"
+        # nodes. Agent-kind task ids carry no subagent id, so they send no node.
+        $activityArgs = @("pane", "report-agent-activity", $env:HERDR_PANE_ID, "--source", "herdr:kimi", "--agent", "kimi", "--seq", $seq)
+        $hint = $payload.hook_event_name
+        if ($hint -is [string] -and $hint -cmatch '^[A-Za-z0-9_.:-]{1,64}\z') { $activityArgs += @("--hint", $hint) }
+        $taskId = $payload.task_id
+        if ($null -eq $taskId -and $payload.source_kind -eq "background_task") { $taskId = $payload.source_id }
+        if ($taskId -is [string] -and $taskId -cmatch '^[A-Za-z0-9_-]{1,128}\z' -and -not $taskId.StartsWith("agent-")) {
+            $activityArgs += @("--node-id", "task:$taskId")
+        }
+        & $herdr @activityArgs 2>$null | Out-Null
+        exit 0
+    }
+    # A turn that fails (provider or authentication errors) ends with StopFailure.
+    # It reports idle like the other turn endings, and before that the failure
+    # with its error type and message, so Herdr announces a failed turn rather
+    # than a finished one. Attention reports keep their own sequence per source.
+    if ($Action -eq "idle" -and $payload.hook_event_name -ceq "StopFailure") {
+        $failureArgs = @("pane", "report-agent-attention", $env:HERDR_PANE_ID, "--source", "herdr:kimi", "--agent", "kimi", "--kind", "failed", "--seq", $seq)
+        $errorType = ConvertTo-HerdrText $(if ($payload.error_type -is [string]) { $payload.error_type } else { $payload.errorType }) 200
+        $errorMessage = ConvertTo-HerdrText $(if ($payload.error_message -is [string]) { $payload.error_message } else { $payload.errorMessage }) 2000
+        if ($errorType) { $failureArgs += @("--title", $errorType) }
+        if ($errorMessage) { $failureArgs += @("--detail", $errorMessage) }
+        # The lifecycle report below must not depend on this one.
+        try {
+            & $herdr @failureArgs 2>$null | Out-Null
+        } catch {
+        }
+    }
     if ([string]::IsNullOrWhiteSpace($sessionId)) {
         & $herdr pane report-agent $env:HERDR_PANE_ID --source herdr:kimi --agent kimi --state $Action --seq $seq 2>$null | Out-Null
     } else {

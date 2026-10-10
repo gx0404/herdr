@@ -7,7 +7,7 @@ use super::targets::{
     uninstall_claude, uninstall_codex, uninstall_kimi, uninstall_opencode, uninstall_pi,
 };
 use super::version::{agent_version_requirement, enforce_agent_version};
-use super::KIMI_MIN_VERSION;
+use super::{CLAUDE_MIN_VERSION, KIMI_MIN_VERSION};
 
 /// codex 还没信任（或信任后改过）herdr 的钩子时的安装提示，逐条作为安装消息输出：
 /// 第一条是要做的选择，第二条是不选的后果。设置页集成页把安装消息逐条单行显示、
@@ -58,6 +58,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                     "ensured claude settings at {}",
                     installed.settings_path.display()
                 ),
+                format!("requires claude code {CLAUDE_MIN_VERSION} or newer"),
             ]
         }
         crate::api::schema::IntegrationTarget::Codex => {

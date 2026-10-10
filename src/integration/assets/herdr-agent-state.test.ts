@@ -1,5 +1,5 @@
 import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net, { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -378,6 +378,72 @@ test("Pi settlement preserves explicit blocked-state precedence", async () => {
   eventHandlers.get("herdr:blocked")?.({ active: false }, context);
   await waitFor(() => requestStates(requests).length === 4);
   expect(requestStates(requests)).toEqual(["idle", "working", "blocked", "idle"]);
+});
+
+// A run whose last turn failed reports the failure before it reports idle, so
+// Herdr announces it once, as a failure.
+test("Pi reports a failed run before it goes idle", async () => {
+  const requests = await startRecordingServer("pi-failed-run");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = piContext(() => idle);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+  idle = false;
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 2);
+
+  handlers.get("turn_end")?.(failedTurn("429 rate\nlimited"), context);
+  idle = true;
+  handlers.get("agent_settled")?.({ aborted: false }, context);
+  await waitFor(() => requestStates(requests).length === 3);
+
+  expect(reportKinds(requests)).toEqual(["idle", "working", "failed", "idle"]);
+  const failure = requests.find((request) => isRecord(request) && request.method === "pane.report_agent_attention");
+  expect(isRecord(failure) && failure.params).toEqual({
+    pane_id: "test:p1",
+    source: "herdr:pi",
+    agent: "pi",
+    kind: "failed",
+    detail: "429 rate limited",
+    seq: expect.any(Number),
+  });
+});
+
+test("Pi does not report aborted, recovered or restarted runs as failures", async () => {
+  const requests = await startRecordingServer("pi-not-failed");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = piContext(() => idle);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  const run = async (turns: unknown[], settled: unknown, restart = false) => {
+    const before = requestStates(requests).length;
+    idle = false;
+    handlers.get("agent_start")?.({}, context);
+    for (const turn of turns) handlers.get("turn_end")?.(turn, context);
+    if (restart) handlers.get("agent_start")?.({}, context);
+    idle = true;
+    handlers.get("agent_settled")?.(settled, context);
+    await waitFor(() => requestStates(requests).at(-1) === "idle" && requestStates(requests).length > before);
+  };
+
+  // Escape stops the run; Pi records the cut-off turn as an error too.
+  await run([failedTurn("aborted by user")], { aborted: true });
+  // A retry that succeeds replaces the failed turn.
+  await run([failedTurn("overloaded"), { message: { role: "assistant", stopReason: "stop" }, toolResults: [] }], {});
+  // A new run starts before the old one settles.
+  await run([failedTurn("network error")], {}, true);
+  // A turn that only ran tools is not a failure either.
+  await run([{ message: { role: "toolResult" } }], {});
+  await Bun.sleep(25);
+
+  expect(reportKinds(requests).filter((kind) => kind === "failed")).toEqual([]);
 });
 
 test("Pi reports the session replacement source", async () => {
@@ -1078,6 +1144,296 @@ test("Pi never reports activity from headless modes", async () => {
   expect(requests).toEqual([]);
 });
 
+// Windows installs the PowerShell hooks (src/integration/mod.rs::*_HOOK_ASSET),
+// which report through the herdr CLI. They run here with a recording stand-in
+// for the CLI (HERDR_BIN_PATH), so only on Windows.
+const powershellTest = process.platform === "win32" ? test : test.skip;
+
+// Records each CLI call as one JSON array of its arguments.
+const CLI_RECORDER = [
+  "$line = ConvertTo-Json -InputObject @($args) -Compress",
+  '[IO.File]::AppendAllText($env:HERDR_TEST_RECORD, $line + "`n")',
+  'if ($env:HERDR_TEST_FAIL -eq "1") { throw "herdr is unavailable" }',
+  "",
+].join("\r\n");
+
+async function runPowerShellHook(
+  agent: "claude" | "codex" | "kimi",
+  action: string,
+  payload: unknown,
+  env: Record<string, string> = {},
+): Promise<{ exitCode: number; calls: string[][] }> {
+  const dir = await mkdtemp(join(tmpdir(), "herdr-ps1-hook-"));
+  try {
+    const record = join(dir, "calls.jsonl");
+    const recorder = join(dir, "herdr.ps1");
+    await writeFile(recorder, CLI_RECORDER);
+    // Never the caller's own pane or agent environment.
+    const childEnv: Record<string, string | undefined> = { ...process.env };
+    for (const name of [
+      "HERDR_SOCKET_PATH",
+      "CLAUDE_CODE_SESSION_KIND",
+      "CLAUDE_JOB_DIR",
+      "HERDR_REPORT_BG_SESSIONS",
+      "CURSOR_VERSION",
+      "CODEX_THREAD_ID",
+    ]) {
+      delete childEnv[name];
+    }
+    Object.assign(childEnv, {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "test:p1",
+      HERDR_BIN_PATH: recorder,
+      HERDR_TEST_RECORD: record,
+      KIMI_CODE_HOME: join(dir, "kimi-home"),
+      ...env,
+    });
+    const script = join(import.meta.dir, agent, "herdr-agent-state.ps1");
+    const proc = Bun.spawn(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, action], {
+      stdin: new Blob([typeof payload === "string" ? payload : JSON.stringify(payload)]),
+      stdout: "ignore",
+      stderr: "ignore",
+      env: childEnv,
+    });
+    const exitCode = await proc.exited;
+    const text = await readFile(record, "utf8").catch(() => "");
+    const calls = text
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as string[]);
+    return { exitCode, calls };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function cliOption(call: string[], name: string): string | undefined {
+  const index = call.indexOf(name);
+  return index === -1 ? undefined : call[index + 1];
+}
+
+function cliOptions(call: string[], name: string): string[] {
+  return call.flatMap((arg, index) => (arg === name ? [call[index + 1]] : []));
+}
+
+powershellTest("Claude's PowerShell hook reports permission and notification details", async () => {
+  const bash = await runPowerShellHook("claude", "attention", {
+    hook_event_name: "PermissionRequest",
+    session_id: "s1",
+    tool_name: "Bash",
+    tool_input: { command: 'cargo test -- "focus"\necho done', description: "Run the tests" },
+  });
+  expect(bash.exitCode).toBe(0);
+  expect(bash.calls).toHaveLength(1);
+  const [call] = bash.calls;
+  expect(call.slice(0, 9)).toEqual([
+    "pane",
+    "report-agent-attention",
+    "test:p1",
+    "--source",
+    "herdr:claude",
+    "--agent",
+    "claude",
+    "--kind",
+    "needs_input",
+  ]);
+  // Windows PowerShell does not escape embedded double quotes for herdr.exe.
+  expect(cliOption(call, "--detail")).toBe("Bash: cargo test -- 'focus'");
+  expect(cliOption(call, "--title")).toBe("Run the tests");
+
+  const question = await runPowerShellHook("claude", "attention", {
+    hook_event_name: "PermissionRequest",
+    tool_name: "AskUserQuestion",
+    tool_input: {
+      questions: [
+        {
+          question: "用哪个日期库？",
+          header: "依赖",
+          options: [{ label: "date-fns" }, { label: "dayjs" }, ...Array.from({ length: 8 }, (_, i) => ({ label: `x${i}` }))],
+        },
+      ],
+    },
+  });
+  expect(cliOption(question.calls[0], "--detail")).toBe("用哪个日期库？");
+  expect(cliOption(question.calls[0], "--title")).toBe("依赖");
+  expect(cliOptions(question.calls[0], "--option")).toEqual(["date-fns", "dayjs", "x0", "x1", "x2", "x3", "x4", "x5"]);
+
+  // The 6-second permission notification only names the tool: it ranks below
+  // the PermissionRequest detail of the same dialog.
+  const notification = await runPowerShellHook("claude", "attention", {
+    hook_event_name: "Notification",
+    message: "Claude needs your permission to use Bash",
+    notification_type: "permission_prompt",
+  });
+  expect(cliOption(notification.calls[0], "--detail")).toBe("Claude needs your permission to use Bash");
+  expect(Number(cliOption(notification.calls[0], "--seq"))).toBeLessThan(Number(cliOption(call, "--seq")));
+
+  const elicitation = await runPowerShellHook("claude", "attention", {
+    hook_event_name: "Notification",
+    message: "Claude Code needs your input",
+    notification_type: "elicitation_dialog",
+  });
+  expect(Number(cliOption(elicitation.calls[0], "--seq"))).toBeGreaterThan(Number(cliOption(call, "--seq")));
+
+  for (const payload of [
+    { hook_event_name: "Notification", message: "Claude is waiting for your input", notification_type: "idle_prompt" },
+    { hook_event_name: "PermissionRequest", tool_input: { command: "ls" } },
+    { hook_event_name: "Stop" },
+  ]) {
+    const ignored = await runPowerShellHook("claude", "attention", payload);
+    expect(ignored).toEqual({ exitCode: 0, calls: [] });
+  }
+});
+
+powershellTest("Claude's PowerShell hook sends activity hints and keeps session reports", async () => {
+  const subagent = await runPowerShellHook("claude", "activity", {
+    hook_event_name: "SubagentStart",
+    agent_id: "a1b2c3",
+    agent_type: "Explore",
+  });
+  expect(subagent.calls).toHaveLength(1);
+  expect(subagent.calls[0].slice(0, 9)).toEqual([
+    "pane",
+    "report-agent-activity",
+    "test:p1",
+    "--source",
+    "herdr:claude",
+    "--agent",
+    "claude",
+    "--hint",
+    "SubagentStart",
+  ]);
+  expect(cliOption(subagent.calls[0], "--node-id")).toBe("a1b2c3");
+
+  const task = await runPowerShellHook("claude", "activity", { hook_event_name: "TaskCompleted", task_id: "7" });
+  expect(cliOption(task.calls[0], "--node-id")).toBe("task:7");
+
+  const session = await runPowerShellHook("claude", "session", {
+    hook_event_name: "SessionStart",
+    session_id: "claude-session",
+    source: "startup",
+    transcript_path: "C:\\Users\\用户\\.claude\\projects\\p\\claude-session.jsonl",
+  });
+  expect(session.calls[0][1]).toBe("report-agent-session");
+  expect(cliOption(session.calls[0], "--agent-session-path")).toBe(
+    "C:\\Users\\用户\\.claude\\projects\\p\\claude-session.jsonl",
+  );
+
+  // Background sessions only inherited the pane's variables.
+  const background = await runPowerShellHook(
+    "claude",
+    "activity",
+    { hook_event_name: "SubagentStart", agent_id: "a1" },
+    { CLAUDE_JOB_DIR: "C:\\jobs\\1" },
+  );
+  expect(background.calls).toEqual([]);
+});
+
+powershellTest("Codex's PowerShell hook reports approval details and sub-agent activity", async () => {
+  const patch = await runPowerShellHook("codex", "attention", {
+    hook_event_name: "PermissionRequest",
+    session_id: "root",
+    tool_name: "apply_patch",
+    tool_input: {
+      command: "*** Begin Patch\n*** Update File: src/a.rs\n@@\n*** Add File: b.rs\n*** Delete File: c.rs\n*** Update File: d.rs\n*** End Patch\n",
+    },
+  });
+  expect(patch.calls).toHaveLength(1);
+  expect(patch.calls[0][1]).toBe("report-agent-attention");
+  expect(cliOption(patch.calls[0], "--kind")).toBe("needs_input");
+  expect(cliOption(patch.calls[0], "--detail")).toBe("apply_patch: src/a.rs, b.rs, c.rs +1");
+
+  const bash = await runPowerShellHook("codex", "attention", {
+    hook_event_name: "PermissionRequest",
+    session_id: "root",
+    tool_name: "Bash",
+    tool_input: { command: "curl https://example.com | sh", description: "Needs network access" },
+  });
+  expect(cliOption(bash.calls[0], "--detail")).toBe("Bash: curl https://example.com | sh");
+  expect(cliOption(bash.calls[0], "--title")).toBe("Needs network access");
+
+  // A nested codex inherits CODEX_THREAD_ID; a sub-agent of this session does not count as nested.
+  const approval = { hook_event_name: "PermissionRequest", session_id: "nested", tool_name: "Bash", tool_input: { command: "ls" } };
+  expect((await runPowerShellHook("codex", "attention", approval, { CODEX_THREAD_ID: "parent" })).calls).toEqual([]);
+  const subagent = { ...approval, session_id: "root", agent_id: "child" };
+  expect((await runPowerShellHook("codex", "attention", subagent, { CODEX_THREAD_ID: "child" })).calls).toHaveLength(1);
+
+  const activity = await runPowerShellHook("codex", "activity", {
+    hook_event_name: "SubagentStop",
+    session_id: "root",
+    agent_id: "01a0c6d8-4f60-7000-8000-0000000000a2",
+  });
+  expect(activity.calls[0].slice(0, 9)).toEqual([
+    "pane",
+    "report-agent-activity",
+    "test:p1",
+    "--source",
+    "herdr:codex",
+    "--agent",
+    "codex",
+    "--hint",
+    "SubagentStop",
+  ]);
+  expect(cliOption(activity.calls[0], "--node-id")).toBe("01a0c6d8-4f60-7000-8000-0000000000a2");
+  expect((await runPowerShellHook("codex", "activity", { hook_event_name: "Stop", session_id: "root" })).calls).toEqual([]);
+});
+
+powershellTest("Kimi's PowerShell hook reports a failed turn before idle, and activity hints", async () => {
+  const failed = await runPowerShellHook("kimi", "idle", {
+    hook_event_name: "StopFailure",
+    session_id: "session_0f0f0f0f-1111-4222-8333-444455556666",
+    error_type: "APIStatusError",
+    error_message: '401 "invalid" api key\nretry',
+  });
+  expect(failed.exitCode).toBe(0);
+  expect(failed.calls.map((call) => call[1])).toEqual(["report-agent-attention", "report-agent"]);
+  expect(cliOption(failed.calls[0], "--kind")).toBe("failed");
+  expect(cliOption(failed.calls[0], "--title")).toBe("APIStatusError");
+  expect(cliOption(failed.calls[0], "--detail")).toBe("401 'invalid' api key retry");
+  expect(cliOption(failed.calls[1], "--state")).toBe("idle");
+
+  const stopped = await runPowerShellHook("kimi", "idle", { hook_event_name: "Stop", session_id: "s" });
+  expect(stopped.calls.map((call) => call[1])).toEqual(["report-agent"]);
+
+  const task = await runPowerShellHook("kimi", "activity", {
+    hook_event_name: "Notification",
+    notification_type: "task.completed",
+    source_kind: "background_task",
+    source_id: "bash-zz990011",
+  });
+  expect(task.calls).toHaveLength(1);
+  expect(task.calls[0][1]).toBe("report-agent-activity");
+  expect(cliOption(task.calls[0], "--hint")).toBe("Notification");
+  expect(cliOption(task.calls[0], "--node-id")).toBe("task:bash-zz990011");
+
+  const agentTask = await runPowerShellHook("kimi", "activity", {
+    hook_event_name: "Notification",
+    source_kind: "background_task",
+    source_id: "agent-k2k2k2k2",
+  });
+  expect(cliOption(agentTask.calls[0], "--node-id")).toBeUndefined();
+  const unreadable = await runPowerShellHook("kimi", "activity", "not json");
+  expect(unreadable.calls).toHaveLength(1);
+  expect(cliOption(unreadable.calls[0], "--hint")).toBeUndefined();
+});
+
+powershellTest("PowerShell hooks fail open", async () => {
+  const approval = { hook_event_name: "PermissionRequest", session_id: "s", tool_name: "Bash", tool_input: { command: "ls" } };
+  for (const agent of ["claude", "codex"] as const) {
+    // The CLI fails, or is missing altogether.
+    expect((await runPowerShellHook(agent, "attention", approval, { HERDR_TEST_FAIL: "1" })).exitCode).toBe(0);
+    const missing = await runPowerShellHook(agent, "attention", approval, { HERDR_BIN_PATH: join(tmpdir(), "missing", "herdr.exe") });
+    expect(missing).toEqual({ exitCode: 0, calls: [] });
+    expect(await runPowerShellHook(agent, "attention", "{ not json")).toEqual({ exitCode: 0, calls: [] });
+    // Outside a Herdr pane nothing is reported.
+    expect(await runPowerShellHook(agent, "attention", approval, { HERDR_ENV: "0" })).toEqual({ exitCode: 0, calls: [] });
+  }
+  const failure = { hook_event_name: "StopFailure", error_type: "E" };
+  const kimi = await runPowerShellHook("kimi", "idle", failure, { HERDR_TEST_FAIL: "1" });
+  expect(kimi.exitCode).toBe(0);
+  expect(kimi.calls.map((call) => call[1])).toEqual(["report-agent-attention", "report-agent"]);
+});
+
 function completionHandlers(handlers: Map<string, Handler>): string[] {
   return ["agent_end", "agent_settled"].filter((event) => handlers.has(event));
 }
@@ -1098,6 +1454,20 @@ function requestStates(requests: unknown[]): unknown[] {
   return requests
     .filter((request) => isRecord(request) && request.method === "pane.report_agent")
     .map(requestState);
+}
+
+// Lifecycle states and attention kinds, in the order Herdr received them.
+function reportKinds(requests: unknown[]): unknown[] {
+  return requests.flatMap((request) => {
+    if (!isRecord(request) || !isRecord(request.params)) return [];
+    if (request.method === "pane.report_agent") return [request.params.state];
+    if (request.method === "pane.report_agent_attention") return [request.params.kind];
+    return [];
+  });
+}
+
+function failedTurn(errorMessage: string) {
+  return { message: { role: "assistant", stopReason: "error", errorMessage }, toolResults: [] };
 }
 
 // 等到 `predicate` 成立或等满 `timeoutMs`，不断言（调用方自己断言结果）。

@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=opencode
-// HERDR_INTEGRATION_VERSION=13
+// HERDR_INTEGRATION_VERSION=14
 
 import net from "node:net";
 
@@ -10,6 +10,7 @@ const SOURCE = "herdr:opencode";
 const AGENT = "opencode";
 let reportSeq = Date.now() * 1000;
 let activitySeq = Date.now() * 1000;
+let attentionSeq = Date.now() * 1000;
 let requestChain = Promise.resolve();
 let reportedRootSessionID;
 
@@ -50,6 +51,32 @@ function nextReportSeq() {
 function nextActivitySeq() {
   activitySeq += 1;
   return activitySeq;
+}
+
+function nextAttentionSeq() {
+  attentionSeq += 1;
+  return attentionSeq;
+}
+
+// One line of at most `max` UTF-16 units: Herdr rejects an attention title over
+// 200 and a detail over 2000 characters.
+function clip(value, max) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) {
+    return undefined;
+  }
+  if (text.length <= max) {
+    return text;
+  }
+  let cut = max - 1;
+  const code = text.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) {
+    cut -= 1;
+  }
+  return `${text.slice(0, cut)}\u2026`;
 }
 
 function sessionIDFromProperties(properties) {
@@ -157,6 +184,38 @@ function reportState(state, sessionID) {
   return request("pane.report_agent", params);
 }
 
+// `session.error` carries `{ name, data: { message } }`. A failed turn latches in
+// Herdr until the user looks at the pane or the agent works again. Failures
+// bring their own sequence so lifecycle numbering stays contiguous.
+function reportFailure(error) {
+  const params = { kind: "failed", seq: nextAttentionSeq() };
+  const title = clip(error?.name, 200);
+  const detail = clip(error?.data?.message, 2000);
+  if (title) params.title = title;
+  if (detail) params.detail = detail;
+  return request("pane.report_agent_attention", params);
+}
+
+// The error of each root session's turn, held until that turn ends. OpenCode's
+// session processor publishes `session.error` and then sets the session idle
+// (`session.status` idle, then `session.idle`): nothing waits for the user, so
+// the error changes no state, and the failure goes out just before the idle
+// that ends the turn. A context overflow that OpenCode compacts publishes the
+// error and keeps working; the next working report drops the failure.
+const pendingFailures = new Map();
+
+function settleFailure(sessionID, state, reports) {
+  if (!sessionID || !pendingFailures.has(sessionID)) {
+    return;
+  }
+  if (state === "idle") {
+    reports.push(reportFailure(pendingFailures.get(sessionID)));
+  }
+  if (state === "idle" || state === "working") {
+    pendingFailures.delete(sessionID);
+  }
+}
+
 // One slot: events arriving before the queued report is dispatched only
 // replace its hint, so a burst collapses into a single request. Rate limiting
 // of the actual refresh belongs to the server.
@@ -230,6 +289,7 @@ function handleEvent(event) {
       // whenever a turn actually runs and idle when it ends. The replies below
       // only resume a turn that is already running.
       const state = stateFromSessionStatus(properties.status);
+      if (state) settleFailure(sessionID, state, reports);
       reports.push(state ? reportState(state, sessionID) : reportSession(sessionID));
       break;
     }
@@ -239,17 +299,31 @@ function handleEvent(event) {
     case "question.replied":
     case "question.rejected":
     case "session.compacted":
+      settleFailure(sessionID, "working", reports);
       reports.push(reportState("working", sessionID));
       break;
     case "permission.asked":
     case "question.asked":
-    case "session.error":
       reports.push(reportState("blocked", sessionID));
       break;
+    case "session.error":
+      // An abort is the user stopping the turn, not a failure. An error without
+      // a session ends no turn this plugin follows; it is reported at once.
+      if (properties.error?.name === "MessageAbortedError") break;
+      if (sessionID) {
+        pendingFailures.set(sessionID, properties.error);
+      } else {
+        reports.push(reportFailure(properties.error));
+      }
+      break;
     case "session.idle":
+      // The failure goes first: Herdr announces a turn that ends after a
+      // failure report once, as a failure.
+      settleFailure(sessionID, "idle", reports);
       reports.push(reportState("idle", sessionID));
       break;
     case "session.deleted":
+      pendingFailures.delete(sessionID);
       break;
     default:
       break;

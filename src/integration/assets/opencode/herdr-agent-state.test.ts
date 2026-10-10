@@ -275,6 +275,112 @@ test("reports retry status as working", async () => {
   expect(lifecycle().map(requestSessionID)).toEqual(["root-session"]);
 });
 
+// OpenCode's session processor publishes `session.error` and then sets the
+// session idle (`session.status` idle, then `session.idle`). The error itself
+// changes no state; the failure (error name and message) goes out just before
+// the idle that ends the turn, so Herdr announces the turn once, as a failure.
+test("a session error reports the failure just before the idle that ends the turn", async () => {
+  const plugin = await loadPlugin();
+  await busy(plugin, "root-session");
+
+  await plugin.event({
+    event: {
+      type: "session.error",
+      properties: {
+        sessionID: "root-session",
+        error: { name: "ProviderAuthError", data: { providerID: "x", message: "  Invalid\napi key " } },
+      },
+    },
+  });
+  expect(lifecycle().map(requestState)).toEqual(["working"]);
+
+  await plugin.event({
+    event: { type: "session.status", properties: { sessionID: "root-session", status: { type: "idle" } } },
+  });
+  await plugin.event({ event: { type: "session.idle", properties: { sessionID: "root-session" } } });
+
+  expect(lifecycle().map(requestMethod)).toEqual([
+    "pane.report_agent",
+    "pane.report_agent_attention",
+    "pane.report_agent",
+    "pane.report_agent",
+  ]);
+  const failure = lifecycle()[1] as { params: Record<string, unknown> };
+  expect(failure.params).toEqual({
+    pane_id: "test:p1",
+    source: "herdr:opencode",
+    agent: "opencode",
+    kind: "failed",
+    title: "ProviderAuthError",
+    detail: "Invalid api key",
+    seq: expect.any(Number),
+  });
+  expect(lifecycle().map(requestState)).toEqual(["working", undefined, "idle", "idle"]);
+  // Failures bring their own sequence: lifecycle numbering stays contiguous.
+  const [working, , idle] = lifecycle().map(requestSeq) as number[];
+  expect(idle).toBe(working + 1);
+});
+
+// A context overflow that OpenCode compacts publishes the error and keeps the
+// turn running: the turn did not fail, so no failure goes out.
+test("an error the turn recovers from is not a failure", async () => {
+  const plugin = await loadPlugin();
+  await busy(plugin, "root-session");
+
+  await plugin.event({
+    event: {
+      type: "session.error",
+      properties: { sessionID: "root-session", error: { name: "ContextOverflowError", data: { message: "too long" } } },
+    },
+  });
+  await plugin.event({ event: { type: "session.compacted", properties: { sessionID: "root-session" } } });
+  await busy(plugin, "root-session");
+  await plugin.event({
+    event: { type: "session.status", properties: { sessionID: "root-session", status: { type: "idle" } } },
+  });
+
+  expect(lifecycle().map(requestMethod)).not.toContain("pane.report_agent_attention");
+  expect(lifecycle().map(requestState)).toEqual(["working", "working", "working", "idle"]);
+});
+
+test("an aborted turn is not a failure, and failure text stays within Herdr's limits", async () => {
+  const plugin = await loadPlugin();
+
+  await busy(plugin, "root-session");
+  await plugin.event({
+    event: {
+      type: "session.error",
+      properties: { sessionID: "root-session", error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
+    },
+  });
+  await plugin.event({ event: { type: "session.idle", properties: { sessionID: "root-session" } } });
+  expect(lifecycle().map(requestState)).toEqual(["working", "idle"]);
+
+  // An error without a session ends no turn this plugin follows: it is reported at once.
+  await plugin.event({
+    event: {
+      type: "session.error",
+      properties: { error: { name: "N".repeat(300), data: { message: "x".repeat(1_998) + "\u{1F600}yy" } } },
+    },
+  });
+  await busy(plugin, "root-session");
+  await plugin.event({ event: { type: "session.error", properties: { sessionID: "root-session" } } });
+  await plugin.event({ event: { type: "session.idle", properties: { sessionID: "root-session" } } });
+
+  const failures = lifecycle().filter((request) => requestMethod(request) === "pane.report_agent_attention");
+  expect(failures).toHaveLength(2);
+  const title = requestParam(failures[0], "title") as string;
+  const detail = requestParam(failures[0], "detail") as string;
+  expect(title).toHaveLength(200);
+  expect(title.endsWith("\u2026")).toBe(true);
+  expect(detail.length).toBeLessThanOrEqual(2_000);
+  // The cut never splits a surrogate pair.
+  expect(detail).toBe(`${"x".repeat(1_998)}\u2026`);
+  expect(requestParam(failures[1], "title")).toBeUndefined();
+  expect(requestParam(failures[1], "detail")).toBeUndefined();
+  expect(requestParam(failures[1], "kind")).toBe("failed");
+});
+
 test("reports child prompts without replacing the root session", async () => {
   const plugin = await loadPlugin();
 

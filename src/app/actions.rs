@@ -109,6 +109,8 @@ pub struct PaneStateUpdate {
     pub interrupted: bool,
     /// 这次更新新锁存了一次失败（要发「失败」通知）。
     pub failed: bool,
+    /// 本回合已经发过失败通知（含这次）：同一回合之后的迁移不再通知。
+    pub failure_announced: bool,
 }
 
 impl PaneStateUpdate {
@@ -125,6 +127,7 @@ impl PaneStateUpdate {
             suppress_completion: self.suppress_completion,
             interrupted_recently: self.interrupted,
             failed_latched: self.failed,
+            failure_announced: self.failure_announced,
             body,
         }
     }
@@ -248,12 +251,19 @@ impl AppState {
             .into_iter()
             .filter_map(|(ws_idx, pane_id, terminal_id)| {
                 let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
-                let mutation = self
-                    .terminals
-                    .get_mut(&terminal_id)?
-                    .expire_agent_metadata_at(scheduled_deadline, now)?;
-                let change = mutation.effective_state_change?;
-                let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, false, false)?;
+                let terminal = self.terminals.get_mut(&terminal_id)?;
+                let change = terminal
+                    .expire_agent_metadata_at(scheduled_deadline, now)?
+                    .effective_state_change?;
+                let failure_announced = terminal.failure_announced();
+                let seen = self.apply_pane_state_change(
+                    ws_idx,
+                    pane_id,
+                    &change,
+                    false,
+                    false,
+                    failure_announced,
+                )?;
                 let update = PaneStateUpdate {
                     pane_id,
                     ws_idx,
@@ -273,6 +283,7 @@ impl AppState {
                     suppress_completion: false,
                     interrupted: change.interrupted,
                     failed: false,
+                    failure_announced,
                 };
                 Some(update)
             })
@@ -1877,6 +1888,7 @@ impl AppState {
             suppress_acquisition_completion,
             completion_reset,
             failure_notice,
+            failure_announced,
             attention_changed,
         ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
@@ -1905,6 +1917,7 @@ impl AppState {
             // 新锁存（或 Working 期间锁存、此刻回合结束）的失败只通知一次；状态没变时也
             // 要产出一次更新，让各路通知照常投递。
             let failure_notice = terminal.take_failure_notice();
+            let failure_announced = terminal.failure_announced();
             let attention_changed = terminal.attention_revision() != attention_revision;
             let unchanged_change = (mutation.agent_released
                 || agent_name_changed
@@ -1919,6 +1932,7 @@ impl AppState {
                 suppress_acquisition_completion,
                 completion_reset,
                 failure_notice,
+                failure_announced,
                 attention_changed,
             )
         };
@@ -1977,6 +1991,7 @@ impl AppState {
             &change,
             suppress_completion,
             failure_notice,
+            failure_announced,
         )?;
         let update = PaneStateUpdate {
             pane_id,
@@ -2005,6 +2020,7 @@ impl AppState {
             suppress_completion,
             interrupted: change.interrupted,
             failed: failure_notice,
+            failure_announced,
         };
         Some(update)
     }
@@ -2051,6 +2067,7 @@ impl AppState {
         change: &EffectiveStateChange,
         suppress_completion: bool,
         failure_notice: bool,
+        failure_announced: bool,
     ) -> Option<bool> {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
@@ -2068,9 +2085,13 @@ impl AppState {
         let seen = pane.seen;
 
         if !suppress_completion {
-            if let Some(delivery) =
-                self.record_or_deliver_agent_notification(ws_idx, pane_id, change, failure_notice)
-            {
+            if let Some(delivery) = self.record_or_deliver_agent_notification(
+                ws_idx,
+                pane_id,
+                change,
+                failure_notice,
+                failure_announced,
+            ) {
                 self.apply_agent_notification_delivery(&delivery);
             }
         }
@@ -2084,7 +2105,12 @@ impl AppState {
         pane_id: PaneId,
         change: &EffectiveStateChange,
         failure_notice: bool,
+        failure_announced: bool,
     ) -> Option<AgentNotificationDelivery> {
+        // 本回合已经通知过失败：之后的迁移不再通知，也不撤掉还在延迟投递的失败通知。
+        if failure_announced && !failure_notice {
+            return None;
+        }
         self.pending_agent_notifications.remove(&pane_id);
 
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
@@ -2100,6 +2126,7 @@ impl AppState {
                 suppress_completion: false,
                 interrupted_recently: change.interrupted,
                 failed_latched: failure_notice,
+                failure_announced,
                 body: None,
             });
         if decision.toast.is_none() && decision.sound.is_none() {
@@ -2164,7 +2191,14 @@ impl AppState {
             .get(ws_idx)?
             .pane_state(pane_id)
             .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))?;
-        if terminal_state.state != expected_state {
+        // 失败通知属于整个回合：同一回合里状态之后还会变（受阻后又回到空闲等），只要
+        // 还没开始新回合就照常投递。
+        let current = if matches!(kind, ToastKind::Failed) {
+            terminal_state.failure_announced()
+        } else {
+            terminal_state.state == expected_state
+        };
+        if !current {
             return None;
         }
         if terminal_state
@@ -3602,6 +3636,78 @@ mod tests {
         assert!(!app.pending_agent_notifications.contains_key(&pane_id));
     }
 
+    /// 延迟投递的「失败」toast 属于整个回合：同一回合之后受阻又回到空闲都不撤掉、也不
+    /// 换成「已完成」，到点照常投递；新回合照常「已完成」。
+    #[test]
+    fn a_delayed_failed_toast_survives_the_rest_of_its_turn() {
+        let mut app = app_with_workspaces(&["active", "background"]);
+        app.active = Some(0);
+        app.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.toast_config.delay_seconds = 1;
+        let pane_id = app.workspaces[1].tabs[0].root_pane;
+        let report = |app: &mut AppState, seq: u64, state: AgentState| {
+            app.handle_app_event(AppEvent::HookStateReported {
+                pane_id,
+                source: "custom:worker".into(),
+                agent_label: "worker".into(),
+                state,
+                message: None,
+                seq: Some(seq),
+                session_ref: None,
+            })
+        };
+        let pending_kind = |app: &AppState| {
+            app.pending_agent_notifications
+                .get(&pane_id)
+                .map(|pending| pending.kind)
+        };
+
+        report(&mut app, 1, AgentState::Working);
+        app.handle_app_event(AppEvent::AgentAttentionReported {
+            pane_id,
+            source: "custom:worker".into(),
+            agent_label: "worker".into(),
+            seq: Some(1),
+            report: crate::terminal::AttentionReport::Failed {
+                title: Some("ProviderAuthError".into()),
+                detail: Some("Invalid api key".into()),
+            },
+        });
+        let blocked = report(&mut app, 2, AgentState::Blocked);
+        assert!(blocked.iter().any(|update| update.failed), "{blocked:?}");
+        assert_eq!(pending_kind(&app), Some(ToastKind::Failed));
+
+        let idle = report(&mut app, 3, AgentState::Idle);
+        assert!(
+            idle.iter()
+                .all(|update| update.failure_announced && !update.failed),
+            "{idle:?}"
+        );
+        assert_eq!(
+            pending_kind(&app),
+            Some(ToastKind::Failed),
+            "同一回合的空闲不撤掉失败通知"
+        );
+        let delivered =
+            app.drain_due_agent_notifications(Instant::now() + std::time::Duration::from_secs(2));
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|delivery| delivery.kind)
+                .collect::<Vec<_>>(),
+            [ToastKind::Failed],
+            "受阻时记下的失败通知在回到空闲之后照常投递"
+        );
+        assert_eq!(
+            app.toast.as_ref().map(|toast| toast.kind),
+            Some(ToastKind::Failed)
+        );
+
+        report(&mut app, 4, AgentState::Working);
+        report(&mut app, 5, AgentState::Idle);
+        assert_eq!(pending_kind(&app), Some(ToastKind::Finished), "新回合");
+    }
+
     #[test]
     fn completion_guard_idle_session_replacement_clears_seen_and_pending_delivery() {
         let mut app = app_with_workspaces(&["active", "background"]);
@@ -3766,6 +3872,7 @@ mod tests {
             suppress_completion: false,
             interrupted_recently: false,
             failed_latched: false,
+            failure_announced: false,
             body: None,
         })
         .sound

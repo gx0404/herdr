@@ -184,7 +184,7 @@ hookTest("lifecycle actions keep their existing request shapes", async () => {
   expect(requests[1].params).toMatchObject({ session_start_source: "startup", agent_session_id: sessionId });
 });
 
-hookTest("a turn that ends with an error reports idle, like a completed turn", async () => {
+hookTest("a turn that ends with an error reports the failure, then idle like a completed turn", async () => {
   const { socketPath, requests } = await listen();
   const sessionId = "session_0f0f0f0f-1111-4222-8333-444455556666";
   // Kimi fires StopFailure instead of Stop when a turn fails (smoke M3: a
@@ -194,14 +194,22 @@ hookTest("a turn that ends with an error reports idle, like a completed turn", a
     session_id: sessionId,
     cwd: "/tmp/project",
     error_type: "APIStatusError",
-    error_message: "401 invalid api key",
+    error_message: "401 invalid\n  api key",
   };
 
   expect(await runHook("idle", JSON.stringify(payload), herdrEnv(socketPath))).toBe(0);
 
-  expect(requests).toHaveLength(1);
-  expect(requests[0].method).toBe("pane.report_agent");
+  expect(requests.map((request) => request.method)).toEqual(["pane.report_agent_attention", "pane.report_agent"]);
   expect(requests[0].params).toEqual({
+    pane_id: "test:p1",
+    source: "herdr:kimi",
+    agent: "kimi",
+    kind: "failed",
+    title: "APIStatusError",
+    detail: "401 invalid api key",
+    seq: expect.any(Number),
+  });
+  expect(requests[1].params).toEqual({
     pane_id: "test:p1",
     source: "herdr:kimi",
     agent: "kimi",
@@ -209,6 +217,35 @@ hookTest("a turn that ends with an error reports idle, like a completed turn", a
     state: "idle",
     agent_session_id: sessionId,
   });
+});
+
+hookTest("a failure report stays within Herdr's limits and other turn endings report none", async () => {
+  const { socketPath, requests } = await listen();
+  const failure = { hook_event_name: "StopFailure", error_type: "E".repeat(300), error_message: "m".repeat(2_500) };
+
+  await runHook("idle", JSON.stringify(failure), herdrEnv(socketPath));
+  await runHook("idle", JSON.stringify({ hook_event_name: "StopFailure" }), herdrEnv(socketPath));
+  await runHook("idle", JSON.stringify({ hook_event_name: "Stop" }), herdrEnv(socketPath));
+  await runHook("idle", JSON.stringify({ hook_event_name: "Interrupt" }), herdrEnv(socketPath));
+
+  const attention = requests.filter((request) => request.method === "pane.report_agent_attention");
+  expect(attention).toHaveLength(2);
+  expect([...String(attention[0].params.title)]).toHaveLength(200);
+  expect([...String(attention[0].params.detail)]).toHaveLength(2_000);
+  expect(attention[1].params).toEqual({ pane_id: "test:p1", source: "herdr:kimi", agent: "kimi", kind: "failed", seq: expect.any(Number) });
+  expect(requests.filter((request) => request.method === "pane.report_agent").map((request) => request.params.state)).toEqual([
+    "idle",
+    "idle",
+    "idle",
+    "idle",
+  ]);
+});
+
+hookTest("the hook exits cleanly when Herdr is not listening", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "herdr-kimi-hook-"));
+  const payload = JSON.stringify({ hook_event_name: "StopFailure", error_type: "APIStatusError" });
+
+  expect(await runHook("idle", payload, herdrEnv(join(tempDir, "missing.sock")))).toBe(0);
 });
 
 test("the installed hook table maps every turn-ending event to idle", async () => {

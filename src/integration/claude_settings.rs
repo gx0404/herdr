@@ -5,13 +5,12 @@ use std::path::Path;
 use jsonc_parser::ast::{Array as AstArray, Object as AstObject, Value as AstValue};
 use jsonc_parser::common::Ranged;
 use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstRootNode};
-use jsonc_parser::{json, parse_to_ast, CollectOptions, ParseOptions};
-use serde_json::{json as serde_json_value, Map, Value};
+use jsonc_parser::{parse_to_ast, CollectOptions, ParseOptions};
+use serde_json::{Map, Value};
 
 use super::command::hook_command;
 use super::config_edit::{
-    ensure_command_hook, ensure_hooks_object, hook_command_variants, hooks_object_if_present,
-    is_matching_command_hook,
+    ensure_hooks_object, hook_command_variants, hooks_object_if_present, is_matching_command_hook,
 };
 
 // Claude's documented SessionStart sources. Third-party tools that import Claude
@@ -19,59 +18,90 @@ use super::config_edit::{
 // starts.
 const SESSION_START_MATCHER: &str = "^(startup|resume|clear|compact|fork)$";
 
+/// `Notification` 只取两种等用户处理的通知：权限对话框（`permission_prompt`）与 MCP
+/// 表单（`elicitation_dialog`）。claude 在对话框出现后、用户 6 秒没有操作时才发它们。
+const NOTIFICATION_MATCHER: &str = "^(permission_prompt|elicitation_dialog)$";
+
 /// herdr 写进 claude settings 的每条钩子的超时（秒）。
 const HOOK_TIMEOUT_SECS: u64 = 10;
 
-/// herdr 安装的一条钩子：事件、脚本动作与 matcher（`None` 表示该事件不支持
-/// matcher，条目里不写这个键）。
+/// herdr 安装的一条钩子：事件、脚本动作、matcher（`None` 表示该事件不支持
+/// matcher，条目里不写这个键），以及是否放到后台跑（`background` 写成
+/// `"async": true`：claude 不等它结束，也不读它的输出）。
 struct HookInstall {
     event: &'static str,
     action: &'static str,
     matcher: Option<&'static str>,
+    background: bool,
 }
 
 static SESSION_HOOK: HookInstall = HookInstall {
     event: "SessionStart",
     action: "session",
     matcher: Some(SESSION_START_MATCHER),
+    background: false,
 };
 
+/// 待处理事项详情钩子，只补 needs-input 的说明（`pane.report_agent_attention`）：
+/// claude 的状态仍由屏幕检测决定，详情只在 pane 受阻时露面，状态离开受阻时 server
+/// 自己清掉，所以不另装清除用的钩子。`PermissionRequest` {tool_name, tool_input,
+/// permission_suggestions?} 以工具名作 matcher，`Notification` {message, title?,
+/// notification_type} 以通知类型作 matcher（claude 2.1.76 核对）。两者只上报、从不替
+/// claude 做决定，放到后台跑。
+///
+/// 不订阅 `StopFailure`（claude 2.1.78 起才有，晚于 `CLAUDE_MIN_VERSION`）：claude
+/// 2.1.101 之前，settings 里出现它不认识的事件会让整份 settings.json 作废（2.1.76
+/// 实测），连同用户自己的设置。
+static ATTENTION_HOOKS: [HookInstall; 2] = [
+    HookInstall {
+        event: "Notification",
+        action: "attention",
+        matcher: Some(NOTIFICATION_MATCHER),
+        background: true,
+    },
+    HookInstall {
+        event: "PermissionRequest",
+        action: "attention",
+        matcher: Some("*"),
+        background: true,
+    },
+];
+
 /// 活动信号钩子，只发「有变化」提示（`pane.report_agent_activity`），活动树本身
-/// 由 server 读转录得出。事件与载荷按 claude 2.1.278 二进制内嵌的 schema 核对：
-/// `SubagentStart` {agent_id, agent_type} 与 `SubagentStop` {agent_id, agent_type,
-/// agent_transcript_path, last_assistant_message?} 以 agent_type 作 matcher 查询，
-/// `*` 取全部；`TaskCreated` / `TaskCompleted` {task_id, task_subject,
-/// task_description?} 不支持 matcher。
-static ACTIVITY_HOOKS: [HookInstall; 4] = [
+/// 由 server 读转录得出，所以放到后台跑。事件与载荷按 claude 2.1.278 二进制内嵌的
+/// schema 核对：`SubagentStart` {agent_id, agent_type} 与 `SubagentStop` {agent_id,
+/// agent_type, agent_transcript_path, last_assistant_message?} 以 agent_type 作 matcher
+/// 查询，`*` 取全部；`TaskCompleted` {task_id, task_subject, task_description?} 不支持
+/// matcher。不再订阅 `TaskCreated`：它从 claude 2.1.84 起才有，晚于
+/// `CLAUDE_MIN_VERSION`，更早的版本见到它会作废整份 settings.json；新建的任务由活动树
+/// 轮询补上。Windows 的 PowerShell 资产经 `herdr pane report-agent-activity` 上报，各
+/// 平台装同一套。
+static ACTIVITY_HOOKS: [HookInstall; 3] = [
     HookInstall {
         event: "SubagentStart",
         action: "activity",
         matcher: Some("*"),
+        background: true,
     },
     HookInstall {
         event: "SubagentStop",
         action: "activity",
         matcher: Some("*"),
-    },
-    HookInstall {
-        event: "TaskCreated",
-        action: "activity",
-        matcher: None,
+        background: true,
     },
     HookInstall {
         event: "TaskCompleted",
         action: "activity",
         matcher: None,
+        background: true,
     },
 ];
 
-/// Windows 的 PowerShell 资产只能经 `herdr` CLI 上报，而 CLI 没有活动信号子命令；
-/// 装上只会让每次派生子 agent 都白白拉起一个 PowerShell，所以只在 Unix 上安装。
-const INSTALL_ACTIVITY_HOOKS: bool = !cfg!(windows);
-
-/// 本平台上 herdr 应当装好的全部钩子，按写入顺序。
+/// herdr 应当装好的全部钩子，按写入顺序。
 fn installed_hooks() -> impl Iterator<Item = &'static HookInstall> {
-    std::iter::once(&SESSION_HOOK).chain(ACTIVITY_HOOKS.iter().filter(|_| INSTALL_ACTIVITY_HOOKS))
+    std::iter::once(&SESSION_HOOK)
+        .chain(ATTENTION_HOOKS.iter())
+        .chain(ACTIVITY_HOOKS.iter())
 }
 
 fn installed_hook_for(event: &str) -> Option<&'static HookInstall> {
@@ -111,8 +141,12 @@ const HOOK_REMOVALS: &[HookRemoval] = &[
         actions: &["activity"],
     },
     HookRemoval {
+        event: "Notification",
+        actions: &["attention"],
+    },
+    HookRemoval {
         event: "PermissionRequest",
-        actions: &["blocked"],
+        actions: &["blocked", "attention"],
     },
     HookRemoval {
         event: "SessionStart",
@@ -162,13 +196,7 @@ fn install_one(
         "claude settings hooks",
     )?;
     apply_value_removals(hooks, hook_path, true)?;
-    ensure_command_hook(
-        hooks,
-        hook.event,
-        hook_command(hook_path, Some(hook.action)),
-        HOOK_TIMEOUT_SECS,
-        hook.matcher,
-    )?;
+    ensure_canonical_hook(hooks, hook_path, hook)?;
 
     if desired == original {
         return Ok(content.to_string());
@@ -200,6 +228,27 @@ pub(crate) fn uninstall(
     }
 
     rewrite(content, settings_path, hook_path, None, &desired)
+}
+
+/// 清理之后补上这条钩子的规范条目。清理只留下规范条目里的 herdr 命令，所以「已有
+/// 相等的条目」就是「已经装好」。
+fn ensure_canonical_hook(
+    hooks: &mut Map<String, Value>,
+    hook_path: &Path,
+    hook: &HookInstall,
+) -> io::Result<()> {
+    let canonical = canonical_hook_value(hook_path, hook);
+    let entries = hooks
+        .entry(hook.event.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| {
+            io::Error::other(format!("hook entries for {} must be an array", hook.event))
+        })?;
+    if !entries.contains(&canonical) {
+        entries.push(canonical);
+    }
+    Ok(())
 }
 
 /// 安装时要原样保留的规范条目；卸载时一律为 `None`。
@@ -423,35 +472,53 @@ fn removal_commands(policy: &HookRemoval, hook_path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// 规范条目的值形状，必须与 `ensure_command_hook` 构造的条目相等。
+/// 规范条目的值形状；`canonical_hook_input` 与 `canonical_hook_json` 写出的文本必须
+/// 解析成同一个值。
 fn canonical_hook_value(hook_path: &Path, hook: &HookInstall) -> Value {
+    let mut handler = Map::new();
+    handler.insert("type".to_string(), Value::from("command"));
+    handler.insert(
+        "command".to_string(),
+        Value::from(hook_command(hook_path, Some(hook.action))),
+    );
+    handler.insert("timeout".to_string(), Value::from(HOOK_TIMEOUT_SECS));
+    if hook.background {
+        handler.insert("async".to_string(), Value::Bool(true));
+    }
     let mut entry = Map::new();
     if let Some(matcher) = hook.matcher {
-        entry.insert("matcher".to_string(), Value::String(matcher.to_string()));
+        entry.insert("matcher".to_string(), Value::from(matcher));
     }
     entry.insert(
         "hooks".to_string(),
-        serde_json_value!([{
-            "type": "command",
-            "command": hook_command(hook_path, Some(hook.action)),
-            "timeout": HOOK_TIMEOUT_SECS,
-        }]),
+        Value::Array(vec![Value::Object(handler)]),
     );
     Value::Object(entry)
 }
 
 fn canonical_hook_input(hook_path: &Path, hook: &HookInstall) -> CstInputValue {
-    let command = hook_command(hook_path, Some(hook.action));
-    let hooks = json!([{
-        "type": "command",
-        command: command,
-        timeout: HOOK_TIMEOUT_SECS,
-    }]);
+    let mut handler = vec![
+        ("type".to_string(), CstInputValue::from("command")),
+        (
+            "command".to_string(),
+            CstInputValue::from(hook_command(hook_path, Some(hook.action))),
+        ),
+        (
+            "timeout".to_string(),
+            CstInputValue::from(HOOK_TIMEOUT_SECS),
+        ),
+    ];
+    if hook.background {
+        handler.push(("async".to_string(), CstInputValue::Bool(true)));
+    }
     let mut properties = Vec::with_capacity(2);
     if let Some(matcher) = hook.matcher {
         properties.push(("matcher".to_string(), CstInputValue::from(matcher)));
     }
-    properties.push(("hooks".to_string(), hooks));
+    properties.push((
+        "hooks".to_string(),
+        CstInputValue::Array(vec![CstInputValue::Object(handler)]),
+    ));
     CstInputValue::Object(properties)
 }
 
@@ -605,8 +672,14 @@ fn append_to_container(
 /// 紧凑容器里追加的规范条目文本（与 `canonical_hook_value` 语义相同）。
 fn canonical_hook_json(hook_path: &Path, hook: &HookInstall) -> io::Result<String> {
     let command = serde_json::to_string(&hook_command(hook_path, Some(hook.action)))?;
-    let hooks =
-        format!("[{{\"type\":\"command\",\"command\":{command},\"timeout\":{HOOK_TIMEOUT_SECS}}}]");
+    let background = if hook.background {
+        ",\"async\":true"
+    } else {
+        ""
+    };
+    let hooks = format!(
+        "[{{\"type\":\"command\",\"command\":{command},\"timeout\":{HOOK_TIMEOUT_SECS}{background}}}]"
+    );
     Ok(match hook.matcher {
         Some(matcher) => format!(
             "{{\"matcher\":{},\"hooks\":{hooks}}}",
@@ -690,8 +763,8 @@ mod tests {
         )
     }
 
-    /// 紧凑容器里 SessionStart 之后依次追加的活动钩子属性（Windows 上为空）。
-    fn activity_tail(hook_path: &Path) -> String {
+    /// 紧凑容器里 SessionStart 之后依次追加的其余钩子属性。
+    fn hooks_tail(hook_path: &Path) -> String {
         installed_hooks()
             .filter(|hook| hook.event != SESSION_HOOK.event)
             .map(|hook| {
@@ -711,7 +784,7 @@ mod tests {
             "{\r\n",
             "    \"zeta\" : {\"escaped\":\"\\u0061\", \"number\":1e+02},\r\n",
             "    \"hooks\" : {\r\n",
-            "        \"Notification\" : [{\"matcher\":\"keep\",\"hooks\":[]}]\r\n",
+            "        \"PreCompact\" : [{\"matcher\":\"keep\",\"hooks\":[]}]\r\n",
             "    },\r\n",
             "    \"alpha\" : 1\r\n",
             "}\r\n\r\n",
@@ -723,7 +796,7 @@ mod tests {
             "{\r\n",
             "    \"zeta\" : {\"escaped\":\"\\u0061\", \"number\":1e+02},\r\n",
             "    \"hooks\" : {\r\n",
-            "        \"Notification\" : [{\"matcher\":\"keep\",\"hooks\":[]}],\r\n",
+            "        \"PreCompact\" : [{\"matcher\":\"keep\",\"hooks\":[]}],\r\n",
         )));
         assert!(updated.ends_with(concat!(
             "\r\n    },\r\n",
@@ -749,8 +822,8 @@ mod tests {
     fn install_keeps_compact_containers_compact() {
         let (settings_path, hook_path) = paths();
         let canonical = canonical_hook_json(hook_path, &SESSION_HOOK).unwrap();
-        // 每种形状里 SessionStart 都落在 hooks 的最后，活动钩子紧随其后逐个追加。
-        let tail = activity_tail(hook_path);
+        // 每种形状里 SessionStart 都落在 hooks 的最后，其余钩子紧随其后逐个追加。
+        let tail = hooks_tail(hook_path);
         let cases = [
             (
                 "{\"zeta\":{\"escaped\":\"\\u0061\",\"n\":1e+02},\"alpha\":1}\r\n",
@@ -759,9 +832,9 @@ mod tests {
                 ),
             ),
             (
-                "{\"hooks\":{\"Notification\":[{\"matcher\":\"keep\",\"hooks\":[]}]}, \"alpha\":1}",
+                "{\"hooks\":{\"PreCompact\":[{\"matcher\":\"keep\",\"hooks\":[]}]}, \"alpha\":1}",
                 format!(
-                    "{{\"hooks\":{{\"Notification\":[{{\"matcher\":\"keep\",\"hooks\":[]}}],\"SessionStart\":[{canonical}]{tail}}}, \"alpha\":1}}"
+                    "{{\"hooks\":{{\"PreCompact\":[{{\"matcher\":\"keep\",\"hooks\":[]}}],\"SessionStart\":[{canonical}]{tail}}}, \"alpha\":1}}"
                 ),
             ),
             (
@@ -777,9 +850,9 @@ mod tests {
                 ),
             ),
             (
-                "{\"hooks\":{\"Notification\":[\n  {\"matcher\":\"keep\",\"hooks\":[]}\n]},\"alpha\":1}",
+                "{\"hooks\":{\"PreCompact\":[\n  {\"matcher\":\"keep\",\"hooks\":[]}\n]},\"alpha\":1}",
                 format!(
-                    "{{\"hooks\":{{\"Notification\":[\n  {{\"matcher\":\"keep\",\"hooks\":[]}}\n],\"SessionStart\":[{canonical}]{tail}}},\"alpha\":1}}"
+                    "{{\"hooks\":{{\"PreCompact\":[\n  {{\"matcher\":\"keep\",\"hooks\":[]}}\n],\"SessionStart\":[{canonical}]{tail}}},\"alpha\":1}}"
                 ),
             ),
             (
@@ -817,7 +890,7 @@ mod tests {
     fn install_is_a_byte_exact_noop_for_a_canonical_hook() {
         let (settings_path, hook_path) = paths();
         let command = serde_json::to_string(&hook_command(hook_path, Some("session"))).unwrap();
-        let tail = activity_tail(hook_path);
+        let tail = hooks_tail(hook_path);
         let input = format!(
             "{{\"hooks\":{{\"SessionStart\":[{{\"hooks\":[{{\"timeout\":10,\"command\":{command},\"type\":\"command\"}}],\"matcher\":\"{SESSION_START_MATCHER}\"}}]{tail}}},\"escaped\":\"\\u0061\"}}  \r\n\r\n"
         );
@@ -864,7 +937,7 @@ mod tests {
     fn install_preserves_canonical_session_start_position_during_migration() {
         let (settings_path, hook_path) = paths();
         let canonical = canonical_hook_json(hook_path, &SESSION_HOOK).unwrap();
-        let tail = activity_tail(hook_path);
+        let tail = hooks_tail(hook_path);
         let old_command = serde_json::to_string(&hook_command(hook_path, Some("working"))).unwrap();
         let session_start = format!(
             "\"SessionStart\":[{canonical},{{\"matcher\":\"foreign\",\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}}]"
@@ -898,7 +971,7 @@ mod tests {
                 "        {{  \"type\" : \"command\", \"command\" : \"echo keep\", \"timeout\" : 3  }}\n",
                 "      ]\n",
                 "    }}],\n",
-                "    \"Notification\": [{{\"matcher\":\"keep\",\"hooks\":[]}}]\n",
+                "    \"PreCompact\": [{{\"matcher\":\"keep\",\"hooks\":[]}}]\n",
                 "  }}\n",
                 "}}\n",
             ),
@@ -911,7 +984,7 @@ mod tests {
         assert!(updated.contains(
             "        {  \"type\" : \"command\", \"command\" : \"echo keep\", \"timeout\" : 3  }"
         ));
-        assert!(updated.contains("    \"Notification\": [{\"matcher\":\"keep\",\"hooks\":[]}]"));
+        assert!(updated.contains("    \"PreCompact\": [{\"matcher\":\"keep\",\"hooks\":[]}]"));
         let parsed: Value = serde_json::from_str(&updated).unwrap();
         assert_eq!(
             parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
@@ -954,43 +1027,45 @@ mod tests {
     }
 
     #[test]
-    fn install_subscribes_activity_hooks_with_their_documented_matchers() {
+    fn install_subscribes_detail_and_activity_hooks_in_the_background() {
         let (settings_path, hook_path) = paths();
         let installed = install("{}", settings_path, hook_path).unwrap();
         let settings: Value = serde_json::from_str(&installed).unwrap();
         let hooks = settings["hooks"].as_object().unwrap();
 
-        for hook in &ACTIVITY_HOOKS {
-            let groups = hooks.get(hook.event);
-            // Unix 上必须已装；Windows 上必须没装。
-            assert_eq!(groups.is_some(), INSTALL_ACTIVITY_HOOKS, "{}", hook.event);
-            let Some(groups) = groups else {
-                continue;
-            };
-            let groups = groups.as_array().unwrap();
+        for (hook, action) in ATTENTION_HOOKS
+            .iter()
+            .map(|hook| (hook, " attention"))
+            .chain(ACTIVITY_HOOKS.iter().map(|hook| (hook, " activity")))
+        {
+            let groups = hooks[hook.event].as_array().unwrap();
             assert_eq!(groups.len(), 1, "{}", hook.event);
-            // SubagentStart/Stop 按 agent_type 匹配取全部；Task* 不支持 matcher，不写键。
+            // Notification 按通知类型、PermissionRequest 按工具名、SubagentStart/Stop 按
+            // agent_type 匹配；TaskCompleted 不支持 matcher，不写键。
             assert_eq!(
                 groups[0].get("matcher").and_then(Value::as_str),
                 hook.matcher,
                 "{}",
                 hook.event
             );
-            let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(command.ends_with(" activity"), "{command}");
-            assert_eq!(groups[0]["hooks"][0]["timeout"], HOOK_TIMEOUT_SECS);
+            let handler = &groups[0]["hooks"][0];
+            let command = handler["command"].as_str().unwrap();
+            assert!(command.ends_with(action), "{command}");
+            assert_eq!(handler["timeout"], HOOK_TIMEOUT_SECS);
+            assert_eq!(handler["async"], true, "{}", hook.event);
         }
+        // 会话身份仍同步上报。
+        assert!(hooks["SessionStart"][0]["hooks"][0].get("async").is_none());
         assert_eq!(
-            hooks
-                .keys()
-                .filter(|event| event.as_str() != "SessionStart")
-                .count(),
-            if INSTALL_ACTIVITY_HOOKS {
-                ACTIVITY_HOOKS.len()
-            } else {
-                0
-            }
+            hooks.keys().map(String::as_str).collect::<HashSet<_>>(),
+            installed_hooks()
+                .map(|hook| hook.event)
+                .collect::<HashSet<_>>()
         );
+        // claude 不认识的事件会让整份 settings 作废：不装只有新版本才有的事件。
+        for event in ["TaskCreated", "StopFailure"] {
+            assert!(hooks.get(event).is_none(), "{event}");
+        }
 
         // 重装字节不变；卸载后一条 herdr 钩子都不剩。
         assert_eq!(
@@ -1002,16 +1077,159 @@ mod tests {
         assert_eq!(settings["hooks"], serde_json::json!({}));
     }
 
+    /// 每个安装的钩子事件最早出现的 claude 版本（claude 更新日志；`Notification` 记的是
+    /// 支持 matcher 的版本）。
+    const EVENT_SINCE: [(&str, &str); 6] = [
+        ("SessionStart", "1.0.62"),
+        ("SubagentStop", "1.0.41"),
+        ("Notification", "2.0.37"),
+        ("SubagentStart", "2.0.43"),
+        ("PermissionRequest", "2.0.45"),
+        ("TaskCompleted", "2.1.33"),
+    ];
+
+    /// claude 2.1.101 之前，settings.json 里出现它不认识的事件会让整份文件作废：安装的
+    /// 每个事件都必须登记，且不晚于安装时校验的最低版本。
+    #[test]
+    fn every_installed_event_is_known_at_the_minimum_claude_version() {
+        use super::super::version::extract_version_triple;
+        let min = extract_version_triple(super::super::CLAUDE_MIN_VERSION).unwrap();
+        for hook in installed_hooks() {
+            let (_, since) = EVENT_SINCE
+                .iter()
+                .find(|(event, _)| *event == hook.event)
+                .unwrap_or_else(|| panic!("{}：登记它最早出现的 claude 版本", hook.event));
+            assert!(
+                extract_version_triple(since).unwrap() <= min,
+                "{} 从 claude {since} 起才有，晚于最低版本",
+                hook.event
+            );
+        }
+        for (event, since) in [("StopFailure", "2.1.78"), ("TaskCreated", "2.1.84")] {
+            assert!(extract_version_triple(since).unwrap() > min, "{event}");
+            assert!(
+                installed_hook_for(event).is_none(),
+                "{event} 晚于最低版本，不能装"
+            );
+        }
+    }
+
+    #[test]
+    fn notification_matcher_takes_only_the_prompts_that_wait_for_the_user() {
+        let pattern = regex::Regex::new(NOTIFICATION_MATCHER).unwrap();
+        for kind in ["permission_prompt", "elicitation_dialog"] {
+            assert!(pattern.is_match(kind), "{kind}");
+        }
+        for kind in [
+            "idle_prompt",
+            "auth_success",
+            "elicitation_complete",
+            "worker_permission_prompt",
+            "agent_needs_input",
+            "",
+        ] {
+            assert!(!pattern.is_match(kind), "{kind}");
+        }
+    }
+
+    #[test]
+    fn install_adds_attention_hooks_beside_user_hooks_and_drops_the_legacy_blocked_hook() {
+        let (settings_path, hook_path) = paths();
+        let blocked = serde_json::to_string(&hook_command(hook_path, Some("blocked"))).unwrap();
+        let input = format!(
+            concat!(
+                "{{\n",
+                "  \"hooks\": {{\n",
+                "    \"Notification\": [{{\"matcher\":\"idle_prompt\",\"hooks\":[{{\"type\":\"command\",\"command\":\"notify-send idle\"}}]}}],\n",
+                "    \"PermissionRequest\": [{{\n",
+                "      \"matcher\": \"*\",\n",
+                "      \"hooks\": [\n",
+                "        {{\"type\":\"command\",\"command\":{blocked},\"timeout\":10}},\n",
+                "        {{\"type\":\"command\",\"command\":\"echo keep-permission\"}}\n",
+                "      ]\n",
+                "    }}]\n",
+                "  }}\n",
+                "}}\n",
+            ),
+            blocked = blocked,
+        );
+
+        let updated = install(&input, settings_path, hook_path).unwrap();
+        let settings: Value = serde_json::from_str(&updated).unwrap();
+
+        assert!(!updated.contains(&blocked));
+        let notification = settings["hooks"]["Notification"].as_array().unwrap();
+        assert_eq!(notification.len(), 2);
+        assert_eq!(notification[0]["hooks"][0]["command"], "notify-send idle");
+        assert_eq!(
+            notification[1],
+            canonical_hook_value(hook_path, &ATTENTION_HOOKS[0])
+        );
+        let permission = settings["hooks"]["PermissionRequest"].as_array().unwrap();
+        assert_eq!(permission.len(), 2);
+        assert_eq!(
+            permission[0]["hooks"],
+            serde_json::json!([{"type": "command", "command": "echo keep-permission"}])
+        );
+        assert_eq!(
+            permission[1],
+            canonical_hook_value(hook_path, &ATTENTION_HOOKS[1])
+        );
+        assert_eq!(
+            install(&updated, settings_path, hook_path).unwrap(),
+            updated
+        );
+
+        let removed = uninstall(&updated, settings_path, hook_path).unwrap();
+        let settings: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(
+            settings["hooks"]["Notification"],
+            serde_json::json!([{"matcher": "idle_prompt", "hooks": [{"type": "command", "command": "notify-send idle"}]}])
+        );
+        assert_eq!(
+            settings["hooks"]["PermissionRequest"][0]["hooks"],
+            serde_json::json!([{"type": "command", "command": "echo keep-permission"}])
+        );
+        assert_eq!(
+            settings["hooks"]["PermissionRequest"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn install_moves_foreground_activity_hooks_to_the_background() {
+        let (settings_path, hook_path) = paths();
+        // v12 写的活动钩子：同一条命令，没有 `async`。
+        let foreground = HookInstall {
+            background: false,
+            ..ACTIVITY_HOOKS[0]
+        };
+        let old_entry =
+            serde_json::to_string(&canonical_hook_value(hook_path, &foreground)).unwrap();
+        let input = format!("{{\"hooks\":{{\"SubagentStart\":[{old_entry}]}}}}");
+
+        let updated = install(&input, settings_path, hook_path).unwrap();
+        let settings: Value = serde_json::from_str(&updated).unwrap();
+
+        assert_eq!(
+            settings["hooks"]["SubagentStart"],
+            serde_json::json!([canonical_hook_value(hook_path, &ACTIVITY_HOOKS[0])])
+        );
+        assert_eq!(
+            install(&updated, settings_path, hook_path).unwrap(),
+            updated
+        );
+    }
+
     #[test]
     fn install_replaces_legacy_subagent_stop_hook_and_keeps_user_hooks() {
-        if !INSTALL_ACTIVITY_HOOKS {
-            return;
-        }
         let (settings_path, hook_path) = paths();
         let working = serde_json::to_string(&hook_command(hook_path, Some("working"))).unwrap();
-        // herdr 自己的活动命令，但超时不是规范值 → 视为旧条目，删掉后重装规范条目。
-        let stale_activity =
-            serde_json::to_string(&hook_command(hook_path, Some("activity"))).unwrap();
+        // v11/v12 装过的 TaskCreated 活动钩子：这个事件不再安装，整条删掉。
+        let activity = serde_json::to_string(&hook_command(hook_path, Some("activity"))).unwrap();
         let input = format!(
             concat!(
                 "{{\n",
@@ -1023,13 +1241,13 @@ mod tests {
                 "        {{\"type\":\"command\",\"command\":\"echo keep-subagent\"}}\n",
                 "      ]\n",
                 "    }}],\n",
-                "    \"TaskCreated\": [{{\"hooks\":[{{\"type\":\"command\",\"command\":{stale},\"timeout\":3}}]}}],\n",
+                "    \"TaskCreated\": [{{\"hooks\":[{{\"type\":\"command\",\"command\":{activity},\"timeout\":10}}]}}],\n",
                 "    \"TaskCompleted\": [{{\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep-task\"}}]}}]\n",
                 "  }}\n",
                 "}}\n",
             ),
             working = working,
-            stale = stale_activity,
+            activity = activity,
         );
 
         let updated = install(&input, settings_path, hook_path).unwrap();
@@ -1048,19 +1266,14 @@ mod tests {
             subagent_stop[1],
             canonical_hook_value(hook_path, &ACTIVITY_HOOKS[1])
         );
-        // 超时不规范的 herdr 条目被整组替换成规范条目。
-        let task_created = settings["hooks"]["TaskCreated"].as_array().unwrap();
-        assert_eq!(
-            task_created,
-            &vec![canonical_hook_value(hook_path, &ACTIVITY_HOOKS[2])]
-        );
+        assert!(settings["hooks"].get("TaskCreated").is_none(), "{updated}");
         // 用户自己的 TaskCompleted 命令保留在前，规范条目追加在后。
         let task_completed = settings["hooks"]["TaskCompleted"].as_array().unwrap();
         assert_eq!(task_completed.len(), 2);
         assert_eq!(task_completed[0]["hooks"][0]["command"], "echo keep-task");
         assert_eq!(
             task_completed[1],
-            canonical_hook_value(hook_path, &ACTIVITY_HOOKS[3])
+            canonical_hook_value(hook_path, &ACTIVITY_HOOKS[2])
         );
         assert!(updated.ends_with("}\n"));
         assert_eq!(

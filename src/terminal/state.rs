@@ -2162,6 +2162,12 @@ impl TerminalState {
         self.turn.failure_notices()
     }
 
+    /// 本回合已经发过失败通知：之后同一回合进入 Idle / Blocked 不再通知（新的 Working
+    /// 开始新回合）。
+    pub(crate) fn failure_announced(&self) -> bool {
+        self.turn.failure_announced()
+    }
+
     /// 用户看过这个 pane：确认已经通知过的失败。返回是否有变化。
     pub(crate) fn acknowledge_attention(&mut self) -> bool {
         self.turn.acknowledge()
@@ -6361,11 +6367,20 @@ mod tests {
         );
         assert!(terminal.take_failure_notice());
         assert!(!terminal.take_failure_notice(), "同一失败只通知一次");
+        assert!(terminal.failure_announced());
         assert!(terminal.acknowledge_attention(), "用户看过后清掉");
         assert_eq!(attention_kind(&terminal), None);
+        assert!(
+            !terminal.report_attention("herdr:pi", "pi", Some(2), failed_report("again")),
+            "同一回合不再锁存第二次失败"
+        );
+        assert_eq!(attention_kind(&terminal), None);
 
-        // 进入 Working 清掉。
-        terminal.report_attention("herdr:pi", "pi", Some(2), failed_report("again"));
+        // 新回合里的失败；进入 Working 清掉。
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        assert!(!terminal.failure_announced(), "新回合");
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.report_attention("herdr:pi", "pi", Some(3), failed_report("again"));
         assert_eq!(attention_kind(&terminal), Some(AgentAttentionKind::Failed));
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
         assert_eq!(attention_kind(&terminal), None);

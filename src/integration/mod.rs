@@ -49,6 +49,11 @@ const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
     include_str!("assets/claude/herdr-agent-state.sh")
 };
 const CLAUDE_INTEGRATION_VERSION: u32 = 12;
+/// 认识 herdr 写进 `settings.json` 的每个钩子事件（最晚的是 `TaskCompleted`）和
+/// `"async"` 字段的最早 claude 版本，安装时用 `claude --version` 校验。claude 2.1.101
+/// 之前，settings 里出现它不认识的事件会让整份 `settings.json` 作废，连同用户自己的
+/// 设置，所以每个事件都要在 `claude_settings` 的版本表里登记且不晚于这个版本。
+const CLAUDE_MIN_VERSION: &str = "2.1.33";
 const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -59,7 +64,7 @@ const CODEX_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/codex/herdr-agent-state.sh")
 };
-const CODEX_INTEGRATION_VERSION: u32 = 9;
+const CODEX_INTEGRATION_VERSION: u32 = 10;
 const KIMI_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -70,7 +75,7 @@ const KIMI_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/kimi/herdr-agent-state.sh")
 };
-const KIMI_INTEGRATION_VERSION: u32 = 8;
+const KIMI_INTEGRATION_VERSION: u32 = 9;
 const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> herdr kimi integration";
 const KIMI_CONFIG_BLOCK_END: &str = "# <<< herdr kimi integration";
 const KIMI_MIN_VERSION: &str = "0.14.0";
@@ -91,7 +96,8 @@ const KIMI_TODO_TOOL_MATCHER: &str = "^TodoList$";
 ///
 /// 回合的三种收尾各发一个事件且互斥：正常结束 `Stop`、用户打断 `Interrupt`、回合出错
 /// `StopFailure`（provider 报错、鉴权失败等，载荷是 `errorType` / `errorMessage`）。
-/// 三者都要映射到 `idle`，否则出错的回合会让 pane 停在 working 直到 kimi 退出。
+/// 三者都要映射到 `idle`，否则出错的回合会让 pane 停在 working 直到 kimi 退出；
+/// `StopFailure` 另由钩子脚本先报一条 `failed` 待处理事项（错误类型与说明）。
 /// `StopFailure` 与 `SessionEnd` 自官方仓库最早的 tag（0.2.0）起就在枚举里，
 /// 0.14.0 的 legacy 引擎也会在回合出错时触发 `StopFailure`，无需按版本门控。
 /// `SessionEnd` 不订阅：它只在 kimi 退出时触发，而 herdr 观察到 agent 进程退出时
@@ -139,7 +145,7 @@ const OPENCODE_TUI_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-tui-
 const OPENCODE_V2_TUI_PLUGIN_DIR: &str = "herdr-opencode";
 const OPENCODE_V2_TUI_PLUGIN_SPEC: &str = "./herdr-opencode";
 const OPENCODE_V2_TUI_PLUGIN_ASSET: &str = include_str!("assets/opencode/tui.js");
-const OPENCODE_INTEGRATION_VERSION: u32 = 13;
+const OPENCODE_INTEGRATION_VERSION: u32 = 14;
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";

@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session|activity) ;;
+  session|activity|attention) ;;
   *) exit 0 ;;
 esac
 
@@ -22,7 +22,7 @@ esac
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'
+HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY' || true
 import json
 import os
 import random
@@ -59,6 +59,8 @@ if hook_input_file:
             hook_input = json.loads(content)
     except Exception:
         hook_input = {}
+if not isinstance(hook_input, dict):
+    hook_input = {}
 
 if "CURSOR_VERSION" in os.environ or "cursor_version" in hook_input:
     raise SystemExit(0)
@@ -66,10 +68,91 @@ hook_event_name = str(hook_input.get("hook_event_name") or "")
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 
+# Herdr rejects attention text over these lengths (characters).
+TITLE_MAX_CHARS = 200
+DETAIL_MAX_CHARS = 2000
+OPTION_MAX_CHARS = 120
+MAX_OPTIONS = 8
+SUMMARY_MAX_CHARS = 200
+# Tool input fields that name what a permission request is about, best first.
+SUMMARY_KEYS = (
+    "command",
+    "file_path",
+    "notebook_path",
+    "path",
+    "url",
+    "query",
+    "pattern",
+    "description",
+    "plan",
+    "prompt",
+)
+# Claude also announces a permission dialog with Notification(permission_prompt),
+# but only after 6 seconds without input, and that message only names the tool.
+# Every other needs-input report is numbered this far ahead of the clock, so the
+# notification cannot replace the PermissionRequest detail of the same dialog:
+# Herdr ignores a report whose seq is not newer than the last one from this
+# source. Without a detailed report in the last ten minutes it still lands.
+DETAIL_SEQ_LEAD_NS = 600 * 1_000_000_000
+
 
 def text_field(name):
     value = hook_input.get(name)
     return value if isinstance(value, str) and value else None
+
+
+def clip(value, limit):
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if not text:
+        return None
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def first_line(text):
+    for line in text.splitlines():
+        if line.strip():
+            return line
+    return text
+
+
+def permission_report():
+    tool_name = clip(hook_input.get("tool_name"), TITLE_MAX_CHARS)
+    if not tool_name:
+        return None
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    questions = tool_input.get("questions")
+    if tool_name == "AskUserQuestion" and isinstance(questions, list) and questions:
+        question = questions[0] if isinstance(questions[0], dict) else {}
+        choices = question.get("options")
+        options = []
+        for option in choices if isinstance(choices, list) else []:
+            label = clip(option.get("label"), OPTION_MAX_CHARS) if isinstance(option, dict) else None
+            if label and len(options) < MAX_OPTIONS:
+                options.append(label)
+        detail = clip(question.get("question"), DETAIL_MAX_CHARS)
+        if detail:
+            return {"title": clip(question.get("header"), TITLE_MAX_CHARS), "detail": detail, "options": options}
+    summary_key = next(
+        (key for key in SUMMARY_KEYS if isinstance(tool_input.get(key), str) and tool_input[key].strip()),
+        None,
+    )
+    summary = clip(first_line(tool_input[summary_key]), SUMMARY_MAX_CHARS) if summary_key else None
+    title = clip(tool_input.get("description"), TITLE_MAX_CHARS) if summary_key != "description" else None
+    return {"title": title, "detail": f"{tool_name}: {summary}" if summary else tool_name}
+
+
+def notification_report():
+    if text_field("notification_type") not in ("permission_prompt", "elicitation_dialog"):
+        return None
+    report = {
+        "title": clip(hook_input.get("title"), TITLE_MAX_CHARS),
+        "detail": clip(hook_input.get("message"), DETAIL_MAX_CHARS),
+    }
+    return report if report["title"] or report["detail"] else None
 
 
 def send(request):
@@ -86,6 +169,38 @@ def send(request):
     except Exception:
         pass
 
+
+if action == "attention":
+    # Details only: Claude's state still comes from Herdr's screen detection, and
+    # Herdr shows these details only while the pane is blocked, dropping them when
+    # it leaves that state. The hook never answers the prompt for Claude.
+    if hook_event_name == "PermissionRequest":
+        report = permission_report()
+        seq = report_seq + DETAIL_SEQ_LEAD_NS
+    elif hook_event_name == "Notification":
+        report = notification_report()
+        lead = 0 if text_field("notification_type") == "permission_prompt" else DETAIL_SEQ_LEAD_NS
+        seq = report_seq + lead
+    else:
+        raise SystemExit(0)
+    if not report:
+        raise SystemExit(0)
+    params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": "claude",
+        "kind": "needs_input",
+        "seq": seq,
+    }
+    for name in ("title", "detail", "options"):
+        if report.get(name):
+            params[name] = report[name]
+    send({
+        "id": request_id,
+        "method": "pane.report_agent_attention",
+        "params": params,
+    })
+    raise SystemExit(0)
 
 if action == "activity":
     # Activity hooks only tell herdr that the sub-agent/task tree changed; the

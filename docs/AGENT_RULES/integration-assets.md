@@ -19,6 +19,17 @@
   `src/platform` 的配置目录约定（见 `platform.md`）。Kimi 的 TOML 管理块标记按语法
   上下文识别，不匹配字符串内容；损坏或多义标记在配置与钩子文件产生任何副作用前拒绝，
   保留无关文本、注释与换行，错误不回显可能含凭据的配置正文。
+- **只安装最低支持版本认识的钩子事件**：宿主按固定枚举校验钩子事件，不认识的事件名
+  会让整份配置失效——Claude Code 2.1.101 之前忽略整个 `settings.json`（连同用户自己
+  的设置，2.1.76 实测），Kimi Code CLI 判整份 `config.toml` 非法。新增事件前先查它最早
+  出现的版本，不晚于集成的最低版本才能装，否则先提高最低版本（并同步文档）。最低版本在
+  安装时用 `<agent> --version` 校验：版本过旧拒绝安装，探测不到只警告
+  （`version.rs::enforce_agent_version`）。Claude Code 最低 2.1.33
+  （`mod.rs::CLAUDE_MIN_VERSION`，事件版本表在 `claude_settings` 的测试里：`SubagentStop`
+  1.0.41、`SessionStart` 1.0.62、`Notification` matcher 2.0.37、`SubagentStart` 2.0.43、
+  `PermissionRequest` 2.0.45、`TaskCompleted` 2.1.33；未装的 `StopFailure` 2.1.78、
+  `TaskCreated` 2.1.84）；Kimi Code CLI 最低 0.14.0（`mod.rs::KIMI_MIN_VERSION`，约束写在
+  `KIMI_HOOK_EVENTS` 上，bun 测试守门）。
 - 资产内容（`src/integration/assets/**`，含 TS 与 JSON）是受控生成/冻结输入：
   修改后必须跑 `just integration-assets-test`（bun），语义变化同步
   `docs/next` 用户文档（见 `docs-pipeline.md`）。

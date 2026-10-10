@@ -17,6 +17,12 @@ pub(crate) fn agent_version_requirement(
             args: &["--version"],
             min_version: super::KIMI_MIN_VERSION,
         }),
+        crate::api::schema::IntegrationTarget::Claude => Some(AgentVersionRequirement {
+            label: "claude code",
+            binary: "claude",
+            args: &["--version"],
+            min_version: super::CLAUDE_MIN_VERSION,
+        }),
         _ => None,
     }
 }
