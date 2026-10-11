@@ -110,6 +110,7 @@ impl ClientShellState {
             .hits
             .endpoint_agents
             .iter()
+            .chain(&self.hits.session_agents)
             .find(|(rect, _, _)| super::contains(*rect, point))
             .map(|(_, endpoint_id, pane_id)| (endpoint_id.clone(), pane_id.clone()))
         else {
@@ -266,6 +267,7 @@ impl ClientShellState {
     ) -> bool {
         self.pending_workspace_highlight = None;
         self.pending_agent_reveal = None;
+        self.reveal_session_target = None;
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
             let label = self.endpoint_label(&endpoint_id).to_owned();
@@ -299,6 +301,7 @@ impl ClientShellState {
         }
         self.pending_workspace_highlight = None;
         self.pending_agent_reveal = None;
+        self.reveal_session_target = None;
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
             let label = self.endpoint_label(&endpoint_id).to_owned();

@@ -185,6 +185,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # link_hints = "prefix+u"   # two-letter markers over visible pane URLs; type a marker to open it
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
+# next_attention = "prefix+a"
 # new_workspace = "prefix+shift+n"
 # new_worktree = "prefix+shift+g"
 # open_worktree = ""    # optional, unset by default
@@ -226,6 +227,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_pane_up = ""     # optional, e.g. "ctrl+shift+alt+up"
 # resize_pane_right = ""  # optional, e.g. "ctrl+shift+alt+right"
 # toggle_sidebar = "prefix+b"
+# toggle_inspector = "prefix+i"
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.

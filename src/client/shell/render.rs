@@ -7,14 +7,13 @@ pub(in crate::client::shell) mod sidebar;
 #[path = "../shell/tabs.rs"]
 mod tabs;
 
-pub(super) use super::agent_sidebar::{ordered_agent_pane_ids, render_agent_panel};
 pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_rows;
 pub(super) use super::context_menu::render_context_menu;
 pub(in crate::client::shell) use overlays::settings_overlay::settings_list_window;
 pub(in crate::client::shell) use overlays::{
     help_geometry, help_max_scroll, modal_button, modal_button_row, modal_panel, panel,
     panel_inner, render_search_bar, scrollback_overlay_body, scrollback_overlay_layout, text_inset,
-    titled_panel, OverlayRender, SearchBar, TEXT_INSET,
+    titled_panel, OverlayRender, SearchBar,
 };
 pub(super) use overlays::{render_client_overlay, render_minimum_overlay};
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
@@ -205,31 +204,16 @@ pub(super) fn render_mode_bar(
 
 pub(super) struct ShellRenderState<'a> {
     pub(super) endpoints: &'a [ClientShellEndpoint],
-    /// Agents 面板的行：由视图计算阶段按端点分代缓存（PERF-02），渲染只读。树行与
-    /// 平铺行是两份并列的切片（`AgentRowsCache::view`）。
-    pub(super) federated_agent_rows: super::agent_tree::AgentRowsView<'a>,
-    pub(super) machine_chrome: &'a HashMap<crate::client::endpoint::ProfileId, MachineChrome>,
     pub(super) active_endpoint_id: &'a ClientEndpointId,
-    pub(super) collapsed_endpoints: &'a HashSet<ClientEndpointId>,
-    pub(super) collapsed_groups: &'a HashSet<String>,
-    pub(super) remote_collapsed_groups: &'a HashMap<ClientEndpointId, HashSet<String>>,
-    pub(super) workspace_scroll: &'a mut usize,
-    pub(super) agent_scroll: &'a mut usize,
+    pub(super) session_rows: Option<&'a super::chrome::sessions::SessionRowsCache>,
+    pub(super) session_view: &'a super::chrome::sessions::SessionView,
+    pub(super) session_grouping: super::chrome::sessions::SessionGrouping,
     pub(super) tab_scroll: &'a mut usize,
-    pub(super) reveal_focused_workspace: &'a mut bool,
     pub(super) reveal_focused_tab: &'a mut bool,
     pub(super) sidebar_collapsed: bool,
-    pub(super) sidebar_section_split: f32,
     pub(super) tab_drag_insert_index: Option<usize>,
-    pub(super) selected_workspace_id: Option<&'a WorkspaceNavigationTarget>,
-    pub(super) reveal_navigation_workspace: &'a mut bool,
-    pub(super) dragged_workspace_id: Option<&'a str>,
-    pub(super) workspace_drop_indicator_row: Option<u16>,
-    /// Current chrome hover identity for row/thumb highlight lookups.
     pub(super) chrome_hover: Option<&'a super::feedback::ChromeHover>,
-    /// Current spinner frame for connecting/reconnecting endpoint rows.
     pub(super) spinner: &'a str,
-    /// Agent 状态字形（运行中按全局转圈帧画）。
     pub(super) status_glyphs: super::StatusGlyphs,
 }
 
@@ -238,7 +222,7 @@ pub(super) fn render_shell(
     layout: ClientShellLayout,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
-    mut state: ShellRenderState<'_>,
+    state: ShellRenderState<'_>,
     visual_bell: bool,
 ) -> ShellHitMap {
     let mut hits = ShellHitMap::default();
@@ -248,6 +232,7 @@ pub(super) fn render_shell(
             layout.mobile_header,
             snapshot,
             config,
+            state.session_rows,
             &mut hits,
         );
     }
@@ -258,7 +243,7 @@ pub(super) fn render_shell(
                     buffer,
                     layout.sidebar,
                     config,
-                    &mut state,
+                    &state,
                     &mut hits,
                 );
             } else {
@@ -267,28 +252,14 @@ pub(super) fn render_shell(
                     layout.sidebar,
                     Some(snapshot),
                     config,
-                    &mut state,
+                    &state,
                     &mut hits,
                 );
             }
         } else if state.sidebar_collapsed {
-            render_collapsed_sidebar(
-                buffer,
-                layout.sidebar,
-                snapshot,
-                config,
-                &mut state,
-                &mut hits,
-            );
+            render_collapsed_sidebar(buffer, layout.sidebar, snapshot, config, &state, &mut hits);
         } else {
-            render_sidebar(
-                buffer,
-                layout.sidebar,
-                snapshot,
-                config,
-                &mut state,
-                &mut hits,
-            );
+            render_sidebar(buffer, layout.sidebar, snapshot, config, &state, &mut hits);
         }
     }
     if layout.tab_bar.height > 0 {

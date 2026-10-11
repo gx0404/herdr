@@ -43,6 +43,7 @@ impl ClientShellState {
         now: std::time::Instant,
     ) {
         if self.visible_notification.is_none() {
+            self.notification_focused = false;
             notification.deadline = now + notification_duration(notification.event.kind);
             self.visible_notification = Some(notification);
             return;
@@ -54,12 +55,29 @@ impl ClientShellState {
     }
 
     fn promote_queued_notification(&mut self, now: std::time::Instant) -> bool {
-        let Some(mut notification) = self.queued_notifications.pop_front() else {
-            return false;
-        };
-        notification.deadline = now + notification_duration(notification.event.kind);
-        self.visible_notification = Some(notification);
-        true
+        self.notification_focused = false;
+        while let Some(mut notification) = self.queued_notifications.pop_front() {
+            if notification.event.kind != SemanticNotificationKind::Custom
+                && (self.notification_validation(&notification.endpoint_id, &notification.event)
+                    != NotificationValidation::Current
+                    || self.notification_target_is_active(
+                        &notification.endpoint_id,
+                        &notification.event,
+                    ))
+            {
+                continue;
+            }
+            notification.deadline = now + notification_duration(notification.event.kind);
+            self.visible_notification = Some(notification);
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn dismiss_visible_notification(&mut self) {
+        self.visible_notification = None;
+        self.notification_focused = false;
+        self.promote_queued_notification(std::time::Instant::now());
     }
 
     pub(super) fn focus_visible_notification(&mut self, outcome: &mut ClientShellInput) {
@@ -195,14 +213,34 @@ impl ClientShellState {
                 self.notification_target_is_active(&pending.endpoint_id, &pending.event);
             let suppress_external = target_active && self.outer_focused != Some(false);
             self.record_notification(
-                super::feedback::ClientToastLevel::from_notification_kind(pending.event.kind),
+                if super::chrome::notification::bucket(
+                    &pending.event,
+                    &self.endpoints,
+                    &pending.endpoint_id,
+                ) == crate::harness::AgentBucket::Failed
+                {
+                    super::feedback::ClientToastLevel::Error
+                } else {
+                    super::feedback::ClientToastLevel::from_notification_kind(pending.event.kind)
+                },
                 pending.event.title.clone(),
                 pending.event.body.clone(),
                 Some(super::feedback::ClientNotificationTarget {
                     endpoint_id: pending.endpoint_id.clone(),
                     pane_id: pending.event.pane_id.clone(),
+                    boot_id: self
+                        .endpoint_boot_id(&pending.endpoint_id)
+                        .map(str::to_owned),
                 }),
             );
+            let bucket = super::chrome::notification::bucket(
+                &pending.event,
+                &self.endpoints,
+                &pending.endpoint_id,
+            );
+            if let Some(record) = self.notification_history.back_mut() {
+                record.bucket = (bucket != crate::harness::AgentBucket::None).then_some(bucket);
+            }
             if let Some(sound) = pending.event.sound {
                 let suppress_sound =
                     pending.event.kind == SemanticNotificationKind::Finished && suppress_external;

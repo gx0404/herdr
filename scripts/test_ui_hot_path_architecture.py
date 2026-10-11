@@ -366,8 +366,7 @@ fn render() { TerminalRuntime::input_state; }
     def test_overlay_renderers_never_write_scroll_state(self) -> None:
         # STATE-04：滚动窗口与一次性 reveal 只在视图计算阶段（compose 之前）
         # 更新；渲染函数是纯函数。浮层逐个点名守门——新增浮层渲染入口时把
-        # 函数名加进来（chrome 面 tabs/workbench/mobile 仍是遗留面，见交付
-        # 记录的显式 PENDING）。
+        # 函数名加进来。会话侧栏与工作台合成另有统一几何与只读渲染守门。
         renderers = {
             PROJECT_ROOT / "src" / "client" / "shell" / "machines_overlay.rs": (
                 "render_machines_view",
@@ -382,6 +381,8 @@ fn render() { TerminalRuntime::input_state; }
             PROJECT_ROOT / "src" / "client" / "shell" / "agent_activity_overlay.rs": (
                 "render_agent_activity_overlay",
             ),
+            PROJECT_ROOT / "src" / "client" / "shell" / "chrome" / "inspector.rs": ("paint",),
+            PROJECT_ROOT / "src" / "client" / "shell" / "chrome" / "overview.rs": ("paint",),
         }
         write = re.compile(r"\.(?:scroll|reveal)\s*=[^=]")
         for path, names in renderers.items():
@@ -396,6 +397,48 @@ fn render() { TerminalRuntime::input_state; }
                         f"{path.name}: {name} 渲染期回写滚动状态"
                         f"（body 内第 {line} 行）：{match.group(0)!r}"
                     )
+
+    def test_session_sidebar_render_reads_state_only(self) -> None:
+        shell = PROJECT_ROOT / "src" / "client" / "shell"
+        sessions = production_code((shell / "chrome" / "sessions.rs").read_text(encoding="utf-8"))
+        state_write = re.compile(
+            r"(?:workspace_scroll|agent_scroll|reveal_\w+|session_view|session_rows)\s*=[^=]"
+        )
+        for name in ("paint_sessions", "paint_body", "paint_rail", "paint_row", "paint_agent_row"):
+            body = rust_function_body(sessions, name)
+            self.assertNotEqual(body, "", f"sessions.rs: {name} body not found")
+            match = state_write.search(body)
+            if match is not None:
+                self.fail(f"sessions.rs: {name} 渲染期回写状态：{match.group(0)!r}")
+        compute = rust_function_body(sessions, "layout_session_view")
+        self.assertIn("reveal_focused_workspace", compute, "reveal 应在视图计算阶段消费")
+        workbench = production_code((shell / "workbench" / "render.rs").read_text(encoding="utf-8"))
+        compose = rust_function_body(workbench, "compose_workbench")
+        self.assertNotEqual(compose, "", "compose_workbench body not found")
+        for borrowed in ("&mut self.workspace_scroll", "&mut self.reveal_focused_workspace"):
+            self.assertNotIn(borrowed, compose, f"工作台合成不应再借出 {borrowed}")
+        self.assertNotIn("self.workbench.geometry =", compose, "绘制应只读计算阶段的几何")
+        geometry_source = production_code((shell / "workbench.rs").read_text(encoding="utf-8"))
+        self.assertIn("self.geometry(cols, rows)", rust_function_body(geometry_source, "compute_geometry"))
+        self.assertIn("self.compute_geometry(cols, rows)", rust_function_body(geometry_source, "layout"))
+        self.assertIn(
+            "self.workbench.compute_geometry(cols, rows)",
+            rust_function_body(geometry_source, "tick_workbench"),
+            "server 视图请求应与绘制共用 rail 几何",
+        )
+        for filename, names in (
+            ("sidebar.rs", ("render_sidebar", "render_collapsed_sidebar")),
+            ("endpoint_sidebar.rs", ("render_expanded", "render_collapsed")),
+            ("mobile.rs", ("render_mobile_switcher", "render_mobile_header")),
+        ):
+            source = production_code((shell / filename).read_text(encoding="utf-8"))
+            for name in names:
+                body = rust_function_body(source, name)
+                self.assertNotEqual(body, "", f"{filename}: {name} body not found")
+                self.assertIsNone(state_write.search(body), f"{filename}: {name} 渲染期回写")
+        composition = production_code((shell / "composition.rs").read_text(encoding="utf-8"))
+        for borrowed in ("&mut self.workspace_scroll", "&mut self.reveal_focused_workspace", "&mut self.reveal_navigation_workspace", "&mut self.mobile_switcher_scroll", "&mut self.reveal_mobile_workspace"):
+            self.assertNotIn(borrowed, composition, f"经典/移动合成不应借出 {borrowed}")
 
     def test_collapse_state_writes_bump_tree_epoch(self) -> None:
         # 折叠态决定 Agents 面板统一树的行序列，agents 行缓存以

@@ -274,6 +274,7 @@ pub(crate) fn response_text(
 const CLIENT_SHELL_METHODS: &[&str] = &[
     "agent.activity.read",
     "agent.external.list",
+    "agent.prompt",
     "client.views.set",
     "client_shell.surface.set",
     "command.invoke",
@@ -347,6 +348,7 @@ pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
 
 pub(crate) fn supports_client_shell_method(method: &Method) -> bool {
     supports_client_shell_method_name(crate::api::api_method_name(method))
+        && !matches!(method, Method::AgentPrompt(params) if params.wait.is_some())
 }
 
 pub(crate) fn error_response(id: String, code: &str, message: impl Into<String>) -> String {
@@ -565,6 +567,17 @@ mod tests {
             )))
             .expect("活动树方法的独立契约");
         assert_eq!(activity_shapes, expected_activity);
+        let prompt_shapes = actual
+            .remove("agent.prompt")
+            .map(|digest| BTreeMap::from([("agent.prompt".to_owned(), digest)]))
+            .expect("advertised agent prompt method");
+        let expected_prompt: BTreeMap<String, String> =
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/endpoint-agent-prompt-shapes-v1.json"
+            )))
+            .expect("agent prompt method contract");
+        assert_eq!(prompt_shapes, expected_prompt);
         // Freeze additive methods separately without rewriting the published fixture.
         assert_eq!(
             actual.remove("pane.clear").as_deref(),
@@ -620,6 +633,33 @@ mod tests {
         for method in methods {
             assert!(supports_client_shell_method_name(method), "{method} 已宣告");
         }
+    }
+
+    #[test]
+    fn agent_prompt_method_shape_is_pinned_without_changing_existing_fixtures() {
+        let expected: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-agent-prompt-shapes-v1.json"
+        )))
+        .expect("agent prompt method contract");
+        let methods = expected.keys().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(methods, ["agent.prompt"]);
+        assert_eq!(method_shape_digests(&methods), expected);
+        assert!(supports_client_shell_method_name("agent.prompt"));
+    }
+
+    #[test]
+    fn client_shell_agent_prompt_supports_submission_but_not_front_door_waiting() {
+        let submit: crate::api::schema::Request = serde_json::from_str(
+            r#"{"id":"submit","method":"agent.prompt","params":{"target":"pane_1","text":"continue"}}"#,
+        )
+        .expect("prompt submission request");
+        assert!(supports_client_shell_method(&submit.method));
+        let wait: crate::api::schema::Request = serde_json::from_str(
+            r#"{"id":"wait","method":"agent.prompt","params":{"target":"pane_1","text":"continue","wait":{"until":["idle"],"timeout_ms":1500}}}"#,
+        )
+        .expect("prompt waiting request");
+        assert!(!supports_client_shell_method(&wait.method));
     }
 
     #[test]

@@ -129,7 +129,6 @@ impl ClientShellState {
             self.workbench.footer_arranging = self.workbench.arranging;
             self.workbench.footer_hover = None;
         }
-        self.workbench.geometry = self.workbench.dock.geometry(content_area(cols, rows));
         // 标题栏（第 0 行）：主菜单入口、面包屑、注意力计数、命令提示与 `⋯` 布局菜单。
         let title = self.paint_workbench_title_bar(
             canvas.buffer(),
@@ -154,71 +153,21 @@ impl ClientShellState {
             self.workbench.hits.push((*rect, Action::Attention));
         }
         self.hits.title_chips = title.chips;
-        let workspace = self
-            .workbench
-            .geometry
-            .panels
-            .iter()
-            .find(|(id, _)| *id == PanelId::Workspaces)
-            .map(|(id, area)| body(*area, id, self.workbench.geometry.compact))
-            .unwrap_or_default();
-        let agents = self
-            .workbench
-            .geometry
-            .panels
-            .iter()
-            .find(|(id, _)| *id == PanelId::Agents)
-            .map(|(id, area)| body(*area, id, self.workbench.geometry.compact))
-            .unwrap_or_default();
-        let federated_agent_rows = self
-            .federated_agent_rows
-            .as_ref()
-            .map(|cache| cache.view())
-            .unwrap_or_default();
-        // 导航确认后等待权威焦点期间，工作区面板同样保留目标行高亮（上游 #4408），
-        // 取法与经典布局的 `compose` 一致。
-        let pending_workspace_highlight =
-            self.pending_workspace_highlight.as_ref().filter(|pending| {
-                self.mode != ClientShellMode::Navigate
-                    && pending.target.endpoint_id == self.active_endpoint_id
-                    && self.navigation_target_valid(&pending.target)
-            });
-        let mut sidebar_state = super::super::render::ShellRenderState {
-            federated_agent_rows,
-            endpoints: &self.endpoints,
-            machine_chrome: &self.machine_chrome,
-            active_endpoint_id: &self.active_endpoint_id,
-            collapsed_endpoints: &self.collapsed_endpoints,
-            collapsed_groups: &self.collapsed_groups,
-            remote_collapsed_groups: &self.remote_collapsed_groups,
-            workspace_scroll: &mut self.workspace_scroll,
-            agent_scroll: &mut self.agent_scroll,
-            tab_scroll: &mut self.tab_scroll,
-            reveal_focused_workspace: &mut self.reveal_focused_workspace,
-            reveal_focused_tab: &mut self.reveal_focused_tab,
-            sidebar_collapsed: false,
-            sidebar_section_split: 0.5,
-            tab_drag_insert_index: None,
-            selected_workspace_id: self
-                .navigate_workspace_id
-                .as_ref()
-                .or_else(|| pending_workspace_highlight.map(|pending| &pending.target)),
-            reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
-            dragged_workspace_id: None,
-            workspace_drop_indicator_row: None,
-            chrome_hover: self.hover.as_ref(),
-            spinner,
-            status_glyphs,
-        };
-        if !workspace.is_empty() || !agents.is_empty() {
-            super::super::endpoint_sidebar::render_expanded_regions(
+        if let Some(cache) = self.session_rows.as_ref() {
+            super::super::chrome::sessions::paint_sessions(
                 canvas.buffer(),
-                workspace,
-                Some(snapshot),
-                &self.config,
-                &mut sidebar_state,
+                &super::super::chrome::sessions::SessionPaint {
+                    cache,
+                    view: &self.session_view,
+                    grouping: self.session_grouping,
+                    config: &self.config,
+                    glyphs: status_glyphs,
+                    hover: self.hover.as_ref(),
+                    spinner,
+                    endpoints: &self.endpoints,
+                    active_endpoint_id: &self.active_endpoint_id,
+                },
                 &mut self.hits,
-                Some((workspace, agents)),
             );
         }
         self.paint_agent_keyboard_focus(canvas.buffer());
@@ -226,11 +175,13 @@ impl ClientShellState {
         self.hits.sidebar_section_divider = Rect::default();
         self.hits.sidebar_toggle = Rect::default();
         // 面板头：画在各面板自己的底色上，终端组把标签条并进同一行。
+        let controls = self.workbench.control_geometry(cols);
         let compact_switcher_shown = super::super::chrome::panel_header::paint_workbench_headers(
             canvas.buffer(),
             &super::super::chrome::panel_header::HeaderFrame {
                 dock: &self.workbench.dock,
                 geometry: &self.workbench.geometry,
+                controls: &controls,
                 snapshot,
                 config: &self.config,
                 hover: self.hover.as_ref(),
@@ -292,7 +243,12 @@ impl ClientShellState {
                 };
                 let cursor = canvas.cursor();
                 canvas.blit_frame(&view.surface.frame, area);
-                if panel != &self.workbench.dock.focused {
+                if panel
+                    != self
+                        .workbench
+                        .dock
+                        .projected_focus(&self.workbench.geometry)
+                {
                     canvas.set_cursor(cursor);
                 }
                 self.hits
@@ -318,6 +274,17 @@ impl ClientShellState {
                         path: split.path.clone(),
                         topology_signature: signature,
                     }));
+            } else if *panel == PanelId::Agents {
+                canvas.clear_links_in(area);
+                super::super::chrome::inspector::paint(
+                    canvas.buffer(),
+                    &self.inspector,
+                    &self.config,
+                    status_glyphs,
+                    self.hover.as_ref(),
+                    &mut self.hits,
+                );
+                occlusion.cover(area);
             } else if *panel == PanelId::Monitor {
                 // The monitor panel hosts all observation pages and always
                 // paints the tab the user last selected, whether or not the
@@ -443,7 +410,13 @@ impl ClientShellState {
             .geometry
             .panels
             .iter()
-            .find(|(panel, _)| panel == &self.workbench.dock.focused)
+            .find(|(panel, _)| {
+                panel
+                    == self
+                        .workbench
+                        .dock
+                        .projected_focus(&self.workbench.geometry)
+            })
             .and_then(|(panel, area)| {
                 self.workbench
                     .focused_view()?
@@ -542,7 +515,10 @@ impl ClientShellState {
                 .popup
                 .as_ref()
                 .filter(|_| {
-                    self.workbench.dock.focused == PanelId::Terminal(id.parse().unwrap_or(0))
+                    self.workbench
+                        .dock
+                        .projected_focus(&self.workbench.geometry)
+                        == &PanelId::Terminal(id.parse().unwrap_or(0))
                 })
                 .map(|hit| (hit.inner_rect.x, hit.inner_rect.y));
             let visibility = if !visible {

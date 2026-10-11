@@ -16,7 +16,7 @@ In a detected Codex pane, an unmodified left-button drag uses Herdr’s frozen t
 
 Clicking the already selected workspace returns keyboard focus to its terminal immediately; layout adjustment mode keeps its panel focus.
 
-Agent shortcuts for previous, next, and a numbered agent scroll the agent list only far enough to reveal the destination. A destination already visible keeps the current scroll position, including on a single machine and in the collapsed sidebar.
+Agent shortcuts for previous, next, and a numbered agent reveal the destination in the unified Sessions tree, opening collapsed ancestors and scrolling only as far as needed. A visible destination keeps the current scroll position, including on a single machine; the collapsed rail reveals its workspace rather than a separate agent list.
 
 ## Keys sent to pane applications
 
@@ -75,14 +75,20 @@ Workspaces and session:
 | New workspace | `prefix+shift+n` |
 | Rename workspace | `prefix+shift+w` |
 | Close workspace | `prefix+shift+d` |
-| Goto picker | `prefix+g` |
+| Agent overview / session navigator | `prefix+g` |
+| Next session that needs you | `prefix+a` |
 | Toggle sidebar | `prefix+b` |
+| Toggle Inspector | `prefix+i` |
 
-The Goto picker (`prefix+g`) is the session navigator. Its search box splits your query on whitespace and keeps a row only when every word appears somewhere in it, so `server web` finds `web server` and word order no longer matters. While a search or status filter is active the selection starts on the first row that matched, instead of on the workspace row that was only pulled in to hold it, so Enter opens what you searched for. Outside the search field, Home returns to the first row and End or `Shift+G` jumps to the last row. `Shift+G` also jumps to the end in SSH import discovery and selection lists, including terminals using the kitty keyboard protocol. (`prefix+w` is a different key: it moves the sidebar into workspace-navigation mode and has no search box.)
+Agent overview (`prefix+g`): `g` switches status/location grouping; Space previews, Enter jumps (or expands a status group), and `r/u/R` mark read/unread/all read locally. `e` opens a reply only for an idle/review session whose endpoint explicitly advertises `agent.prompt`. In the reply editor Enter inserts a newline and Ctrl+Enter or **Send** submits with `wait = None`. PageUp/PageDown scroll preview text; Up/Down keep selecting targets. Working, failed, and blocked sessions are jump-only. If submission times out, inspect the terminal before retrying: the prompt may already have been submitted.
+
+Inspector is available in the docked layout. Click its body to give it keyboard focus: Up/Down or `j/k` select rows, Enter activates a row, PageUp/PageDown and Home/End scroll, `d` opens detailed activity, `r` refreshes activity, and Esc returns to the terminal. The mouse wheel and scrollbar track scroll without answering any question. **Jump and answer** only focuses the real agent pane; permissions must be answered there.
+
+In location mode (`g` in the overview), the session navigator retains the Goto picker's machines, workspaces, and ordinary terminals. Each agent or terminal has its own row, including every pane in split tabs. Its search box splits your query on whitespace and keeps a row only when every word appears somewhere in it, so `server web` finds `web server` regardless of word order. Search and status filters start on the first matching destination rather than a containing workspace. Outside the search field, Home returns to the first row and End or `Shift+G` jumps to the last row. `Shift+G` also jumps to the end in SSH import discovery and selection lists, including terminals using the kitty keyboard protocol. (`prefix+w` instead moves the sidebar into workspace-navigation mode, without a search box.)
+
+Press `/` to search names, agent kinds, tabs, workspaces, branches, or paths; use Up/Down or `j/k` to move between rows when not typing a search. In location mode without a preview, Left/Right jumps to the first agent or terminal in the previous/next workspace section, without wrapping. With a preview open, Left/Right scrolls the preview; while editing a search, it moves the text cursor. Outside search, `b/w/i/d` filter blocked, working, idle, or done agents, and `a` clears the filter. The selected destination's location and path appear below the list. The mouse wheel, scrollbar track, and thumb scroll without opening a destination.
 
 The full keymap and the binding syntax live in the [keybinding reference](/docs/configuration/#keybindings).
-
-The Goto picker (`prefix+g`) lists each agent or terminal on its own row, grouped by workspace. Split tabs never hide their panes behind another row. Click a row or press Enter to jump directly to it. Press `/` to search names, agent kinds, tabs, workspaces, branches, or paths; use Up/Down or `j/k` to move between rows when not typing a search. Left/Right jumps to the first agent or terminal in the previous/next workspace section, without wrapping. While editing a search, Left/Right moves the text cursor instead. Outside search, `b/w/i/d` filter blocked, working, idle, or done agents, and `a` shows all terminals again. The selected destination's location and path appear below the list. When the list overflows, use the mouse wheel, click the scrollbar track, or drag its thumb to scroll without opening a destination.
 
 ## Editing text fields
 

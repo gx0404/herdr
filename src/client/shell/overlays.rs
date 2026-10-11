@@ -12,6 +12,7 @@ pub(crate) struct OverlayRender {
     pub(crate) primary: Rect,
     pub(crate) clear: Rect,
     pub(crate) cancel: Rect,
+    pub(crate) overview_actions: Vec<(Rect, super::chrome::overview::Action)>,
     pub(crate) navigator_popup: Rect,
     pub(crate) navigator_search: Rect,
     pub(crate) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
@@ -94,6 +95,7 @@ pub(crate) fn render_client_overlay(
     session_log_dropped: &std::collections::HashMap<crate::client::endpoint::ProfileId, u64>,
     active_endpoint_id: &ClientEndpointId,
     k: &LiveKeybindConfig,
+    status_indicators: crate::config::StatusIndicatorStyle,
     history: &std::collections::VecDeque<ClientNotificationRecord>,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
@@ -124,7 +126,13 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, cx),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, cx),
         ClientShellOverlay::Navigator(v) => {
-            render_navigator_overlay(b, v, endpoints, active_endpoint_id, cx)
+            if super::chrome::overview::ready(v) {
+                super::chrome::overview::paint(b, v, cx)
+            } else {
+                let rendered = render_navigator_overlay(b, v, endpoints, active_endpoint_id, cx)?;
+                super::chrome::overview::paint_location_details(b, v, &rendered, cx);
+                Some(rendered)
+            }
         }
         ClientShellOverlay::Settings(v) => settings_overlay::render_settings_overlay(
             b,
@@ -198,10 +206,10 @@ pub(crate) fn render_client_overlay(
             worktree_overlays::render_worktree_remove_overlay(b, v, cx)
         }
         ClientShellOverlay::NotificationHistory(v) => {
-            render_notification_history_overlay(b, v, history, cx)
+            render_notification_history_overlay(b, v, history, status_indicators, cx)
         }
         ClientShellOverlay::CommandPalette(v) => {
-            super::command_palette::render_command_palette(b, v, cx)
+            super::command_palette::render_command_palette(b, v, status_indicators, cx)
         }
         ClientShellOverlay::AgentActivity(v) => {
             super::agent_activity_overlay::render_agent_activity_overlay(b, v, endpoints, cx)
@@ -416,7 +424,13 @@ pub(in crate::client::shell) fn modal_panel(
         .page_bounds
         .map(|rect| rect.intersection(b.area))
         .or_else(|| crate::ui::modal_rect(b.area, size))?;
-    let inner = panel(b, outer, border, cx.palette.panel_bg, cx.glyphs)?;
+    let inner = panel(
+        b,
+        outer,
+        border,
+        cx.palette.panel_bg,
+        crate::ui::BorderGlyphs::ROUNDED,
+    )?;
     Some((outer, inner))
 }
 
@@ -788,17 +802,18 @@ fn render_onboarding_overlay(
         .bg(p.panel_bg)
         .remove_modifier(Modifier::DIM);
     let title = base.fg(p.text).add_modifier(Modifier::BOLD);
-    let muted = base.fg(p.overlay0);
-    let text = base.fg(p.overlay1);
-    let accent = base.fg(p.accent).add_modifier(Modifier::BOLD);
+    let muted = base.fg(p.subtext0);
+    let text = base.fg(p.subtext0);
+    let accent = crate::ui::design::key_cap(p);
 
-    // 欢迎页文案自带 2 列前导空格，已离边框留白，这里不再让列（L4 复审）。
+    let wordmark = crate::ui::ONBOARDING_TITLE.trim();
+    let wordmark_width = display_width(wordmark);
     put_text(
         b,
-        stack.header.x,
+        stack.header.x + stack.header.width.saturating_sub(wordmark_width) / 2,
         stack.header.y,
-        stack.header.width,
-        crate::ui::ONBOARDING_TITLE,
+        wordmark_width,
+        wordmark,
         title,
     );
     put_wrapped(
@@ -1501,13 +1516,7 @@ fn help_lines(
             lines.push((
                 width,
                 Line::from(vec![
-                    Span::styled(
-                        padded_key,
-                        Style::default()
-                            .fg(palette.mauve)
-                            .bg(palette.panel_bg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(padded_key, crate::ui::design::key_cap(palette)),
                     Span::styled(
                         label.into_owned(),
                         Style::default().fg(palette.text).bg(palette.panel_bg),
@@ -1760,6 +1769,7 @@ fn render_notification_history_overlay(
     b: &mut Buffer,
     o: &super::feedback::ClientNotificationHistoryOverlay,
     history: &std::collections::VecDeque<ClientNotificationRecord>,
+    status_indicators: crate::config::StatusIndicatorStyle,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     let p = cx.palette;
@@ -1778,7 +1788,42 @@ fn render_notification_history_overlay(
         t.title,
         base.fg(p.text).add_modifier(Modifier::BOLD),
     );
-    let body = stack.content;
+    let selected_body = history
+        .get(o.selected)
+        .and_then(|record| record.body.as_deref())
+        .filter(|text| !text.is_empty());
+    let detail_rows = if selected_body.is_some() && stack.content.height >= 5 {
+        3
+    } else {
+        0
+    };
+    let body = Rect::new(
+        stack.content.x,
+        stack.content.y,
+        stack.content.width,
+        stack.content.height.saturating_sub(detail_rows),
+    );
+    if let Some(text) = selected_body.filter(|_| detail_rows > 0) {
+        let detail = text_inset(Rect::new(
+            stack.content.x,
+            body.bottom() + 1,
+            stack.content.width,
+            2,
+        ));
+        for (index, line) in super::super::chrome::notification::body_lines(text, detail.width)
+            .iter()
+            .enumerate()
+        {
+            put_text(
+                b,
+                detail.x,
+                detail.y + index as u16,
+                detail.width,
+                line,
+                crate::ui::design::muted(p).bg(p.panel_bg),
+            );
+        }
+    }
     let mut rows = Vec::new();
     let count = history.len();
     if count == 0 {
@@ -1814,7 +1859,6 @@ fn render_notification_history_overlay(
                 1,
             );
             let is_selected = ix == selected;
-            // 三态与其它浮层同一口径：选中 accent 反色 > 悬浮弱底色 > 常态。
             let is_hovered = !is_selected && o.hovered == Some(ix);
             let row_bg = super::list_row_bg(p, cx.components, is_selected, is_hovered);
             let base = base.bg(row_bg);
@@ -1827,14 +1871,28 @@ fn render_notification_history_overlay(
             let level_color = if is_selected {
                 row_style.fg.unwrap_or(p.text)
             } else {
-                record.level.color(cx.components)
+                record
+                    .bucket
+                    .map(|bucket| crate::ui::design::status_color(bucket, p, cx.components))
+                    .unwrap_or_else(|| record.level.color(cx.components))
             };
             put_text(
                 b,
                 rect.x,
                 rect.y,
                 2,
-                &format!(" {}", record.level.icon()),
+                &format!(
+                    " {}",
+                    record
+                        .bucket
+                        .map(|bucket| crate::ui::design::status_glyph(
+                            bucket,
+                            status_indicators,
+                            0,
+                            false
+                        ))
+                        .unwrap_or_else(|| record.level.icon())
+                ),
                 if is_selected {
                     row_style
                 } else {
@@ -2046,7 +2104,7 @@ mod tests {
         .expect("medium modal");
         assert_eq!(outer, Rect::new(21, 7, 64, 16));
         assert_eq!(inner, Rect::new(22, 8, 62, 14));
-        assert_eq!(buffer[(21, 7)].symbol(), "┌");
+        assert_eq!(buffer[(21, 7)].symbol(), "╭");
 
         let mut tiny = Buffer::empty(Rect::new(0, 0, 8, 5));
         assert!(modal_panel(&mut tiny, crate::ui::ModalSize::Small, palette.accent, &cx).is_none());

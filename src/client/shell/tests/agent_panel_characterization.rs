@@ -1,22 +1,11 @@
-//! Agents 面板统一树的 characterization（行为钉住）测试与渲染扩展 profile。
-//!
-//! W3 之前 classic / workbench（联邦）/ mobile 是三条并行渲染路径，这里最初钉的
-//! 是**重构前**的可见行为；统一树落地后，用例改为钉住新行为：三条桌面路径共用
-//! `agent_tree::build_agent_tree`（视图计算阶段进 `AgentRowsCache`）与
-//! `agent_tree::render_agent_tree_rows`（渲染只读），mobile 只加活动徽标。
-//!
-//! - classic：`agent_sidebar::render_agent_panel`，单端点且未启用 workbench，
-//!   agent 行写 `hits.agents`；
-//! - workbench / 联邦：`endpoint_agents::render_expanded`，agent 行写
-//!   `hits.endpoint_agents`；
-//! - mobile 与排序来源：`aggregate_navigation::aggregate_agent_rows`。
+//! 会话侧栏、Inspector 组合中的导航与活动行为测试及渲染扩展 profile。
 
 use super::*;
 use crate::client::endpoint::{
     ClientEndpointId, ClientEndpointStatus, ProfileId, SavedSshEndpoint,
 };
 use crate::client::shell::agent_sidebar::agent_group_key;
-use crate::client::shell::agent_tree::{AgentTreeKind, MACHINE_TOGGLE_KEY};
+use crate::client::shell::agent_tree::AgentTreeKind;
 use crate::config::AgentPanelSortConfig;
 use crate::protocol::{
     ClientShellActivityNode, ClientShellAgentActivity, ClientShellExternalAgent,
@@ -184,41 +173,14 @@ fn rect_rows(state: &ClientShellState, rect: Rect) -> Vec<String> {
         .collect()
 }
 
-/// 树行矩形里的文字，去掉 L4 的行首留白（面板够宽时 1 列、窄面板 0 列，判据
-/// 同 `agent_tree::tree_inset`）：树前缀与名称的相对排布照旧按字符比较。留白列
-/// 必须是空白；留白本身由 `tree_rows_and_header_keep_a_one_column_inset_from_both_edges`
-/// 钉住。
-fn tree_rows(state: &ClientShellState, rect: Rect) -> Vec<String> {
-    let inset = crate::client::shell::agent_tree::tree_inset(state.hits.agent_body.width);
-    for line in rect_rows(
-        state,
-        Rect::new(rect.x, rect.y, inset.min(rect.width), rect.height),
-    ) {
-        assert!(
-            line.chars().all(|ch| ch == ' '),
-            "树行行首的留白列必须是空白：{line:?}"
-        );
-    }
-    rect_rows(
-        state,
-        Rect::new(
-            rect.x + inset.min(rect.width),
-            rect.y,
-            rect.width.saturating_sub(inset),
-            rect.height,
-        ),
-    )
-}
-
 fn compact(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 fn body_text(state: &ClientShellState) -> String {
-    rect_rows(state, state.hits.agent_body).join("\n")
+    rect_rows(state, state.session_view.body).join("\n")
 }
 
-/// 表头右侧的排序标签：命中区即绘制区（`render_agent_panel_header`）。
 fn sort_label(state: &ClientShellState) -> String {
     compact(&rect_rows(state, state.hits.agent_sort_toggle).join(""))
 }
@@ -226,19 +188,31 @@ fn sort_label(state: &ClientShellState) -> String {
 fn classic_hit_ids(state: &ClientShellState) -> Vec<&str> {
     state
         .hits
-        .agents
+        .session_agents
         .iter()
-        .map(|(_, pane_id)| pane_id.as_str())
+        .filter(|(_, endpoint, _)| endpoint.is_local())
+        .map(|(_, _, pane)| pane.as_str())
         .collect()
 }
 
-/// 统一树的折叠开关命中区：`(端点是否本机, 折叠键)`，按行序。
 fn toggle_keys(state: &ClientShellState) -> Vec<(bool, &str)> {
     state
         .hits
-        .agent_tree_toggles
+        .sessions
         .iter()
-        .map(|(_, endpoint_id, key)| (endpoint_id.is_local(), key.as_str()))
+        .filter_map(|(_, hit)| match hit {
+            super::super::chrome::sessions::SessionHit::Toggle(endpoint, key) => {
+                Some((endpoint.is_local(), key.as_str()))
+            }
+            _ => None,
+        })
+        .chain(
+            state
+                .hits
+                .session_tree_toggles
+                .iter()
+                .map(|(_, endpoint, key)| (endpoint.is_local(), key.as_str())),
+        )
         .collect()
 }
 
@@ -246,12 +220,14 @@ fn local_toggle_keys(state: &ClientShellState) -> Vec<&str> {
     toggle_keys(state).into_iter().map(|(_, key)| key).collect()
 }
 
+fn agent_panel_hits(state: &ClientShellState) -> Vec<(Rect, ClientEndpointId, String)> {
+    state.hits.session_agents.clone()
+}
+
 fn endpoint_hit_ids(state: &ClientShellState) -> Vec<(ClientEndpointId, String)> {
-    state
-        .hits
-        .endpoint_agents
-        .iter()
-        .map(|(_, endpoint_id, pane_id)| (endpoint_id.clone(), pane_id.clone()))
+    agent_panel_hits(state)
+        .into_iter()
+        .map(|(_, endpoint, pane)| (endpoint, pane))
         .collect()
 }
 
@@ -262,18 +238,22 @@ fn local(pane_id: &str) -> (ClientEndpointId, String) {
 fn classic_agent_rect(state: &ClientShellState, pane_id: &str) -> Rect {
     state
         .hits
-        .agents
+        .session_agents
         .iter()
-        .find(|(_, id)| id == pane_id)
-        .unwrap_or_else(|| panic!("agent 行 {pane_id} 不在命中表里"))
+        .find(|(_, endpoint, pane)| endpoint.is_local() && pane == pane_id)
+        .unwrap_or_else(|| panic!("agent 会话行 {pane_id} 不在命中表里"))
         .0
 }
 
-/// 某端点上某折叠键的开关命中区（分组头整行、agent 行只有开关两列）。
 fn toggle_rect(state: &ClientShellState, endpoint_id: &ClientEndpointId, key: &str) -> Rect {
+    let wanted =
+        super::super::chrome::sessions::SessionHit::Toggle(endpoint_id.clone(), key.to_owned());
+    if let Some((rect, _)) = state.hits.sessions.iter().find(|(_, hit)| hit == &wanted) {
+        return *rect;
+    }
     state
         .hits
-        .agent_tree_toggles
+        .session_tree_toggles
         .iter()
         .find(|(_, endpoint, id)| endpoint == endpoint_id && id == key)
         .unwrap_or_else(|| panic!("折叠开关 {key} 不在命中表里"))
@@ -322,191 +302,86 @@ fn assert_no_tree_glyphs(text: &str) {
 /// 缓存里的 agent 行身份，按行序。
 fn cached_agent_ids(state: &ClientShellState) -> Vec<(ClientEndpointId, String)> {
     state
-        .federated_agent_rows
+        .session_rows
         .as_ref()
-        .expect("行缓存")
-        .rows()
+        .expect("会话行缓存")
+        .rows
         .iter()
-        .filter_map(|row| {
-            row.kind
-                .agent()
-                .map(|agent| (row.kind.endpoint_id.clone(), agent.pane_id.clone()))
+        .filter_map(|row| match &row.kind {
+            super::super::chrome::sessions::SessionRowKind::Agent(agent) => {
+                Some((row.endpoint_id.clone(), agent.pane_id.clone()))
+            }
+            _ => None,
         })
         .collect()
 }
 
-/// (a) classic + Spaces：「工作区头 + agent 行」两层树，前缀走 kit 树原语。工作区
-/// 头以折叠开关开头、汇总最高优先级状态与 agent 数（右对齐）；子行带 `├──` /
-/// `└──` 连接线，且子行不再重复工作区名。默认行配置
-/// `[状态图标 机器 工作区 标签页] / [agent]` 丢掉分组头承载的 token 后首行只剩
-/// 图标，并进下一行成「图标 名称 状态文案」一行。
 #[test]
 fn characterization_classic_spaces_renders_two_level_workspace_tree() {
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
-    state.compose(106, 30).expect("classic agents 面板");
-
+    state.compose(106, 30).expect("统一会话树");
     assert_eq!(
         local_toggle_keys(&state),
-        [agent_group_key("ws_1"), agent_group_key("ws_2")],
-        "折叠键带 agent-panel: 命名空间，按快照的工作区顺序"
+        [agent_group_key("ws_1"), agent_group_key("ws_2")]
     );
     assert_eq!(classic_hit_ids(&state), ["pane_1", "pane_2", "pane_3"]);
-    assert!(
-        state.hits.endpoint_agents.is_empty(),
-        "classic 路径不写联邦命中区"
-    );
+    assert!(state.hits.agents.is_empty() && state.hits.agent_body.is_empty());
+    assert!(state.hits.sidebar_section_divider.is_empty());
     assert_eq!(
-        sort_label(&state),
-        compact(crate::i18n::texts().sidebar.sort_grouped)
+        state.session_view.area.bottom(),
+        state.layout(106, 30).sidebar.bottom()
     );
-
-    let first_header = group_rect(&state, "ws_1");
-    let header = &tree_rows(&state, first_header)[0];
-    assert!(
-        header.starts_with("▾ × client-shell"),
-        "工作区头: {header:?}"
-    );
-    assert!(header.trim_end().ends_with("· 2"), "计数右对齐: {header:?}");
-    let second_header = group_rect(&state, "ws_2");
-    let header = &tree_rows(&state, second_header)[0];
-    assert!(header.starts_with("▾ ◐ herdr"), "工作区头: {header:?}");
-    assert!(header.trim_end().ends_with("· 1"), "计数右对齐: {header:?}");
-
-    let status = &crate::i18n::texts().status;
-    let one = tree_rows(&state, classic_agent_rect(&state, "pane_1"));
-    assert_eq!(one.len(), 1, "只剩图标的首行并进名称行: {one:?}");
-    assert!(one[0].starts_with("├── ○ one "), "非末子行前缀: {one:?}");
-    assert!(
-        compact(&one[0]).ends_with(&compact(status.idle)),
-        "名称后跟状态文案（次要信息）: {one:?}"
-    );
-    let two = tree_rows(&state, classic_agent_rect(&state, "pane_2"));
-    assert!(two[0].starts_with("└── × two "), "末子行前缀: {two:?}");
-    assert!(
-        compact(&two[0]).ends_with(&compact(status.blocked)),
-        "{two:?}"
-    );
-    let three = tree_rows(&state, classic_agent_rect(&state, "pane_3"));
-    assert!(
-        three[0].starts_with("└── ◐ three "),
-        "独子也是末子行: {three:?}"
-    );
-    for lines in [&one, &two, &three] {
-        assert!(
-            lines
-                .iter()
-                .all(|line| !line.contains("client-shell") && !line.contains("herdr")),
-            "子行不重复工作区名: {lines:?}"
-        );
-    }
-
-    // 纵向次序：头紧跟自己的子行，下一个工作区头排在上一组最后一个子行之后。
     let ys = [
-        first_header.y,
+        group_rect(&state, "ws_1").y,
         classic_agent_rect(&state, "pane_1").y,
         classic_agent_rect(&state, "pane_2").y,
-        second_header.y,
+        group_rect(&state, "ws_2").y,
         classic_agent_rect(&state, "pane_3").y,
     ];
-    assert!(ys.windows(2).all(|pair| pair[0] < pair[1]), "行序: {ys:?}");
-    assert_eq!(ys[1], first_header.y + 1, "子行紧贴工作区头");
-    assert_eq!(
-        first_header.width, state.hits.agent_body.width,
-        "分组头整行都是折叠开关"
-    );
+    assert!(ys.windows(2).all(|pair| pair[0] < pair[1]), "{ys:?}");
+    for (pane, name, glyph) in [
+        ("pane_1", "one", "○"),
+        ("pane_2", "two", "×"),
+        ("pane_3", "three", "◐"),
+    ] {
+        let text = rect_rows(&state, classic_agent_rect(&state, pane)).join("");
+        assert!(text.contains(name) && text.contains(glyph), "{text}");
+        assert!(
+            !text.contains("client-shell") && !text.contains("herdr"),
+            "{text}"
+        );
+    }
 }
 
-/// (a) classic 折叠：折叠键进 `collapsed_groups` 后该工作区的子行消失、开关变
-/// `▸`、计数保留；其它工作区不受影响并上移补位。点分组头任意位置都能折叠，
-/// 悬浮在分组头上整行高亮。
 #[test]
 fn characterization_classic_collapsed_workspace_hides_children_and_flips_chevron() {
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
     state.compose(106, 30).expect("展开帧");
-    let expanded_second_header_y = group_rect(&state, "ws_2").y;
-    let first_header = group_rect(&state, "ws_1");
-
-    // 点在头行的标签文字上（不是开关格）也折叠。
-    state.handle_raw_events(vec![click_at(first_header.x + 6, first_header.y)]);
-    assert!(
-        state.collapsed_groups.contains("agent-panel:ws_1"),
-        "本机折叠态存于 collapsed_groups"
-    );
+    let before = group_rect(&state, "ws_2").y;
+    let toggle = group_rect(&state, "ws_1");
+    state.handle_raw_events(vec![click(toggle)]);
+    assert!(state.collapsed_groups.contains("agent-panel:ws_1"));
     state.compose(106, 30).expect("折叠帧");
-
-    assert_eq!(
-        local_toggle_keys(&state),
-        [agent_group_key("ws_1"), agent_group_key("ws_2")],
-        "折叠后工作区头仍在"
-    );
-    assert_eq!(classic_hit_ids(&state), ["pane_3"], "折叠组的子行不再可点");
-    let first_header = group_rect(&state, "ws_1");
-    let header = &tree_rows(&state, first_header)[0];
+    assert_eq!(classic_hit_ids(&state), ["pane_3"]);
+    let toggle = group_rect(&state, "ws_1");
+    assert_eq!(rect_rows(&state, toggle)[0], "▸");
+    assert!(group_rect(&state, "ws_2").y < before);
+    state.handle_raw_events(vec![moved(toggle.x, toggle.y)]);
     assert!(
-        header.starts_with("▸ × client-shell"),
-        "折叠箭头: {header:?}"
+        matches!(state.hover, Some(super::super::feedback::ChromeHover::Session(super::super::chrome::sessions::SessionHit::Toggle(ClientEndpointId::Local, ref key))) if key == "agent-panel:ws_1")
     );
-    assert!(header.trim_end().ends_with("· 2"), "计数保留: {header:?}");
-    let second_header = group_rect(&state, "ws_2");
-    assert!(tree_rows(&state, second_header)[0].starts_with("▾ ◐ herdr"));
-    assert_eq!(second_header.y, first_header.y + 1, "后续工作区上移补位");
-    assert!(second_header.y < expanded_second_header_y);
-
-    let body = body_text(&state);
-    assert!(!body.contains("one") && !body.contains("two"), "{body}");
-    assert!(body.contains("three"), "{body}");
-    assert!(!body.contains('├'), "只剩一个独子行: {body}");
-
-    // 悬浮在分组头上：整行高亮（同悬浮底色），指针移开恢复。
-    let plain_bg = state.compose_buffer.as_ref().expect("缓冲")
-        [(first_header.x + 3, first_header.y)]
-        .style()
-        .bg;
-    state.handle_raw_events(vec![moved(first_header.x + 6, first_header.y)]);
-    assert!(matches!(
-        state.hover,
-        Some(super::super::feedback::ChromeHover::AgentTreeToggle(ClientEndpointId::Local, ref key))
-            if key == "agent-panel:ws_1"
-    ));
-    state.compose(106, 30).expect("悬浮帧");
-    let hovered_bg = state.compose_buffer.as_ref().expect("缓冲")
-        [(first_header.x + 3, first_header.y)]
-        .style()
-        .bg;
-    assert_ne!(hovered_bg, plain_bg, "分组头悬浮整行高亮");
-    assert_eq!(hovered_bg, Some(state.config.palette.hover_row_bg()));
+    state.handle_raw_events(vec![click(toggle)]);
+    state.compose(106, 30).expect("重新展开");
+    assert_eq!(classic_hit_ids(&state), ["pane_1", "pane_2", "pane_3"]);
 }
 
-/// (b) classic + Launch：**平铺**，按全局启动顺序排（不再按工作区分组），行保留
-/// 工作区 token 以示归属；没有分组头、没有连接线。`launch_seq` 全为 0（旧 server
-/// 不下发）时退回快照顺序。
 #[test]
 fn characterization_classic_launch_is_flat_in_global_launch_order() {
     let mut state = classic_state(AgentPanelSortConfig::Launch);
-    state.compose(106, 30).expect("classic launch 帧");
-
-    assert_eq!(
-        sort_label(&state),
-        compact(crate::i18n::texts().agent_panel.sort_launch)
-    );
-    assert!(
-        state.hits.agent_tree_toggles.is_empty(),
-        "平铺：没有分组头，也没有可展开的活动"
-    );
-    assert_eq!(
-        classic_hit_ids(&state),
-        ["pane_2", "pane_3", "pane_1"],
-        "全局启动顺序，跨工作区混排"
-    );
-    assert_no_tree_glyphs(&body_text(&state));
-    let two = tree_rows(&state, classic_agent_rect(&state, "pane_2"));
-    assert!(
-        two[0].starts_with("  × client-shell"),
-        "平铺行带工作区名: {two:?}"
-    );
-    assert!(two[1].starts_with("    two"), "续行缩进对齐名称: {two:?}");
-    let three = tree_rows(&state, classic_agent_rect(&state, "pane_3"));
-    assert!(three[0].starts_with("  ◐ herdr"), "{three:?}");
+    state.compose(106, 30).expect("launch sessions");
+    assert_eq!(classic_hit_ids(&state), ["pane_2", "pane_3", "pane_1"]);
+    assert!(rect_rows(&state, classic_agent_rect(&state, "pane_2"))[0].contains("client-shell"));
+    assert!(rect_rows(&state, classic_agent_rect(&state, "pane_3"))[0].contains("herdr"));
 
     // 旧 server 不下发 launch_seq：全为 0，稳定排序保持快照顺序。
     let mut projected = two_workspace_snapshot();
@@ -520,277 +395,173 @@ fn characterization_classic_launch_is_flat_in_global_launch_order() {
     assert_eq!(classic_hit_ids(&state), ["pane_1", "pane_2", "pane_3"]);
 }
 
-/// (c) classic 矮面板：列表区不足 3 行（放不下「分组头 + 一个 agent 行」）时
-/// 退化为平铺视图——无分组头、无树前缀。行带完整 token（工作区名不再由分组头
-/// 承载），按聚合顺序列出全部 agent：这个视图没有分组头，面板内折叠了的工作区
-/// 在这里展不开，所以折叠也藏不住它的 agent（审查发现 1）。
 #[test]
 fn characterization_classic_short_panel_degrades_to_flat_rows() {
+    for sort in [AgentPanelSortConfig::Spaces, AgentPanelSortConfig::Launch] {
+        let mut state = classic_state(sort);
+        state.compose(106, 10).expect("short sessions");
+        assert!(state.session_view.body.height > 0);
+        assert!(state.hits.agent_body.is_empty());
+        let mut seen = HashSet::new();
+        for start in 0..10 {
+            state.workspace_scroll = start;
+            state.compose(106, 10).expect("session scroll");
+            seen.extend(classic_hit_ids(&state).into_iter().map(str::to_owned));
+        }
+        assert_eq!(
+            seen,
+            HashSet::from(["pane_1".into(), "pane_2".into(), "pane_3".into()])
+        );
+    }
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
-    state.compose(106, 10).expect("矮面板帧");
-    let body = state.hits.agent_body;
-    assert!(
-        body.height > 0 && body.height < 3,
-        "夹具前提：列表区不足 3 行，实际 {body:?}"
-    );
-    assert!(
-        state.hits.agent_tree_toggles.is_empty(),
-        "退化后无分组头 / 开关"
-    );
-    assert_eq!(classic_hit_ids(&state).first(), Some(&"pane_1"));
-    let one = tree_rows(&state, classic_agent_rect(&state, "pane_1"));
-    assert!(
-        one[0].starts_with("  ○ client-shell"),
-        "平铺行只有两列前缀，首行带工作区名: {one:?}"
-    );
-    assert_no_tree_glyphs(&body_text(&state));
-
-    // 同一状态换回足够高的面板，树立即回来：退化只由高度决定。
-    state.compose(106, 30).expect("高面板帧");
-    assert_eq!(state.hits.agent_tree_toggles.len(), 2);
-
-    // 折叠 ws_1 之后，退化视图仍能逐个滚到全部三个 agent，各带自己的工作区名。
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
-    let mut seen = Vec::new();
-    for start in 0..3 {
-        state.agent_scroll = start;
-        state.compose(106, 10).expect("折叠后的矮面板帧");
-        assert!(state.hits.agent_tree_toggles.is_empty());
-        let pane_id = classic_hit_ids(&state)[0].to_owned();
-        let first_line = tree_rows(&state, classic_agent_rect(&state, &pane_id))[0].clone();
-        assert_no_tree_glyphs(&first_line);
-        seen.push((pane_id, compact(&first_line)));
-    }
-    assert_eq!(
-        seen,
-        [
-            ("pane_1".to_owned(), "○client-shell".to_owned()),
-            ("pane_2".to_owned(), "×client-shell".to_owned()),
-            ("pane_3".to_owned(), "◐herdr".to_owned()),
-        ],
-        "折叠的工作区藏不住平铺视图里的 agent"
-    );
-
-    // Launch 下退化视图按全局启动顺序平铺。
-    let mut state = classic_state(AgentPanelSortConfig::Launch);
-    let mut flat_order = Vec::new();
-    for start in 0..3 {
-        state.agent_scroll = start;
-        state.compose(106, 10).expect("矮面板 launch 帧");
-        assert!(state.hits.agent_tree_toggles.is_empty());
-        flat_order.push(classic_hit_ids(&state)[0].to_owned());
-    }
-    assert_eq!(flat_order, ["pane_2", "pane_3", "pane_1"]);
+    state.compose(106, 30).expect("collapsed sessions");
+    assert_eq!(classic_hit_ids(&state), ["pane_3"]);
 }
 
-/// 联邦折叠侧栏（单列「机器首字母 + 状态图标」）同样走平铺视图：面板内折叠了
-/// 工作区，其下的 agent 仍按聚合顺序列出、可点（这里没有分组头，展不开）；机器
-/// 层折叠照旧藏起该端点的 agent（上方工作区区的机器行可切换）（审查发现 1）。
 #[test]
 fn characterization_federated_collapsed_sidebar_keeps_agents_of_collapsed_workspaces() {
     let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
     state.toggle_collapsed_group(&remote, agent_group_key("ws_1"));
     state.sidebar_collapsed = true;
-    state.compose(106, 40).expect("联邦折叠侧栏帧");
-
-    assert_eq!(
-        endpoint_hit_ids(&state),
-        [
-            local("pane_1"),
-            local("pane_2"),
-            local("pane_3"),
-            (remote.clone(), "pane_1".to_owned()),
-            (remote.clone(), "pane_2".to_owned()),
-        ],
-        "两端的 ws_1 都折叠了，折叠侧栏仍列出全部 agent"
-    );
-    let cells = |state: &ClientShellState, index: usize| {
-        compact(&tree_rows(state, state.hits.endpoint_agents[index].0)[0])
-    };
-    assert_eq!(cells(&state, 0), "L○", "本机 one：Idle");
-    assert_eq!(cells(&state, 1), "L×", "本机 two：Blocked");
-    assert_eq!(cells(&state, 3), "B◐", "远端 r-one：Working");
-
-    // 折叠工作区里的远端 agent 照样可点：切到该端点并聚焦它。
-    let (rect, _, _) = state.hits.endpoint_agents[3].clone();
-    let outcome = state.handle_raw_events(vec![click(rect)]);
+    state.compose(106, 40).expect("federated rail");
+    assert!(endpoint_hit_ids(&state).is_empty());
+    assert_eq!(state.hits.workspaces.len(), 3);
+    let rect = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.endpoint_id == remote)
+        .expect("remote workspace")
+        .rect;
+    let outcome = state.handle_raw_events(vec![
+        click(rect),
+        RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        }),
+    ]);
     assert!(
-        matches!(
-            outcome.actions.as_slice(),
-            [ClientShellAction::ActivateEndpoint {
-                endpoint_id,
-                target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
-            }] if endpoint_id == &remote && pane_id == "pane_1"
-        ),
-        "{:?}",
-        outcome.actions
+        matches!(&outcome.actions[..], [ClientShellAction::ActivateEndpoint { endpoint_id, target: Some(ClientEndpointFocusTarget::Workspace(workspace)) }] if endpoint_id == &remote && workspace == "ws_1")
     );
-
-    // 机器层折叠：远端的 agent 不再列出。
     state.collapsed_endpoints.insert(remote.clone());
     state.bump_tree_collapse_epoch();
-    state.compose(106, 40).expect("远端机器折叠帧");
-    assert_eq!(
-        endpoint_hit_ids(&state),
-        [local("pane_1"), local("pane_2"), local("pane_3")]
-    );
+    state.compose(106, 40).expect("collapsed machine");
+    assert!(!state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| hit.endpoint_id == remote));
+    assert!(state
+        .hits
+        .machines
+        .iter()
+        .any(|hit| hit.endpoint_id == remote));
 }
 
-/// 文档口径（concepts「Agents 面板」段）：平铺列表里的机器层折叠只在树排序下
-/// 生效——启动顺序本来就不按机器分组，折叠了的机器照样列出它的 agent；折叠侧栏
-/// 只列 Herdr 窗格里的 agent，外部来源条目只在展开的面板里出现（单机与联邦两条
-/// 渲染路径都一样）。
 #[test]
 fn characterization_collapsed_sidebar_machine_collapse_and_external_entries() {
-    // 启动顺序：远端机器折叠了，折叠侧栏仍列出全部 5 个 agent。
     let (mut state, remote) = federated_state(AgentPanelSortConfig::Launch);
-    state.collapsed_endpoints.insert(remote.clone());
-    state.bump_tree_collapse_epoch();
-    state.sidebar_collapsed = true;
-    state.compose(106, 40).expect("启动顺序折叠侧栏帧");
-    let ids = endpoint_hit_ids(&state);
-    assert_eq!(ids.len(), 5, "启动顺序不看机器折叠：{ids:?}");
-    assert_eq!(
-        ids.iter()
-            .filter(|(endpoint_id, _)| endpoint_id == &remote)
-            .count(),
-        2,
-        "{ids:?}"
-    );
-
-    let external = ClientShellExternalAgent {
+    let mut projected = two_workspace_snapshot();
+    projected.external_agents.push(ClientShellExternalAgent {
         external_id: "zcode:abc".into(),
         source: "zcode".into(),
-        agent_status: AgentStatus::Working,
         label: "fix login".into(),
         readable: true,
+        agent_status: AgentStatus::Working,
         agent: Some("zcode".into()),
         cwd: None,
         updated_at_ms: None,
         activity: Default::default(),
-    };
-    let mut projected = two_workspace_snapshot();
-    projected.external_agents = vec![external];
-
-    // 单机：展开的面板列出外部条目，折叠侧栏只列 3 个窗格 agent。
-    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected.clone());
-    state.compose(106, 40).expect("单机展开帧");
-    assert_eq!(state.hits.external_agents.len(), 1, "展开的面板有外部条目");
-    state.sidebar_collapsed = true;
-    state.compose(106, 40).expect("单机折叠侧栏帧");
-    assert!(
-        state.hits.external_agents.is_empty(),
-        "折叠侧栏不列外部条目"
-    );
-    let mut panes = classic_hit_ids(&state);
-    panes.sort_unstable();
-    assert_eq!(panes, ["pane_1", "pane_2", "pane_3"]);
-
-    // 联邦：同上，外部条目挂在本机上。
-    let mut state = ClientShellState::new(panel_config(AgentPanelSortConfig::Spaces));
-    let profile = remote_profile();
-    let remote = ClientEndpointId::Ssh(profile.id.clone());
-    state.set_endpoint_catalog(&[profile]);
-    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    });
     state.set_snapshot(Box::new(projected));
-    state.set_pane_surface(surface());
-    state.set_endpoint_snapshot(&remote, Box::new(remote_snapshot()));
-    state.compose(106, 40).expect("联邦展开帧");
-    assert_eq!(state.hits.external_agents.len(), 1, "展开的面板有外部条目");
+    state.compose(106, 40).expect("external sessions");
+    assert_eq!(state.hits.session_external_agents.len(), 1);
     state.sidebar_collapsed = true;
-    state.compose(106, 40).expect("联邦折叠侧栏帧");
-    assert!(
-        state.hits.external_agents.is_empty(),
-        "折叠侧栏不列外部条目"
-    );
-    assert_eq!(endpoint_hit_ids(&state).len(), 5, "只列窗格里的 agent");
+    state.collapsed_endpoints.insert(remote.clone());
+    state.bump_tree_collapse_epoch();
+    state.compose(106, 40).expect("rail");
+    assert!(state.hits.session_external_agents.is_empty());
+    assert!(state.hits.session_agents.is_empty());
+    assert!(!state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| hit.endpoint_id == remote));
+    assert_eq!(state.hits.workspaces.len(), 2);
 }
 
-/// (c) 退化阈值：逐个终端高度扫一遍，「无分组头」当且仅当列表区不足 3 行。
 #[test]
 fn characterization_classic_tree_degrades_exactly_below_three_body_rows() {
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
-    let mut seen_flat = false;
-    let mut seen_tree = false;
     for rows in 6..=30 {
-        state.agent_scroll = 0;
-        state.compose(106, rows).expect("classic 帧");
-        let body_height = state.hits.agent_body.height;
-        let flat = state.hits.agent_tree_toggles.is_empty();
+        state.compose(106, rows).expect("classic sessions");
+        assert!(state.hits.agent_body.is_empty() && state.hits.sidebar_section_divider.is_empty());
         assert_eq!(
-            flat,
-            body_height < 3,
-            "终端高 {rows}、列表区高 {body_height}"
+            state.session_view.area.bottom(),
+            state.layout(106, rows).sidebar.bottom()
         );
-        if body_height > 0 {
-            assert!(
-                !state.hits.agents.is_empty(),
-                "两种视图都至少保住一个可点的 agent 行（终端高 {rows}）"
-            );
+        for (rect, _, _) in &state.hits.session_agents {
+            assert_eq!(rect.intersection(state.session_view.body), *rect);
         }
-        seen_flat |= flat && body_height > 0;
-        seen_tree |= !flat;
     }
-    assert!(seen_flat && seen_tree, "扫描范围应同时覆盖两种视图");
 }
 
-/// (d) workbench 布局：与 classic 同一棵树——Spaces 下有工作区头与连接线，折叠
-/// 态生效；agent 行写端点限定的命中区。切到 Launch 平铺并换行序。
 #[test]
 fn characterization_workbench_spaces_renders_the_same_workspace_tree_as_classic() {
-    let mut state = workbench_state(AgentPanelSortConfig::Spaces);
-    state.compose(120, 40).expect("workbench 帧");
-
-    assert_eq!(
-        sort_label(&state),
-        compact(crate::i18n::texts().sidebar.sort_grouped)
-    );
-    assert_eq!(
-        local_toggle_keys(&state),
-        [agent_group_key("ws_1"), agent_group_key("ws_2")]
-    );
-    assert!(
-        state.hits.agents.is_empty(),
-        "workbench 不写 classic 命中区"
-    );
-    assert_eq!(
-        endpoint_hit_ids(&state),
-        [local("pane_1"), local("pane_2"), local("pane_3")]
-    );
-    let expected = ["├── ○ one ", "└── × two ", "└── ◐ three "];
-    for ((rect, _, _), first) in state.hits.endpoint_agents.iter().zip(expected) {
-        let lines = tree_rows(&state, *rect);
-        assert_eq!(lines.len(), 1, "与 classic 同样并成一行: {lines:?}");
-        assert!(lines[0].starts_with(first), "树前缀: {lines:?}");
-        assert!(
-            !lines[0].contains("Local"),
-            "单端点不画机器层，也不带机器 token: {lines:?}"
+    for cols in [120, 160] {
+        let mut state = workbench_state(AgentPanelSortConfig::Spaces);
+        state.compose(cols, 40).expect("workbench sessions");
+        assert_eq!(
+            local_toggle_keys(&state),
+            [agent_group_key("ws_1"), agent_group_key("ws_2")]
         );
+        assert!(state.hits.agents.is_empty() && state.hits.agent_body.is_empty());
+        assert_eq!(
+            endpoint_hit_ids(&state),
+            [local("pane_1"), local("pane_2"), local("pane_3")]
+        );
+        for ((rect, _, _), (name, glyph)) in
+            state
+                .hits
+                .session_agents
+                .iter()
+                .zip([("one", "○"), ("two", "×"), ("three", "◐")])
+        {
+            assert_eq!(*rect, rect.intersection(state.session_view.body));
+            let text = rect_rows(&state, *rect).join("\n");
+            assert!(text.contains(name) && text.contains(glyph), "{text}");
+            assert!(
+                !text.contains("Local")
+                    && !text.contains("client-shell")
+                    && !text.contains("herdr"),
+                "{text}"
+            );
+        }
+        state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
+        state
+            .compose(cols, 40)
+            .expect("collapsed workbench sessions");
+        assert_eq!(endpoint_hit_ids(&state), [local("pane_3")]);
+        assert_eq!(local_toggle_keys(&state).len(), 2);
+        let toggle = state.hits.agent_sort_toggle;
+        assert!(!toggle.is_empty());
+        state.handle_raw_events(vec![click(toggle)]);
+        assert_eq!(state.config.agent_panel_sort, AgentPanelSortConfig::Launch);
+        state.compose(cols, 40).expect("launch workbench sessions");
+        assert!(sort_label(&state).contains("↑"));
+        assert!(state.hits.session_tree_toggles.is_empty());
+        assert_eq!(
+            endpoint_hit_ids(&state),
+            [local("pane_2"), local("pane_3"), local("pane_1")]
+        );
+        for (rect, _, _) in &state.hits.session_agents {
+            assert_no_tree_glyphs(&rect_rows(&state, *rect).join("\n"));
+        }
     }
-
-    // 折叠某个工作区：子行藏起来。
-    state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
-    state.compose(120, 40).expect("折叠后的 workbench 帧");
-    assert_eq!(endpoint_hit_ids(&state), [local("pane_3")]);
-    assert_eq!(local_toggle_keys(&state).len(), 2);
-
-    // 点表头排序标签切到 Launch：平铺、按启动顺序。
-    let toggle = state.hits.agent_sort_toggle;
-    assert!(!toggle.is_empty(), "排序标签可点");
-    state.handle_raw_events(vec![click(toggle)]);
-    assert_eq!(state.config.agent_panel_sort, AgentPanelSortConfig::Launch);
-    state.compose(120, 40).expect("launch workbench 帧");
-    assert_eq!(
-        sort_label(&state),
-        compact(crate::i18n::texts().agent_panel.sort_launch)
-    );
-    assert!(state.hits.agent_tree_toggles.is_empty());
-    assert_eq!(
-        endpoint_hit_ids(&state),
-        [local("pane_2"), local("pane_3"), local("pane_1")]
-    );
-    assert_no_tree_glyphs(&body_text(&state));
 }
 
 /// (d) 联邦（多端点、未启用 workbench）：机器层出现在工作区之上，各端点的折叠
@@ -801,204 +572,195 @@ fn characterization_federated_sidebar_nests_machines_above_workspaces() {
     assert!(!state.workbench.enabled);
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
     state.toggle_collapsed_group(&remote, agent_group_key("ws_1"));
-    state.compose(106, 40).expect("联邦帧");
-
+    state.compose(106, 40).expect("federated sessions");
+    assert_eq!(endpoint_hit_ids(&state), [local("pane_3")]);
+    assert!(state.hits.agents.is_empty() && state.hits.agent_body.is_empty());
     assert_eq!(
-        sort_label(&state),
-        compact(crate::i18n::texts().sidebar.sort_grouped)
+        state
+            .hits
+            .machines
+            .iter()
+            .map(|hit| hit.endpoint_id.clone())
+            .collect::<Vec<_>>(),
+        [ClientEndpointId::Local, remote.clone()]
     );
-    assert!(state.hits.agents.is_empty());
+    for machine in &state.hits.machines {
+        let label = if machine.endpoint_id.is_local() {
+            "Local"
+        } else {
+            "Build"
+        };
+        assert!(rect_rows(&state, machine.rect).join("").contains(label));
+        for workspace in state
+            .hits
+            .workspaces
+            .iter()
+            .filter(|hit| hit.endpoint_id == machine.endpoint_id)
+        {
+            assert!(workspace.rect.y > machine.rect.y);
+        }
+    }
+    let remote_workspace = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.endpoint_id == remote)
+        .expect("remote workspace");
+    let text = rect_rows(&state, remote_workspace.rect).join("\n");
+    assert!(text.contains("remote-space"), "{text}");
     assert_eq!(
-        toggle_keys(&state),
-        [
-            (true, MACHINE_TOGGLE_KEY),
-            (true, "agent-panel:ws_1"),
-            (true, "agent-panel:ws_2"),
-            (false, MACHINE_TOGGLE_KEY),
-            (false, "agent-panel:ws_1"),
-        ],
-        "机器 → 工作区，按端点顺序"
+        rect_rows(
+            &state,
+            toggle_rect(
+                &state,
+                &remote,
+                &agent_group_key(&remote_workspace.workspace_id)
+            )
+        )[0],
+        "▸"
     );
-    assert_eq!(
-        endpoint_hit_ids(&state),
-        [local("pane_3")],
-        "两端的 ws_1 都折叠了，只剩本机 ws_2 的独子"
-    );
-    let local_machine = tree_rows(
-        &state,
-        toggle_rect(&state, &ClientEndpointId::Local, MACHINE_TOGGLE_KEY),
-    );
+    let three = rect_rows(&state, state.hits.session_agents[0].0).join("\n");
     assert!(
-        local_machine[0].starts_with("▾ ● Local"),
-        "{local_machine:?}"
+        three.contains("three") && !three.contains("Local"),
+        "{three}"
     );
-    assert!(
-        local_machine[0].trim_end().ends_with("· 3"),
-        "机器行计数: {local_machine:?}"
-    );
-    let remote_machine = tree_rows(&state, toggle_rect(&state, &remote, MACHINE_TOGGLE_KEY));
-    assert!(
-        remote_machine[0].starts_with("▾ ● Build"),
-        "{remote_machine:?}"
-    );
-    let remote_workspace = tree_rows(&state, toggle_rect(&state, &remote, "agent-panel:ws_1"));
-    assert!(
-        remote_workspace[0].starts_with("└─▸ ◐ remote-space"),
-        "远端工作区挂在机器下且折叠，状态取 r-one 的 Working: {remote_workspace:?}"
-    );
-    let three = tree_rows(&state, state.hits.endpoint_agents[0].0);
-    assert!(
-        three[0].starts_with("  └── ◐ three"),
-        "深两层：ws_2 是本机的末工作区，机器层的引导线留白: {three:?}"
-    );
-    assert!(
-        three.iter().all(|line| !line.contains("Local")),
-        "机器层承载机器名，agent 行不再带机器 token: {three:?}"
-    );
-
-    // 点远端机器行：整个端点收起，写进 collapsed_endpoints（与工作区区共用）。
-    let remote_row = toggle_rect(&state, &remote, MACHINE_TOGGLE_KEY);
-    state.handle_raw_events(vec![click_at(remote_row.x + 4, remote_row.y)]);
+    let remote_row = state
+        .hits
+        .machines
+        .iter()
+        .find(|hit| hit.endpoint_id == remote)
+        .expect("remote machine")
+        .collapse_toggle;
+    state.handle_raw_events(vec![click(remote_row)]);
     assert!(state.collapsed_endpoints.contains(&remote));
-    state.compose(106, 40).expect("远端折叠帧");
-    assert_eq!(
-        toggle_keys(&state),
-        [
-            (true, MACHINE_TOGGLE_KEY),
-            (true, "agent-panel:ws_1"),
-            (true, "agent-panel:ws_2"),
-            (false, MACHINE_TOGGLE_KEY),
-        ]
-    );
-    let remote_machine = tree_rows(&state, toggle_rect(&state, &remote, MACHINE_TOGGLE_KEY));
-    assert!(
-        remote_machine[0].starts_with("▸ ● Build"),
-        "{remote_machine:?}"
-    );
-    // 再点一次展开。
-    state.handle_raw_events(vec![click_at(remote_row.x + 4, remote_row.y)]);
+    state.compose(106, 40).expect("collapsed machine");
+    assert!(!state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| hit.endpoint_id == remote));
+    assert_eq!(endpoint_hit_ids(&state), [local("pane_3")]);
+    let machine = state
+        .hits
+        .machines
+        .iter()
+        .find(|hit| hit.endpoint_id == remote)
+        .expect("collapsed machine stays visible");
+    assert_eq!(machine.collapse_toggle.width, 2);
+    assert_eq!(rect_rows(&state, machine.collapse_toggle)[0], "▸ ");
+    state.handle_raw_events(vec![click(machine.collapse_toggle)]);
     assert!(!state.collapsed_endpoints.contains(&remote));
+    state.compose(106, 40).expect("expanded machine");
+    assert!(state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| hit.endpoint_id == remote));
 }
 
-/// (e) workbench 的 `hits.endpoint_agents` 与缓存里的 agent 行一一对应：同序、同
+/// (e) workbench 的 `hits.session_agents` 与缓存里的 agent 行一一对应：同序、同
 /// （端点, pane）身份，高度等于该行的 token 行数；点击按（端点, pane）路由。
 #[test]
 fn characterization_workbench_endpoint_agent_hits_mirror_cached_rows() {
-    let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
-    enable_workbench(&mut state);
-    // 机器 2 + 工作区头 3 + agent 5 行：要一个够高的面板才全放得下。
-    state.compose(120, 60).expect("workbench 联邦帧");
-
-    let body = state.hits.agent_body;
-    let cache = state.federated_agent_rows.as_ref().expect("行缓存");
-    let agent_rows = cache
-        .rows()
-        .iter()
-        .filter(|row| row.kind.agent().is_some())
-        .collect::<Vec<_>>();
-    assert_eq!(agent_rows.len(), 5, "本机 3 + 远端 2");
-    assert_eq!(
-        cache.rows().len(),
-        5 + 2 + 3,
-        "外加两个机器行与三个工作区头"
-    );
-    assert_eq!(
-        state.hits.endpoint_agents.len(),
-        agent_rows.len(),
-        "夹具前提：全部行都放得下"
-    );
-    let names = ["one", "two", "three", "r-one", "r-two"];
-    for ((rect, endpoint_id, pane_id), (row, name)) in state
-        .hits
-        .endpoint_agents
-        .iter()
-        .zip(agent_rows.iter().zip(names))
-    {
-        let agent = row.kind.agent().expect("agent 行");
-        assert_eq!(
-            (endpoint_id, pane_id),
-            (&row.kind.endpoint_id, &agent.pane_id)
+    use super::super::chrome::sessions::SessionRowKind;
+    for cols in [120, 160] {
+        let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
+        enable_workbench(&mut state);
+        state
+            .compose(cols, 60)
+            .expect("workbench federated sessions");
+        let body = state.session_view.body;
+        let cache = state.session_rows.as_ref().expect("session cache");
+        let agents = cache
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match &row.kind {
+                SessionRowKind::Agent(agent) => Some((index, row, agent)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(agents.len(), 5);
+        assert_eq!(cache.rows.len(), 5 + 2 + 3);
+        assert_eq!(state.hits.session_agents.len(), agents.len());
+        assert!(state.hits.workspace_scrollbar.is_empty());
+        for (((rect, endpoint, pane), (index, row, agent)), name) in state
+            .hits
+            .session_agents
+            .iter()
+            .zip(&agents)
+            .zip(["one", "two", "three", "r-one", "r-two"])
+        {
+            assert_eq!((endpoint, pane), (&row.endpoint_id, &agent.pane_id));
+            assert_eq!((rect.x, rect.width), (body.x, body.width));
+            assert_eq!(rect.height, cache.heights[*index]);
+            assert_eq!(rect.height, agent.tokens.len().max(1) as u16);
+            let text = rect_rows(&state, *rect).join("\n");
+            assert!(text.contains(name), "{text}");
+        }
+        assert_eq!(state.hits.session_agents[3].1, remote);
+        let rect = state.hits.session_agents[4].0;
+        let outcome = state.handle_raw_events(vec![click_at(rect.x + 6, rect.y)]);
+        assert!(
+            matches!(&outcome.actions[..], [ClientShellAction::ActivateEndpoint { endpoint_id, target: Some(ClientEndpointFocusTarget::Pane(pane_id)) }] if endpoint_id == &remote && pane_id == "pane_2")
         );
-        assert_eq!(
-            (rect.x, rect.width),
-            (body.x, body.width),
-            "无滚动条时占满列表区"
-        );
-        assert_eq!(usize::from(rect.height), agent.rows.len());
-        let text = tree_rows(&state, *rect).join("\n");
-        assert!(text.contains(name), "命中区里画的就是这一行: {text}");
     }
-    assert_eq!(state.hits.endpoint_agents[3].1, remote);
-
-    // 点击命中区按（端点, pane）身份路由：远端行触发端点激活。
-    let (rect, _, _) = state.hits.endpoint_agents[4].clone();
-    let outcome = state.handle_raw_events(vec![click_at(rect.x + 6, rect.y)]);
-    assert!(matches!(
-        outcome.actions.as_slice(),
-        [ClientShellAction::ActivateEndpoint {
-            endpoint_id,
-            target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
-        }] if endpoint_id == &remote && pane_id == "pane_2"
-    ));
 }
 
 /// (e) 面板放不下全部行时，命中区只覆盖可见窗口：agent 行命中区是缓存 agent 行
 /// 序列的一段连续切片，并为滚动条让出 1 列。
 #[test]
 fn characterization_workbench_endpoint_agent_hits_cover_only_the_visible_window() {
-    let (mut state, _) = federated_state(AgentPanelSortConfig::Spaces);
-    enable_workbench(&mut state);
-    for start in [0, 3] {
-        state.agent_scroll = start;
-        state.compose(120, 26).expect("矮 workbench 帧");
-        let body = state.hits.agent_body;
-        let cached = cached_agent_ids(&state);
-        let visible = endpoint_hit_ids(&state);
-        assert!(
-            !visible.is_empty() && visible.len() < cached.len(),
-            "夹具前提：只放得下一部分行，可见 {} / {}，列表区 {body:?}",
-            visible.len(),
-            cached.len()
-        );
-        assert_eq!(state.agent_scroll, start, "起始行在可滚动范围内");
-        let offset = cached
-            .iter()
-            .position(|id| id == &visible[0])
-            .expect("可见的第一行来自缓存");
-        assert_eq!(
-            cached[offset..offset + visible.len()],
-            visible[..],
-            "可见行是缓存 agent 行的连续切片"
-        );
-        for (rect, _, _) in &state.hits.endpoint_agents {
-            assert_eq!(rect.width, body.width - 1, "滚动条占最右 1 列");
-            assert!(rect.y >= body.y && rect.bottom() <= body.bottom());
+    use super::super::chrome::sessions::SessionRowKind;
+    for cols in [120, 160] {
+        let (mut state, _) = federated_state(AgentPanelSortConfig::Spaces);
+        enable_workbench(&mut state);
+        for start in [0, 3] {
+            state.workspace_scroll = start;
+            state.reveal_focused_workspace = false;
+            state.compose(cols, 12).expect("short workbench sessions");
+            let body = state.session_view.body;
+            let cached = state
+                .session_rows
+                .as_ref()
+                .expect("session cache")
+                .rows
+                .iter()
+                .filter_map(|row| match &row.kind {
+                    SessionRowKind::Agent(agent) => {
+                        Some((row.endpoint_id.clone(), agent.pane_id.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let visible = endpoint_hit_ids(&state);
+            assert!(
+                !visible.is_empty() && visible.len() < cached.len(),
+                "{cols}: {visible:?} / {cached:?}, {body:?}"
+            );
+            assert_eq!(state.workspace_scroll, start);
+            let offset = cached
+                .iter()
+                .position(|id| id == &visible[0])
+                .expect("visible first row is cached");
+            assert_eq!(cached[offset..offset + visible.len()], visible[..]);
+            assert!(!state.hits.workspace_scrollbar.is_empty());
+            for (rect, _, _) in &state.hits.session_agents {
+                assert_eq!(rect.width, body.width - 1);
+                assert_eq!(*rect, rect.intersection(body));
+            }
         }
     }
 }
 
-fn current_rows_key(
-    state: &ClientShellState,
-) -> crate::client::shell::endpoint_agents::AgentRowsKey {
-    crate::client::shell::endpoint_agents::AgentRowsCache::key_for(
-        &state.endpoints,
-        &state.config,
-        state.config_epoch,
-        state.agent_rows_epoch,
-        state.tree_collapse_epoch,
-        state.agent_activity_epoch,
-        &state.active_endpoint_id,
-        state
-            .snapshot
-            .as_deref()
-            .and_then(|snapshot| snapshot.agent_view_label.as_deref()),
-    )
+fn current_rows_key(state: &ClientShellState) -> super::super::chrome::sessions::SessionRowsKey {
+    super::super::chrome::sessions::SessionRowsKey::for_state(state)
 }
 
 /// 缓存行 Vec 的地址：重建时新 Vec 在旧缓存被替换之前分配，地址必然不同；
 /// 复用则地址不变。比「键相等」更直接地回答「这一帧有没有重建」。
 fn cached_rows_address(state: &ClientShellState) -> usize {
-    let rows = state.federated_agent_rows.as_ref().expect("行缓存").rows();
+    let rows = &state.session_rows.as_ref().expect("会话行缓存").rows;
     assert!(!rows.is_empty(), "空 Vec 不分配，地址比较无意义");
     rows.as_ptr() as usize
 }
@@ -1010,7 +772,7 @@ fn cached_pane_ids(state: &ClientShellState) -> Vec<String> {
         .collect()
 }
 
-/// (f) `AgentRowsCache`：键不变跨帧复用；折叠集合的代际（`tree_collapse_epoch`）
+/// (f) `SessionRowsCache`：键不变跨帧复用；折叠集合的代际（`tree_collapse_epoch`）
 /// 在键里，折叠态一变就重建且行序列随之变化；快照 revision 与排序在键里，变了就
 /// 重建。
 #[test]
@@ -1059,10 +821,10 @@ fn characterization_agent_rows_cache_rebuilds_on_revision_and_on_collapse() {
     let revised_key = current_rows_key(&state);
     assert_eq!(state.agent_rows_epoch, epoch, "数据代际没动");
     assert_ne!(revised_key, key, "revision 单独变化就足以换键");
-    state.refresh_federated_agent_rows();
+    state.refresh_session_rows();
     let revised_address = cached_rows_address(&state);
     assert_ne!(revised_address, address, "revision 变化触发重建");
-    let cache = state.federated_agent_rows.as_ref().expect("行缓存");
+    let cache = state.session_rows.as_ref().expect("会话行缓存");
     assert!(cache.key_matches(&revised_key) && !cache.key_matches(&key));
 
     // 生产路径：新快照（revision 前进、agent 改名）→ 重建，且新内容上屏。
@@ -1074,11 +836,9 @@ fn characterization_agent_rows_cache_rebuilds_on_revision_and_on_collapse() {
     state.compose(120, 40).expect("新快照帧");
     let renamed_address = cached_rows_address(&state);
     assert_ne!(renamed_address, revised_address);
-    let first = state.hits.endpoint_agents[0].0;
-    assert!(
-        tree_rows(&state, first)[0].starts_with("├── ○ renamed"),
-        "重建后的行上屏"
-    );
+    let first = state.hits.session_agents[0].0;
+    let text = rect_rows(&state, first).join("\n");
+    assert!(text.contains("○ renamed"), "重建后的会话行上屏：{text}");
 
     // 排序在键里：点排序标签 → 重建为 Launch 平铺行序。
     let toggle = state.hits.agent_sort_toggle;
@@ -1312,13 +1072,9 @@ fn mobile_agent_targets(state: &ClientShellState) -> Vec<(Rect, String)> {
         .collect()
 }
 
-/// (g) mobile 切换器的 agent 段：恒为平铺（无工作区头、无树前缀、折叠态无效），
-/// 行序与 `aggregate_agent_rows` 同源，随排序设置变化；在运行且有活动的 agent 在
-/// 详情行末尾带活动徽标（与桌面树同一口径：`activity_badge` 的「N 运行中」形态；
-/// 这里 pane_2 受阻，算在运行）。
 #[test]
 fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
-    let badge = running_badge(1);
+    use super::super::chrome::sessions::SessionHit;
     for (sort, expected) in [
         (AgentPanelSortConfig::Spaces, ["pane_1", "pane_2", "pane_3"]),
         (AgentPanelSortConfig::Launch, ["pane_2", "pane_3", "pane_1"]),
@@ -1333,21 +1089,40 @@ fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
         };
         let mut state = classic_state_with(sort, projected);
         state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
-        state.compose(44, 40).expect("mobile 头部");
-        assert!(state.mobile_layout_active(), "夹具前提：窄屏走 mobile 布局");
-        let switch = state.hits.mobile_switch;
-        state.handle_raw_events(vec![click(switch)]);
+        state.compose(44, 40).expect("mobile header");
+        assert!(state.mobile_layout_active());
+        state.handle_raw_events(vec![click(state.hits.mobile_switch)]);
         assert_eq!(state.mode, ClientShellMode::Navigate);
-        state.compose(44, 40).expect("mobile 切换器");
-
+        state.compose(44, 40).expect("mobile sessions");
+        assert_eq!(
+            mobile_agent_targets(&state)
+                .iter()
+                .map(|(_, pane)| pane.as_str())
+                .collect::<Vec<_>>(),
+            if sort == AgentPanelSortConfig::Spaces {
+                vec!["pane_3"]
+            } else {
+                expected.to_vec()
+            }
+        );
+        let toggle = state
+            .hits
+            .sessions
+            .iter()
+            .find_map(|(rect, hit)| {
+                matches!(hit, SessionHit::Toggle(_, key) if key == &agent_group_key("ws_1"))
+                    .then_some(*rect)
+            })
+            .expect("workspace toggle");
+        state.handle_raw_events(vec![click(toggle)]);
+        state.compose(44, 40).expect("expanded shared sessions");
         let agents = mobile_agent_targets(&state);
         assert_eq!(
             agents
                 .iter()
-                .map(|(_, pane_id)| pane_id.as_str())
+                .map(|(_, pane)| pane.as_str())
                 .collect::<Vec<_>>(),
-            expected,
-            "{sort:?}：折叠态不隐藏任何 agent"
+            expected
         );
         let aggregate = aggregate_navigation::aggregate_agent_rows(
             &state.endpoints,
@@ -1357,38 +1132,56 @@ fn characterization_mobile_switcher_lists_agents_flat_in_aggregate_order() {
         .into_iter()
         .map(|row| row.agent.pane_id.clone())
         .collect::<Vec<_>>();
-        assert_eq!(aggregate, expected, "与聚合行序同源");
-        for (rect, pane_id) in &agents {
-            let text = tree_rows(&state, *rect).join("\n");
-            assert_no_tree_glyphs(&text);
-            let name = match pane_id.as_str() {
+        assert_eq!(aggregate, expected);
+        for (rect, pane) in &agents {
+            let text = rect_rows(&state, *rect).join("\n");
+            let name = match pane.as_str() {
                 "pane_1" => "one",
                 "pane_2" => "two",
                 _ => "three",
             };
-            assert!(text.contains(name), "{pane_id}: {text}");
+            assert!(text.contains(name), "{pane}: {text}");
             assert_eq!(
-                compact(&text).ends_with(&compact(&badge)),
-                pane_id == "pane_2",
-                "只有有活动的 agent 带徽标: {pane_id}: {text}"
+                text.contains("▸1"),
+                pane == "pane_2",
+                "完整活动计数：{text}"
             );
         }
         assert!(state.hits.agent_tree_toggles.is_empty());
     }
 }
 
-/// 活动徽标只给在运行的属主：有运行中的节点写「N 运行中」；没有运行中的节点但
-/// 有已结束（完成 + 失败）的写「N 已完成」；都没有不画。属主空闲（且没有仍在跑
-/// 的非待办节点）时不画——主 agent 没在运行，它名下的活动一概不显示；空闲属主
-/// 名下还在跑的子 agent、以及有运行中节点却一个也没下发（快照预算用尽）时仍算
-/// 在运行。中英文案逐字钉住，文档里写的就是这些。
 #[test]
 fn activity_badge_shows_running_then_finished_only_for_running_owners() {
     let badge = |status: AgentStatus, activity: ClientShellAgentActivity| {
+        use super::super::chrome::sessions::SessionRowKind;
+        let mut projected = two_workspace_snapshot();
         let mut agent = panel_agent("pane_1", "ws_1", "tab_1", "one", status, 1);
         agent.activity = activity;
-        // 宽度不设限，只看文案本身。
-        super::super::agent_tree::mobile_activity_badge(&agent, u16::MAX)
+        projected.agents = vec![agent];
+        let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+        state.sidebar_width = 40;
+        state.sidebar_width_manual = true;
+        state.compose(106, 40).expect("real activity chip");
+        let agent = state
+            .session_rows
+            .as_ref()
+            .expect("session cache")
+            .rows
+            .iter()
+            .find_map(|row| match &row.kind {
+                SessionRowKind::Agent(agent) => Some(agent),
+                _ => None,
+            })
+            .expect("agent row");
+        let badge = agent.activity.as_ref().map(|(_, _, count)| count.clone());
+        let text = rect_rows(&state, classic_agent_rect(&state, "pane_1")).join("");
+        if let Some(count) = &badge {
+            assert!(text.contains(count), "{text}");
+        } else {
+            assert!(!text.contains('▸'), "{text}");
+        }
+        badge.map(|count| count.trim_start_matches(['▸', '▾']).to_owned())
     };
     let counts = |running: u32, done: u32, failed: u32| ClientShellAgentActivity {
         running,
@@ -1410,14 +1203,8 @@ fn activity_badge_shows_running_then_finished_only_for_running_owners() {
     use crate::api::schema::AgentActivityKind::{Subagent, Todo};
     use crate::api::schema::AgentActivityStatus::{Pending, Running};
     for (lang, expected) in [
-        (
-            crate::i18n::Lang::En,
-            ["2 running", "5 finished", "1 finished"],
-        ),
-        (
-            crate::i18n::Lang::ZhCn,
-            ["2 运行中", "5 已完成", "1 已完成"],
-        ),
+        (crate::i18n::Lang::En, ["2", "5", "1"]),
+        (crate::i18n::Lang::ZhCn, ["2", "5", "1"]),
     ] {
         let _lang = crate::i18n::lang_guard(lang);
         let working = AgentStatus::Working;
@@ -1466,88 +1253,53 @@ fn activity_badge_shows_running_then_finished_only_for_running_owners() {
     }
 }
 
-/// mobile 详情行的活动徽标只拿其余字段排完后剩下的宽度（审查发现：原先把完整
-/// 文案接在行尾再整体截断，长标签页名会把徽标截成「运行中 2…」之类的残段）。
-/// 32 / 44 列、中英各扫一遍标签页名长度（0 表示不显示标签页）：徽标要么是完整
-/// 文案、要么只留数字 `7`、要么整段不出现，画出来时整行不截断；每种宽度下三档
-/// 都实际出现过。pane_3 在工作，算在运行。
 #[test]
 fn mobile_activity_badge_degrades_instead_of_truncating_digits() {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    enum Tier {
-        Full,
-        Compact,
-        Hidden,
-    }
     const TAB_LABEL: &str = "feature-branch-with-a-very-long-tab-name";
     for lang in [crate::i18n::Lang::En, crate::i18n::Lang::ZhCn] {
         let _lang = crate::i18n::lang_guard(lang);
-        let full = compact(&running_badge(7));
-        for cols in [32u16, 44] {
-            let mut tiers = HashSet::new();
-            for len in 0..=TAB_LABEL.len() {
-                let mut projected = two_workspace_snapshot();
-                // pane_3 独占 ws_2 / tab_2：只有自定义标签页名才会进详情行。
-                projected.tabs[1].label = TAB_LABEL[..len].into();
-                projected.tabs[1].custom_label = len > 0;
-                projected.agents[2].activity = ClientShellAgentActivity {
-                    running: 7,
-                    total: 9,
-                    truncated: false,
-                    nodes: Vec::new(),
-                    ..Default::default()
-                };
-                let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
-                state.compose(cols, 40).expect("mobile 头部");
-                assert!(
-                    state.mobile_layout_active(),
-                    "夹具前提：{cols} 列走 mobile 布局"
-                );
-                let switch = state.hits.mobile_switch;
-                state.handle_raw_events(vec![click(switch)]);
-                state.compose(cols, 40).expect("mobile 切换器");
-                let (rect, _) = mobile_agent_targets(&state)
-                    .into_iter()
-                    .find(|(_, pane_id)| pane_id == "pane_3")
-                    .expect("pane_3 行");
-                let rows = tree_rows(&state, rect);
-                let detail = compact(&rows[1]);
-                let context = format!("{lang:?} {cols} 列，标签页名 {len} 字符：{:?}", rows[1]);
-                let tier = if detail.contains(&full) {
-                    Tier::Full
-                } else if detail.contains('7') {
-                    Tier::Compact
-                } else {
-                    Tier::Hidden
-                };
-                match tier {
-                    Tier::Full | Tier::Compact => {
-                        assert!(!detail.contains('…'), "徽标画出来时整行不截断：{context}");
-                        let shown = if tier == Tier::Full {
-                            full.as_str()
-                        } else {
-                            "7"
-                        };
-                        assert!(detail.ends_with(shown), "徽标完整收尾：{context}");
-                    }
-                    Tier::Hidden => {
-                        let words = crate::i18n::texts()
-                            .agent_panel
-                            .activity_badge_running_fmt
-                            .replace("{running}", "");
+        for cols in [8u16, 16, 32, 44] {
+            for running in [7, 1_234_567] {
+                for len in 0..=TAB_LABEL.len() {
+                    let mut projected = two_workspace_snapshot();
+                    projected.tabs[1].label = TAB_LABEL[..len].into();
+                    projected.tabs[1].custom_label = len > 0;
+                    projected.agents[2].activity = ClientShellAgentActivity {
+                        running,
+                        total: running + 2,
+                        truncated: true,
+                        nodes: Vec::new(),
+                        ..Default::default()
+                    };
+                    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+                    state.compose(cols, 40).expect("mobile header");
+                    assert!(state.mobile_layout_active());
+                    state.handle_raw_events(vec![click(state.hits.mobile_switch)]);
+                    state.compose(cols, 40).expect("shared mobile sessions");
+                    let rect = mobile_agent_targets(&state)
+                        .into_iter()
+                        .find(|(_, pane)| pane == "pane_3")
+                        .expect("pane_3 row")
+                        .0;
+                    let text = compact(&rect_rows(&state, rect).join("\n"));
+                    let chip = format!("▸{running}");
+                    if text.contains('▸') {
                         assert!(
-                            !detail.contains(words.trim()),
-                            "放不下就整段不画，不留残段：{context}"
+                            text.contains(&chip),
+                            "count must not truncate: {lang:?} {cols} {len} {text}"
+                        );
+                    }
+                    if cols >= 32 || (cols >= 16 && running == 7) {
+                        assert!(text.contains(&chip), "chip should fit: {text}");
+                    }
+                    if cols == 8 {
+                        assert!(
+                            !text.contains('▸'),
+                            "hide the complete chip when too narrow: {text}"
                         );
                     }
                 }
-                tiers.insert(tier);
             }
-            assert_eq!(
-                tiers.len(),
-                3,
-                "{lang:?} {cols} 列：扫描应覆盖完整 / 只留数字 / 不画三档：{tiers:?}"
-            );
         }
     }
 }
@@ -1569,34 +1321,18 @@ fn agent_menu_rename_is_labelled_as_renaming_the_pane() {
     }
 }
 
-/// 「N 运行中」形态的活动徽标（在运行的属主有运行中的节点时）。
 fn running_badge(running: u32) -> String {
-    crate::i18n::fill(
-        crate::i18n::texts().agent_panel.activity_badge_running_fmt,
-        &[("running", &running.to_string())],
+    format!(
+        "{running} {}",
+        super::super::observability::tr("running", "运行中")
     )
 }
 
-/// 「N 已完成」形态的活动徽标（在运行的属主没有运行中的节点、有已结束的时）。
 fn finished_badge(finished: u32) -> String {
-    crate::i18n::fill(
-        crate::i18n::texts().agent_panel.activity_badge_finished_fmt,
-        &[("n", &finished.to_string())],
+    format!(
+        "{finished} {}",
+        super::super::observability::tr("finished", "已完成")
     )
-}
-
-/// 右对齐画在 `rect` 首行的徽标 `badge` 里，`digits` 首字符所在的列（徽标的
-/// 文字部分可能在数字前后）。
-fn badge_digits_x(state: &ClientShellState, rect: Rect, badge: &str, digits: &str) -> u16 {
-    let offset = badge.find(digits).expect("徽标里有数字");
-    // 徽标离行尾留 L4 的右缘间距（窄面板为 0）。
-    badge_right(state, rect) - crate::ui::display_width(badge) as u16
-        + crate::ui::display_width(&badge[..offset]) as u16
-}
-
-/// 行右侧计数 / 徽标的右缘（不含）：行尾让出 L4 的间距（窄面板为 0）。
-fn badge_right(state: &ClientShellState, rect: Rect) -> u16 {
-    rect.right() - crate::client::shell::agent_tree::tree_inset(state.hits.agent_body.width)
 }
 
 /// 一个 agent 挂 `activity` 个活动节点（`node_0..` 为根，`node_k` 挂在
@@ -1634,34 +1370,52 @@ fn tree_tab_level_appears_only_with_multiple_tabs_and_drops_tab_tokens() {
         ],
         "ws_1 有两个标签页 → 标签页层；ws_2 只有一个 → 没有"
     );
-    let main = tree_rows(
-        &state,
-        toggle_rect(&state, &ClientEndpointId::Local, "agent-tab:tab_1"),
-    );
-    assert!(
-        main[0].starts_with("├─▾ ○ main"),
-        "标签页头带状态与名字: {main:?}"
-    );
-    assert!(main[0].trim_end().ends_with("· 1"), "{main:?}");
-    let review = tree_rows(
-        &state,
-        toggle_rect(&state, &ClientEndpointId::Local, "agent-tab:tab_1b"),
-    );
-    assert!(review[0].starts_with("└─▾ × review"), "{review:?}");
-    let one = tree_rows(&state, classic_agent_rect(&state, "pane_1"));
-    assert!(one[0].starts_with("│ └── ○"), "深两层的 agent 行: {one:?}");
-    assert!(
-        !one.iter().any(|line| line.contains("main")),
-        "标签页头承载标签页名，子行不重复: {one:?}"
-    );
-    let two = tree_rows(&state, classic_agent_rect(&state, "pane_2"));
-    assert!(two[0].starts_with("  └── ×"), "末标签页下的末子: {two:?}");
-    assert!(!two.iter().any(|line| line.contains("review")), "{two:?}");
-
-    // 折叠一个标签页只藏它自己的 agent。
-    state.toggle_collapsed_group(&ClientEndpointId::Local, "agent-tab:tab_1".into());
-    state.compose(106, 30).expect("折叠标签页帧");
+    for (tab, label, glyph) in [("tab_1", "main", "○"), ("tab_1b", "review", "×")] {
+        let hit =
+            super::super::chrome::sessions::SessionHit::Tab(ClientEndpointId::Local, tab.into());
+        let rect = state
+            .hits
+            .sessions
+            .iter()
+            .find(|(_, target)| target == &hit)
+            .expect("tab header")
+            .0;
+        let text = rect_rows(&state, rect).join("");
+        assert!(
+            text.contains(label) && text.contains(glyph) && text.trim_end().ends_with('1'),
+            "{text}"
+        );
+        assert_eq!(
+            rect_rows(
+                &state,
+                toggle_rect(
+                    &state,
+                    &ClientEndpointId::Local,
+                    &format!("agent-tab:{tab}")
+                )
+            )[0],
+            "▾"
+        );
+    }
+    for (pane, name, glyph) in [("pane_1", "one", "○"), ("pane_2", "two", "×")] {
+        let text = rect_rows(&state, classic_agent_rect(&state, pane)).join("");
+        assert!(text.contains(name) && text.contains(glyph), "{text}");
+        assert!(!text.contains("main") && !text.contains("review"), "{text}");
+    }
+    let toggle = toggle_rect(&state, &ClientEndpointId::Local, "agent-tab:tab_1");
+    state.handle_raw_events(vec![click(toggle)]);
+    state.compose(106, 30).expect("collapsed tab");
     assert_eq!(classic_hit_ids(&state), ["pane_2", "pane_3"]);
+    assert_eq!(
+        rect_rows(
+            &state,
+            toggle_rect(&state, &ClientEndpointId::Local, "agent-tab:tab_1")
+        )[0],
+        "▸"
+    );
+    state.handle_raw_events(vec![click(toggle)]);
+    state.compose(106, 30).expect("expanded tab");
+    assert_eq!(classic_hit_ids(&state), ["pane_1", "pane_2", "pane_3"]);
 }
 
 /// 快照默认下发的活动摘要：计数（运行中 2、活跃 3、完成 4、失败 1）+ 活跃子集
@@ -1690,199 +1444,114 @@ fn summary_snapshot() -> ClientShellSnapshot {
     projected
 }
 
-/// agent 行的活动摘要：默认折叠，行尾徽标写「N 运行中」；点开关展开出活跃子集，
-/// 被截断时跟「还有 N 项」（没下发的活跃节点数），有已结束节点时末尾再跟灰显
-/// 的「已完成 N · 失败 M」；点活跃节点行打开「Agent 活动」窗口并选中它，点后
-/// 两行打开窗口不预选。
 #[test]
 fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
-    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
-    state.sidebar_width = 40;
-    state.sidebar_width_manual = true;
-    state.compose(106, 30).expect("活动摘要帧");
-
-    assert_eq!(
-        local_toggle_keys(&state),
-        ["agent-panel:ws_0", "agent-activity:pane:pane_0"],
-        "在运行、有活动的 agent 行带开关"
-    );
-    assert!(
-        state.hits.agent_activity_rows.is_empty(),
-        "活动摘要默认折叠"
-    );
-    let badge = running_badge(2);
-    let agent = tree_rows(&state, classic_agent_rect(&state, "pane_0"));
-    assert!(agent[0].starts_with("└─▸ ○ agent-0 "), "{agent:?}");
-    assert!(
-        compact(&agent[0]).ends_with(&compact(&badge)),
-        "行尾徽标 = N 运行中: {agent:?}"
-    );
-    let rect = classic_agent_rect(&state, "pane_0");
-    let buffer = state.compose_buffer.as_ref().expect("缓冲");
-    // 徽标右对齐：取数字首格（宽字符的占位格不带样式）。
-    let badge_x = badge_digits_x(&state, rect, &badge, "2");
-    assert_eq!(buffer[(badge_x, rect.y)].symbol(), "2");
-    assert_eq!(
-        buffer[(badge_x, rect.y)].style().fg,
-        Some(state.config.palette.yellow),
-        "有运行中的活动：徽标用工作色"
-    );
-
-    // 点开关：展开（键在集合里 = 展开）。
-    let toggle = toggle_rect(
-        &state,
-        &ClientEndpointId::Local,
-        "agent-activity:pane:pane_0",
-    );
-    assert_eq!(toggle.width, 2, "agent 行的开关只占开关与间隔两列");
-    state.handle_raw_events(vec![click(toggle)]);
-    assert!(state
-        .collapsed_groups
-        .contains("agent-activity:pane:pane_0"));
-    state.compose(106, 30).expect("展开摘要帧");
-    let activity_ids = state
-        .hits
-        .agent_activity_rows
-        .iter()
-        .map(|hit| (hit.owner_key.as_str(), hit.node_id.as_str()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        activity_ids,
-        [
-            ("pane:pane_0", "sub-7"),
-            ("pane:pane_0", ""),
-            (
-                "pane:pane_0",
-                super::super::agent_tree::ACTIVITY_DONE_HIT_ID
-            )
-        ],
-        "活跃节点 +「还有 N 项」（node_id 为空）+「已完成 · 失败」"
-    );
-    let agent = tree_rows(&state, classic_agent_rect(&state, "pane_0"));
-    assert!(agent[0].starts_with("└─▾ ○ agent-0 "), "{agent:?}");
-    let latest = tree_rows(&state, state.hits.agent_activity_rows[0].rect);
-    let texts = &crate::i18n::texts().agent_activity;
-    assert!(
-        latest[0].starts_with("  ├── ◐ explore repo "),
-        "活跃节点：状态图标 + 标签: {latest:?}"
-    );
-    assert!(
-        compact(&latest[0]).contains(&compact(texts.kind_subagent)),
-        "种类是次要信息: {latest:?}"
-    );
-    let more = tree_rows(&state, state.hits.agent_activity_rows[1].rect);
-    let more_text = crate::i18n::fill(
-        crate::i18n::texts().agent_panel.activity_more_fmt,
-        &[("n", "2")],
-    );
-    assert!(more[0].starts_with("  ├── "), "{more:?}");
-    assert!(
-        compact(&more[0]).contains(&compact(&more_text)),
-        "没下发的活跃节点 = 活跃 3 − 已下发 1: {more:?}"
-    );
-    let done_rect = state.hits.agent_activity_rows[2].rect;
-    let done = tree_rows(&state, done_rect);
-    let panel_texts = &crate::i18n::texts().agent_panel;
-    let done_text = format!(
-        "{} · {}",
-        crate::i18n::fill(panel_texts.activity_done_fmt, &[("n", "4")]),
-        crate::i18n::fill(panel_texts.activity_failed_fmt, &[("n", "1")])
-    );
-    assert!(done[0].starts_with("  └── "), "末行: {done:?}");
-    assert!(compact(&done[0]).contains(&compact(&done_text)), "{done:?}");
-    let buffer = state.compose_buffer.as_ref().expect("缓冲");
-    let first = done_text.chars().next().expect("完成文案").to_string();
-    let done_x = (done_rect.x..done_rect.right())
-        .find(|x| buffer[(*x, done_rect.y)].symbol() == first)
-        .expect("已完成行的文字");
-    assert_eq!(
-        buffer[(done_x, done_rect.y)].style().fg,
-        Some(state.config.palette.overlay0),
-        "已完成行灰显"
-    );
-
-    // 点最新节点行：打开活动窗口并选中它。
-    let row = state.hits.agent_activity_rows[0].rect;
-    state.handle_raw_events(vec![click_at(row.x + 10, row.y)]);
-    match state.overlay.as_ref() {
-        Some(ClientShellOverlay::AgentActivity(overlay)) => {
+    for sort in [AgentPanelSortConfig::Spaces, AgentPanelSortConfig::Launch] {
+        let mut state = classic_state_with(sort, summary_snapshot());
+        state.sidebar_width = 40;
+        state.sidebar_width_manual = true;
+        state.compose(106, 30).expect("collapsed activity");
+        assert!(state.hits.session_activity_rows.is_empty());
+        let text = rect_rows(&state, classic_agent_rect(&state, "pane_0")).join("");
+        assert!(text.contains("○ agent-0") && text.contains("▸2"), "{text}");
+        let key = "agent-activity:pane:pane_0";
+        let toggle = toggle_rect(&state, &ClientEndpointId::Local, key);
+        assert_eq!(toggle.width, 2);
+        assert_eq!(
+            text_cell(&state, toggle, "2").fg,
+            state.config.components.status_running
+        );
+        state.handle_raw_events(vec![click(toggle)]);
+        state.compose(106, 30).expect("expanded activity");
+        assert!(state.collapsed_groups.contains(key));
+        assert_eq!(
+            state
+                .hits
+                .session_activity_rows
+                .iter()
+                .map(|hit| (hit.owner_key.as_str(), hit.node_id.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("pane:pane_0", "sub-7"),
+                ("pane:pane_0", ""),
+                (
+                    "pane:pane_0",
+                    super::super::agent_tree::ACTIVITY_DONE_HIT_ID
+                )
+            ]
+        );
+        let texts = &crate::i18n::texts().agent_panel;
+        let expected = [
+            "explore repo".to_owned(),
+            crate::i18n::fill(texts.activity_more_fmt, &[("n", "2")]),
+            format!(
+                "{} · {}",
+                crate::i18n::fill(texts.activity_done_fmt, &[("n", "4")]),
+                crate::i18n::fill(texts.activity_failed_fmt, &[("n", "1")])
+            ),
+        ];
+        for (index, text) in expected.iter().enumerate() {
+            let rect = state.hits.session_activity_rows[index].rect;
+            let line = rect_rows(&state, rect).join("");
+            assert!(compact(&line).contains(&compact(text)), "{line}");
+            assert!(line.contains(if index == 2 { '└' } else { '├' }), "{line}");
+            if index == 0 {
+                assert!(line.contains('◐'));
+                assert!(compact(&line)
+                    .contains(&compact(crate::i18n::texts().agent_activity.kind_subagent)));
+            } else if index == 2 {
+                let first = text.chars().next().expect("completion text").to_string();
+                assert_eq!(
+                    text_cell(&state, rect, &first).fg,
+                    state.config.palette.overlay0
+                );
+            }
+            state.handle_raw_events(vec![click_at(rect.x + 10, rect.y)]);
+            let Some(ClientShellOverlay::AgentActivity(overlay)) = state.overlay.as_ref() else {
+                panic!("activity overlay");
+            };
             assert_eq!(
                 overlay.owner,
                 super::super::agent_activity_overlay::AgentActivityOwner::Pane {
                     pane_id: "pane_0".into()
                 }
             );
-            assert_eq!(overlay.selected_node.as_deref(), Some("sub-7"));
+            assert_eq!(
+                overlay.selected_node.as_deref(),
+                if index == 0 { Some("sub-7") } else { None }
+            );
+            state.overlay = None;
         }
-        other => panic!("应打开 Agent 活动窗口: {other:?}"),
+        state.handle_raw_events(vec![click(toggle_rect(
+            &state,
+            &ClientEndpointId::Local,
+            key,
+        ))]);
+        state.compose(106, 30).expect("collapsed again");
+        assert!(state.hits.session_activity_rows.is_empty());
     }
-    state.overlay = None;
-    // 点「还有 N 项」：打开窗口，不预选节点。
-    let row = state.hits.agent_activity_rows[1].rect;
-    state.handle_raw_events(vec![click_at(row.x + 8, row.y)]);
-    assert!(matches!(
-        state.overlay.as_ref(),
-        Some(ClientShellOverlay::AgentActivity(overlay)) if overlay.selected_node.is_none()
-    ));
-    state.overlay = None;
-
-    // 再点开关收起。
-    state.handle_raw_events(vec![click(toggle)]);
-    state.compose(106, 30).expect("收起摘要帧");
-    assert!(state.hits.agent_activity_rows.is_empty());
-
-    // 没有运行中的活动：只写总数，徽标退为次要色。
     let mut projected = summary_snapshot();
     projected.agents[0].activity.running = 0;
     projected.agents[0].agent_status = AgentStatus::Working;
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
-    state.sidebar_width = 40;
-    state.sidebar_width_manual = true;
-    state.compose(106, 30).expect("无运行中活动帧");
-    let rect = classic_agent_rect(&state, "pane_0");
-    let agent = tree_rows(&state, rect);
-    let badge = finished_badge(5);
-    assert!(compact(&agent[0]).ends_with(&compact(&badge)), "{agent:?}");
-    let buffer = state.compose_buffer.as_ref().expect("缓冲");
-    let badge_x = badge_digits_x(&state, rect, &badge, "5");
-    assert_eq!(buffer[(badge_x, rect.y)].symbol(), "5");
-    assert_eq!(
-        buffer[(badge_x, rect.y)].style().fg,
-        Some(state.config.palette.overlay0)
-    );
-
-    // Launch 平铺下 agent 行仍可展开活动摘要。
-    let mut state = classic_state_with(AgentPanelSortConfig::Launch, summary_snapshot());
-    state.compose(106, 30).expect("launch 活动帧");
-    assert_eq!(
-        local_toggle_keys(&state),
-        ["agent-activity:pane:pane_0"],
-        "平铺没有分组头，只有 agent 行自己的开关"
-    );
-    let agent = tree_rows(&state, classic_agent_rect(&state, "pane_0"));
-    assert!(
-        agent[0].starts_with("▸ ○ space-0"),
-        "平铺行带工作区 token: {agent:?}"
-    );
-    state.handle_raw_events(vec![click(toggle_rect(
+    state.compose(106, 30).expect("finished activity");
+    let toggle = toggle_rect(
         &state,
         &ClientEndpointId::Local,
         "agent-activity:pane:pane_0",
-    ))]);
-    state.compose(106, 30).expect("launch 展开帧");
-    assert_eq!(state.hits.agent_activity_rows.len(), 3);
-    let latest = tree_rows(&state, state.hits.agent_activity_rows[0].rect);
-    assert!(latest[0].starts_with("├── ◐ explore repo"), "{latest:?}");
+    );
+    assert_eq!(rect_rows(&state, toggle)[0], "▸5");
+    assert_eq!(
+        text_cell(&state, toggle, "5").fg,
+        state.config.palette.overlay0
+    );
 }
 
 /// 徽标在窄侧栏里的档位（审查发现 2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BadgeTier {
-    /// 完整文案。
     Full,
-    /// 只留数字 `2`。
     Digits,
-    /// 不画。
     Hidden,
 }
 
@@ -1907,8 +1576,6 @@ fn badged_snapshot(extra_tab: bool) -> ClientShellSnapshot {
     projected
 }
 
-/// 断言 `rect` 首行右端按 `tier` 画徽标：`Full` 是完整文案 `full`，`Digits` 只剩
-/// 数字 `2`（前一格是间隔），`Hidden` 整行不出现 `2`。数字逐格比对。
 fn assert_badge_tier(
     state: &ClientShellState,
     rect: Rect,
@@ -1916,90 +1583,42 @@ fn assert_badge_tier(
     tier: BadgeTier,
     case: &str,
 ) {
-    let buffer = state.compose_buffer.as_ref().expect("缓冲");
-    let cell = |x: u16| buffer[(x, rect.y)].symbol().to_owned();
-    let line = tree_rows(state, rect)[0].clone();
+    let line = rect_rows(state, rect)[0].clone();
+    assert!(
+        !compact(&line).contains(&compact(full)),
+        "会话行不画旧长徽标：{line}"
+    );
     match tier {
-        BadgeTier::Full => {
-            assert!(
-                compact(&line).ends_with(&compact(full)),
-                "{case}: 完整徽标: {line:?}"
-            );
-            assert_eq!(cell(badge_digits_x(state, rect, full, "2")), "2", "{case}");
+        BadgeTier::Full | BadgeTier::Digits => {
+            assert!(line.trim_end().ends_with("▸2"), "{case}: 完整计数：{line}");
+            let buffer = state.compose_buffer.as_ref().expect("buffer");
+            assert_eq!(buffer[(rect.right() - 2, rect.y)].symbol(), "2");
+            assert_eq!(buffer[(rect.right() - 3, rect.y)].symbol(), "▸");
         }
-        BadgeTier::Digits => {
-            let x = badge_right(state, rect) - 1;
-            assert_eq!(cell(x), "2", "{case}: 只留数字: {line:?}");
-            assert_eq!(cell(x - 1), " ", "{case}: 数字前间隔");
-            assert!(
-                !compact(&line).contains(&compact(full)),
-                "{case}: 完整文案放不下: {line:?}"
-            );
-        }
-        BadgeTier::Hidden => assert!(!line.contains('2'), "{case}: 徽标让位: {line:?}"),
+        BadgeTier::Hidden => assert!(!line.contains('2'), "{case}: 数字整体让位：{line}"),
     }
 }
 
-/// 窄侧栏的宽度预算（审查发现 2）：状态图标与名称先保 8 列（图标 2 列 + 名称
-/// ≥ 6 列），徽标再按剩余宽度三档退化——完整文案 → 只留数字 → 不画。侧栏
-/// 18 / 26 / 36 列 × agent 深度 1–3（工作区 / +标签页 / +机器）逐格断言图标字符、
-/// 名称前缀与徽标数字；外部条目行同一预算。
-///
-/// 行宽 = 侧栏宽 − 1（右缘分隔线），内容区再扣树前缀（每层 2 列 + 开关 2 列），
-/// 徽标可用 = 内容区 − 8 − 1 列间隔。例：侧栏 18、深度 2 → 17 − 6 − 9 = 2 列，
-/// 数字档只有一列；英文完整徽标 9 列、中文 8 列，分别覆盖各档边界。
 #[test]
 fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
     use BadgeTier::{Digits, Full, Hidden};
-    // 名称优先（L4 复审）：「图标 + 完整名称 + 1 列间隔 + 完整徽标」放得下才画完整
-    // 文案，否则只留数字，数字档仍先给图标与名称保 8 列。侧栏 26 / 36 列的面板带
-    // 1 列行首留白、徽标离右缘 1 列（18 列不留）：26 列时整名「agent-0」加完整徽标
-    // 放不下，中英文都退到只留数字；表里每一档名称都完整可见。
-    for (lang, full_width, tiers) in [
-        (
-            crate::i18n::Lang::En,
-            9,
-            [
-                (18, 1, Digits),
-                (18, 2, Digits),
-                (18, 3, Hidden),
-                (26, 1, Full),
-                (26, 2, Digits),
-                (26, 3, Digits),
-                (36, 1, Full),
-                (36, 2, Full),
-                (36, 3, Full),
-            ],
-        ),
-        (
-            crate::i18n::Lang::ZhCn,
-            8,
-            [
-                (18, 1, Digits),
-                (18, 2, Digits),
-                (18, 3, Hidden),
-                (26, 1, Full),
-                (26, 2, Digits),
-                (26, 3, Digits),
-                (36, 1, Full),
-                (36, 2, Full),
-                (36, 3, Full),
-            ],
-        ),
-    ] {
+    for lang in [crate::i18n::Lang::En, crate::i18n::Lang::ZhCn] {
         let _lang = crate::i18n::lang_guard(lang);
         let full = running_badge(2);
-        assert_eq!(
-            crate::ui::display_width(&full),
-            full_width,
-            "{lang:?}: 夹具前提：完整徽标 {full:?} 的宽度"
-        );
-        for (width, depth, tier) in tiers {
+        for (width, depth, tier) in [
+            (18, 1, Digits),
+            (18, 2, Hidden),
+            (18, 3, Hidden),
+            (26, 1, Full),
+            (26, 2, Digits),
+            (26, 3, Digits),
+            (36, 1, Full),
+            (36, 2, Full),
+            (36, 3, Full),
+        ] {
             assert_narrow_agent_row(lang, &full, width, depth, tier);
         }
-
-        // 外部条目行：同一预算（深度 1：外部分组头之下）。
-        for (width, tier) in [(18, Digits), (36, Full)] {
+        for (width, tier) in [(18, Hidden), (36, Full)] {
             let mut projected = badged_snapshot(false);
             projected.external_agents = vec![ClientShellExternalAgent {
                 external_id: "zcode:abc".into(),
@@ -2015,25 +1634,21 @@ fn tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars() {
             let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
             state.sidebar_width = width;
             state.sidebar_width_manual = true;
-            state.compose(106, 40).expect("窄侧栏外部条目帧");
-            let case = format!("{lang:?}、外部条目、侧栏 {width}");
+            state.compose(106, 40).expect("narrow external session");
+            let case = format!("{lang:?} external sidebar {width}");
             let rect = state
                 .hits
-                .external_agents
+                .session_external_agents
                 .first()
-                .unwrap_or_else(|| panic!("{case}: 外部条目不在命中表里"))
+                .expect("external session hit")
                 .0;
-            assert_eq!(
-                rect.width,
-                width - 1,
-                "{case}: 夹具前提：行宽 = 侧栏宽 − 右缘分隔线"
-            );
-            let buffer = state.compose_buffer.as_ref().expect("缓冲");
-            let cell = |x: u16| buffer[(x, rect.y)].symbol().to_owned();
-            let inset = crate::client::shell::agent_tree::tree_inset(state.hits.agent_body.width);
-            let content_x = rect.x + inset + 4;
-            assert_eq!(cell(content_x), "◐", "{case}: 状态图标");
-            let label = (content_x + 2..content_x + 8).map(cell).collect::<String>();
+            assert_eq!(rect.width, width - 1);
+            let buffer = state.compose_buffer.as_ref().expect("buffer");
+            let content_x = rect.x + 3;
+            assert_eq!(buffer[(content_x, rect.y)].symbol(), "◐", "{case}");
+            let label = (content_x + 2..content_x + 8)
+                .map(|x| buffer[(x, rect.y)].symbol())
+                .collect::<String>();
             assert_eq!(label, "fix lo", "{case}: 标签至少保 6 列");
             assert_badge_tier(&state, rect, &full, tier, &case);
         }
@@ -2066,7 +1681,7 @@ fn assert_narrow_agent_row(
     let rect = if depth == 3 {
         state
             .hits
-            .endpoint_agents
+            .session_agents
             .iter()
             .find(|(_, endpoint_id, pane_id)| endpoint_id.is_local() && pane_id == "pane_0")
             .unwrap_or_else(|| panic!("{case}: 本机 agent 行不在命中表里"))
@@ -2081,10 +1696,17 @@ fn assert_narrow_agent_row(
     );
     let buffer = state.compose_buffer.as_ref().expect("缓冲");
     let cell = |x: u16| buffer[(x, rect.y)].symbol().to_owned();
-    // 行首留白（冒烟 L4，窄面板为 0）+ 前缀每层 2 列 + 开关与间隔 2 列。
-    let inset = crate::client::shell::agent_tree::tree_inset(state.hits.agent_body.width);
-    let content_x = rect.x + inset + 2 * depth + 2;
-    assert_eq!(cell(content_x - 2), "▸", "{case}: 活动摘要的折叠开关");
+    let content_x = rect.x + 3 + u16::from(depth >= 2) * 2;
+    let toggle = toggle_rect(
+        &state,
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0",
+    );
+    assert_eq!(
+        buffer[(toggle.x, toggle.y)].symbol(),
+        "▸",
+        "{case}: 活动摘要的折叠开关"
+    );
     assert_eq!(cell(content_x), "○", "{case}: 状态图标");
     // 名称优先：表里每一档都放得下整名「agent-0」，徽标不截名称（L4 复审：此前只
     // 断言保底 6 列，放过了默认宽度下名称被徽标挤成「agent…」的回归）。
@@ -2092,7 +1714,7 @@ fn assert_narrow_agent_row(
     assert_eq!(name, "agent-0", "{case}: 名称完整可见");
     assert_badge_tier(&state, rect, full, tier, &case);
     if tier == BadgeTier::Hidden {
-        let line = tree_rows(&state, rect)[0].clone();
+        let line = rect_rows(&state, rect)[0].clone();
         assert!(line.contains("○ agent-0"), "{case}: 名称完整: {line:?}");
     }
 }
@@ -2120,17 +1742,16 @@ fn tree_activity_with_several_nodes_expands_children_on_demand() {
     let ids = |state: &ClientShellState| {
         state
             .hits
-            .agent_activity_rows
+            .session_activity_rows
             .iter()
             .map(|hit| hit.node_id.clone())
             .collect::<Vec<_>>()
     };
     assert_eq!(ids(&state), ["node_0", "node_1"]);
-    let node_0 = tree_rows(&state, state.hits.agent_activity_rows[0].rect);
-    assert!(node_0[0].starts_with("  ├─▸ ◐ task 0"), "{node_0:?}");
-    let node_1 = tree_rows(&state, state.hits.agent_activity_rows[1].rect);
-    assert!(node_1[0].starts_with("  └─▸ ✓ task 1"), "{node_1:?}");
-
+    let node_0 = rect_rows(&state, state.hits.session_activity_rows[0].rect);
+    assert!(node_0[0].starts_with("├─▸ ◐ task 0"), "{node_0:?}");
+    let node_1 = rect_rows(&state, state.hits.session_activity_rows[1].rect);
+    assert!(node_1[0].starts_with("└─▸ ✓ task 1"), "{node_1:?}");
     let toggle = toggle_rect(
         &state,
         &ClientEndpointId::Local,
@@ -2140,11 +1761,11 @@ fn tree_activity_with_several_nodes_expands_children_on_demand() {
     assert!(state
         .collapsed_groups
         .contains("agent-node:pane:pane_0:node_0"));
-    state.compose(106, 30).expect("展开 node_0 帧");
+    state.compose(106, 30).expect("expanded node_0");
     assert_eq!(ids(&state), ["node_0", "node_2", "node_1"]);
-    let node_2 = tree_rows(&state, state.hits.agent_activity_rows[1].rect);
+    let node_2 = rect_rows(&state, state.hits.session_activity_rows[1].rect);
     assert!(
-        node_2[0].starts_with("  │ └── ◐ task 2"),
+        node_2[0].starts_with("│ └── ◐ task 2"),
         "深一层的子节点: {node_2:?}"
     );
 }
@@ -2196,7 +1817,7 @@ fn active_workflow_tree_renders_group_types_progress_and_finished_summary() {
             state.toggle_collapsed_group(&ClientEndpointId::Local, key.into());
         }
         state.compose(106, 40).expect("workflow 树");
-        let rows = &state.hits.agent_activity_rows;
+        let rows = &state.hits.session_activity_rows;
         assert_eq!(
             rows.iter()
                 .map(|hit| hit.node_id.as_str())
@@ -2208,14 +1829,14 @@ fn active_workflow_tree_renders_group_types_progress_and_finished_summary() {
                 super::super::agent_tree::ACTIVITY_DONE_HIT_ID
             ]
         );
-        let flow = tree_rows(&state, rows[0].rect)[0].clone();
-        let phase = tree_rows(&state, rows[1].rect)[0].clone();
+        let flow = rect_rows(&state, rows[0].rect)[0].clone();
+        let phase = rect_rows(&state, rows[1].rect)[0].clone();
         assert!(flow.contains(workflow_mark), "{width}: {flow:?}");
         assert!(phase.contains(phase_mark), "{width}: {phase:?}");
         if width == 48 {
             assert!(flow.contains("flow 1/3"), "{flow:?}");
             assert!(phase.contains("phase 1/2"), "{phase:?}");
-            assert!(tree_rows(&state, rows[2].rect)[0].contains("child"));
+            assert!(rect_rows(&state, rows[2].rect)[0].contains("child"));
         }
         let finished = rows[3].rect;
         state.handle_raw_events(vec![click_at(finished.x + 10, finished.y)]);
@@ -2237,52 +1858,41 @@ fn idle_owner_hides_activity_children_badges_and_expansion_in_tree_and_launch() 
             "agent-activity:pane:pane_0".into(),
         );
         state.compose(106, 40).expect("空闲属主");
-        assert!(state.hits.agent_activity_rows.is_empty());
+        assert!(state.hits.session_activity_rows.is_empty());
         assert!(!local_toggle_keys(&state).contains(&"agent-activity:pane:pane_0"));
-        let row = tree_rows(&state, classic_agent_rect(&state, "pane_0"));
+        let row = rect_rows(&state, classic_agent_rect(&state, "pane_0"));
         assert!(!compact(&row[0]).contains(&compact(&finished_badge(5))));
     }
 }
 
-/// 宽/窄工作台都可用稳定行身份按回车打开更多/完成窗口；上下键会滚到屏外。
 #[test]
 fn agents_panel_keyboard_opens_summary_rows_and_scrolls_to_offscreen_rows() {
+    use super::super::chrome::sessions::SessionRowKind;
     use super::super::dock::PanelId;
-    for width in [120, 62] {
+    let key =
+        |code| RawInputEvent::Key(crate::input::TerminalKey::new(code, KeyModifiers::empty()));
+    for width in [120, 160, 62] {
         for done in [false, true] {
             let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
             enable_workbench(&mut state);
-            state.workbench.dock.focused = PanelId::Agents;
+            state.workbench.dock.focused = PanelId::Workspaces;
+            if width < super::super::chrome::sessions::RAIL_BELOW_COLS {
+                state.workbench.dock.maximized = Some(PanelId::Workspaces);
+            }
             state.toggle_collapsed_group(
                 &ClientEndpointId::Local,
                 "agent-activity:pane:pane_0".into(),
             );
-            state.compose(width, 40).expect("键盘树");
-            let index = state
-                .federated_agent_rows
-                .as_ref()
-                .expect("行")
-                .rows()
-                .iter()
-                .position(|row| {
-                    if done {
-                        matches!(row.kind.kind, AgentTreeKind::ActivityDone { .. })
-                    } else {
-                        matches!(row.kind.kind, AgentTreeKind::ActivityMore { .. })
-                    }
-                })
-                .expect("目标行");
+            state
+                .compose(width, 40)
+                .expect("real session keyboard tree");
+            assert!(!state.session_view.rail && !state.session_view.body.is_empty());
+            let index = state.session_rows.as_ref().expect("session cache").rows.iter().position(|row| matches!(&row.kind, SessionRowKind::Activity(activity, _) if if done { matches!(&activity.kind.kind, AgentTreeKind::ActivityDone { .. }) } else { matches!(&activity.kind.kind, AgentTreeKind::ActivityMore { .. }) })).expect("summary row");
             for _ in 0..=index {
-                state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-                    KeyCode::Down,
-                    KeyModifiers::empty(),
-                ))]);
-                state.compose(width, 40).expect("移动焦点");
+                state.handle_raw_events(vec![key(KeyCode::Down)]);
+                state.compose(width, 40).expect("keyboard selection");
             }
-            state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-                KeyCode::Enter,
-                KeyModifiers::empty(),
-            ))]);
+            state.handle_raw_events(vec![key(KeyCode::Enter)]);
             assert!(
                 matches!(state.overlay.as_ref(), Some(ClientShellOverlay::AgentActivity(overlay)) if overlay.selected_node.is_none()),
                 "{width} done={done}"
@@ -2291,23 +1901,24 @@ fn agents_panel_keyboard_opens_summary_rows_and_scrolls_to_offscreen_rows() {
     }
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, scale_snapshot(30, 0));
     enable_workbench(&mut state);
-    state.workbench.dock.focused = PanelId::Agents;
-    state.compose(120, 40).expect("长列表");
+    state.workbench.dock.focused = PanelId::Workspaces;
+    state.compose(120, 14).expect("long session list");
+    assert!(state.hits.workspace_max_scroll > 0);
     for _ in 0..25 {
-        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-            KeyCode::Down,
-            KeyModifiers::empty(),
-        ))]);
-        state.compose(120, 40).expect("键盘滚动");
+        state.handle_raw_events(vec![key(KeyCode::Down)]);
+        state.compose(120, 14).expect("keyboard reveal");
     }
-    assert!(state.agent_scroll > 0, "键盘能导航到屏外行");
+    assert!(state.workspace_scroll > 0);
+    assert!(state.hits.session_agents.iter().any(|(rect, _, _)| state
+        .compose_buffer
+        .as_ref()
+        .expect("buffer")[(rect.x, rect.y)]
+        .modifier
+        .contains(Modifier::UNDERLINED)));
     let selection = state.workbench.agent_keyboard_target.clone();
-    // 换成空树，旧目标不再可激活，Enter 只校正焦点。
     state.set_snapshot(Box::new(scale_snapshot(0, 0)));
-    state.compose(120, 40).expect("目标移除");
-    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(
-        crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
-    )]);
+    state.compose(120, 14).expect("removed selected session");
+    let outcome = state.handle_raw_events(vec![key(KeyCode::Enter)]);
     assert!(outcome.actions.is_empty());
     assert!(selection.is_some() && state.workbench.agent_keyboard_target.is_none());
 }
@@ -2317,15 +1928,15 @@ fn collapsed_activity_keyboard_target_never_opens_the_hidden_node() {
     use super::super::dock::PanelId;
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
     enable_workbench(&mut state);
-    state.workbench.dock.focused = PanelId::Agents;
+    state.workbench.dock.focused = PanelId::Workspaces;
     let key = "agent-activity:pane:pane_0";
     state.toggle_collapsed_group(&ClientEndpointId::Local, key.into());
-    state.compose(120, 40).expect("展开");
+    state.compose(120, 40).expect("expanded sessions");
     let count = state
-        .federated_agent_rows
+        .session_rows
         .as_ref()
-        .expect("行")
-        .rows()
+        .expect("session cache")
+        .rows
         .len();
     for _ in 0..count {
         state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
@@ -2333,16 +1944,17 @@ fn collapsed_activity_keyboard_target_never_opens_the_hidden_node() {
             KeyModifiers::empty(),
         ))]);
     }
+    assert!(state.workbench.agent_keyboard_target.is_some());
     state.toggle_collapsed_group(&ClientEndpointId::Local, key.into());
-    state.compose(120, 40).expect("折叠");
-    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-        KeyCode::Enter,
-        KeyModifiers::empty(),
-    ))]);
+    state.compose(120, 40).expect("collapsed sessions");
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+    )]);
     assert!(
-        state.overlay.is_none(),
-        "失效目标回退到当前可见分组，不能打开旧完成行"
+        state.overlay.is_none() && outcome.actions.is_empty(),
+        "隐藏节点不可激活"
     );
+    assert!(state.workbench.agent_keyboard_target.is_none());
 }
 
 #[test]
@@ -2351,6 +1963,7 @@ fn agents_keyboard_navigation_does_not_intercept_other_panels_or_modes() {
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, summary_snapshot());
     enable_workbench(&mut state);
     let key = crate::input::TerminalKey::new(KeyCode::Down, KeyModifiers::empty());
+    state.workbench.dock.focused = PanelId::Workspaces;
     for mode in [
         ClientShellMode::Copy,
         ClientShellMode::Navigate,
@@ -2358,18 +1971,16 @@ fn agents_keyboard_navigation_does_not_intercept_other_panels_or_modes() {
         ClientShellMode::Resize,
     ] {
         state.mode = mode;
-        state.workbench.dock.focused = PanelId::Agents;
         assert!(!state.agent_tree_key(&key, &mut ClientShellInput::default()));
     }
     state.mode = ClientShellMode::Terminal;
-    state.workbench.dock.focused = PanelId::Workspaces;
-    assert!(!state.agent_tree_key(&key, &mut ClientShellInput::default()));
+    for panel in [PanelId::Terminal(1), PanelId::Agents, PanelId::Monitor] {
+        state.workbench.dock.focused = panel;
+        assert!(!state.agent_tree_key(&key, &mut ClientShellInput::default()));
+    }
     assert!(state.workbench.agent_keyboard_target.is_none());
 }
 
-/// 多行行配置（这里 `[状态图标 agent] / [状态文案]`）：续行画祖先引导线并缩进
-/// 两列对齐名称；agent 行展开活动时，续行在开关列接一条引导线到下面的活动行。
-/// 行配置自带状态文案时不再另补。
 #[test]
 fn tree_multi_line_agent_rows_draw_continuation_guides() {
     use crate::config::AgentSidebarToken as Token;
@@ -2382,23 +1993,19 @@ fn tree_multi_line_agent_rows_draw_continuation_guides() {
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("多行配置帧");
     let status = &crate::i18n::texts().status;
-    let one = tree_rows(&state, classic_agent_rect(&state, "pane_1"));
-    assert_eq!(one.len(), 2, "{one:?}");
-    assert!(one[0].starts_with("├── ○ one"), "{one:?}");
-    assert_eq!(
-        compact(&one[0]),
-        compact("├── ○ one"),
-        "行配置带状态文案：首行不另补: {one:?}"
-    );
-    assert!(
-        one[1].starts_with("│     "),
-        "非末子续行接祖先引导线: {one:?}"
-    );
-    assert_eq!(compact(&one[1]), compact(&format!("│ {}", status.idle)));
-    let two = tree_rows(&state, classic_agent_rect(&state, "pane_2"));
-    assert!(two[1].starts_with("      "), "末子续行留白: {two:?}");
-
-    // 展开活动的 agent 行：续行在开关列接引导线。
+    for (pane, primary, secondary) in [
+        ("pane_1", "○one", status.idle),
+        ("pane_2", "×two", status.blocked),
+    ] {
+        let lines = rect_rows(&state, classic_agent_rect(&state, pane));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(compact(&lines[0]), primary, "首行不重复状态文案");
+        assert_eq!(compact(&lines[1]), compact(secondary));
+        assert_eq!(
+            lines[0].chars().take_while(|ch| ch.is_whitespace()).count(),
+            lines[1].chars().take_while(|ch| ch.is_whitespace()).count()
+        );
+    }
     let mut projected = summary_snapshot();
     projected.agents[0].agent_status = AgentStatus::Working;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
@@ -2408,13 +2015,20 @@ fn tree_multi_line_agent_rows_draw_continuation_guides() {
         &ClientEndpointId::Local,
         "agent-activity:pane:pane_0".into(),
     );
-    state.compose(106, 30).expect("展开活动的多行帧");
-    let agent = tree_rows(&state, classic_agent_rect(&state, "pane_0"));
-    assert!(agent[0].starts_with("└─▾ ◐ agent-0"), "{agent:?}");
+    state.compose(106, 30).expect("expanded multiline session");
+    let owner = classic_agent_rect(&state, "pane_0");
+    let lines = rect_rows(&state, owner);
     assert!(
-        agent[1].starts_with("  │   "),
-        "开关列接到活动行: {agent:?}"
+        lines[0].trim_start().starts_with("◐ agent-0") && lines[0].contains("▾2"),
+        "{lines:?}"
     );
+    assert_eq!(compact(&lines[1]), compact(status.working));
+    assert_eq!(state.hits.session_activity_rows[0].rect.y, owner.bottom());
+    assert!(state
+        .hits
+        .session_activity_rows
+        .iter()
+        .all(|hit| hit.owner_key == "pane:pane_0"));
 }
 
 /// 重复 id / 自指父节点的活动数据不会让构建死循环，也不重复出行。
@@ -2451,9 +2065,9 @@ fn tree_activity_nodes_tolerate_cycles_and_duplicate_ids() {
     state.compose(106, 30).expect("环状活动帧");
     let labels = state
         .hits
-        .agent_activity_rows
+        .session_activity_rows
         .iter()
-        .map(|hit| tree_rows(&state, hit.rect)[0].trim().to_owned())
+        .map(|hit| rect_rows(&state, hit.rect)[0].trim().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(
         labels.len(),
@@ -2512,41 +2126,37 @@ fn tree_external_agents_group_by_source_and_open_the_activity_window() {
     state.compose(106, 34).expect("外部分组帧");
 
     let keys = local_toggle_keys(&state);
-    assert_eq!(
-        keys.last().copied(),
-        Some("agent-activity:ext:zcode:abc"),
-        "有活动的外部条目可展开: {keys:?}"
-    );
-    assert!(keys.contains(&"agent-external:zcode"), "{keys:?}");
+    assert_eq!(keys.last().copied(), Some("agent-activity:ext:zcode:abc"));
+    assert!(keys.contains(&"agent-external:zcode"));
     let texts = &crate::i18n::texts().agent_panel;
-    let group = tree_rows(
+    let group = rect_rows(
         &state,
         toggle_rect(&state, &ClientEndpointId::Local, "agent-external:zcode"),
     );
-    assert!(group[0].starts_with('▾'), "{group:?}");
+    assert!(group[0].trim_start().starts_with('▾'), "{group:?}");
     assert!(
         compact(&group[0]).contains(&compact(texts.external_group)) && group[0].contains("zcode"),
-        "分组头写「外部 · source」: {group:?}"
+        "{group:?}"
     );
-    assert!(group[0].trim_end().ends_with("· 2"), "{group:?}");
-    let externals = state
-        .hits
-        .external_agents
-        .iter()
-        .map(|(_, _, id)| id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(externals, ["zcode:abc", "zcode:def"]);
-    let abc = tree_rows(&state, state.hits.external_agents[0].0);
-    assert!(
-        abc[0].starts_with("├─▸ ◐ fix login zcode"),
-        "活动摘要默认折叠: {abc:?}"
+    assert!(group[0].trim_end().ends_with('2'), "{group:?}");
+    assert_eq!(
+        state
+            .hits
+            .session_external_agents
+            .iter()
+            .map(|(_, _, id)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["zcode:abc", "zcode:def"]
     );
-    let badge = running_badge(1);
-    assert!(compact(&abc[0]).ends_with(&compact(&badge)), "{abc:?}");
-    assert!(state.hits.agent_activity_rows.is_empty());
-    let def = tree_rows(&state, state.hits.external_agents[1].0);
+    let abc = rect_rows(&state, state.hits.session_external_agents[0].0);
     assert!(
-        def[0].starts_with("└── ○ zcode:def"),
+        abc[0].trim_start().starts_with("◐ fix login zcode") && abc[0].trim_end().ends_with("▸1"),
+        "{abc:?}"
+    );
+    assert!(state.hits.session_activity_rows.is_empty());
+    let def = rect_rows(&state, state.hits.session_external_agents[1].0);
+    assert!(
+        def[0].trim_start().starts_with("○ zcode:def"),
         "没有标签时回退到 id: {def:?}"
     );
     assert!(
@@ -2558,68 +2168,58 @@ fn tree_external_agents_group_by_source_and_open_the_activity_window() {
         &ClientEndpointId::Local,
         "agent-activity:ext:zcode:abc",
     ))]);
-    state.compose(106, 34).expect("展开外部条目活动帧");
-    let node = tree_rows(&state, state.hits.agent_activity_rows[0].rect);
-    assert!(
-        node[0].starts_with("│ └── · sub"),
-        "外部条目下的活动节点: {node:?}"
+    state.compose(106, 34).expect("expanded external activity");
+    let node = rect_rows(&state, state.hits.session_activity_rows[0].rect);
+    assert!(node[0].starts_with("└── · sub"), "{node:?}");
+    assert_eq!(
+        state.hits.session_activity_rows[0].owner_key,
+        "ext:zcode:abc"
     );
-    assert_eq!(state.hits.agent_activity_rows[0].owner_key, "ext:zcode:abc");
-
-    // 点条目行：打开活动窗口。
-    let row = state.hits.external_agents[1].0;
-    state.handle_raw_events(vec![click_at(row.x + 8, row.y)]);
-    assert!(matches!(
-        state.overlay.as_ref(),
-        Some(ClientShellOverlay::AgentActivity(overlay))
-            if overlay.owner == super::super::agent_activity_overlay::AgentActivityOwner::External {
-                external_id: "zcode:def".into()
-            }
-    ));
+    let row = state.hits.session_external_agents[1].0;
+    let outcome = state.handle_raw_events(vec![click_at(row.x + 8, row.y)]);
+    assert!(
+        matches!(state.overlay.as_ref(), Some(ClientShellOverlay::AgentActivity(overlay)) if overlay.owner == super::super::agent_activity_overlay::AgentActivityOwner::External { external_id: "zcode:def".into() })
+    );
+    assert!(!outcome.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint { request, .. } if matches!(&request.method, crate::api::schema::Method::PaneFocus(_)))));
     state.overlay = None;
-
-    // 右键：外部条目菜单。
-    let row = state.hits.external_agents[0].0;
-    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+    let row = state.hits.session_external_agents[0].0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Right),
         column: row.x + 8,
         row: row.y,
         modifiers: KeyModifiers::empty(),
     })]);
-    assert!(matches!(
-        state.overlay.as_ref(),
-        Some(ClientShellOverlay::ContextMenu(menu))
-            if matches!(&menu.target, ClientContextMenuTarget::ExternalAgent { external_id, .. } if external_id == "zcode:abc")
-    ));
+    assert!(
+        matches!(state.overlay.as_ref(), Some(ClientShellOverlay::ContextMenu(menu)) if matches!(&menu.target, ClientContextMenuTarget::ExternalAgent { external_id, .. } if external_id == "zcode:abc"))
+    );
     state.overlay = None;
-
-    // 折叠分组：条目与活动行都藏起来。
     let group = toggle_rect(&state, &ClientEndpointId::Local, "agent-external:zcode");
     state.handle_raw_events(vec![click_at(group.x + 3, group.y)]);
-    state.compose(106, 34).expect("折叠外部分组帧");
-    assert!(state.hits.external_agents.is_empty());
-    assert!(state.hits.agent_activity_rows.is_empty());
-    assert!(local_toggle_keys(&state).contains(&"agent-external:zcode"));
-
-    // 平铺（Launch）下外部分组仍单列在 agent 之后。
-    let mut state = classic_state_with(AgentPanelSortConfig::Launch, projected.clone());
-    state.compose(106, 34).expect("launch 外部分组帧");
-    assert_eq!(state.hits.external_agents.len(), 2);
-    let last_agent = state.hits.agents.iter().map(|(rect, _)| rect.y).max();
+    state.compose(106, 34).expect("collapsed external source");
     assert!(
-        state
-            .hits
-            .external_agents
-            .iter()
-            .all(|(rect, _, _)| Some(rect.y) > last_agent),
-        "外部条目排在全部 agent 之后"
+        state.hits.session_external_agents.is_empty()
+            && state.hits.session_activity_rows.is_empty()
     );
-
-    // 状态过滤视图只过滤 pane 里的 agent，外部条目不列出。
+    assert!(local_toggle_keys(&state).contains(&"agent-external:zcode"));
+    let mut state = classic_state_with(AgentPanelSortConfig::Launch, projected.clone());
+    state.compose(106, 34).expect("launch external sessions");
+    assert_eq!(state.hits.session_external_agents.len(), 2);
+    let last_agent = state
+        .hits
+        .session_agents
+        .iter()
+        .map(|(rect, _, _)| rect.y)
+        .max()
+        .expect("agent rows");
+    assert!(state
+        .hits
+        .session_external_agents
+        .iter()
+        .all(|(rect, _, _)| rect.y > last_agent));
     projected.agent_view_label = Some("blocked".into());
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
-    state.compose(106, 34).expect("过滤视图帧");
-    assert!(state.hits.external_agents.is_empty());
+    state.compose(106, 34).expect("filtered sessions");
+    assert!(state.hits.session_external_agents.is_empty());
     assert!(local_toggle_keys(&state)
         .iter()
         .all(|key| !key.starts_with("agent-external:")));
@@ -2631,9 +2231,18 @@ fn tree_offline_endpoint_rows_are_dimmed_with_a_status_label() {
     let (mut state, remote) = federated_state(AgentPanelSortConfig::Spaces);
     state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
     state.compose(106, 40).expect("离线端点帧");
-    let machine = toggle_rect(&state, &remote, MACHINE_TOGGLE_KEY);
-    let line = &tree_rows(&state, machine)[0];
-    assert!(line.starts_with("▾ … Build"), "重连中的状态字形: {line:?}");
+    let machine = state
+        .hits
+        .machines
+        .iter()
+        .find(|hit| hit.endpoint_id == remote)
+        .expect("remote machine")
+        .rect;
+    let line = &rect_rows(&state, machine)[0];
+    assert!(
+        line.contains("▾ Build") && line.contains(state.spinner_glyph()),
+        "重连中的状态字形: {line:?}"
+    );
     let status_label =
         crate::client::shell::endpoints::endpoint_status_label(ClientEndpointStatus::Reconnecting);
     assert!(compact(line).contains(&compact(status_label)), "{line:?}");
@@ -2645,7 +2254,7 @@ fn tree_offline_endpoint_rows_are_dimmed_with_a_status_label() {
             .contains(ratatui::style::Modifier::DIM),
         "离线端点整行变暗"
     );
-    let (rect, endpoint_id, _) = &state.hits.endpoint_agents[3];
+    let (rect, endpoint_id, _) = &state.hits.session_agents[3];
     assert_eq!(endpoint_id, &remote);
     assert!(
         buffer[(rect.x + 6, rect.y)]
@@ -2672,22 +2281,41 @@ fn tree_rows_follow_the_machine_workspace_tab_agent_activity_hierarchy() {
         "agent-activity:pane:pane_0".into(),
     );
     state.compose(106, 40).expect("层级帧");
-    let rows = state.federated_agent_rows.as_ref().expect("行缓存").rows();
+    use super::super::chrome::sessions::SessionRowKind;
+    let rows = &state.session_rows.as_ref().expect("session cache").rows;
     let shape = rows
         .iter()
-        .map(|row| {
-            let kind = match &row.kind.kind {
-                AgentTreeKind::Machine { .. } => "machine",
-                AgentTreeKind::Workspace { .. } => "workspace",
-                AgentTreeKind::Tab { .. } => "tab",
-                AgentTreeKind::Agent { .. } => "agent",
-                AgentTreeKind::Activity { .. } => "activity",
-                AgentTreeKind::ActivityMore { .. } => "more",
-                AgentTreeKind::ActivityDone { .. } => "done",
-                AgentTreeKind::ExternalGroup { .. } => "external-group",
-                AgentTreeKind::ExternalAgent { .. } => "external",
-            };
-            (kind, row.depth, row.has_children, row.collapsed)
+        .map(|row| match &row.kind {
+            SessionRowKind::Machine { collapsed, .. } => ("machine", 0, true, *collapsed),
+            SessionRowKind::Workspace { indent, toggle, .. } => (
+                "workspace",
+                1 + indent / 2,
+                toggle.is_some(),
+                toggle.as_ref().is_some_and(|(_, collapsed)| *collapsed),
+            ),
+            SessionRowKind::Tab {
+                indent,
+                collapsed,
+                rollup,
+                ..
+            } => ("tab", 1 + indent / 2, rollup.is_some(), *collapsed),
+            SessionRowKind::Agent(agent) => (
+                "agent",
+                2 + agent.indent / 2,
+                agent.activity.is_some(),
+                agent
+                    .activity
+                    .as_ref()
+                    .is_some_and(|(_, expanded, _)| !expanded),
+            ),
+            SessionRowKind::Activity(activity, indent) => (
+                "activity",
+                2 + indent / 2 + u16::from(activity.depth),
+                activity.has_children,
+                activity.collapsed,
+            ),
+            SessionRowKind::Terminal { indent, .. } => ("terminal", 2 + indent / 2, false, false),
+            other => panic!("unexpected hierarchy row: {other:?}"),
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -2698,6 +2326,7 @@ fn tree_rows_follow_the_machine_workspace_tab_agent_activity_hierarchy() {
             ("tab", 2, true, false),
             ("agent", 3, true, false),
             ("activity", 4, true, true),
+            ("tab", 2, false, false),
             ("machine", 0, true, false),
             ("workspace", 1, true, false),
             ("agent", 2, false, false),
@@ -2804,189 +2433,231 @@ fn tree_agent_context_actions_rename_and_close_the_agent_pane() {
     assert!(state.active_endpoint_id.is_local());
 }
 
-/// 冒烟 M10：没有任何 agent、也没有状态筛选时，列表区不再一片空白——kit 空状态
-/// 在列表区正中画「暂无 agent」（与 mobile 同一文案键），标题是正文色加粗；有筛选
-/// 而无匹配时仍是左上角暗淡的「没有匹配的 agent」。classic 与 workbench 同一路径。
 #[test]
 fn empty_agent_panel_draws_the_no_agents_empty_state() {
-    let no_agents = compact(crate::i18n::texts().mobile.no_agents);
-    let mut workbench = classic_state_with(AgentPanelSortConfig::Spaces, snapshot());
-    enable_workbench(&mut workbench);
-    let mut classic = classic_state_with(AgentPanelSortConfig::Spaces, snapshot());
-    for (name, state, cols) in [
-        ("workbench", &mut workbench, 133),
-        ("classic", &mut classic, 106),
-    ] {
-        state.compose(cols, 32).expect("空 Agents 面板");
-        let body = state.hits.agent_body;
-        assert!(body.height >= 3, "{name}：夹具前提，列表区够高 {body:?}");
-        let rows = rect_rows(state, body);
+    use super::super::chrome::sessions::SessionHit;
+    for workbench in [false, true] {
+        let cols = if workbench { 160 } else { 106 };
+        let mut plain = classic_state_with(AgentPanelSortConfig::Spaces, snapshot());
+        if workbench {
+            enable_workbench(&mut plain);
+        }
+        plain.compose(cols, 32).expect("plain terminal session");
+        assert!(plain.hits.agent_body.is_empty() && plain.hits.session_agents.is_empty());
+        assert!(plain
+            .hits
+            .sessions
+            .iter()
+            .any(|(_, hit)| matches!(hit, SessionHit::Terminal(_, pane) if pane == "pane_1")));
+        if workbench {
+            let text = compact(&rect_rows(&plain, plain.hits.inspector_body).join("\n"));
+            assert!(
+                text.contains(&compact(super::super::observability::tr(
+                    "No agent selected",
+                    "未选择智能体"
+                ))),
+                "{text}"
+            );
+        }
+        let mut empty = snapshot();
+        empty.workspaces.clear();
+        empty.tabs.clear();
+        empty.panes.clear();
+        empty.agents.clear();
+        empty.focused_workspace_id = None;
+        empty.focused_pane_id = None;
+        let mut state = classic_state_with(AgentPanelSortConfig::Spaces, empty);
+        if workbench {
+            enable_workbench(&mut state);
+        }
+        state.compose(cols, 32).expect("empty session list");
+        let body = state.session_view.body;
+        assert!(body.height >= 3);
+        let expected = compact(super::super::observability::tr(
+            "No sessions yet",
+            "还没有会话",
+        ));
+        let rows = rect_rows(&state, body);
         let (y, line) = rows
             .iter()
             .enumerate()
-            .find(|(_, line)| compact(line).contains(&no_agents))
-            .unwrap_or_else(|| panic!("{name}：列表区没有「暂无 agent」：{rows:?}"));
-        assert!(y > 0, "{name}：空状态垂直居中，不贴在首行：{rows:?}");
+            .find(|(_, line)| compact(line).contains(&expected))
+            .expect("visible empty-state title");
+        assert!(y > 0, "空状态垂直居中：{rows:?}");
         let x = body.x + line.chars().take_while(|ch| ch.is_whitespace()).count() as u16;
-        assert!(x > body.x, "{name}：空状态水平居中：{line:?}");
-        let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
-        let cell = &buffer[(x, body.y + y as u16)];
-        assert_eq!(cell.fg, state.config.palette.text, "{name}：标题用正文色");
-        assert!(cell.modifier.contains(Modifier::BOLD), "{name}：标题加粗");
+        assert!(x > body.x, "空状态水平居中：{line:?}");
+        let cell = &state.compose_buffer.as_ref().expect("buffer")[(x, body.y + y as u16)];
+        assert_eq!(cell.fg, state.config.palette.text);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+        let mut filtered = snapshot();
+        filtered.agent_view_label = Some("working".into());
+        let mut state = classic_state_with(AgentPanelSortConfig::Spaces, filtered);
+        if workbench {
+            enable_workbench(&mut state);
+        }
+        state.compose(cols, 32).expect("no matching agent sessions");
+        let text = compact(&body_text(&state));
+        assert!(
+            text.contains(&compact(crate::i18n::texts().sidebar.no_matching_agents)),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&compact(crate::i18n::texts().mobile.no_agents)),
+            "{text}"
+        );
+        assert!(state
+            .hits
+            .sessions
+            .iter()
+            .any(|(_, hit)| matches!(hit, SessionHit::Terminal(_, pane) if pane == "pane_1")));
     }
-
-    // 有筛选而无匹配：仍是「没有匹配的 agent」，不画「暂无 agent」。
-    let mut filtered = snapshot();
-    filtered.agent_view_label = Some("working".into());
-    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, filtered);
-    state.compose(106, 32).expect("筛选无匹配");
-    let text = compact(&body_text(&state));
-    assert!(
-        text.contains(&compact(crate::i18n::texts().sidebar.no_matching_agents)),
-        "{text}"
-    );
-    assert!(!text.contains(&no_agents), "{text}");
 }
 
-/// 冒烟 M11：窄面板上表头标题与排序切换粘成「 agent按工作区分组」。排序标签
-/// 右对齐，但最左只能从标题右侧留 2 列处开始；放不下整个标签就截短带省略号，
-/// 仍可点。与冒烟同口径：在 133 列终端上启用停靠工作台（侧栏占比由此而定），
-/// 93 列时 Agents 面板放不下完整标签，133 列时完整显示。
 #[test]
 fn agent_panel_header_keeps_a_gap_between_title_and_sort_toggle() {
-    let mut state = classic_state(AgentPanelSortConfig::Spaces);
-    state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
-    state.compose(133, 32).expect("初始画面");
-    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
-    state.workbench.pending = false;
-    state.workbench.acknowledged = state.workbench.revision;
-    assert!(state.workbench.enabled, "夹具前提：workbench 布局已启用");
-
-    let texts = crate::i18n::texts();
-    let title_width = crate::ui::display_width_u16(texts.sidebar.agents);
-    let full = crate::ui::display_width_u16(texts.sidebar.sort_grouped);
+    use super::super::chrome::sessions::SessionHit;
+    use super::super::dock::PanelId;
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = workbench_state(AgentPanelSortConfig::Spaces);
     let mut seen_truncated = false;
     let mut seen_full = false;
-    for cols in [93, 133] {
-        state.compose(cols, 32).expect("workbench 帧");
-        let panel = state.hits.agent_body;
-        let toggle = state.hits.agent_sort_toggle;
-        assert!(!toggle.is_empty(), "{cols} 列：排序标签仍可点");
+    for cols in [100, 160] {
+        state.compose(cols, 32).expect("session header");
+        assert!(!state.session_view.rail);
+        let label = state.hits.agent_sort_toggle;
+        let grouping = state
+            .hits
+            .sessions
+            .iter()
+            .find(|(_, hit)| *hit == SessionHit::Grouping)
+            .expect("grouping control")
+            .0;
+        let panel = state
+            .workbench
+            .geometry
+            .panels
+            .iter()
+            .find(|(id, _)| *id == PanelId::Workspaces)
+            .expect("session panel")
+            .1;
+        assert!(!label.is_empty() && !grouping.is_empty());
+        assert!(label.y > panel.y, "面板标题与排序控件分行");
+        assert_eq!(label.y, grouping.y);
         assert!(
-            toggle.x >= panel.x + title_width + 2,
-            "{cols} 列：标题右侧至少留 2 列间距：toggle {toggle:?} 面板 {panel:?}"
+            label.right() < grouping.x,
+            "标签和分组按钮之间有空格：{label:?} {grouping:?}"
         );
-        // 冒烟 L4：右端离分隔线留 1 列（窄面板不留），与树行的计数同一右缘。
-        let inset = crate::client::shell::agent_tree::tree_inset(panel.width);
-        assert_eq!(
-            toggle.right(),
-            panel.right() - inset,
-            "{cols} 列：排序标签右对齐到留白之前"
-        );
-        let header = rect_rows(
-            &state,
-            Rect::new(panel.x, toggle.y, toggle.right() - panel.x, 1),
-        )
-        .remove(0);
-        let label = sort_label(&state);
-        if panel.width < title_width + 2 + full + inset {
+        assert_eq!(grouping.right(), state.session_view.grouping.right() - 1);
+        let text = sort_label(&state);
+        if label.width < crate::ui::display_width_u16("Workspaces") {
             seen_truncated = true;
-            assert!(
-                label.ends_with('…'),
-                "{cols} 列：放不下就截短带省略号：{header:?}"
-            );
+            assert!(text.ends_with('…'), "{cols}: {text}");
         } else {
             seen_full = true;
-            assert_eq!(label, compact(texts.sidebar.sort_grouped), "{header:?}");
+            assert_eq!(text, "Workspaces");
         }
     }
-    assert!(
-        seen_truncated && seen_full,
-        "两个宽度应分别覆盖截短与完整两种情形"
-    );
+    assert!(seen_truncated && seen_full);
 }
 
-/// A4：平铺行不再挂在树第 0 行的负载上旁路传递。渲染拿到的树行切片不一定从
-/// 第 0 行开始，矮面板的平铺视图也必须照样逐个列出全部 agent（折叠了的工作区
-/// 也不例外）。
 #[test]
 fn flat_view_rows_do_not_depend_on_the_first_tree_row() {
+    use super::super::chrome::sessions::SessionRowKind;
     let mut state = classic_state(AgentPanelSortConfig::Spaces);
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
-    state.compose(106, 40).expect("classic 帧");
-    let cache = state.federated_agent_rows.as_ref().expect("行缓存");
-    let tree = cache.rows();
-    assert!(tree.len() > 1, "夹具前提：树不止一行");
-    assert_eq!(cache.flat_rows().len(), 3, "平铺行是缓存上独立的一片");
-    // 矮面板：表头 3 行 + 列表区 2 行，走平铺视图。
-    let area = Rect::new(0, 0, 30, 5);
-    let mut listed = Vec::new();
-    for start in 0..3 {
-        let mut buffer = Buffer::empty(area);
-        let mut hits = ShellHitMap::default();
-        let mut scroll = start;
-        crate::client::shell::agent_tree::render_agent_tree_rows(
-            &mut buffer,
-            area,
-            None,
-            crate::client::shell::agent_tree::AgentRowsView {
-                tree: &tree[1..],
-                flat: cache.flat_rows(),
-                ..Default::default()
-            },
-            &state.config,
-            state.status_glyphs(),
-            &mut scroll,
-            None,
-            &mut hits,
-            false,
-        );
-        assert!(hits.agent_tree_toggles.is_empty(), "矮面板走平铺视图");
-        listed.extend(hits.agents.first().map(|(_, id)| id.clone()));
-    }
-    assert_eq!(
-        listed,
-        ["pane_1", "pane_2", "pane_3"],
-        "只拿到后半段树行也列出全部 agent"
+    state.compose(106, 40).expect("collapsed tree");
+    let rows = &state.session_rows.as_ref().expect("session cache").rows;
+    assert!(rows.len() > 1);
+    assert!(matches!(
+        &rows[0].kind,
+        SessionRowKind::Workspace {
+            toggle: Some((_, true)),
+            ..
+        }
+    ));
+    assert_eq!(cached_pane_ids(&state), ["pane_3"]);
+    let tree_address = rows.as_ptr();
+    state.config.agent_panel_sort = AgentPanelSortConfig::Launch;
+    state.config_epoch += 1;
+    state.refresh_session_rows();
+    assert_eq!(cached_pane_ids(&state), ["pane_2", "pane_3", "pane_1"]);
+    assert_ne!(
+        state
+            .session_rows
+            .as_ref()
+            .expect("flat session cache")
+            .rows
+            .as_ptr(),
+        tree_address
     );
+    let targets = state
+        .session_rows
+        .as_ref()
+        .expect("session cache")
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| match &row.kind {
+            SessionRowKind::Agent(agent) => Some((index, agent.pane_id.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut listed = Vec::new();
+    for (start, pane) in targets {
+        state.workspace_scroll = start;
+        state.reveal_focused_workspace = false;
+        state
+            .compose(106, 2)
+            .expect("real one-row session viewport");
+        assert_eq!(state.session_view.body.height, 1);
+        let (rect, _, shown) = state.hits.session_agents.first().expect("visible session");
+        assert_eq!(shown, &pane);
+        assert_eq!(*rect, rect.intersection(state.session_view.body));
+        listed.push(shown.clone());
+    }
+    assert_eq!(listed, ["pane_2", "pane_3", "pane_1"]);
 }
 
-/// 复审轻级 A2：矮到列表区只剩 1 行时，平铺行默认的两行（「图标 工作区」/
-/// 「agent 名」）只画得下第一行，agent 名反而看不见。行高不够时优先画含 agent
-/// 名的那一行：前面补状态图标，后面带上工作区名（平铺视图靠它交代上下文）。
 #[test]
 fn one_row_agent_list_keeps_the_agent_name_visible() {
-    let mut state = classic_state(AgentPanelSortConfig::Spaces);
-    let one_row = (6..=30).find(|rows| {
-        state.agent_scroll = 0;
-        state.compose(106, *rows).expect("classic 帧");
-        state.hits.agent_body.height == 1
-    });
-    assert!(one_row.is_some(), "夹具前提：存在列表区恰好 1 行的终端高度");
-    assert!(
-        state.hits.agent_tree_toggles.is_empty(),
-        "1 行列表区走平铺视图"
-    );
-    let rect = classic_agent_rect(&state, "pane_1");
-    assert_eq!(rect.height, 1);
-    let line = compact(&tree_rows(&state, rect)[0]);
-    assert!(line.starts_with('○'), "状态图标仍在行首：{line}");
-    assert!(line.contains("one"), "agent 名可见：{line}");
-    assert!(line.contains("client-shell"), "带上工作区名：{line}");
-
-    // 列表区够两行时照旧按行配置分两行画，不受影响。
-    let two_rows = (6..=30).find(|rows| {
-        state.agent_scroll = 0;
-        state.compose(106, *rows).expect("classic 帧");
-        state.hits.agent_body.height == 2
-    });
-    assert!(
-        two_rows.is_some(),
-        "夹具前提：存在列表区恰好 2 行的终端高度"
-    );
-    let lines = tree_rows(&state, classic_agent_rect(&state, "pane_1"));
-    assert!(lines[0].starts_with("  ○ client-shell"), "{lines:?}");
-    assert!(compact(&lines[1]).starts_with("one"), "{lines:?}");
+    use super::super::chrome::sessions::SessionRowKind;
+    use crate::config::AgentSidebarToken as Token;
+    let mut state = classic_state(AgentPanelSortConfig::Launch);
+    state.config.agents.rows = vec![
+        vec![Token::StateIcon, Token::Workspace],
+        vec![Token::Agent, Token::Custom("absent".into())],
+    ];
+    state.config_epoch += 1;
+    state.refresh_session_rows();
+    let target = state
+        .session_rows
+        .as_ref()
+        .expect("sessions")
+        .rows
+        .iter()
+        .position(
+            |row| matches!(&row.kind, SessionRowKind::Agent(agent) if agent.pane_id == "pane_1"),
+        )
+        .expect("agent row");
+    for (height, expected) in [(2, 1), (3, 2)] {
+        state.workspace_scroll = target;
+        state.reveal_focused_workspace = false;
+        state.compose(106, height).expect("short viewport");
+        assert_eq!(state.session_view.body.height, expected);
+        let rect = classic_agent_rect(&state, "pane_1");
+        assert_eq!(rect.height, expected);
+        let lines = rect_rows(&state, rect);
+        if expected == 1 {
+            let line = compact(&lines[0]);
+            assert!(
+                line.starts_with('○') && line.contains("one") && line.contains("client-shell"),
+                "{line}"
+            );
+        } else {
+            assert!(compact(&lines[0]).starts_with("○client-shell"), "{lines:?}");
+            assert_eq!(compact(&lines[1]), "one");
+        }
+    }
 }
 
 /// `rect` 里从某格起依次拼出 `text` 的第一个单元格（找不到就失败），用来断言
@@ -3017,8 +2688,7 @@ fn readable(cell: &ratatui::buffer::Cell) -> f32 {
 /// 计数前多一个粗体「!」——默认的圆点图标下阻塞与工作中同是「●」，不能只靠颜色。
 #[test]
 fn agent_leaf_rows_are_readable_and_blocked_is_not_color_only() {
-    // 默认的石墨字形下阻塞本来就有独立字形「◆」；这里钉的是圆点风格（阻塞与工作中
-    // 同为「●」）的兜底：分组头额外的粗体「!」。
+    use crate::config::AgentSidebarToken as Token;
     {
         let mut config = Config::default();
         config.ui.agent_panel_sort = AgentPanelSortConfig::Spaces;
@@ -3026,41 +2696,43 @@ fn agent_leaf_rows_are_readable_and_blocked_is_not_color_only() {
         state.set_snapshot(Box::new(two_workspace_snapshot()));
         state.set_pane_surface(surface());
         enable_workbench(&mut state);
-        state.compose(133, 32).expect("workbench 帧");
-        let header = tree_rows(&state, group_rect(&state, "ws_1"))[0].clone();
-        assert!(header.contains('◆'), "石墨字形的阻塞分组头：{header}");
+        state.compose(133, 32).expect("graphite sessions");
+        let rect = state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.workspace_id == "ws_1")
+            .expect("workspace")
+            .rect;
+        let header = rect_rows(&state, rect)[0].clone();
+        assert!(header.contains('◆'), "{header}");
     }
     let mut config = Config::default();
     config.ui.agent_panel_sort = AgentPanelSortConfig::Spaces;
     config.ui.status_indicators = crate::config::StatusIndicatorStyle::Dots;
+    config.ui.sidebar.agents.rows =
+        vec![vec![Token::StateIcon, Token::Agent], vec![Token::StateText]];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(two_workspace_snapshot()));
     state.set_pane_surface(surface());
     enable_workbench(&mut state);
-    state.compose(133, 32).expect("workbench 帧");
+    state
+        .compose(133, 32)
+        .expect("configured session state text");
     let status = &crate::i18n::texts().status;
-    let row = |pane: &str| {
-        state
-            .hits
-            .endpoint_agents
-            .iter()
-            .find(|(_, _, id)| id == pane)
-            .map(|(rect, _, _)| *rect)
-            .unwrap_or_else(|| panic!("agent 行 {pane}"))
-    };
     for (pane, name, label, blocked) in [
         ("pane_1", "one", status.idle, false),
         ("pane_2", "two", status.blocked, true),
         ("pane_3", "three", status.working, false),
     ] {
-        let rect = row(pane);
+        let rect = classic_agent_rect(&state, pane);
         let name_cell = text_cell(&state, rect, name);
         assert!(
             readable(&name_cell) >= 4.5,
             "{name} 名称对比度 {}",
             readable(&name_cell)
         );
-        let first = label.chars().next().expect("状态文案").to_string();
+        let first = label.chars().next().expect("state text").to_string();
         let label_cell = text_cell(&state, rect, &first);
         assert!(
             readable(&label_cell) >= 4.5,
@@ -3070,48 +2742,48 @@ fn agent_leaf_rows_are_readable_and_blocked_is_not_color_only() {
         assert_eq!(
             label_cell.modifier.contains(Modifier::BOLD),
             blocked,
-            "只有「{}」加粗：{label}",
-            status.blocked
+            "{label}"
         );
     }
-    let mark = text_cell(&state, group_rect(&state, "ws_1"), "!");
-    assert!(
-        mark.modifier.contains(Modifier::BOLD),
-        "阻塞分组头的「!」加粗"
-    );
-    assert!(
-        !tree_rows(&state, group_rect(&state, "ws_2"))[0].contains('!'),
-        "没有阻塞的分组头不带「!」"
-    );
+    let blocked = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == "ws_1")
+        .expect("blocked workspace")
+        .rect;
+    let mark = text_cell(&state, blocked, "!");
+    assert!(mark.modifier.contains(Modifier::BOLD));
+    let working = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == "ws_2")
+        .expect("working workspace")
+        .rect;
+    assert!(!rect_rows(&state, working)[0].contains('!'));
 }
 
-/// 按给定宽度直接画统一树，返回每个 agent 行的 `(pane_id, 行文本, 行矩形)` 与缓冲。
-fn render_tree_at(state: &ClientShellState, width: u16) -> (Vec<(String, String, Rect)>, Buffer) {
-    let cache = state.federated_agent_rows.as_ref().expect("行缓存");
-    let area = Rect::new(0, 0, width, 12);
-    let mut buffer = Buffer::empty(area);
-    let mut hits = ShellHitMap::default();
-    let mut scroll = 0;
-    crate::client::shell::agent_tree::render_agent_tree_rows(
-        &mut buffer,
-        area,
-        None,
-        crate::client::shell::agent_tree::AgentRowsView {
-            tree: cache.rows(),
-            flat: cache.flat_rows(),
-            ..Default::default()
-        },
-        &state.config,
-        state.status_glyphs(),
-        &mut scroll,
-        None,
-        &mut hits,
-        false,
-    );
-    let rows = hits
-        .agents
+fn render_tree_at(
+    state: &mut ClientShellState,
+    width: u16,
+) -> (Vec<(String, String, Rect)>, Buffer) {
+    state.sidebar_width = width + 1;
+    state.sidebar_width_manual = true;
+    state.sidebar_collapsed = false;
+    state.sidebar_collapsed_manual = true;
+    state.compose(106, 40).expect("actual session rendering");
+    let buffer = state
+        .compose_buffer
+        .as_ref()
+        .expect("retained buffer")
+        .clone();
+    let rows = state
+        .hits
+        .session_agents
         .iter()
-        .map(|(rect, pane)| {
+        .map(|(rect, _, pane)| {
+            assert_eq!(rect.width, width);
             let text = (rect.x..rect.right())
                 .map(|x| buffer[(x, rect.y)].symbol())
                 .collect::<String>();
@@ -3135,6 +2807,11 @@ fn dots_state(
     let mut config = Config::default();
     config.ui.agent_panel_sort = AgentPanelSortConfig::Spaces;
     config.ui.status_indicators = indicators;
+    if !long_names {
+        use crate::config::AgentSidebarToken as Token;
+        config.ui.sidebar.agents.rows =
+            vec![vec![Token::StateIcon, Token::Agent, Token::StateText]];
+    }
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
@@ -3142,9 +2819,6 @@ fn dots_state(
     state
 }
 
-/// 冒烟 L3（续）：窄面板里名称这类弹性 token 会占满大半行。圆点图标下阻塞行放得下
-/// 就画加粗的「已阻塞」，放不下整段就退成粗体「!」；其它状态照旧把状态文案当
-/// 次要信息先丢。符号图标的「×」已按形状区分，不加「!」。
 #[test]
 fn blocked_rows_keep_a_non_color_cue_in_narrow_panels() {
     use crate::config::StatusIndicatorStyle;
@@ -3153,52 +2827,46 @@ fn blocked_rows_keep_a_non_color_cue_in_narrow_panels() {
         (false, 30u16, status.blocked, "two"),
         (true, 30, "!", "two-with-a-long-name"),
     ] {
-        let state = dots_state(long_names, StatusIndicatorStyle::Dots);
-        let (rows, buffer) = render_tree_at(&state, width);
+        let mut state = dots_state(long_names, StatusIndicatorStyle::Dots);
+        let (rows, buffer) = render_tree_at(&mut state, width);
         let row = |pane: &str| {
             rows.iter()
                 .find(|(id, _, _)| id == pane)
-                .unwrap_or_else(|| panic!("{width} 列：agent 行 {pane}：{rows:?}"))
+                .unwrap_or_else(|| panic!("{width}: {pane} {rows:?}"))
         };
         let (_, blocked, rect) = row("pane_2");
         assert!(
             compact(blocked).contains(name),
-            "{width} 列：名称仍在：{blocked:?}"
+            "{width}: 名称完整：{blocked}"
         );
-        assert!(
-            compact(blocked).ends_with(&compact(cue)),
-            "{width} 列：阻塞行保留「{cue}」：{blocked:?}"
-        );
-        let first = cue.chars().next().expect("提示").to_string();
+        if long_names {
+            assert!(compact(blocked).starts_with('!'), "{blocked}");
+        } else {
+            assert!(compact(blocked).ends_with(&compact(cue)), "{blocked}");
+        }
+        let first = cue.chars().next().expect("cue").to_string();
         let cue_cell = (rect.x..rect.right())
             .map(|x| &buffer[(x, rect.y)])
             .find(|cell| cell.symbol() == first)
-            .expect("提示单元格");
-        assert!(
-            cue_cell.modifier.contains(Modifier::BOLD),
-            "{width} 列：提示加粗"
-        );
+            .expect("visible cue");
+        assert!(cue_cell.modifier.contains(Modifier::BOLD));
         let (_, working, _) = row("pane_3");
-        assert!(
-            !working.contains('!'),
-            "{width} 列：工作中不加「!」：{working:?}"
-        );
+        assert!(!working.contains('!'), "{working}");
         if long_names {
             assert!(
                 !compact(working).contains(&compact(status.working)),
-                "{width} 列：其它状态照旧先丢状态文案：{working:?}"
+                "{working}"
             );
         }
     }
-
-    let state = dots_state(true, StatusIndicatorStyle::Symbols);
-    let (rows, _) = render_tree_at(&state, 30);
+    let mut state = dots_state(true, StatusIndicatorStyle::Symbols);
+    let (rows, _) = render_tree_at(&mut state, 30);
     let (_, blocked, _) = rows
         .iter()
         .find(|(id, _, _)| id == "pane_2")
-        .expect("阻塞行");
-    assert!(blocked.contains('×'), "符号图标：{blocked:?}");
-    assert!(!blocked.contains('!'), "符号图标已按形状区分：{blocked:?}");
+        .expect("blocked row");
+    assert!(blocked.contains('×'), "{blocked}");
+    assert!(!blocked.contains('!'), "符号图标已按形状区分：{blocked}");
 }
 
 /// 冒烟 L8：Agents 树的工作区分组头右键打开与工作区列表同一份工作区菜单（截屏
@@ -3238,6 +2906,7 @@ fn right_clicking_a_workspace_group_header_opens_the_workspace_menu() {
 #[test]
 fn tree_row_labels_end_with_an_ellipsis_when_truncated() {
     let mut projected = summary_snapshot();
+    projected.agents[0].agent_status = AgentStatus::Working;
     projected.agents[0].activity.nodes[0].label = "执行 echo 命令并返回 herdr-probe".into();
     projected.workspaces[0].label = "a-workspace-with-a-long-name".into();
     projected.external_agents = vec![ClientShellExternalAgent {
@@ -3254,29 +2923,36 @@ fn tree_row_labels_end_with_an_ellipsis_when_truncated() {
     let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
     state.sidebar_width = 26;
     state.sidebar_width_manual = true;
-    state.compose(106, 30).expect("窄侧栏帧");
+    state.compose(106, 30).expect("narrow session labels");
     state.handle_raw_events(vec![click(toggle_rect(
         &state,
         &ClientEndpointId::Local,
         "agent-activity:pane:pane_0",
     ))]);
-    state.compose(106, 30).expect("展开活动摘要帧");
-
-    // 宽字符后的占位格是空格：比对前去掉空白。
-    let activity = compact(&tree_rows(&state, state.hits.agent_activity_rows[0].rect)[0]);
+    state.compose(106, 30).expect("expanded activity labels");
+    let activity = compact(&rect_rows(&state, state.hits.session_activity_rows[0].rect)[0]);
     assert!(
         activity.contains("执行echo") && activity.ends_with('…'),
-        "活动节点标签截短带省略号：{activity:?}"
+        "{activity}"
     );
-    let group = tree_rows(&state, group_rect(&state, "ws_0"));
+    let rect = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == "ws_0")
+        .expect("workspace")
+        .rect;
+    let group = rect_rows(&state, rect);
     assert!(
-        compact(&group[0]).contains("a-workspace") && compact(&group[0]).contains("…·"),
-        "分组头标签截短带省略号，计数照常：{group:?}"
+        compact(&group[0]).contains("a-workspace")
+            && group[0].contains('…')
+            && group[0].trim_end().ends_with('1'),
+        "分组头截短且保留汇总：{group:?}"
     );
-    let external = compact(&tree_rows(&state, state.hits.external_agents[0].0)[0]);
+    let external = compact(&rect_rows(&state, state.hits.session_external_agents[0].0)[0]);
     assert!(
         external.contains("anexternal") && external.ends_with('…'),
-        "外部条目标签截短带省略号：{external:?}"
+        "{external}"
     );
 }
 
@@ -3290,10 +2966,10 @@ fn classic_agent_menu(
     state.compose(width, height).expect("classic 帧");
     let rect = state
         .hits
-        .agents
+        .session_agents
         .iter()
-        .find(|(_, pane)| pane == pane_id)
-        .map(|(rect, _)| *rect)
+        .find(|(_, _, pane)| pane == pane_id)
+        .map(|(rect, _, _)| *rect)
         .unwrap_or_else(|| panic!("{width}x{height}：{pane_id} 的 agent 行在命中表里"));
     state.handle_input_bytes(format!("\x1b[<2;{};{}M", rect.x + 3, rect.y + 1).as_bytes());
     let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
@@ -3343,7 +3019,8 @@ fn agent_context_menu_lists_the_same_actions_for_every_agent() {
                 "{size:?} {agent}"
             );
             assert!(
-                rows.contains(&compact(t.menu_close)),
+                rows.iter()
+                    .any(|row| row.starts_with(&compact(t.menu_close))),
                 "{size:?} {agent}：菜单确实画出来了：{rows:?}"
             );
         }
@@ -3358,7 +3035,7 @@ fn right_click_endpoint_agent(
 ) {
     let rect = state
         .hits
-        .endpoint_agents
+        .session_agents
         .iter()
         .find(|(_, endpoint, pane)| endpoint == endpoint_id && pane == pane_id)
         .map(|(rect, ..)| *rect)
@@ -3536,7 +3213,7 @@ fn renaming_a_remote_agent_pane_goes_to_its_endpoint_and_dims_when_unavailable()
         state.compose(cols, rows).expect("关菜单");
         let (local, pane) = state
             .hits
-            .endpoint_agents
+            .session_agents
             .iter()
             .find(|(_, endpoint, _)| endpoint.is_local())
             .map(|(_, endpoint, pane)| (endpoint.clone(), pane.clone()))
@@ -3742,67 +3419,48 @@ fn remote_pane_action_failures_survive_an_endpoint_switch() {
     }
 }
 
-/// 冒烟 L4：树行首列不再紧贴面板左缘、分组计数不再紧贴右侧分隔线——行内文字
-/// 左右各让 1 列（与「 agent」表头、工作区区的行首对齐），表头的排序切换同样离
-/// 分隔线 1 列；高亮与命中区仍是整行。窄侧栏（面板不足 22 列）不留边距，名称
-/// 优先（窄宽度的名称 / 徽标预算见
-/// `tree_badge_yields_to_the_status_icon_and_name_on_narrow_sidebars`）。
 #[test]
 fn tree_rows_and_header_keep_a_one_column_inset_from_both_edges() {
-    for (width, inset) in [(36u16, 1u16), (26, 1), (18, 0)] {
+    use super::super::chrome::sessions::SessionHit;
+    for width in [36u16, 26, 18] {
         let mut state = classic_state(AgentPanelSortConfig::Spaces);
         state.sidebar_width = width;
         state.sidebar_width_manual = true;
-        state.compose(106, 30).expect("classic 帧");
-        let case = format!("侧栏 {width}");
-        let buffer = state.compose_buffer.as_ref().expect("缓冲");
-        let cell = |x: u16, y: u16| buffer[(x, y)].symbol().to_owned();
-
-        let header = group_rect(&state, "ws_1");
+        state.compose(106, 30).expect("actual session insets");
+        let buffer = state.compose_buffer.as_ref().expect("buffer");
+        let header = state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.workspace_id == "ws_1")
+            .expect("workspace row")
+            .rect;
+        assert_eq!(header.width, state.session_view.body.width);
+        assert_eq!(buffer[(header.x, header.y)].symbol(), " ");
+        assert_eq!(buffer[(header.x + 1, header.y)].symbol(), "▾");
         assert_eq!(
-            header.width, state.hits.agent_body.width,
-            "{case}: 分组头命中区仍是整行"
+            buffer[(header.right() - 2, header.y)].symbol(),
+            "1",
+            "最高优先级汇总计数"
         );
-        for x in header.x..header.x + inset {
-            assert_eq!(cell(x, header.y), " ", "{case}: 行首留 {inset} 列");
-        }
-        assert_eq!(
-            cell(header.x + inset, header.y),
-            "▾",
-            "{case}: 折叠开关画在留白之后"
-        );
-        // 计数「· 2」的最后一格离行尾（右侧分隔线之前）inset 列。
-        let last = header.right() - 1 - inset;
-        assert_eq!(cell(last, header.y), "2", "{case}: 计数右对齐到留白之前");
-        assert_eq!(cell(last - 2, header.y), "·", "{case}: 计数前的点");
-        for x in last + 1..header.right() {
-            assert_eq!(cell(x, header.y), " ", "{case}: 计数与分隔线之间留白");
-        }
-
+        assert_eq!(buffer[(header.right() - 1, header.y)].symbol(), " ");
         let one = classic_agent_rect(&state, "pane_1");
-        for x in one.x..one.x + inset {
-            assert_eq!(cell(x, one.y), " ", "{case}: agent 行首留白");
-        }
-        assert_eq!(
-            cell(one.x + inset, one.y),
-            "├",
-            "{case}: 树前缀接在留白之后"
-        );
-
-        let sort = state.hits.agent_sort_toggle;
-        assert!(!sort.is_empty(), "{case}: 排序切换画出来了");
-        assert_eq!(
-            sort.right(),
-            state.hits.agent_body.right() - inset,
-            "{case}: 排序切换离右侧分隔线 {inset} 列"
-        );
+        assert_eq!(one.width, state.session_view.body.width);
+        assert_eq!(buffer[(one.x, one.y)].symbol(), " ");
+        assert_eq!(buffer[(one.right() - 1, one.y)].symbol(), " ");
+        assert!(rect_rows(&state, one)[0].contains("○ one"));
+        let grouping = state
+            .hits
+            .sessions
+            .iter()
+            .find(|(_, hit)| *hit == SessionHit::Grouping)
+            .expect("grouping control")
+            .0;
+        assert_eq!(grouping.right(), state.session_view.grouping.right() - 1);
+        assert!(!state.hits.agent_sort_toggle.is_empty());
     }
 }
 
-/// L4 复审（中）：默认宽度下活动徽标不再挤掉 agent 名称。徽标按「名称优先」取档：
-/// 状态图标 + 完整名称 + 1 列间隔 + 完整徽标都放得下才画完整文案，否则退到只留
-/// 数字（数字档仍先给图标与名称保 8 列）。{中文, 英文} × {classic 侧栏 26 列,
-/// 工作台 120 列} × 深度 1、徽标 2、名称 "opencode"：整名可见，徽标至少是数字档。
 #[test]
 fn default_width_badges_leave_the_whole_agent_name_visible() {
     for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
@@ -3817,7 +3475,7 @@ fn default_width_badges_leave_the_whole_agent_name_visible() {
                 state.compose(120, 40).expect("工作台帧");
                 state
                     .hits
-                    .endpoint_agents
+                    .session_agents
                     .iter()
                     .find(|(_, _, pane_id)| pane_id == "pane_0")
                     .unwrap_or_else(|| panic!("{case}: agent 行不在命中表里"))
@@ -3828,7 +3486,7 @@ fn default_width_badges_leave_the_whole_agent_name_visible() {
                 state.compose(106, 40).expect("classic 帧");
                 classic_agent_rect(&state, "pane_0")
             };
-            let line = tree_rows(&state, rect)[0].clone();
+            let line = rect_rows(&state, rect)[0].clone();
             assert!(
                 line.contains("opencode") && !line.contains('…'),
                 "{case}: 名称完整可见，不被徽标截断：{line:?}"

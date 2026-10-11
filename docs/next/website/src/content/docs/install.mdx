@@ -156,6 +156,10 @@ If your shell cannot find `herdr`, restart the terminal or check that the instal
 
 ## Update
 
+The unified Sessions sidebar and agent overview navigation need no server upgrade; previews show only the insight the endpoint supplies. Older servers retain the classic terminal surface with the same Sessions tree, without Inspector or a second Agents list. Inline replies require an explicit `agent.prompt` capability and an idle/review target; other targets remain jump-only. Manual read marks and Inspector visibility live in client-shell preferences, not server session persistence.
+
+A saved version-1 dock layout migrates once to version 2, retaining the terminal split tree and groups, focus, lock, and valid maximization while replacing the old Agents and retired Accounts panels with Inspector. A one-time notice confirms the migration. This is a client layout change, not a restart of pane processes.
+
 Herdr checks for new releases and notifies you in the app. You can update manually:
 
 ```bash

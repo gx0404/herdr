@@ -1,819 +1,145 @@
-use super::render::{display_width, put_right_text, put_text, ShellRenderState};
+use super::chrome::sessions::{paint_sessions, SessionHit, SessionPaint};
+use super::render::{put_text, ShellRenderState};
 use super::*;
-
-fn collapsed_groups_for_endpoint<'a>(
-    state: &'a ShellRenderState<'_>,
-    endpoint_id: &ClientEndpointId,
-) -> Option<&'a HashSet<String>> {
-    if endpoint_id.is_local() {
-        Some(state.collapsed_groups)
-    } else {
-        state.remote_collapsed_groups.get(endpoint_id)
-    }
-}
-
-/// Sidebar grouping for one endpoint: the catalog `group` of its saved
-/// profile. Local and ungrouped machines return `None` and stay flat.
-fn machine_sidebar_group<'a>(
-    machine_chrome: &'a HashMap<crate::client::endpoint::ProfileId, MachineChrome>,
-    endpoint_id: &ClientEndpointId,
-) -> Option<&'a str> {
-    let ClientEndpointId::Ssh(profile_id) = endpoint_id else {
-        return None;
-    };
-    machine_chrome
-        .get(profile_id)
-        .and_then(|chrome| chrome.group.as_deref())
-}
-
-fn machine_sidebar_tag(
-    machine_chrome: &HashMap<crate::client::endpoint::ProfileId, MachineChrome>,
-    endpoint: &ClientShellEndpoint,
-    palette: &Palette,
-) -> Option<ratatui::style::Color> {
-    let ClientEndpointId::Ssh(profile_id) = &endpoint.endpoint_id else {
-        return None;
-    };
-    let color = machine_chrome
-        .get(profile_id)
-        .and_then(|chrome| chrome.color);
-    Some(
-        color.unwrap_or_else(|| {
-            super::machines_overlay::machine_hash_color(&endpoint.label, palette)
-        }),
-    )
-}
-
-enum Row {
-    GroupHeader(String),
-    Endpoint(usize),
-    Workspace {
-        endpoint: usize,
-        entry: WorkspaceEntry,
-    },
-}
-
-fn push_endpoint_rows(
-    state: &ShellRenderState<'_>,
-    empty_collapsed_groups: &HashSet<String>,
-    rows: &mut Vec<Row>,
-    endpoint_index: usize,
-) {
-    rows.push(Row::Endpoint(endpoint_index));
-    let endpoint = &state.endpoints[endpoint_index];
-    if state.collapsed_endpoints.contains(&endpoint.endpoint_id) {
-        return;
-    }
-    if let Some(snapshot) = endpoint.snapshot.as_deref() {
-        let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
-            .unwrap_or(empty_collapsed_groups);
-        rows.extend(
-            super::sidebar::workspace_entries(snapshot, collapsed_groups)
-                .into_iter()
-                .map(|entry| Row::Workspace {
-                    endpoint: endpoint_index,
-                    entry,
-                }),
-        );
-    }
-}
 
 pub(super) fn render_collapsed(
     buffer: &mut Buffer,
     area: Rect,
     config: &ClientShellConfig,
-    state: &mut ShellRenderState<'_>,
+    state: &ShellRenderState<'_>,
     hits: &mut ShellHitMap,
 ) {
-    let palette = &config.palette;
-    super::render::render_sidebar_background(
-        buffer,
-        area,
-        palette,
-        matches!(
-            state.chrome_hover,
-            Some(super::feedback::ChromeHover::SidebarDivider)
-        ),
-    );
-    let (workspace_area, divider_y, detail_area) = super::sidebar::collapsed_sidebar_sections(area);
-    // 矮侧栏没有 agent 区：工作区同样为末行的折叠开关让位，几何、滚动和命中共用。
-    let workspace_area = if detail_area.is_empty() {
-        Rect::new(
-            workspace_area.x,
-            workspace_area.y,
-            workspace_area.width,
-            workspace_area.height.saturating_sub(1),
-        )
-    } else {
-        workspace_area
-    };
-    let mut total_rows = 0usize;
-    let mut selected_row = None;
-    let reveal = std::mem::take(state.reveal_navigation_workspace);
-    for endpoint in state.endpoints {
-        total_rows += 1;
-        if state.collapsed_endpoints.contains(&endpoint.endpoint_id) {
-            continue;
-        }
-        if let Some(snapshot) = endpoint.snapshot.as_deref() {
-            if reveal {
-                if let Some(target) = state
-                    .selected_workspace_id
-                    .filter(|target| target.endpoint_id == endpoint.endpoint_id)
-                {
-                    selected_row = snapshot
-                        .workspaces
-                        .iter()
-                        .position(|workspace| workspace.workspace_id == target.workspace_id)
-                        .map(|index| total_rows + index);
-                }
-            }
-            total_rows += snapshot.workspaces.len();
-        }
-    }
-    let height = usize::from(workspace_area.height);
-    let max_scroll = total_rows.saturating_sub(height);
-    *state.workspace_scroll = (*state.workspace_scroll).min(max_scroll);
-    if let Some(row) = selected_row {
-        if row < *state.workspace_scroll {
-            *state.workspace_scroll = row;
-        } else if row >= state.workspace_scroll.saturating_add(height) {
-            *state.workspace_scroll = row.saturating_add(1).saturating_sub(height).min(max_scroll);
-        }
-    }
-    hits.workspace_max_scroll = max_scroll;
-    // 折叠态此前没有回写 `workspace_body`，`mouse.rs` 的滚轮守卫因此恒不成立
-    // （C-26/SB-02 与单端点折叠侧栏同源）。
-    hits.workspace_body = workspace_area;
-    let mut skip = *state.workspace_scroll;
-    let mut y = workspace_area.y;
-    for (index, endpoint) in state.endpoints.iter().enumerate() {
-        if y >= workspace_area.bottom() {
-            break;
-        }
-        let rect = Rect::new(workspace_area.x, y, workspace_area.width, 1);
-        let active = &endpoint.endpoint_id == state.active_endpoint_id;
-        let collapsed = state.collapsed_endpoints.contains(&endpoint.endpoint_id);
-        if skip > 0 {
-            skip -= 1;
-        } else {
-            if active && collapsed {
-                buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
-            } else if matches!(
-                state.chrome_hover,
-                Some(super::feedback::ChromeHover::MachineRow(id))
-                    if id == &endpoint.endpoint_id
-            ) {
-                buffer.set_style(rect, Style::default().bg(palette.surface0));
-            }
-            let marker = if collapsed { "▸" } else { "▾" };
-            let plain = Style::default().fg(if endpoint.status == ClientEndpointStatus::Online {
-                palette.text
-            } else {
-                palette.overlay0
-            });
-            put_text(buffer, rect.x, rect.y, 1, marker, plain);
-            if endpoint.endpoint_id.is_local() {
-                put_text(
-                    buffer,
-                    rect.x.saturating_add(1),
-                    rect.y,
-                    rect.width.saturating_sub(2),
-                    "L",
-                    plain,
-                );
-            } else {
-                // Four columns leave no room for a tag cell, so the machine's
-                // first letter carries the tag color (the expanded row's
-                // `machine_chrome` lookup) as its identity mark.
-                let letter = endpoint
-                    .label
-                    .chars()
-                    .next()
-                    .map(|ch| ch.to_uppercase().collect::<String>())
-                    .unwrap_or_else(|| (index + 1).to_string());
-                let tag = machine_sidebar_tag(state.machine_chrome, endpoint, palette)
-                    .unwrap_or(palette.overlay0);
-                put_text(
-                    buffer,
-                    rect.x.saturating_add(1),
-                    rect.y,
-                    rect.width.saturating_sub(2),
-                    &letter,
-                    Style::default().fg(tag).add_modifier(Modifier::BOLD),
-                );
-            }
-            if !endpoint.endpoint_id.is_local() {
-                let (glyph, _, color) =
-                    endpoint_status_presentation(endpoint.status, palette, state.spinner);
-                put_right_text(buffer, rect, rect.y, glyph, Style::default().fg(color));
-            }
-            hits.machines.push(MachineHit {
-                rect,
-                collapse_toggle: Rect::new(rect.x, rect.y, u16::from(rect.width > 1), 1),
-                endpoint_id: endpoint.endpoint_id.clone(),
-            });
-            y = y.saturating_add(1);
-        }
-        if collapsed {
-            continue;
-        }
-        let Some(snapshot) = endpoint.snapshot.as_deref() else {
-            continue;
-        };
-        for workspace in &snapshot.workspaces {
-            if skip > 0 {
-                skip -= 1;
-                continue;
-            }
-            if y >= workspace_area.bottom() {
-                break;
-            }
-            let rect = Rect::new(workspace_area.x, y, workspace_area.width, 1);
-            let focused = active && workspace.focused;
-            let selected = state.selected_workspace_id.is_some_and(|target| {
-                target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
-            });
-            let selection_background = palette.selection_row_bg();
-            if selected {
-                buffer.set_style(rect, Style::default().bg(selection_background));
-            } else if focused {
-                buffer.set_style(
-                    rect,
-                    Style::default().bg(super::sidebar::workspace_active_background(
-                        palette,
-                        state.selected_workspace_id.is_some(),
-                    )),
-                );
-            } else if matches!(
-                state.chrome_hover,
-                Some(super::feedback::ChromeHover::WorkspaceRow {
-                    endpoint_id,
-                    workspace_id,
-                }) if endpoint_id == &endpoint.endpoint_id
-                    && workspace_id == &workspace.workspace_id
-            ) {
-                buffer.set_style(rect, Style::default().bg(palette.surface0));
-            }
-            let stale = endpoint.status != ClientEndpointStatus::Online;
-            let number = format!(" {}", workspace.number);
-            let number_width = super::render::display_width(&number).min(rect.width);
-            let dim = if stale {
-                Modifier::DIM
-            } else {
-                Modifier::empty()
-            };
-            put_text(
-                buffer,
-                rect.x,
-                rect.y,
-                number_width,
-                &number,
-                Style::default()
-                    .fg(if focused && !stale {
-                        palette.text
-                    } else {
-                        palette.overlay0
-                    })
-                    .add_modifier(dim),
-            );
-            put_text(
-                buffer,
-                rect.x.saturating_add(number_width),
-                rect.y,
-                rect.width.saturating_sub(number_width),
-                if stale {
-                    status_icon(workspace.agent_status, config.status_indicators)
-                } else {
-                    state.status_glyphs.status(workspace.agent_status)
-                },
-                Style::default()
-                    .fg(if stale {
-                        palette.overlay0
-                    } else {
-                        status_color(workspace.agent_status, palette, &config.components)
-                    })
-                    .add_modifier(dim),
-            );
-            hits.workspaces.push(WorkspaceHit {
-                rect,
-                endpoint_id: endpoint.endpoint_id.clone(),
-                workspace_id: workspace.workspace_id.clone(),
-                indented: false,
-                group_toggle: None,
-            });
-            y = y.saturating_add(1);
-        }
-    }
-    if let Some(divider_y) = divider_y {
-        put_text(
-            buffer,
-            workspace_area.x,
-            divider_y,
-            workspace_area.width,
-            &"─".repeat(workspace_area.width as usize),
-            Style::default().fg(palette.surface_dim),
-        );
-    }
-    // agent 区让出底格：折叠开关 » 画在侧栏最后一行，与单机折叠侧栏的
-    // `detail_content` 同一口径——滚轮、揭示与命中区都不压住开关（D10）。
-    let detail_content = Rect::new(
-        detail_area.x,
-        detail_area.y,
-        detail_area.width,
-        detail_area.height.saturating_sub(1),
-    );
-    super::endpoint_agents::render_collapsed(
-        buffer,
-        detail_content,
-        state.federated_agent_rows,
-        config,
-        state.status_glyphs,
-        *state.agent_scroll,
-        state.chrome_hover,
-        hits,
-    );
-    hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
-        Rect::default()
-    } else {
-        Rect::new(
-            workspace_area.x + workspace_area.width / 2,
-            area.bottom().saturating_sub(1),
-            1,
-            1,
-        )
-    };
-    put_text(
-        buffer,
-        hits.sidebar_toggle.x,
-        hits.sidebar_toggle.y,
-        hits.sidebar_toggle.width,
-        "»",
-        Style::default().fg(
-            if matches!(
-                state.chrome_hover,
-                Some(super::feedback::ChromeHover::SidebarToggle)
-            ) {
-                palette.text
-            } else {
-                palette.overlay0
-            },
-        ),
-    );
+    render_expanded(buffer, area, None, config, state, hits);
 }
 
 pub(super) fn render_expanded(
     buffer: &mut Buffer,
     area: Rect,
-    active_snapshot: Option<&ClientShellSnapshot>,
+    snapshot: Option<&ClientShellSnapshot>,
     config: &ClientShellConfig,
-    state: &mut ShellRenderState<'_>,
+    state: &ShellRenderState<'_>,
     hits: &mut ShellHitMap,
 ) {
-    render_expanded_regions(buffer, area, active_snapshot, config, state, hits, None);
-}
-
-pub(super) fn render_expanded_regions(
-    buffer: &mut Buffer,
-    area: Rect,
-    active_snapshot: Option<&ClientShellSnapshot>,
-    config: &ClientShellConfig,
-    state: &mut ShellRenderState<'_>,
-    hits: &mut ShellHitMap,
-    regions: Option<(Rect, Rect)>,
-) {
-    let palette = &config.palette;
-    if let Some((workspace, agents)) = regions {
-        // 工作台：面板之间的分隔线由停靠布局画，两个面板只铺同一种侧栏底色，工作区
-        // 面板不再画经典侧栏右缘的「│」（冒烟 L4：紧凑视图里工作区面板有、Agents
-        // 面板没有，宽屏下又与停靠分隔线叠成「││」）。
-        let background = Style::default().bg(palette.sidebar_bg);
-        buffer.set_style(workspace, background);
-        buffer.set_style(agents, background);
-    } else {
-        super::render::render_sidebar_background(
+    super::render::render_sidebar_background(
+        buffer,
+        area,
+        &config.palette,
+        matches!(
+            state.chrome_hover,
+            Some(super::feedback::ChromeHover::SidebarDivider)
+        ),
+    );
+    let view = state.session_view;
+    if let Some(cache) = state.session_rows {
+        paint_sessions(
             buffer,
-            area,
-            palette,
-            matches!(
-                state.chrome_hover,
-                Some(super::feedback::ChromeHover::SidebarDivider)
-            ),
+            &SessionPaint {
+                cache,
+                view,
+                grouping: state.session_grouping,
+                config,
+                glyphs: state.status_glyphs,
+                hover: state.chrome_hover,
+                spinner: state.spinner,
+                endpoints: state.endpoints,
+                active_endpoint_id: state.active_endpoint_id,
+            },
+            hits,
         );
     }
-    hits.sidebar_divider = if area.is_empty() {
-        Rect::default()
-    } else {
-        Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
-    };
-    let (workspace_area, detail_area) = regions
-        .unwrap_or_else(|| crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split));
-    hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
-    put_text(
-        buffer,
-        workspace_area.x,
-        workspace_area.y,
-        workspace_area.width,
-        crate::i18n::texts().sidebar.machines,
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    let empty_collapsed_groups = HashSet::new();
-
-    let mut rows = Vec::new();
-    let mut emitted_groups: Vec<String> = Vec::new();
-    for endpoint_index in 0..state.endpoints.len() {
-        let endpoint = &state.endpoints[endpoint_index];
-        let group = machine_sidebar_group(state.machine_chrome, &endpoint.endpoint_id);
-        if let Some(group) = group {
-            if emitted_groups.iter().any(|emitted| emitted == group) {
-                continue;
-            }
-            emitted_groups.push(group.to_owned());
-            rows.push(Row::GroupHeader(group.to_owned()));
-            for member_index in 0..state.endpoints.len() {
-                let member = &state.endpoints[member_index];
-                if machine_sidebar_group(state.machine_chrome, &member.endpoint_id) == Some(group) {
-                    push_endpoint_rows(state, &empty_collapsed_groups, &mut rows, member_index);
-                }
-            }
+    hits.sidebar_divider = view.sidebar_divider;
+    hits.sidebar_section_divider = view.section_divider;
+    hits.sidebar_toggle = view.sidebar_toggle;
+    if !view.header.is_empty() {
+        let header = view.header;
+        let attention = snapshot.is_some_and(super::global_menu::global_menu_attention);
+        let label = if attention {
+            crate::i18n::texts().sidebar.attention_menu
         } else {
-            push_endpoint_rows(state, &empty_collapsed_groups, &mut rows, endpoint_index);
-        }
-    }
-    let body = Rect::new(
-        workspace_area.x,
-        workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
-        workspace_area.width,
-        workspace_area
-            .height
-            .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
-    );
-    hits.workspace_body = body;
-    let row_heights = rows
-        .iter()
-        .map(|row| match row {
-            Row::GroupHeader(_) | Row::Endpoint(_) => 1,
-            Row::Workspace { endpoint, entry } => {
-                let endpoint = &state.endpoints[*endpoint];
-                let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
-                    .unwrap_or(&empty_collapsed_groups);
-                endpoint
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| {
-                        let workspace = snapshot.workspaces.get(entry.index)?;
-                        Some(
-                            super::sidebar::workspace_rows(
-                                workspace,
-                                super::sidebar::displayed_workspace_status(
-                                    snapshot,
-                                    workspace,
-                                    collapsed_groups,
-                                ),
-                                entry.indented,
-                                &config.spaces,
-                            )
-                            .len()
-                            .max(1)
-                            .min(u16::MAX as usize) as u16,
-                        )
-                    })
-                    .unwrap_or(1)
-            }
-        })
-        .collect::<Vec<_>>();
-    let gaps = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| match (row, rows.get(index + 1)) {
-            (
-                Row::Workspace { endpoint, .. },
-                Some(Row::Workspace {
-                    endpoint: next_endpoint,
-                    entry,
-                }),
-            ) if endpoint == next_endpoint => u16::from(!entry.indented) * config.spaces.row_gap,
-            _ => 0,
-        })
-        .collect::<Vec<_>>();
-    let reveal_navigation = !body.is_empty() && std::mem::take(state.reveal_navigation_workspace);
-    let reveal_focus = !body.is_empty() && std::mem::take(state.reveal_focused_workspace);
-    if reveal_navigation || reveal_focus {
-        let selected_row = rows.iter().position(|row| match row {
-            Row::Workspace { endpoint, entry } => {
-                let endpoint = &state.endpoints[*endpoint];
-                endpoint
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.workspaces.get(entry.index))
-                    .is_some_and(|workspace| {
-                        if reveal_navigation {
-                            state.selected_workspace_id.is_some_and(|target| {
-                                target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
-                            })
-                        } else {
-                            &endpoint.endpoint_id == state.active_endpoint_id
-                                && active_snapshot.is_some_and(|snapshot| {
-                                    snapshot.focused_workspace_id.as_deref()
-                                        == Some(workspace.workspace_id.as_str())
-                                })
-                        }
-                    })
-            }
-            Row::GroupHeader(_) | Row::Endpoint(_) => false,
-        });
-        if let Some(selected_row) = selected_row {
-            *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
-                &row_heights,
-                &gaps,
-                body.height,
-                *state.workspace_scroll,
-                selected_row,
+            crate::i18n::texts().sidebar.menu
+        };
+        let menu_width = super::render::display_width(label).min(header.width.saturating_sub(5));
+        hits.global_launcher = Rect::new(header.x + 1, header.y, menu_width, 1);
+        put_text(
+            buffer,
+            header.x + 1,
+            header.y,
+            menu_width,
+            label,
+            crate::ui::design::meta(&config.palette).fg(config.palette.overlay0),
+        );
+        if attention {
+            put_text(
+                buffer,
+                header.x + 1,
+                header.y,
+                1,
+                "●",
+                Style::default().fg(config.palette.accent),
             );
         }
-    }
-    let metrics = super::scroll::list_scroll_metrics(
-        &row_heights,
-        &gaps,
-        body.height,
-        *state.workspace_scroll,
-    );
-    hits.workspace_max_scroll = metrics.max_offset_from_bottom;
-    hits.workspace_scroll_metrics = Some(metrics);
-    *state.workspace_scroll = metrics
-        .max_offset_from_bottom
-        .saturating_sub(metrics.offset_from_bottom);
-    let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
-    let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (row_index, row) in rows.iter().enumerate().skip(*state.workspace_scroll) {
-        match row {
-            Row::GroupHeader(group) => {
-                if y >= body.bottom() {
-                    break;
-                }
-                let rect = Rect::new(body.x, y, content_width, 1);
+        put_text(
+            buffer,
+            header.x.saturating_add(menu_width + 2),
+            header.y,
+            header.width.saturating_sub(menu_width + 7),
+            super::observability::tr("Sessions", "会话"),
+            crate::ui::design::title(&config.palette),
+        );
+        for (offset, label, hit) in [
+            (4, "✚", SessionHit::NewWorkspace),
+            (2, "⌕", SessionHit::Search),
+        ] {
+            if header.width >= offset {
+                let rect = Rect::new(header.right() - offset, header.y, 2, 1);
                 put_text(
                     buffer,
                     rect.x,
                     rect.y,
                     rect.width,
-                    &format!(" {group}"),
-                    Style::default()
-                        .fg(palette.overlay0)
-                        .add_modifier(Modifier::BOLD | Modifier::DIM),
+                    label,
+                    crate::ui::design::meta(&config.palette),
                 );
-                y = y
-                    .saturating_add(1)
-                    .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
-            }
-            Row::Endpoint(index) => {
-                if y >= body.bottom() {
-                    break;
+                if hit == SessionHit::NewWorkspace {
+                    hits.new_workspace = rect;
                 }
-                let endpoint = &state.endpoints[*index];
-                let rect = Rect::new(body.x, y, content_width, 1);
-                let collapsed = state.collapsed_endpoints.contains(&endpoint.endpoint_id);
-                let marker = if collapsed { "▸" } else { "▾" };
-                let tag = machine_sidebar_tag(state.machine_chrome, endpoint, palette);
-                let hovered = matches!(
-                    state.chrome_hover,
-                    Some(super::feedback::ChromeHover::MachineRow(id))
-                        if id == &endpoint.endpoint_id
-                );
-                render_endpoint_row(
-                    buffer,
-                    rect,
-                    marker,
-                    endpoint,
-                    collapsed && &endpoint.endpoint_id == state.active_endpoint_id,
-                    hovered,
-                    palette,
-                    tag,
-                    state.spinner,
-                );
-                hits.machines.push(MachineHit {
-                    rect,
-                    collapse_toggle: Rect::new(
-                        rect.x.saturating_add(u16::from(tag.is_some()) + 1),
-                        rect.y,
-                        u16::from(rect.width > 1),
-                        1,
-                    ),
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                });
-                y = y
-                    .saturating_add(1)
-                    .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
-            }
-            Row::Workspace { endpoint, entry } => {
-                let endpoint = &state.endpoints[*endpoint];
-                let Some(snapshot) = endpoint.snapshot.as_deref() else {
-                    continue;
-                };
-                let Some(workspace) = snapshot.workspaces.get(entry.index) else {
-                    continue;
-                };
-                let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
-                    .unwrap_or(&empty_collapsed_groups);
-                let status = super::sidebar::displayed_workspace_status(
-                    snapshot,
-                    workspace,
-                    collapsed_groups,
-                );
-                let tokens = super::sidebar::workspace_rows(
-                    workspace,
-                    status,
-                    entry.indented,
-                    &config.spaces,
-                );
-                let height = (tokens.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-                if y.saturating_add(height) > body.bottom() {
-                    break;
-                }
-                let rect = Rect::new(body.x, y, content_width, height);
-                let nested = Rect::new(
-                    rect.x.saturating_add(2),
-                    rect.y,
-                    rect.width.saturating_sub(2),
-                    rect.height,
-                );
-                let endpoint_active = &endpoint.endpoint_id == state.active_endpoint_id;
-                let selected = state.selected_workspace_id.is_some_and(|target| {
-                    target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
-                });
-                let hovered = matches!(
-                    state.chrome_hover,
-                    Some(super::feedback::ChromeHover::WorkspaceRow {
-                        endpoint_id,
-                        workspace_id,
-                    }) if endpoint_id == &endpoint.endpoint_id
-                        && workspace_id == &workspace.workspace_id
-                );
-                super::sidebar::render_workspace_rows(
-                    buffer,
-                    nested,
-                    status,
-                    if endpoint.status == ClientEndpointStatus::Online {
-                        state.status_glyphs
-                    } else {
-                        StatusGlyphs::fixed(config.status_indicators)
-                    },
-                    entry,
-                    tokens,
-                    endpoint_active && workspace.focused,
-                    selected,
-                    state.selected_workspace_id.is_some(),
-                    false,
-                    hovered,
-                    palette,
-                    &config.components,
-                );
-                if endpoint.status != ClientEndpointStatus::Online {
-                    buffer.set_style(
-                        rect,
-                        Style::default()
-                            .fg(palette.overlay0)
-                            .add_modifier(Modifier::DIM),
-                    );
-                }
-                let group_toggle = super::sidebar::render_parent_group_toggle(
-                    buffer,
-                    rect,
-                    snapshot,
-                    entry.index,
-                    collapsed_groups,
-                    palette,
-                );
-                hits.workspaces.push(WorkspaceHit {
-                    rect,
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                    workspace_id: workspace.workspace_id.clone(),
-                    indented: entry.indented,
-                    group_toggle,
-                });
-                y = y
-                    .saturating_add(height)
-                    .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
+                hits.sessions.push((rect, hit));
             }
         }
     }
-    if show_scrollbar {
-        let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
-        hits.workspace_scrollbar = track;
-        let thumb_hovered = matches!(
-            state.chrome_hover,
-            Some(super::feedback::ChromeHover::WorkspaceScrollbarThumb)
-        );
-        super::scroll::render_list_scrollbar(buffer, track, metrics, palette, thumb_hovered);
-    }
-
-    let footer_y = workspace_area.bottom().saturating_sub(1);
-    // 工作台布局（`regions` 由停靠面板给出）：主菜单入口只留标题栏「≡ herdr」，
-    // 工作区面板不能收起，页脚既不画「菜单」也不画「«」。经典布局两者都画。
-    let workbench = regions.is_some();
-    let toggle = sidebar_toggle_rect(area, workbench);
-    if config.mouse_capture {
-        let label = crate::i18n::fill(
-            crate::i18n::texts().sidebar.new_endpoint_fmt,
-            &[("label", active_endpoint_label(state))],
-        );
-        hits.new_workspace = Rect::new(
-            workspace_area.x,
-            footer_y,
-            display_width(&label).min(workspace_area.width),
-            u16::from(workspace_area.height > 0),
-        );
+    if !view.sidebar_toggle.is_empty() {
         put_text(
             buffer,
-            workspace_area.x,
-            footer_y,
-            workspace_area.width,
-            &label,
-            Style::default().fg(palette.overlay0),
-        );
-        if !workbench {
-            let attention = active_snapshot.is_some_and(super::global_menu::global_menu_attention);
-            let menu_label = if attention {
-                crate::i18n::texts().sidebar.attention_menu
+            view.sidebar_toggle.x,
+            view.sidebar_toggle.y,
+            view.sidebar_toggle.width,
+            if state.sidebar_collapsed { "»" } else { "«" },
+            if state.sidebar_collapsed
+                && snapshot.is_some_and(super::global_menu::global_menu_attention)
+            {
+                Style::default()
+                    .fg(config.palette.accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                crate::i18n::texts().sidebar.menu
-            };
-            let slot = footer_menu_slot(workspace_area, footer_y, toggle);
-            let width = display_width(menu_label).min(slot.width);
-            hits.global_launcher =
-                Rect::new(slot.right().saturating_sub(width), footer_y, width, 1);
-            put_right_text(
-                buffer,
-                slot,
-                footer_y,
-                menu_label,
-                Style::default().fg(if attention {
-                    palette.accent
-                } else if matches!(
-                    state.chrome_hover,
-                    Some(super::feedback::ChromeHover::GlobalLauncher)
-                ) {
-                    palette.text
-                } else {
-                    palette.overlay0
-                }),
-            );
-        }
-    }
-    super::endpoint_agents::render_expanded(
-        buffer,
-        detail_area,
-        active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
-        state.federated_agent_rows,
-        config,
-        state.status_glyphs,
-        state.agent_scroll,
-        state.chrome_hover,
-        hits,
-    );
-    hits.sidebar_toggle = toggle;
-    if toggle.is_empty() {
-        return;
-    }
-    put_text(
-        buffer,
-        hits.sidebar_toggle.x,
-        hits.sidebar_toggle.y,
-        hits.sidebar_toggle.width,
-        "«",
-        Style::default().fg(
-            if matches!(
-                state.chrome_hover,
-                Some(super::feedback::ChromeHover::SidebarToggle)
-            ) {
-                palette.text
-            } else {
-                palette.overlay0
+                crate::ui::design::meta(&config.palette)
             },
-        ),
-    );
+        );
+    }
 }
 
-/// 展开侧栏右下角的收起开关「«」；工作台布局没有可收起的侧栏，给空矩形。
 pub(super) fn sidebar_toggle_rect(area: Rect, workbench: bool) -> Rect {
-    if workbench {
+    if workbench || area.is_empty() {
         return Rect::default();
     }
     Rect::new(
         area.right().saturating_sub(2),
         area.bottom().saturating_sub(1),
         u16::from(area.width > 1),
-        u16::from(area.height > 0),
+        1,
     )
 }
 
-/// 页脚「菜单」标签右对齐所用的槽位：与「«」同一行时让出它和一格间隔，免得
-/// 「«」盖住宽字符的半格（「菜«」）。
+#[cfg(test)]
 pub(super) fn footer_menu_slot(workspace_area: Rect, footer_y: u16, toggle: Rect) -> Rect {
     let right = if !toggle.is_empty() && toggle.y == footer_y {
         toggle.x.saturating_sub(1).max(workspace_area.x)
@@ -826,80 +152,4 @@ pub(super) fn footer_menu_slot(workspace_area: Rect, footer_y: u16, toggle: Rect
         right.min(workspace_area.right()) - workspace_area.x,
         1,
     )
-}
-
-fn active_endpoint_label<'a>(state: &'a ShellRenderState<'_>) -> &'a str {
-    state
-        .endpoints
-        .iter()
-        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
-        .map_or(crate::i18n::texts().sidebar.local, |endpoint| {
-            endpoint.label.as_str()
-        })
-}
-
-fn render_endpoint_row(
-    buffer: &mut Buffer,
-    rect: Rect,
-    marker: &str,
-    endpoint: &ClientShellEndpoint,
-    highlighted: bool,
-    hovered: bool,
-    palette: &Palette,
-    tag: Option<ratatui::style::Color>,
-    spinner: &str,
-) {
-    if highlighted {
-        buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
-    } else if hovered {
-        buffer.set_style(rect, Style::default().bg(palette.surface0));
-    }
-    let (glyph, state, color) = endpoint_status_presentation(endpoint.status, palette, spinner);
-    let state = if endpoint.status == ClientEndpointStatus::Online {
-        ""
-    } else {
-        state
-    };
-    let signal = if endpoint.endpoint_id.is_local() {
-        String::new()
-    } else if state.is_empty() {
-        glyph.to_owned()
-    } else {
-        format!("{glyph} {state}")
-    };
-    let signal_width = display_width(&signal).min(rect.width);
-    let text_x = if let Some(tag) = tag {
-        put_text(
-            buffer,
-            rect.x,
-            rect.y,
-            1,
-            "▪",
-            Style::default().fg(tag).add_modifier(Modifier::BOLD),
-        );
-        rect.x.saturating_add(1)
-    } else {
-        rect.x
-    };
-    let text_width = rect
-        .width
-        .saturating_sub(text_x - rect.x)
-        .saturating_sub(signal_width.saturating_add(1));
-    put_text(
-        buffer,
-        text_x,
-        rect.y,
-        text_width,
-        &format!(" {marker} {}", endpoint.label),
-        Style::default()
-            .fg(
-                if matches!(endpoint.status, ClientEndpointStatus::Disabled) {
-                    palette.overlay0
-                } else {
-                    palette.text
-                },
-            )
-            .add_modifier(Modifier::BOLD),
-    );
-    put_right_text(buffer, rect, rect.y, &signal, Style::default().fg(color));
 }

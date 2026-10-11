@@ -61,6 +61,7 @@ pub(crate) enum KeybindAction {
     ResizePaneUp,
     ResizePaneRight,
     ToggleSidebar,
+    ToggleInspector,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -74,6 +75,7 @@ pub(crate) enum KeybindAction {
     Detach,
     OpenNavigator,
     LinkHints,
+    NextAttention,
 }
 
 pub(crate) fn resolve_direct_binding(
@@ -154,6 +156,7 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.resize_pane_up, KeybindAction::ResizePaneUp),
         (&keybinds.resize_pane_right, KeybindAction::ResizePaneRight),
         (&keybinds.toggle_sidebar, KeybindAction::ToggleSidebar),
+        (&keybinds.toggle_inspector, KeybindAction::ToggleInspector),
         (&keybinds.reload_config, KeybindAction::ReloadConfig),
         (
             &keybinds.open_notification_target,
@@ -162,6 +165,7 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.detach, KeybindAction::Detach),
         (&keybinds.goto, KeybindAction::OpenNavigator),
         (&keybinds.link_hints, KeybindAction::LinkHints),
+        (&keybinds.next_attention, KeybindAction::NextAttention),
     ] {
         if action_matches(bindings, key, dispatch) {
             return Some(action);

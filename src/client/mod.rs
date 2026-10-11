@@ -2663,6 +2663,8 @@ async fn run_client_loop(
                         }
                         shell.tick_observability(now, &mut outcome);
                         shell.tick_agent_activity(now, &mut outcome);
+                        shell.tick_inspector(now, &mut outcome);
+                        shell.tick_overview(now, &mut outcome);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id)
                                 && !shell

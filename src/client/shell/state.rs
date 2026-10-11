@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) const MIN_TAB_WIDTH: u16 = 8;
 pub(super) const NEW_TAB_WIDTH: u16 = 3;
-pub(super) const WORKSPACE_HEADER_ROWS: u16 = 2;
 const ENDPOINT_ERROR_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,10 +142,16 @@ pub(super) struct ShellHitMap {
     pub(super) external_agent_groups: Vec<(Rect, ClientEndpointId, String)>,
     /// 外部来源条目行：`(矩形, 端点, external_id)`。
     pub(super) external_agents: Vec<(Rect, ClientEndpointId, String)>,
+    pub(super) sessions: Vec<(Rect, super::chrome::sessions::SessionHit)>,
+    pub(super) session_agents: Vec<(Rect, ClientEndpointId, String)>,
+    pub(super) session_tree_toggles: Vec<(Rect, ClientEndpointId, String)>,
+    pub(super) session_activity_rows: Vec<AgentActivityHit>,
+    pub(super) session_external_agents: Vec<(Rect, ClientEndpointId, String)>,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
     pub(super) new_workspace: Rect,
+    pub(super) welcome_actions: Vec<(Rect, chrome::welcome::Action)>,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
     pub(super) tab_scroll_right: Rect,
@@ -170,6 +175,7 @@ pub(super) struct ShellHitMap {
         super::chrome::panel_header::PanelButton,
     )>,
     pub(super) notification_toast: Rect,
+    pub(super) notification_keys: Rect,
     pub(super) menu_popup: Rect,
     pub(super) menu_search: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
@@ -180,6 +186,7 @@ pub(super) struct ShellHitMap {
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
+    pub(super) overview_actions: Vec<(Rect, super::chrome::overview::Action)>,
     pub(super) navigator_popup: Rect,
     pub(super) navigator_search: Rect,
     pub(super) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
@@ -217,6 +224,9 @@ pub(super) struct ShellHitMap {
     pub(super) machine_files_actions: Vec<(Rect, super::machine_files_overlay::MachineFilesButton)>,
     /// 「Agent 活动」窗口的命中区：渲染输出经 `composition.rs` 回写，悬浮解析已在
     /// `feedback.rs` 接好；内容区 / 滚动条由波 3 二级窗口车道填充并消费。
+    pub(super) inspector_body: Rect,
+    pub(super) inspector_scrollbar: Rect,
+    pub(super) inspector_actions: Vec<(Rect, super::chrome::inspector::Action)>,
     pub(super) agent_activity_popup: Rect,
     pub(super) agent_activity_content: Rect,
     pub(super) agent_activity_scrollbar: Rect,
@@ -667,6 +677,7 @@ impl ClientShellOverlayKind {
 
 #[derive(Debug)]
 pub(super) enum ClientRenameTarget {
+    OpenDirectory,
     NewWorkspace {
         source_workspace_id: Option<String>,
         cwd: Option<String>,
@@ -756,6 +767,7 @@ pub(super) struct ClientNavigatorOverlay {
     pub(super) hovered: Option<ClientNavigatorTarget>,
     pub(super) scroll: usize,
     pub(super) filter: Option<ClientNavigatorFilter>,
+    pub(super) overview: Box<super::chrome::overview::State>,
 }
 
 #[derive(Debug)]
@@ -767,14 +779,18 @@ pub(super) struct ClientHelpOverlay {
     pub(super) max_scroll: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 设置浮层的分区，`ALL` 的顺序就是导航顺序：通用（语言）/ 外观（主题）/ 指示器 /
+/// 通知 / 声音 / 集成 / 快捷键 / 监控。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ClientSettingsSection {
     Language,
     Theme,
     Indicators,
-    Sound,
     Toast,
+    Sound,
     Integrations,
+    Keyboard,
+    Monitor,
 }
 
 impl ClientSettingsSection {
@@ -782,9 +798,11 @@ impl ClientSettingsSection {
         Self::Language,
         Self::Theme,
         Self::Indicators,
-        Self::Sound,
         Self::Toast,
+        Self::Sound,
         Self::Integrations,
+        Self::Keyboard,
+        Self::Monitor,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -793,9 +811,11 @@ impl ClientSettingsSection {
             Self::Language => t.section_language,
             Self::Theme => t.section_theme,
             Self::Indicators => t.section_indicators,
-            Self::Sound => t.section_sound,
             Self::Toast => t.section_toasts,
+            Self::Sound => t.section_sound,
             Self::Integrations => t.section_integrations,
+            Self::Keyboard => t.section_keyboard,
+            Self::Monitor => t.section_monitor,
         }
     }
 }
@@ -1258,6 +1278,14 @@ pub(super) enum PendingEndpointKind {
         epoch: u64,
         node_id: Option<String>,
     },
+    InspectorRead {
+        epoch: u64,
+        target: super::chrome::inspector::Target,
+    },
+    OverviewPrompt {
+        epoch: u64,
+        target: super::chrome::inspector::Target,
+    },
 }
 
 pub(super) struct PendingEndpointRequest {
@@ -1358,6 +1386,7 @@ pub(super) struct ClientInputContext {
     pub(super) popup_terminal_id: Option<String>,
     pub(super) popup_pending: bool,
     pub(super) retained_selection: bool,
+    pub(super) notification_focused: bool,
 }
 
 type ClientInputLeases = crate::input::InputLeaseTable<u8, ClientInputContext, ClientInputTarget>;
@@ -1458,6 +1487,7 @@ pub(super) struct ClientCopyModeState {
 pub(crate) struct ClientShellState {
     pub(crate) endpoint_connect_options: Option<crate::client::endpoint::EndpointConnectOptions>,
     pub(super) workbench: super::workbench::State,
+    pub(super) inspector: super::chrome::inspector::State,
     pub(super) observability: super::observability::State,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
@@ -1486,6 +1516,12 @@ pub(crate) struct ClientShellState {
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
+    pub(super) reveal_session_target: Option<(ClientEndpointId, String)>,
+    pub(super) session_rows: Option<super::chrome::sessions::SessionRowsCache>,
+    pub(super) session_view: super::chrome::sessions::SessionView,
+    pub(super) session_grouping: super::chrome::sessions::SessionGrouping,
+    pub(super) session_grouping_manual: bool,
+    pub(super) wall_clock_override_ms: Option<u64>,
     pub(super) tab_scroll: usize,
     pub(super) mobile_switcher_scroll: usize,
     pub(super) reveal_focused_workspace: bool,
@@ -1526,14 +1562,12 @@ pub(crate) struct ClientShellState {
     /// When the detail card polls the supervisor again (forward failures are
     /// recorded by monitor threads without an event).
     pub(super) port_forward_polled_at: Option<std::time::Instant>,
-    /// In-flight snippet run: per-target outcomes collect here until every
-    /// request resolves, then history is written and the summary toast shows.
-    /// 联邦 agents 面板行的缓存（PERF-02）：视图计算阶段按端点分代刷新，渲染只读。
-    pub(super) federated_agent_rows: Option<super::endpoint_agents::AgentRowsCache>,
+    /// Online agent attention counts and animation, refreshed before rendering.
+    pub(super) agent_attention: Option<super::endpoint_agents::AgentAttentionCache>,
     /// 配置代际：`reload_client_config` 递增，缓存据此失效。
     pub(super) config_epoch: u64,
-    /// 侧栏数据的代际：**每一处改变端点快照 / 状态 / 目录的写入都要递增**，联邦
-    /// agents 行缓存据此失效（PERF-02）。内容比较不可靠——会原地替换快照、也会
+    /// 侧栏数据的代际：**每一处改变端点快照 / 状态 / 目录的写入都要递增**，Sessions
+    /// 行与注意力缓存据此失效（PERF-02）。内容比较不可靠——会原地替换快照、也会
     /// 原地改写 agent 状态（确认表面时 Done → Idle，revision 不变）。
     ///
     /// 当前写入点（没有自动守门：新增写入点靠这份清单评审与
@@ -1631,6 +1665,7 @@ pub(crate) struct ClientShellState {
     pub(super) pending_integration_installs: usize,
     pub(super) pending_notifications: Vec<ClientPendingNotification>,
     pub(super) visible_notification: Option<ClientVisibleNotification>,
+    pub(super) notification_focused: bool,
     pub(super) queued_notifications: VecDeque<ClientVisibleNotification>,
     pub(super) endpoint_notice_seen: HashSet<ClientEndpointNoticeKey>,
     pub(super) visible_endpoint_notice: Option<ClientVisibleEndpointNotice>,
@@ -1745,6 +1780,7 @@ impl ClientShellState {
         Self {
             endpoint_connect_options: None,
             workbench,
+            inspector: super::chrome::inspector::State::default(),
             observability,
             config,
             snapshot: None,
@@ -1774,6 +1810,12 @@ impl ClientShellState {
             workspace_scroll: 0,
             agent_scroll: 0,
             pending_agent_reveal: None,
+            reveal_session_target: None,
+            session_rows: None,
+            session_view: Default::default(),
+            session_grouping: preferences.session_grouping.unwrap_or_default(),
+            session_grouping_manual: preferences.session_grouping.is_some(),
+            wall_clock_override_ms: None,
             tab_scroll: 0,
             mobile_switcher_scroll: 0,
             reveal_focused_workspace: true,
@@ -1794,7 +1836,7 @@ impl ClientShellState {
             endpoint_port_forwards: HashMap::new(),
             session_log_dropped: HashMap::new(),
             port_forward_polled_at: None,
-            federated_agent_rows: None,
+            agent_attention: None,
             config_epoch: 0,
             agent_rows_epoch: 0,
             tree_collapse_epoch: 0,
@@ -1862,6 +1904,7 @@ impl ClientShellState {
             pending_integration_installs: 0,
             pending_notifications: Vec::new(),
             visible_notification: None,
+            notification_focused: false,
             queued_notifications: VecDeque::new(),
             endpoint_notice_seen: HashSet::new(),
             visible_endpoint_notice: None,
@@ -1962,15 +2005,11 @@ impl ClientShellState {
         snapshot: &ClientShellSnapshot,
     ) -> Vec<WorkspaceEntry> {
         let empty_collapsed_groups = HashSet::new();
-        if self.mobile_layout_active() {
-            render::workspace_entries(snapshot, &empty_collapsed_groups)
-        } else {
-            render::workspace_entries(
-                snapshot,
-                self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
-                    .unwrap_or(&empty_collapsed_groups),
-            )
-        }
+        render::workspace_entries(
+            snapshot,
+            self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
+                .unwrap_or(&empty_collapsed_groups),
+        )
     }
 
     pub(super) fn reveal_workspace(&mut self, workspace_id: &str) {
@@ -2217,12 +2256,10 @@ impl ClientShellState {
                     })
                 || render::tab_bar_status_width(current) != render::tab_bar_status_width(&snapshot)
         });
-        if self
-            .snapshot
-            .as_deref()
-            .and_then(|current| current.focused_workspace_id.as_deref())
-            != snapshot.focused_workspace_id.as_deref()
-        {
+        if self.snapshot.as_deref().is_none_or(|current| {
+            current.focused_workspace_id != snapshot.focused_workspace_id
+                || current.focused_pane_id != snapshot.focused_pane_id
+        }) {
             self.reveal_focused_workspace = true;
         }
         if tab_layout_changed

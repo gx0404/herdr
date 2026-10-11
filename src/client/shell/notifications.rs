@@ -94,6 +94,7 @@ pub(super) fn notification_agent_label<'a>(
     from_pane.or(event.agent.as_deref())
 }
 
+#[cfg(test)]
 pub(super) fn render_mobile_notification_banner(
     buffer: &mut Buffer,
     area: Rect,
@@ -223,6 +224,7 @@ pub(super) fn render_notification_card(
     rect
 }
 
+#[cfg(test)]
 pub(super) fn render_visible_notification(
     buffer: &mut Buffer,
     area: Rect,
@@ -242,6 +244,138 @@ pub(super) fn render_visible_notification(
         super::feedback::ClientToastLevel::from_notification_kind(event.kind),
         cx,
     )
+}
+
+pub(super) struct NotificationContext<'a> {
+    pub(super) endpoints: &'a [ClientShellEndpoint],
+    pub(super) keybinds: &'a LiveKeybindConfig,
+    pub(super) status_indicators: crate::config::StatusIndicatorStyle,
+    pub(super) history: &'a VecDeque<super::feedback::ClientNotificationRecord>,
+    pub(super) focused: bool,
+    pub(super) position: crate::config::ToastHerdrPosition,
+    pub(super) offset: u16,
+}
+
+pub(super) fn render_shell_notification(
+    buffer: &mut Buffer,
+    area: Rect,
+    notification: &ClientVisibleNotification,
+    presentation: &NotificationContext<'_>,
+    cx: &super::feedback::ChromeContext<'_>,
+) -> Rect {
+    use super::chrome::notification::{bucket, Card};
+    let event = &notification.event;
+    let bucket = bucket(event, presentation.endpoints, &notification.endpoint_id);
+    let agent = notification_agent_label(presentation.endpoints, notification);
+    let title = match (
+        event.kind,
+        agent.filter(|agent| Some(*agent) != event.agent.as_deref()),
+    ) {
+        (SemanticNotificationKind::NeedsAttention, Some(agent)) => crate::i18n::fill(
+            crate::i18n::texts().notify.agent_waiting_fmt,
+            &[("agent", agent)],
+        ),
+        (SemanticNotificationKind::Finished, Some(agent)) => crate::i18n::fill(
+            crate::i18n::texts().notify.agent_done_fmt,
+            &[("agent", agent)],
+        ),
+        _ => event.title.clone(),
+    };
+    let endpoint = presentation
+        .endpoints
+        .iter()
+        .find(|e| e.endpoint_id == notification.endpoint_id);
+    let location = endpoint
+        .map(|e| {
+            let workspace = e.snapshot.as_deref().and_then(|s| {
+                s.workspaces
+                    .iter()
+                    .find(|w| Some(w.workspace_id.as_str()) == event.workspace_id.as_deref())
+            });
+            workspace
+                .map(|w| {
+                    format!(
+                        "{} / {}{}",
+                        e.label,
+                        w.label,
+                        w.branch
+                            .as_ref()
+                            .map(|branch| format!(" / {branch}"))
+                            .unwrap_or_default()
+                    )
+                })
+                .unwrap_or_else(|| e.label.clone())
+        })
+        .unwrap_or_else(|| notification.endpoint_id.storage_key());
+    let at = presentation
+        .history
+        .iter()
+        .rev()
+        .find(|r| {
+            r.title == event.title
+                && r.target.as_ref().is_some_and(|t| {
+                    t.endpoint_id == notification.endpoint_id && t.pane_id == event.pane_id
+                })
+        })
+        .map(|r| r.received_at)
+        .unwrap_or(cx.now);
+    let age = super::feedback::relative_time_ago(at, cx.now);
+    let jump = event.pane_id.as_ref().and_then(|_| {
+        super::chrome::key_sequence(
+            presentation.keybinds,
+            &presentation.keybinds.keybinds.open_notification_target,
+        )
+    });
+    super::chrome::notification::paint(
+        buffer,
+        area,
+        &Card {
+            title: &title,
+            location: &location,
+            body: event.body.as_deref().unwrap_or_default(),
+            bucket,
+            status_indicators: presentation.status_indicators,
+            age: &age,
+            jump_key: jump.as_deref(),
+            focused: presentation.focused,
+        },
+        event.position.unwrap_or(presentation.position),
+        presentation.offset,
+        cx,
+    )
+}
+
+impl ClientShellState {
+    pub(super) fn route_notification_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !self.notification_focused
+            || self.overlay.is_some()
+            || self.visible_notification.is_none()
+        {
+            return false;
+        }
+        if key.modifiers.is_empty() {
+            match key.code {
+                crossterm::event::KeyCode::Enter => {
+                    self.notification_focused = false;
+                    self.focus_visible_notification(outcome);
+                    return true;
+                }
+                crossterm::event::KeyCode::Esc => {
+                    self.dismiss_visible_notification();
+                    outcome.repaint = true;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        self.notification_focused = false;
+        outcome.repaint = true;
+        false
+    }
 }
 
 #[cfg(test)]
@@ -625,5 +759,120 @@ mod tests {
                 assert!(rect.bottom() <= area.bottom());
             }
         }
+    }
+
+    #[test]
+    fn failed_custom_notification_is_not_a_permission_request() {
+        let mut event = notification().event;
+        event.agent = Some("codex".into());
+        event.pane_id = Some("pane_1".into());
+        event.sound = Some(SemanticNotificationSound::Request);
+        event.title = "codex failed".into();
+        assert_eq!(
+            super::super::chrome::notification::bucket(&event, &[], &ClientEndpointId::Local),
+            crate::harness::AgentBucket::Failed
+        );
+        event.kind = SemanticNotificationKind::NeedsAttention;
+        assert_eq!(
+            super::super::chrome::notification::bucket(&event, &[], &ClientEndpointId::Local),
+            crate::harness::AgentBucket::NeedsInput
+        );
+    }
+
+    #[test]
+    fn new_boot_retires_visible_pending_and_queued_notifications() {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let snapshot = super::super::tests::snapshot();
+        state.set_snapshot(Box::new(snapshot.clone()));
+        let now = std::time::Instant::now();
+        for title in ["first", "second"] {
+            let mut event = notification().event;
+            event.title = title.into();
+            state.receive_notification(&ClientEndpointId::Local, event, now);
+        }
+        let mut changed = snapshot;
+        changed.boot_id = "replacement-boot".into();
+        state.set_snapshot(Box::new(changed));
+        assert!(state.visible_notification.is_none());
+        assert!(state.queued_notifications.is_empty());
+        assert!(state.pending_notifications.is_empty());
+    }
+
+    #[test]
+    fn delayed_permission_card_rechecks_state_and_external_delivery_keeps_the_body() {
+        for delivery in [
+            crate::config::ToastDelivery::Herdr,
+            crate::config::ToastDelivery::Terminal,
+            crate::config::ToastDelivery::System,
+        ] {
+            let mut config = ClientShellConfig::from_config(&Config::default());
+            config.toast_delivery = delivery;
+            config.toast_delay_seconds = 1;
+            let mut state = ClientShellState::new(config);
+            let mut projection = super::super::tests::snapshot();
+            projection.agents.push(crate::protocol::ClientShellAgent {
+                pane_id: "pane_1".into(),
+                workspace_id: "ws_1".into(),
+                tab_id: "tab_1".into(),
+                name: Some("codex".into()),
+                display_agent: None,
+                agent: Some("codex".into()),
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                agent_status: crate::api::schema::AgentStatus::Blocked,
+                state_change_seq: 1,
+                state_labels: Vec::new(),
+                tokens: Vec::new(),
+                focused: false,
+                launch_seq: 0,
+                activity: Default::default(),
+                insight: Default::default(),
+            });
+            state.set_snapshot(Box::new(projection.clone()));
+            let mut event = notification().event;
+            event.kind = SemanticNotificationKind::NeedsAttention;
+            event.agent = Some("codex".into());
+            event.pane_id = Some("pane_1".into());
+            event.tab_id = Some("other-tab".into());
+            event.body = Some("完整权限问题".into());
+            let now = std::time::Instant::now();
+            state.receive_notification(&ClientEndpointId::Local, event.clone(), now);
+            projection.agents[0].agent_status = crate::api::schema::AgentStatus::Working;
+            projection.revision += 1;
+            state.set_snapshot(Box::new(projection.clone()));
+            let (effects, _) = state.tick_notifications(now + std::time::Duration::from_secs(2));
+            assert!(effects.is_empty());
+            assert!(state.visible_notification.is_none());
+            projection.agents[0].agent_status = crate::api::schema::AgentStatus::Blocked;
+            projection.revision += 1;
+            state.set_snapshot(Box::new(projection));
+            state.receive_notification(&ClientEndpointId::Local, event, now);
+            let (effects, _) = state.tick_notifications(now + std::time::Duration::from_secs(2));
+            match delivery {
+                crate::config::ToastDelivery::Herdr => assert_eq!(state.visible_notification.as_ref().and_then(|n| n.event.body.as_deref()), Some("完整权限问题")),
+                _ => assert!(effects.iter().any(|effect| matches!(effect, ClientShellNotificationEffect::Terminal { body, .. } | ClientShellNotificationEffect::System { body, .. } if body.as_deref() == Some("完整权限问题")))),
+            }
+        }
+    }
+
+    #[test]
+    fn notification_jump_activates_the_real_remote_pane() {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let profile =
+            SavedSshEndpoint::new("Remote", "dev@example.com", "default").expect("profile");
+        let endpoint = ClientEndpointId::Ssh(profile.id.clone());
+        state.set_endpoint_catalog(&[profile]);
+        state.set_endpoint_status(&endpoint, ClientEndpointStatus::Online);
+        state.set_endpoint_snapshot(&endpoint, Box::new(super::super::tests::snapshot()));
+        let mut visible = notification();
+        visible.endpoint_id = endpoint.clone();
+        visible.event.pane_id = Some("pane_1".into());
+        state.visible_notification = Some(visible);
+        let mut outcome = ClientShellInput::default();
+        state.focus_visible_notification(&mut outcome);
+        assert!(
+            matches!(outcome.actions.as_slice(), [ClientShellAction::ActivateEndpoint { endpoint_id, target: Some(ClientEndpointFocusTarget::Pane(pane)) }] if endpoint_id == &endpoint && pane == "pane_1")
+        );
     }
 }

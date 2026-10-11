@@ -536,7 +536,7 @@ impl ClientShellState {
     fn workspace_drop_target_at(&self, point: (u16, u16)) -> Option<(Option<String>, u16)> {
         if self.hits.workspace_body.height == 0
             || point.1 < self.hits.workspace_body.y.saturating_sub(1)
-            || point.1 >= self.hits.new_workspace.y
+            || point.1 > self.hits.workspace_body.bottom()
             || self.hits.workspaces.iter().any(|hit| {
                 hit.endpoint_id != self.active_endpoint_id && super::contains(hit.rect, point)
             })
@@ -598,7 +598,7 @@ impl ClientShellState {
                     .map(|workspace| workspace.workspace_id.clone())
             });
             let row = last_hit.rect.bottom();
-            if row < self.hits.new_workspace.y {
+            if row <= self.hits.workspace_body.bottom() {
                 slots.push((before, row));
             }
         }
@@ -855,6 +855,9 @@ impl ClientShellState {
             self.toggle_global_menu();
             self.release_catalog_selection();
             outcome.repaint = true;
+            return;
+        }
+        if self.welcome_mouse(mouse, outcome) {
             return;
         }
         if self.workbench_mouse(mouse, outcome) {
@@ -1215,6 +1218,16 @@ impl ClientShellState {
         }
         if self.overlay.is_none()
             && self.mode == ClientShellMode::Terminal
+            && self.visible_notification.is_some()
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && super::contains(self.hits.notification_keys, point)
+        {
+            self.notification_focused = true;
+            outcome.repaint = true;
+            return;
+        }
+        if self.overlay.is_none()
+            && self.mode == ClientShellMode::Terminal
             && self
                 .visible_notification
                 .as_ref()
@@ -1224,6 +1237,10 @@ impl ClientShellState {
         {
             self.focus_visible_notification(outcome);
             return;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.notification_focused {
+            self.notification_focused = false;
+            outcome.repaint = true;
         }
         if self.handle_mobile_mouse(mouse, outcome) {
             return;
@@ -1837,6 +1854,9 @@ impl ClientShellState {
                 }
                 _ => {}
             }
+            return;
+        }
+        if self.overview_mouse(mouse, outcome) {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Navigator(_))) {
@@ -2635,6 +2655,9 @@ impl ClientShellState {
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
                     outcome.repaint = true;
+                    return;
+                }
+                if self.handle_session_click(point, outcome) {
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

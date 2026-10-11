@@ -247,6 +247,9 @@ impl ClientShellState {
         if panel == PanelId::Monitor {
             self.observability.process_dialog = None;
         }
+        if panel == PanelId::Agents {
+            self.sync_inspector_target(Rect::default());
+        }
         self.cancel_frozen_selection();
         self.selection = None;
         self.clear_link_hover();
@@ -280,6 +283,9 @@ impl ClientShellState {
             .any(|rect| contains(*rect, point))
         {
             return false;
+        }
+        if self.workbench.drag.is_none() && self.inspector_mouse(mouse, outcome) {
+            return true;
         }
         let previous_tab = self.focused_tab_id();
         if let Some(mut drag) = self.workbench.drag.take() {
@@ -683,10 +689,9 @@ impl ClientShellState {
         let previous_tab = self.focused_tab_id();
         // 去最大化投影：最大化时 `geometry` 只有一个面板、零分隔线，Tab /
         // 方向键会静默失效（WB-01）。
-        let geometry = self
-            .workbench
-            .dock
-            .layout_geometry(Rect::new(0, 0, 4096, 4096));
+        let cols = self.last_composed_size.map_or(120, |size| size.0);
+        let geometry = self.workbench.control_geometry(cols);
+        let focused_panel = self.workbench.dock.projected_focus(&geometry).clone();
         // 只有真正改写了布局的按键才标脏落盘：未处理按键与 Esc（`arranging`
         // 不入偏好）保持零磁盘写（PERF-01）。
         let mut dirty = false;
@@ -700,7 +705,7 @@ impl ClientShellState {
                     .collect::<Vec<_>>();
                 if let Some(index) = panels
                     .iter()
-                    .position(|panel| panel == &self.workbench.dock.focused)
+                    .position(|panel| panel == self.workbench.dock.projected_focus(&geometry))
                 {
                     let reverse =
                         key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
@@ -725,7 +730,7 @@ impl ClientShellState {
                 self.workbench.dock.maximized = if self.workbench.dock.maximized.is_some() {
                     None
                 } else {
-                    Some(self.workbench.dock.focused.clone())
+                    Some(focused_panel)
                 };
                 dirty = true;
             }
@@ -740,13 +745,9 @@ impl ClientShellState {
                     if let Some((target, _)) = geometry
                         .panels
                         .iter()
-                        .find(|(panel, _)| panel != &self.workbench.dock.focused)
+                        .find(|(panel, _)| panel != &focused_panel)
                     {
-                        dirty |= self.workbench.dock.dock(
-                            self.workbench.dock.focused.clone(),
-                            target,
-                            edge,
-                        );
+                        dirty |= self.workbench.dock.dock(focused_panel, target, edge);
                     }
                 } else {
                     // 最大化时屏幕上只有一个铺满的面板，分隔线全被挡住：先退出
@@ -761,7 +762,7 @@ impl ClientShellState {
                     if let Some((_, focused)) = geometry
                         .panels
                         .iter()
-                        .find(|(panel, _)| panel == &self.workbench.dock.focused)
+                        .find(|(panel, _)| panel == &focused_panel)
                     {
                         if let Some(divider) = geometry.dividers.iter().rev().find(|divider| {
                             (divider.axis == Axis::Horizontal) == horizontal

@@ -273,6 +273,9 @@ fn command_palette_closes_the_monitor_panel_from_a_focused_terminal() {
     state.compose(120, 40).expect("并排画面");
     state.open_command_search();
     palette_select(&mut state, "observation:close-monitor");
+    state
+        .compose(120, 40)
+        .expect("close monitor action revealed");
     state.handle_input_bytes(b"\r");
     assert!(state.overlay.is_none());
     assert!(

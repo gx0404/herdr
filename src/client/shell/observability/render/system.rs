@@ -735,15 +735,10 @@ fn cores_card(
     offset: usize,
     hits: &mut Vec<(Rect, Action)>,
 ) -> usize {
-    // 每格至少 `CORE_SLOT_WIDTH` 列，放得下几格就排几格，再把富余均分给各格：
-    // 条形铺满卡片宽度，不在右侧留一大片空白（整除后的零头 < 格数，留在最右）。
-    let slots = (inner.width.saturating_add(1) / (CORE_SLOT_WIDTH + 1)).max(1);
-    let stride = inner.width.saturating_add(1) / slots;
-    let slot_width = if slots == 1 {
-        inner.width
-    } else {
-        stride.saturating_sub(1)
-    };
+    // 每格至少 `CORE_SLOT_WIDTH` 列，富余均分到各列；列宽最多相差一格，
+    // 最右一列贴到卡片内边距，不留下整除余数。
+    let span = u32::from(inner.width) + 1;
+    let slots = (span / u32::from(CORE_SLOT_WIDTH + 1)).max(1) as u16;
     let per_row = usize::from(slots);
     let max = sample
         .cores
@@ -753,8 +748,7 @@ fn cores_card(
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
     let cpu_thresholds = thresholds(state, "cpu");
-    // 全卡统一列宽：标签按最大核号的位数、数字按「100%」预留，每格条形等长且
-    // 起点对齐，滚动换屏时也不跳。
+    // 全卡统一标签和数字列宽；同一列的条形等长且起点对齐，滚动换屏时也不跳。
     let columns = MeterColumns {
         label: decimal_width(sample.cores.iter().map(|core| core.id).max().unwrap_or(0)),
         value: crate::ui::display_width_u16("100%"),
@@ -768,20 +762,21 @@ fn cores_card(
         .enumerate()
     {
         let row = index as u16 / slots;
-        let x = inner.x + (index as u16 % slots) * stride;
-        let rect = Rect::new(
-            x,
-            inner.y + row,
-            slot_width.min(inner.right().saturating_sub(x)),
-            1,
-        );
+        let column = u32::from(index as u16 % slots);
+        let start = span * column / u32::from(slots);
+        let end = span * (column + 1) / u32::from(slots) - 1;
+        let x = inner.x + start as u16;
+        let rect = Rect::new(x, inner.y + row, (end - start) as u16, 1);
         let label = core.id.to_string();
         let value = core
             .usage_percent
             .map_or_else(|| "—".to_owned(), |value| format!("{value:.0}%"));
         render_meter_row_aligned(
             buffer,
-            rect,
+            Rect {
+                width: (span / u32::from(slots) - 1) as u16,
+                ..rect
+            },
             &MeterRow {
                 label: &label,
                 value: &value,
@@ -2037,6 +2032,43 @@ mod tests {
         assert!(top.contains("42.0%"), "{top}");
         let row = row_text(&tiny, cpu.y + 1);
         assert!(!row.contains("42.0%"), "数字不在条形那一行重复：{row}");
+    }
+
+    #[test]
+    fn core_slots_cover_each_width_with_balanced_non_overlapping_columns() {
+        let mut state = monitored();
+        let mut sample = state.metrics.take().expect("host sample");
+        sample.cores = (0..64).map(|id| core(id, 50.0)).collect();
+        let config = config();
+        for width in 1..=256 {
+            for origin in [0, 7] {
+                let inner = Rect::new(origin, 1, width, 1);
+                let mut buffer = Buffer::empty(Rect::new(0, 0, width + origin + 2, 3));
+                let mut hits = Vec::new();
+                cores_card(
+                    &mut buffer,
+                    inner,
+                    &state,
+                    &sample,
+                    &config.palette,
+                    0,
+                    &mut hits,
+                );
+                let slots = hits
+                    .iter()
+                    .filter_map(|(rect, action)| matches!(action, Action::Core(_)).then_some(*rect))
+                    .collect::<Vec<_>>();
+                assert_eq!(slots.first().expect("first core").x, inner.x);
+                assert_eq!(slots.last().expect("last core").right(), inner.right());
+                for pair in slots.windows(2) {
+                    assert_eq!(pair[0].right() + 1, pair[1].x);
+                    assert!(pair[0].width.abs_diff(pair[1].width) <= 1);
+                }
+                assert!(slots
+                    .iter()
+                    .all(|rect| rect.width > 0 && contains_rect(inner, *rect)));
+            }
+        }
     }
 
     #[test]

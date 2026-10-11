@@ -1,27 +1,6 @@
 use std::collections::HashMap;
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
-};
-
 use super::*;
-// 显式导入优先于上面的 glob：本文件按 `usize` 算宽度。
-use crate::ui::display_width;
-
-/// 一个 agent 行的行数据：按侧栏行配置解析出的 token 行，由统一树
-/// （`agent_tree.rs`）在视图计算阶段构建、渲染阶段画出。
-#[derive(Debug)]
-pub(super) struct AgentRow {
-    pub(super) pane_id: String,
-    pub(super) status: crate::api::schema::AgentStatus,
-    pub(super) focused: bool,
-    pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
-    /// 状态文案（服务端给的自定义状态标签优先）。行配置里没有 `state_text`
-    /// token 时，统一树把它当次要信息画在名称后面，放不下先丢它。
-    pub(super) state_text: String,
-}
 
 pub(super) fn ordered_agent_pane_ids(
     snapshot: &ClientShellSnapshot,
@@ -68,232 +47,6 @@ pub(super) fn group_key_workspace(key: &str) -> Option<&str> {
     key.strip_prefix(AGENT_GROUP_PREFIX)
 }
 
-/// classic 单端点侧栏的 Agents 面板：行来自视图计算阶段的统一树缓存
-/// （`AgentRowsCache`），与联邦 / workbench 同一套渲染，agent 行写进 `hits.agents`
-/// （端点隐含为本机）。
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_agent_panel(
-    buffer: &mut Buffer,
-    area: Rect,
-    agent_view_label: Option<&str>,
-    rows: super::agent_tree::AgentRowsView<'_>,
-    config: &ClientShellConfig,
-    glyphs: StatusGlyphs,
-    agent_scroll: &mut usize,
-    chrome_hover: Option<&super::feedback::ChromeHover>,
-    hits: &mut ShellHitMap,
-) {
-    super::agent_tree::render_agent_tree_rows(
-        buffer,
-        area,
-        agent_view_label,
-        rows,
-        config,
-        glyphs,
-        agent_scroll,
-        chrome_hover,
-        hits,
-        false,
-    );
-}
-
-pub(super) fn render_agent_panel_header(
-    buffer: &mut Buffer,
-    area: Rect,
-    agent_view_label: Option<&str>,
-    config: &ClientShellConfig,
-    chrome_hover: Option<&super::feedback::ChromeHover>,
-    hits: &mut ShellHitMap,
-) -> bool {
-    if area.height == 0 {
-        return false;
-    }
-    let section_divider_hovered = matches!(
-        chrome_hover,
-        Some(super::feedback::ChromeHover::SidebarSectionDivider)
-    );
-    put_text(
-        buffer,
-        area.x,
-        area.y,
-        area.width,
-        &"─".repeat(area.width as usize),
-        Style::default().fg(if section_divider_hovered {
-            config.palette.overlay1
-        } else {
-            config.palette.surface_dim
-        }),
-    );
-    if area.height < 2 {
-        return false;
-    }
-    let texts = crate::i18n::texts();
-    put_text(
-        buffer,
-        area.x,
-        area.y + 1,
-        area.width,
-        texts.sidebar.agents,
-        Style::default()
-            .fg(config.palette.overlay0)
-            .add_modifier(Modifier::BOLD),
-    );
-    let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
-        crate::config::AgentPanelSortConfig::Spaces => texts.sidebar.sort_grouped,
-        crate::config::AgentPanelSortConfig::Launch => texts.agent_panel.sort_launch,
-    });
-    // 宽度仲裁（冒烟 M11）：排序标签右对齐，最左只能从标题右侧留 2 列间距处
-    // 开始，不再与标题粘连；放不下整个标签就截短带省略号，连「字 + …」都放不下
-    // 时整个让出（命中区一并清空）。沿用拆掉「用量」按钮前 `min_usage_x` 的口径。
-    let min_sort_x = area
-        .x
-        .saturating_add(crate::ui::display_width_u16(texts.sidebar.agents))
-        .saturating_add(2);
-    // 右端离分隔线留的列数与树行同一判据（冒烟 L4：原来紧贴分隔线）。
-    let right = area
-        .right()
-        .saturating_sub(super::agent_tree::tree_inset(area.width));
-    let room = usize::from(right.saturating_sub(min_sort_x));
-    let fitted = if display_width(sort_label) <= room {
-        std::borrow::Cow::Borrowed(sort_label)
-    } else if room >= 3 {
-        std::borrow::Cow::Owned(crate::ui::truncate_end(sort_label, room))
-    } else {
-        std::borrow::Cow::Borrowed("")
-    };
-    let sort_label = fitted.as_ref();
-    let sort_width = display_width(sort_label).min(area.width as usize) as u16;
-    let sort_rect = if sort_width == 0 {
-        Rect::default()
-    } else {
-        Rect::new(right.saturating_sub(sort_width), area.y + 1, sort_width, 1)
-    };
-    hits.agent_sort_toggle = if config.mouse_capture && agent_view_label.is_none() {
-        sort_rect
-    } else {
-        Rect::default()
-    };
-    let sort_hovered = matches!(
-        chrome_hover,
-        Some(super::feedback::ChromeHover::AgentSortToggle)
-    );
-    put_text(
-        buffer,
-        sort_rect.x,
-        sort_rect.y,
-        sort_rect.width,
-        sort_label,
-        Style::default()
-            .fg(if agent_view_label.is_some() {
-                config.palette.accent
-            } else if sort_hovered {
-                config.palette.text
-            } else {
-                config.palette.overlay0
-            })
-            .add_modifier(Modifier::BOLD),
-    );
-    true
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_agent_list<T>(
-    buffer: &mut Buffer,
-    area: Rect,
-    rows: &[T],
-    empty_message: Option<&str>,
-    config: &ClientShellConfig,
-    agent_scroll: &mut usize,
-    thumb_hovered: bool,
-    hits: &mut ShellHitMap,
-    row_lines: impl Fn(&T) -> usize,
-    mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
-) {
-    let body = Rect::new(
-        area.x,
-        area.y.saturating_add(3),
-        area.width,
-        area.height.saturating_sub(3),
-    );
-    hits.agent_body = body;
-    if body.is_empty() || rows.is_empty() {
-        *agent_scroll = 0;
-        if let Some(message) = empty_message.filter(|_| !body.is_empty()) {
-            put_text(
-                buffer,
-                body.x,
-                body.y,
-                body.width,
-                message,
-                Style::default()
-                    .fg(config.palette.overlay0)
-                    .add_modifier(Modifier::DIM),
-            );
-        }
-        return;
-    }
-
-    let row_heights = rows
-        .iter()
-        .map(|row| row_lines(row).max(1).min(u16::MAX as usize) as u16)
-        .collect::<Vec<_>>();
-    let gaps = rows
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            if index + 1 < rows.len() {
-                config.agents.row_gap
-            } else {
-                0
-            }
-        })
-        .collect::<Vec<_>>();
-    let metrics =
-        super::scroll::list_scroll_metrics(&row_heights, &gaps, body.height, *agent_scroll);
-    hits.agent_max_scroll = metrics.max_offset_from_bottom;
-    hits.agent_scroll_metrics = Some(metrics);
-    *agent_scroll = metrics
-        .max_offset_from_bottom
-        .saturating_sub(metrics.offset_from_bottom);
-    let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
-    let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (index, row) in rows.iter().enumerate().skip(*agent_scroll) {
-        let height = row_heights[index].min(body.height);
-        if y.saturating_add(height) > body.bottom() {
-            break;
-        }
-        let rect = Rect::new(body.x, y, content_width, height);
-        render_row(buffer, rect, row, hits);
-        y = y
-            .saturating_add(height)
-            .saturating_add(if index + 1 < rows.len() {
-                config.agents.row_gap
-            } else {
-                0
-            });
-    }
-
-    if show_scrollbar {
-        // 轨道让出底格，避免覆盖同列最后一行的侧栏折叠开关 «。
-        // 鼠标路由另以 `sidebar_toggle` 优先命中，防止重叠轨道吞掉点击。
-        let track = Rect::new(
-            body.right().saturating_sub(1),
-            body.y,
-            1,
-            body.height.saturating_sub(1),
-        );
-        hits.agent_scrollbar = track;
-        super::scroll::render_list_scrollbar(
-            buffer,
-            track,
-            metrics,
-            &config.palette,
-            thumb_hovered,
-        );
-    }
-}
-
 /// 按侧栏行配置解析一个 agent 的 token 行。`machine` 有值时行里带机器 token
 /// （联邦平铺视图）；树视图里机器 / 工作区 / 标签页由分组头承载，调用方按需
 /// 丢掉对应 token。
@@ -302,7 +55,7 @@ pub(super) fn agent_row(
     pane_id: &str,
     config: &ClientShellConfig,
     machine: Option<&str>,
-) -> Option<AgentRow> {
+) -> Option<Vec<Vec<crate::ui::ResolvedToken>>> {
     let agent = snapshot
         .agents
         .iter()
@@ -362,19 +115,7 @@ pub(super) fn agent_row(
         },
         state_text,
     );
-    Some(AgentRow {
-        pane_id: agent.pane_id.clone(),
-        status: agent.agent_status,
-        focused: agent.focused,
-        rows,
-        state_text: state_text.to_owned(),
-    })
-}
-
-fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {
-    // set_stringn truncates by display width and writes spacer cells after
-    // double-width graphemes; a per-cell char loop would corrupt CJK text.
-    buffer.set_stringn(x, y, text, width as usize, style);
+    Some(rows)
 }
 
 fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str {

@@ -528,7 +528,7 @@ impl super::super::ClientShellState {
         };
 
         let counts = self
-            .federated_agent_rows
+            .agent_attention
             .as_ref()
             .map(|rows| rows.counts())
             .unwrap_or_default();

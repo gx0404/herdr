@@ -371,6 +371,7 @@ pub struct Keybinds {
     pub open_notification_target: ActionKeybinds,
     /// Link hints mode shortcut (`keys.link_hints`, `prefix+u` by default).
     pub link_hints: ActionKeybinds,
+    pub next_attention: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -410,6 +411,7 @@ pub struct Keybinds {
     pub resize_pane_up: ActionKeybinds,
     pub resize_pane_right: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
+    pub toggle_inspector: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -558,6 +560,7 @@ impl Config {
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
             link_hints: empty_action!(),
+            next_attention: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -597,6 +600,7 @@ impl Config {
             resize_pane_up: empty_action!(),
             resize_pane_right: empty_action!(),
             toggle_sidebar: empty_action!(),
+            toggle_inspector: empty_action!(),
             custom_commands: Vec::new(),
         };
 
@@ -695,6 +699,7 @@ impl Config {
                 source
             );
             apply_action!(keybinds.link_hints, link_hints, source);
+            apply_action!(keybinds.next_attention, next_attention, source);
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);
@@ -749,6 +754,7 @@ impl Config {
             apply_action!(keybinds.resize_pane_up, resize_pane_up, source);
             apply_action!(keybinds.resize_pane_right, resize_pane_right, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
+            apply_action!(keybinds.toggle_inspector, toggle_inspector, source);
 
             if source == field_source!(indexed) {
                 append_legacy_indexed_bindings(

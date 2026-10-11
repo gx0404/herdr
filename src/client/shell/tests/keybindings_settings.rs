@@ -195,7 +195,8 @@ fn manual_client_chrome_preferences_round_trip_per_endpoint() {
     let mut state = ClientShellState::new(config);
     state.sidebar_width = 31;
     state.sidebar_width_manual = true;
-    state.sidebar_section_split = 0.7;
+    state.config.preferences.sidebar_section_split = Some(0.7);
+    state.sidebar_section_split = 0.4;
     state.sidebar_section_split_manual = true;
     state.sidebar_collapsed = true;
     state.sidebar_collapsed_manual = true;
@@ -1194,7 +1195,7 @@ fn settings_footer_announces_install_all_in_the_integrations_section() {
     };
     // 宽字符在帧里带补位空格，比较时两边都去空格。
     let squeeze = |value: &str| value.replace(' ', "");
-    let hint = squeeze(crate::i18n::texts().settings.footer_install_all);
+    let hint = squeeze(crate::i18n::texts().settings.hint_install_all);
     assert!(!hint.is_empty(), "批量安装提示文案不得为空");
     assert!(
         !squeeze(&frame_text(&mut state)).contains(&hint),
@@ -1260,16 +1261,15 @@ fn settings_integration_messages_show_codex_trust_hints_in_full_at_80_columns() 
     let frame = state
         .compose(terminal.width, terminal.height)
         .expect("settings frame");
-    let rows = frame_rows(&frame);
-    let screen = rows.join("\n");
+    let screen = settings_popup_rows(&state, &frame).join("\n");
+    let visible = without_whitespace(&screen);
     assert!(
-        rows.iter()
-            .any(|row| row.contains("Trust all and continue")),
+        visible.contains("Trustallandcontinue"),
         "设置页要能看到该选哪一项：\n{screen}"
     );
     for hint in hints {
         assert!(
-            rows.iter().any(|row| row.contains(hint)),
+            visible.contains(&without_whitespace(hint)),
             "每条信任提示都要完整显示：{hint:?}\n{screen}"
         );
     }
@@ -1307,17 +1307,33 @@ fn settings_integrations_state(labels: &[&str], messages: &[&str]) -> ClientShel
     state
 }
 
-/// 设置浮层边框以内的文字行（去掉左右边框列），按屏幕行序。
-fn settings_popup_rows(state: &ClientShellState, frame: &FrameData) -> Vec<String> {
+fn settings_content(state: &ClientShellState) -> Rect {
+    use super::super::chrome::settings::{settings_layout, NavItem};
     let popup = state.hits.settings_popup;
     assert!(!popup.is_empty(), "设置浮层必须画出来");
+    let items = ClientSettingsSection::ALL
+        .iter()
+        .map(|section| NavItem {
+            section: *section,
+            label: section.label(),
+            badge: false,
+        })
+        .collect::<Vec<_>>();
+    let inner = Rect::new(popup.x + 1, popup.y + 1, popup.width - 2, popup.height - 2);
+    settings_layout(inner, &items)
+        .expect("settings layout")
+        .content
+}
+
+fn settings_popup_rows(state: &ClientShellState, frame: &FrameData) -> Vec<String> {
+    let content = settings_content(state);
     let rows = frame_rows(frame);
-    (popup.y + 1..popup.bottom().saturating_sub(1))
+    (content.y..content.bottom())
         .map(|y| {
             rows[usize::from(y)]
                 .chars()
-                .skip(usize::from(popup.x) + 1)
-                .take(usize::from(popup.width.saturating_sub(2)))
+                .skip(usize::from(content.x))
+                .take(usize::from(content.width))
                 .collect()
         })
         .collect()
@@ -1351,7 +1367,7 @@ fn settings_integration_messages_wrap_instead_of_truncating_at_every_width() {
             .iter()
             .position(|row| row.contains("to enable OpenCode V2"))
             .unwrap_or_else(|| panic!("{cols} 列：V2 提示首行\n{}", popup_rows.join("\n")));
-        let inner_width = usize::from(state.hits.settings_popup.width.saturating_sub(2));
+        let inner_width = usize::from(settings_content(&state).width.saturating_sub(2));
         assert!(inner_width < 76, "{cols} 列：夹具前提：正文比 V2 提示窄");
         assert!(
             !popup_rows[first].contains("this integration"),
@@ -1561,10 +1577,8 @@ fn assert_left_inset(rows: &[String], needle: &str, case: &str) {
     );
 }
 
-/// 冒烟 L4：浮层正文首列不再紧贴边框——设置页分区标题与说明、集成页说明行与
-/// 安装消息（续行再缩 2 列）、命令搜索的标题与空态、快捷键与通知历史的标题和
-/// 空态都从边框内第 2 列起笔，与本就带前导空格的搜索栏、列表行、页脚同列；
-/// 搜索栏右侧的计数离右边框 1 列。宽 / 中 / 窄三档。
+/// 设置正文按内容列留白；消息续行再缩进两列。其余浮层保留边框内一列留白。
+/// 搜索栏右侧计数仍离右边框一列，覆盖宽 / 中 / 窄三档。
 #[test]
 fn overlay_text_keeps_a_one_column_inset_from_the_border() {
     let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
@@ -1575,12 +1589,23 @@ fn overlay_text_keeps_a_one_column_inset_from_the_border() {
         let mut outcome = ClientShellInput::default();
         state.select_settings_section(ClientSettingsSection::Indicators, &mut outcome);
         let screen = frame_rows(&state.compose(cols, rows).expect("settings indicators"));
-        assert_left_inset(
-            &screen,
-            "agent status indicators",
-            &format!("{case} 指示器标题"),
+        let title_x = state
+            .hits
+            .settings_choices
+            .first()
+            .expect("indicator choice")
+            .0
+            .x;
+        assert_eq!(
+            find_text(&screen, "agent status indicators")
+                .expect("title")
+                .1,
+            usize::from(title_x)
         );
-        assert_left_inset(&screen, "choose how", &format!("{case} 指示器说明"));
+        assert_eq!(
+            find_text(&screen, "choose how").expect("description").1,
+            usize::from(title_x)
+        );
 
         state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
         // 切回集成页会重新请求列表并清掉上次的安装消息：夹具直接当作列表与
@@ -1593,8 +1618,19 @@ fn overlay_text_keeps_a_one_column_inset_from_the_border() {
                 .collect();
         }
         let screen = frame_rows(&state.compose(cols, rows).expect("settings integrations"));
-        assert_left_inset(&screen, "agent integrations", &format!("{case} 集成说明行"));
-        assert_left_inset(&screen, "to enable OpenCode", &format!("{case} 安装消息"));
+        let content_x = settings_content(&state).x;
+        assert_eq!(
+            find_text(&screen, "agent integrations")
+                .expect("integration title")
+                .1,
+            usize::from(content_x)
+        );
+        assert_eq!(
+            find_text(&screen, "to enable OpenCode")
+                .expect("installation message")
+                .1,
+            usize::from(content_x + 1)
+        );
         let (y, x) = find_text(&screen, "to enable OpenCode").expect("V2 提示");
         let next = screen[y + 1].chars().collect::<Vec<_>>();
         assert!(
@@ -1643,4 +1679,238 @@ fn overlay_text_keeps_a_one_column_inset_from_the_border() {
         assert_left_inset(&screen, history.title, &format!("{case} 通知历史标题"));
         assert_left_inset(&screen, history.empty, &format!("{case} 通知历史空态"));
     }
+}
+
+#[test]
+fn settings_keyboard_and_monitor_open_existing_destinations() {
+    for docked in [false, true] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        if docked {
+            state.set_endpoint_methods(Some(vec!["client.views.set".into()]));
+            state.compose(160, 45).expect("initial frame");
+            state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+            assert!(state.workbench.enabled);
+        }
+        let mut outcome = ClientShellInput::default();
+        state.open_settings_overlay();
+        state.select_settings_section(ClientSettingsSection::Keyboard, &mut outcome);
+        state.apply_settings_choice(&mut outcome);
+        assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
+        state.overlay = None;
+        for (index, page) in [
+            (0, super::super::observability::Page::Settings),
+            (1, super::super::observability::Page::Monitor),
+        ] {
+            state.open_settings_overlay();
+            state.select_settings_section(ClientSettingsSection::Monitor, &mut outcome);
+            state.select_settings_choice(index);
+            state.apply_settings_choice(&mut outcome);
+            assert!(state.overlay.is_none());
+            assert_eq!(state.observability.monitor_tab, page);
+            assert_eq!(state.observability.page, Some(page));
+            if docked {
+                assert!(state
+                    .workbench
+                    .dock
+                    .root
+                    .contains(&super::super::dock::PanelId::Monitor));
+            }
+            assert!(state.compose(160, 45).is_some());
+        }
+    }
+}
+
+#[test]
+fn welcome_folder_keyboard_and_click_share_real_workspace_creation() {
+    for click in [false, true] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut empty = snapshot();
+        empty.workspaces.clear();
+        empty.tabs.clear();
+        empty.panes.clear();
+        empty.agents.clear();
+        empty.focused_workspace_id = None;
+        empty.focused_tab_id = None;
+        empty.focused_pane_id = None;
+        state.set_snapshot(Box::new(empty));
+        state.set_pane_surface(surface());
+        let frame = state.compose(80, 24).expect("welcome");
+        assert!(!frame_rows(&frame).join("\n").contains("recent"));
+        assert_eq!(state.hits.welcome_actions.len(), 3);
+        if click {
+            let rect = state.hits.welcome_actions[0].0;
+            state.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &mut ClientShellInput::default(),
+            );
+        } else {
+            state.handle_input_bytes(b"o");
+        }
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                target: ClientRenameTarget::OpenDirectory,
+                ..
+            }))
+        ));
+        let mut outcome = ClientShellInput::default();
+        state.save_rename_overlay(&mut outcome);
+        assert!(outcome.actions.is_empty());
+        let Some(ClientShellOverlay::Rename(rename)) = state.overlay.as_mut() else {
+            panic!("directory input");
+        };
+        rename.input = TextEditor::new("E:/project with spaces", false);
+        state.save_rename_overlay(&mut outcome);
+        let [ClientShellAction::Endpoint { request, .. }] = outcome.actions.as_slice() else {
+            panic!("workspace request: {:?}", outcome.actions);
+        };
+        let crate::api::schema::Method::WorkspaceCreate(params) = &request.method else {
+            panic!("workspace.create expected");
+        };
+        assert_eq!(params.cwd.as_deref(), Some("E:/project with spaces"));
+        assert!(params.focus);
+    }
+}
+
+#[test]
+fn sixty_column_welcome_keeps_action_names_and_bindings_readable_in_both_layouts() {
+    use super::super::chrome::welcome::Action;
+    for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+        let _lang = crate::i18n::lang_guard(lang);
+        for docked in [false, true] {
+            let mut state =
+                ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+            let mut empty = snapshot();
+            empty.workspaces.clear();
+            empty.tabs.clear();
+            empty.panes.clear();
+            empty.agents.clear();
+            empty.focused_workspace_id = None;
+            empty.focused_tab_id = None;
+            empty.focused_pane_id = None;
+            state.set_snapshot(Box::new(empty));
+            state.set_pane_surface(surface());
+            if docked {
+                state.set_endpoint_methods(Some(vec!["client.views.set".into()]));
+                state.compose(60, 20).expect("initial frame");
+                state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+                assert!(state.workbench.enabled);
+            }
+            let screen = frame_rows(&state.compose(60, 20).expect("welcome frame"));
+            let t = &crate::i18n::texts().welcome;
+            let expected = [
+                (Action::OpenFolder, t.open_folder, "o".to_owned()),
+                (
+                    Action::NewWorkspace,
+                    t.new_workspace,
+                    super::super::chrome::key_sequence(
+                        &state.config.keybinds,
+                        &state.config.keybinds.keybinds.new_workspace,
+                    )
+                    .expect("new workspace binding"),
+                ),
+                (
+                    Action::Help,
+                    t.help,
+                    super::super::chrome::key_sequence(
+                        &state.config.keybinds,
+                        &state.config.keybinds.keybinds.help,
+                    )
+                    .expect("help binding"),
+                ),
+            ];
+            assert_eq!(state.hits.welcome_actions.len(), expected.len());
+            for (action, label, key) in expected {
+                let (rect, _) = state
+                    .hits
+                    .welcome_actions
+                    .iter()
+                    .find(|(_, candidate)| *candidate == action)
+                    .expect("action hit");
+                let visible = (rect.y..rect.bottom())
+                    .map(|y| {
+                        screen[usize::from(y)]
+                            .chars()
+                            .skip(usize::from(rect.x))
+                            .take(usize::from(rect.width))
+                            .collect::<String>()
+                    })
+                    .collect::<String>()
+                    .replace(' ', "");
+                assert!(
+                    visible.contains(&label.replace(' ', "")),
+                    "{lang:?} docked={docked}: {label:?} / {visible:?}"
+                );
+                assert!(
+                    visible.contains(&key.replace(' ', "")),
+                    "{lang:?} docked={docked}: {key:?} / {visible:?}"
+                );
+                assert!(!visible.contains('…'));
+            }
+        }
+    }
+}
+
+#[test]
+fn settings_boundary_long_integration_message_is_keyboard_scrollable() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let message = format!(
+        "{} TRUST-TAIL",
+        "请完整阅读授权步骤并确认目录权限。".repeat(35)
+    );
+    let mut state = settings_integrations_state(&["codex"], &[&message]);
+    state.config.mouse_capture = false;
+    state.compose(60, 16).expect("narrow integrations");
+    state.select_settings_choice(1);
+    state.compose(60, 16).expect("message start");
+    let mut seen = String::new();
+    for _ in 0..50 {
+        state.handle_raw_events(vec![RawInputEvent::Key(TerminalKey::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        ))]);
+        let frame = state.compose(60, 16).expect("message page");
+        seen.push_str(&settings_popup_rows(&state, &frame).join(""));
+    }
+    assert!(
+        without_whitespace(&seen).contains("TRUST-TAIL"),
+        "message tail must be reachable"
+    );
+    state.handle_raw_events(vec![RawInputEvent::Key(TerminalKey::new(
+        KeyCode::End,
+        KeyModifiers::NONE,
+    ))]);
+    let frame = state.compose(60, 16).expect("message end");
+    assert!(
+        without_whitespace(&settings_popup_rows(&state, &frame).join("")).contains("TRUST-TAIL")
+    );
+    state.handle_raw_events(vec![RawInputEvent::Key(TerminalKey::new(
+        KeyCode::PageUp,
+        KeyModifiers::NONE,
+    ))]);
+    state.compose(60, 16).expect("previous message page");
+    state.handle_raw_events(vec![RawInputEvent::Key(TerminalKey::new(
+        KeyCode::Home,
+        KeyModifiers::NONE,
+    ))]);
+    state.handle_raw_events(vec![RawInputEvent::Key(TerminalKey::new(
+        KeyCode::Up,
+        KeyModifiers::NONE,
+    ))]);
+    state.compose(60, 16).expect("back to installation row");
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::Settings(ref settings)) if settings.selected == 0)
+    );
+    assert!(state
+        .hits
+        .settings_choices
+        .iter()
+        .any(|(_, index)| *index == 0));
 }

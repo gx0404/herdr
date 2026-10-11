@@ -22,7 +22,7 @@ try {
         Write-Host 'In the test session, check: Ctrl+B Space main menu; Ctrl+B / search; the settings page; dragging the window border.'
         Write-Host 'During continuous output, hold the left button to select; output should continue in the background, and releasing copies what you saw. Shift drag-select is handled by the host terminal (Ghostty GX).'
         Write-Host 'Resize to 60x16, 80x24, 120x40, and 160x50 in turn; check CJK text, IME, scrolling, and the right-click menu.'
-        Write-Host 'Detach with Ctrl+B d to return; this script then cleans up only its own session.'
+        Write-Host 'Detach with the configured binding (default: Ctrl+B q) to return; this script then cleans up only its own session.'
         $context.ServerStarted = $true
         Invoke-SmokeHerdr -Context $context -Arguments @() -Interactive -TimeoutMilliseconds -1 | Out-Null
         $result.runtime = 'PASS'

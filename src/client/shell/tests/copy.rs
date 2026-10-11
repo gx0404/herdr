@@ -1277,6 +1277,7 @@ fn navigator_searches_ancestor_context_and_keeps_split_agents_individually_actio
         panic!("navigator");
     };
     navigator.query.clear();
+    navigator.overview.grouping = super::super::chrome::overview::Grouping::Location;
     let frame = state.compose(160, 48).expect("navigator");
     assert_eq!(state.hits.navigator_popup.width, 116);
     let pane_rows = state

@@ -2,11 +2,16 @@ use super::*;
 use crate::api::schema::{ClientViewSpec, Method};
 use crate::client::shell::dock::{Edge, PanelId};
 use crate::protocol::ServerMessage;
+use crossterm::event::KeyCode;
 
 fn ready() -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+    state.workbench.inspector_visibility.insert(
+        "local".into(),
+        crate::client::shell::dock::InspectorVisibility::Shown,
+    );
     state.set_pane_surface(surface());
     state.compose(120, 40).expect("初始画面");
     state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
@@ -809,6 +814,193 @@ fn maximized_layout_keyboard_rotates_panels_and_moves_the_maximized_target() {
     );
 }
 
+fn arranging_auto_inspector() -> ClientShellState {
+    let mut state = ready();
+    state.workbench.inspector_visibility.insert(
+        "local".into(),
+        crate::client::shell::dock::InspectorVisibility::Auto,
+    );
+    state.workbench_open(PanelId::Agents);
+    state.compose(160, 40).expect("宽屏 Inspector 聚焦");
+    assert_eq!(
+        state
+            .workbench
+            .dock
+            .projected_focus(&state.workbench.geometry),
+        &PanelId::Agents,
+    );
+    state.workbench.arranging = true;
+    state
+}
+
+#[test]
+fn arrange_enter_maximizes_projected_focus_when_auto_inspector_hides() {
+    for (cols, panel) in [(120, PanelId::Terminal(1)), (160, PanelId::Agents)] {
+        for locked in [false, true] {
+            let mut state = arranging_auto_inspector();
+            state.workbench.dock.locked = locked;
+            let before = state.workbench.dock.clone();
+            state.compose(cols, 40).expect("调整布局的当前投影");
+            assert_eq!(state.workbench.dock, before, "投影不改保存的焦点");
+            assert_eq!(
+                state
+                    .workbench
+                    .dock
+                    .projected_focus(&state.workbench.geometry),
+                &panel,
+            );
+
+            let mut outcome = ClientShellInput::default();
+            assert!(state.workbench_key(
+                &crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut outcome,
+            ));
+            let mut expected = before.clone();
+            expected.maximized = Some(panel.clone());
+            assert_eq!(state.workbench.dock, expected, "只最大化有效投影焦点");
+            for width in [cols, 160] {
+                state.compose(width, 40).expect("最大化后窄屏与回宽");
+                assert_eq!(state.workbench.geometry.panels.len(), 1);
+                assert_eq!(state.workbench.geometry.panels[0].0, panel);
+                assert_eq!(state.workbench.dock, expected, "回宽不改保存的布局");
+                assert!(state.workbench.dock.valid());
+            }
+
+            assert!(state.workbench_key(
+                &crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut outcome,
+            ));
+            state.compose(160, 40).expect("还原后回到宽屏布局");
+            assert_eq!(state.workbench.dock, before, "还原保留树、焦点与锁定");
+            assert_eq!(
+                state
+                    .workbench
+                    .dock
+                    .projected_focus(&state.workbench.geometry),
+                &PanelId::Agents,
+            );
+            assert!(state.workbench.dock.valid());
+        }
+    }
+}
+
+#[test]
+fn arrange_shift_arrows_move_projected_focus_when_auto_inspector_hides() {
+    for (cols, panel) in [(120, PanelId::Terminal(1)), (160, PanelId::Agents)] {
+        for (code, edge) in [
+            (KeyCode::Left, Edge::Left),
+            (KeyCode::Right, Edge::Right),
+            (KeyCode::Up, Edge::Top),
+            (KeyCode::Down, Edge::Bottom),
+        ] {
+            for locked in [false, true] {
+                let mut state = arranging_auto_inspector();
+                state.workbench.dock.locked = locked;
+                state.workbench.dock.maximized = Some(PanelId::Agents);
+                let before = state.workbench.dock.clone();
+                state.compose(cols, 40).expect("移动前的当前投影");
+                assert_eq!(state.workbench.dock, before, "投影不改保存的焦点");
+                assert_eq!(
+                    state
+                        .workbench
+                        .dock
+                        .projected_focus(&state.workbench.geometry),
+                    &panel,
+                );
+                let geometry = state.workbench.control_geometry(cols);
+                let target = geometry
+                    .panels
+                    .iter()
+                    .find(|(candidate, _)| candidate != &panel)
+                    .map(|(target, _)| target.clone())
+                    .expect("投影里有另一个可停靠面板");
+                let mut expected = before.clone();
+                assert_eq!(expected.dock(panel.clone(), &target, edge), !locked);
+
+                let mut outcome = ClientShellInput::default();
+                assert!(state.workbench_key(
+                    &crate::input::TerminalKey::new(code, KeyModifiers::SHIFT),
+                    &mut outcome,
+                ));
+                assert_eq!(state.workbench.dock, expected, "移动有效投影焦点");
+                for width in [cols, 160] {
+                    state.compose(width, 40).expect("移动后窄屏与回宽");
+                    assert_eq!(state.workbench.dock, expected);
+                    assert!(state.workbench.dock.valid());
+                    assert_eq!(
+                        state
+                            .workbench
+                            .dock
+                            .projected_focus(&state.workbench.geometry),
+                        if locked && width == 160 {
+                            &PanelId::Agents
+                        } else {
+                            &panel
+                        },
+                    );
+                }
+                assert_eq!(state.workbench.dock.groups, before.groups);
+                assert!(state.workbench.dock.root.contains(&PanelId::Agents));
+                assert!(state.workbench.dock.root.contains(&PanelId::Terminal(1)));
+            }
+        }
+    }
+}
+
+#[test]
+fn arrange_arrows_resize_projected_focus_when_auto_inspector_hides() {
+    for (cols, panel) in [(120, PanelId::Terminal(1)), (160, PanelId::Agents)] {
+        for locked in [false, true] {
+            let mut state = arranging_auto_inspector();
+            state.workbench.dock.locked = locked;
+            state.workbench.dock.maximized = Some(PanelId::Agents);
+            let before = state.workbench.dock.clone();
+            state.compose(cols, 40).expect("缩放前的当前投影");
+            assert_eq!(state.workbench.dock, before, "投影不改保存的焦点");
+            assert_eq!(
+                state
+                    .workbench
+                    .dock
+                    .projected_focus(&state.workbench.geometry),
+                &panel,
+            );
+
+            let mut outcome = ClientShellInput::default();
+            assert!(state.workbench_key(
+                &crate::input::TerminalKey::new(KeyCode::Right, KeyModifiers::NONE),
+                &mut outcome,
+            ));
+            if locked {
+                assert_eq!(state.workbench.dock, before, "锁定不缩放也不退出最大化");
+            } else {
+                assert_ne!(state.workbench.dock.root, before.root, "有效面板真的缩放");
+                assert_eq!(state.workbench.dock.revision, before.revision + 1);
+                assert_eq!(state.workbench.dock.maximized, None);
+            }
+            let resized = state.workbench.dock.clone();
+            for width in [cols, 160] {
+                state.compose(width, 40).expect("缩放后窄屏与回宽");
+                assert_eq!(state.workbench.dock, resized);
+                assert_eq!(state.workbench.dock.focused, before.focused);
+                assert_eq!(state.workbench.dock.groups, before.groups);
+                assert_eq!(state.workbench.dock.locked, locked);
+                assert!(state.workbench.dock.valid());
+                assert_eq!(
+                    state
+                        .workbench
+                        .dock
+                        .projected_focus(&state.workbench.geometry),
+                    if width == 120 {
+                        &PanelId::Terminal(1)
+                    } else {
+                        &PanelId::Agents
+                    },
+                );
+            }
+        }
+    }
+}
+
 fn preferences_path(name: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "herdr-workbench-preferences-{name}-{}.json",
@@ -1394,7 +1586,7 @@ fn locked_layout_stops_advertising_drag_affordances() {
         "锁定后不再显示把手：{rows:#?}"
     );
     assert!(
-        compact(&rows[1]).contains("工作区"),
+        compact(&rows[1]).contains("会话"),
         "标题文字仍在：{:?}",
         rows[1]
     );
@@ -1474,9 +1666,13 @@ fn pane_handles(state: &ClientShellState) -> Vec<(String, Rect)> {
         .collect()
 }
 
-/// 终端面板 body（x = 30 起）里第 `y` 行的前 `len` 个字符。
-fn body_text(rows: &[String], y: u16, len: usize) -> String {
-    rows[usize::from(y)].chars().skip(30).take(len).collect()
+fn body_text(state: &ClientShellState, rows: &[String], y: u16, len: usize) -> String {
+    let x = state.hits.panes.first().expect("pane").rect.x;
+    rows[usize::from(y)]
+        .chars()
+        .skip(usize::from(x))
+        .take(len)
+        .collect()
 }
 
 /// 冒烟 L2：调整布局模式下无边框窗格的 `⠿` 把手不再压住终端首行（截屏 40 里
@@ -1493,9 +1689,15 @@ fn arrange_mode_pane_handle_leaves_the_first_terminal_row_intact() {
     let mut state = arranged_borderless_panes(&[(full, "pane_1")], &[(0, "xyz% FIRST TEXT")]);
     let rows = frame_rows(&state.compose(133, 32).expect("调整布局模式"));
     let pane = state.hits.panes[0].rect;
-    assert_eq!(pane, Rect::new(30, 2, 103, 28), "终端面板 body 起点");
+    let body = panel_body(&state, &PanelId::Terminal(1));
+    assert_eq!((pane.x, pane.y), (body.x, body.y), "终端面板 body 起点");
     assert_eq!(
-        body_text(&rows, pane.y, 15),
+        (pane.width, pane.height),
+        (full.width.min(body.width), full.height.min(body.height)),
+        "窗格限制在当前正文几何内"
+    );
+    assert_eq!(
+        body_text(&state, &rows, pane.y, 15),
         "xyz% FIRST TEXT",
         "把手不压终端首行"
     );
@@ -1547,9 +1749,9 @@ fn stacked_borderless_pane_handles_never_cover_the_pane_above() {
     let texts = [(0, "UPPER TOP"), (12, "UPPER LAST"), (14, "LOWER TOP")];
     let mut state = arranged_borderless_panes(&[(upper, "pane_1"), (lower, "pane_2")], &texts);
     let rows = frame_rows(&state.compose(133, 32).expect("有空隙"));
-    assert_eq!(body_text(&rows, 2, 9), "UPPER TOP");
-    assert_eq!(body_text(&rows, 14, 10), "UPPER LAST");
-    assert_eq!(body_text(&rows, 16, 9), "LOWER TOP");
+    assert_eq!(body_text(&state, &rows, 2, 9), "UPPER TOP");
+    assert_eq!(body_text(&state, &rows, 14, 10), "UPPER LAST");
+    assert_eq!(body_text(&state, &rows, 16, 9), "LOWER TOP");
     let handles = pane_handles(&state);
     let handle_of = |id: &str| {
         handles
@@ -1573,7 +1775,11 @@ fn stacked_borderless_pane_handles_never_cover_the_pane_above() {
     let texts = [(12, "UPPER LAST"), (13, "LOWER TOP")];
     let mut state = arranged_borderless_panes(&[(upper, "pane_1"), (flush, "pane_2")], &texts);
     let rows = frame_rows(&state.compose(133, 32).expect("无空隙"));
-    assert_eq!(body_text(&rows, 14, 10), "UPPER LAST", "不压上方窗格的内容");
+    assert_eq!(
+        body_text(&state, &rows, 14, 10),
+        "UPPER LAST",
+        "不压上方窗格的内容"
+    );
     let handles = pane_handles(&state);
     let lower_handle = handles
         .iter()
@@ -1635,7 +1841,7 @@ fn unfocused_panel_titles_are_readable() {
     state.compose(133, 32).expect("工作台");
     let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
     let title = (0..133)
-        .find(|x| buffer[(*x, 1)].symbol() == "工")
+        .find(|x| buffer[(*x, 1)].symbol() == "会")
         .expect("工作区面板标题");
     let cell = &buffer[(title, 1)];
     assert_ne!(
@@ -1861,9 +2067,12 @@ fn sgr_click(state: &mut ClientShellState, x: u16, y: u16) {
 /// 名字直接切过去；页脚随之说明。
 #[test]
 fn compact_view_title_bar_switches_panels_with_one_click() {
-    // 文档里的阈值：默认布局需要 37 列、13 行；终端旁停靠监控面板后需要 66 列。
     let mut state = ready();
-    for (cols, rows, compact) in [(37, 13, false), (36, 32, true), (37, 12, true)] {
+    state.workbench.inspector_visibility.insert(
+        "local".into(),
+        crate::client::shell::dock::InspectorVisibility::Auto,
+    );
+    for (cols, rows, compact) in [(37, 7, false), (36, 32, true), (37, 6, true)] {
         state.compose(cols, rows).expect("默认布局");
         assert_eq!(
             state.workbench.geometry.compact, compact,
@@ -1889,7 +2098,7 @@ fn compact_view_title_bar_switches_panels_with_one_click() {
         "用例前提：62 列是紧凑视图"
     );
     let title = title_text(&state);
-    for name in ["工作区", "Agents", "client-shell", "监控"] {
+    for name in ["会话", "Inspector", "client-shell", "监控"] {
         assert!(title.contains(name), "切换条列出「{name}」：{title}");
     }
     assert!(
@@ -1897,13 +2106,13 @@ fn compact_view_title_bar_switches_panels_with_one_click() {
         "紧凑视图没有可停靠的目标，不画拖动把手"
     );
     let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
-    let current = &buffer[(title_x(&state, "A"), 1)];
+    let current = &buffer[(title_x(&state, "I"), 1)];
     assert_eq!(
         current.bg, state.config.palette.surface1,
         "当前面板浅一档底色"
     );
     assert!(current.modifier.contains(Modifier::BOLD), "当前面板加粗");
-    let other = &buffer[(title_x(&state, "工"), 1)];
+    let other = &buffer[(title_x(&state, "会"), 1)];
     assert_ne!(other.bg, state.config.palette.surface1, "其它面板平铺");
     let ratio = crate::ui::color::contrast_ratio(other.fg, other.bg).expect("可比较");
     assert!(ratio >= 4.5, "其它面板名对标题栏底色的对比度 {ratio}");
@@ -1963,7 +2172,7 @@ fn compact_switcher_moves_the_maximized_panel_with_the_focus() {
         "用例前提：只投影最大化的终端组"
     );
 
-    let x = title_x(&state, "A");
+    let x = title_x(&state, "I");
     sgr_click(&mut state, x, 1);
     assert_eq!(state.workbench.dock.focused, PanelId::Agents);
     assert_eq!(
@@ -1993,7 +2202,7 @@ fn compact_switcher_falls_back_to_the_focused_title_when_names_do_not_fit() {
     assert!(state.workbench.geometry.compact, "用例前提：紧凑视图");
     let title = rows[1].split_whitespace().collect::<String>();
     assert!(
-        title.contains("Agents") && !title.contains("工作区"),
+        title.contains("Inspector") && !title.contains("会话"),
         "只画聚焦面板的标题：{title}"
     );
     assert!(
@@ -2027,7 +2236,7 @@ fn compact_switcher_without_mouse_capture_keeps_the_keyboard_hint() {
         "用例前提：62 列是紧凑视图"
     );
     let title = title_text(&state);
-    for name in ["工作区", "Agents", "client-shell", "监控"] {
+    for name in ["会话", "Inspector", "client-shell", "监控"] {
         assert!(title.contains(name), "切换条照画「{name}」：{title}");
     }
     assert!(
@@ -2048,7 +2257,7 @@ fn compact_switcher_without_mouse_capture_keeps_the_keyboard_hint() {
         "点不到就不提示点击：{footer}"
     );
 
-    let x = title_x(&state, "工");
+    let x = title_x(&state, "会");
     sgr_click(&mut state, x, 1);
     assert_eq!(
         state.workbench.dock.focused,
@@ -2116,7 +2325,7 @@ fn compact_title_bar_blank_space_never_starts_a_dock_drag() {
         panic!("用例前提：标题栏有面板标题命中区：{}", title_text(&state));
     };
     assert!(
-        gap < title_x(&state, "A"),
+        gap < title_x(&state, "I"),
         "用例前提：第一处是名字之间的空隙（{gap}）"
     );
     for x in [gap, blank] {
@@ -2142,13 +2351,13 @@ fn compact_fallback_title_has_no_drag_handle() {
     let rows = frame_rows(&state.compose(24, 32).expect("很窄的紧凑视图"));
     assert!(state.workbench.geometry.compact, "用例前提：紧凑视图");
     assert!(
-        rows[1].contains("Agents") && !rows[1].contains("工作区"),
+        rows[1].contains("Inspector") && !rows[1].contains("会话"),
         "用例前提：回退为只画聚焦面板的标题：{}",
         rows[1]
     );
     assert!(!rows[1].contains('⠿'), "回退标题不画拖动把手：{}", rows[1]);
     let layout = state.workbench.dock.clone();
-    let x = title_x(&state, "A");
+    let x = title_x(&state, "I");
     let dragged = drag_from_title_into_the_panel(&mut state, x, 24, 32);
     assert!(!dragged.contains("放到这里"), "不画停靠预览：{dragged}");
     assert_eq!(state.workbench.dock, layout, "布局不变");
@@ -2186,7 +2395,7 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
             "{size}：用例前提：只投影最大化的 Agents 面板"
         );
         assert!(
-            squash(&screen[1]).starts_with("Agents"),
+            squash(&screen[1]).starts_with("Inspector"),
             "{size}：标题文字左移占位：{}",
             screen[1]
         );
@@ -2206,7 +2415,7 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
         );
 
         let root = state.workbench.dock.root.clone();
-        let x = title_x(&state, "A");
+        let x = title_x(&state, "I");
         let dragged = drag_from_title_into_the_panel(&mut state, x, cols, rows);
         assert!(
             !dragged.contains("放到这里"),
@@ -2263,6 +2472,7 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
         );
         state.open_command_search();
         palette_select(&mut state, "layout");
+        state.compose(cols, rows).expect("layout action revealed");
         state.handle_input_bytes(b"\r");
         assert!(state.workbench.arranging, "{size}：命令搜索进入调整布局");
         state.handle_input_bytes(b"\r");
@@ -2296,6 +2506,9 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
             } else {
                 state.open_command_search();
                 palette_select(&mut state, "layout");
+                state
+                    .compose(cols, rows)
+                    .expect("locked layout action revealed");
                 state.handle_input_bytes(b"\r");
                 assert!(state.workbench.arranging, "{size}：锁定时也能进调整布局");
                 state.handle_input_bytes(b"\r");
@@ -2431,7 +2644,7 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
             "{size}：不登记点不到的窗格把手"
         );
         assert!(
-            squash(&screen[1]).starts_with("工作区"),
+            state.workbench.geometry.rail || squash(&screen[1]).starts_with("会话"),
             "{size}：标题文字左移占位：{}",
             screen[1]
         );
@@ -2461,6 +2674,7 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
         let before = state.workbench.dock.focused.clone();
         state.open_command_search();
         palette_select(&mut state, "layout");
+        state.compose(cols, rows).expect("layout action revealed");
         state.handle_input_bytes(b"\r");
         assert!(state.workbench.arranging, "{size}：命令搜索进入调整布局");
         state.handle_input_bytes(b"\t");
@@ -2752,8 +2966,12 @@ fn workspace_and_agents_panels_share_the_same_edges_and_background() {
         for y in [body.y, body.bottom() - 1] {
             assert_eq!(
                 buffer[(body.x, y)].bg,
-                sidebar_bg,
-                "{case}: {panel:?} 正文用侧栏底色，行 {y}"
+                if panel == PanelId::Agents {
+                    state.config.palette.panel_bg
+                } else {
+                    sidebar_bg
+                },
+                "{case}: {panel:?} 正文用面板所属的底色，行 {y}"
             );
         }
     };

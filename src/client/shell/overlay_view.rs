@@ -12,8 +12,9 @@ impl ClientShellState {
     /// `reveal` 是一次性请求（键盘把选中行滚进视野），这里消费即清；滚轮只改
     /// `scroll`，不改键盘选中（C-20 残留面）。
     pub(super) fn compute_overlay_view(&mut self, cols: u16, rows: u16) {
-        // 联邦 agents 面板的行：按端点分代缓存，键未变则复用（PERF-02）。
-        self.refresh_federated_agent_rows();
+        self.refresh_agent_attention();
+        self.refresh_session_rows();
+        self.compute_session_view(cols, rows);
         let area = Rect::new(0, 0, cols, rows);
         let page_bounds = self.floating_page_rect(cols, rows);
         self.compute_scenes_scroll(area, page_bounds);
@@ -24,6 +25,21 @@ impl ClientShellState {
         self.compute_machine_files_scroll(area, page_bounds);
         self.compute_machines_view(area, page_bounds);
         self.compute_agent_activity_view(area, page_bounds);
+        self.compute_overview_view(area);
+        let inspector_area = if self.workbench.enabled {
+            self.workbench
+                .geometry
+                .panels
+                .iter()
+                .find(|(panel, _)| *panel == super::dock::PanelId::Agents)
+                .map(|(panel, area)| {
+                    super::workbench::body(*area, panel, self.workbench.geometry.compact)
+                })
+                .unwrap_or_default()
+        } else {
+            Rect::default()
+        };
+        self.compute_inspector_view(inspector_area);
     }
 
     fn compute_palette_scroll(&mut self, area: Rect, page_bounds: Option<Rect>) {
@@ -38,11 +54,18 @@ impl ClientShellState {
     }
 
     fn compute_settings_scroll(&mut self, area: Rect, page_bounds: Option<Rect>) {
-        let Self { overlay, .. } = self;
+        let Self {
+            overlay, snapshot, ..
+        } = self;
         let Some(ClientShellOverlay::Settings(settings)) = overlay.as_mut() else {
             return;
         };
-        if let Some(window) = super::render::settings_list_window(area, page_bounds, settings) {
+        let updates = snapshot
+            .as_deref()
+            .is_some_and(|snapshot| snapshot.integration_updates_available);
+        if let Some(window) =
+            super::render::settings_list_window(area, page_bounds, settings, updates)
+        {
             settings.scroll = window.start(settings.scroll, settings.reveal);
         }
         settings.reveal = false;

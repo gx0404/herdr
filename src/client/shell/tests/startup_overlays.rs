@@ -736,7 +736,8 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.replace(' ', "").contains("更新就绪●"));
+    assert!(text.replace(' ', "").contains("更新就绪"));
+    assert!(text.contains('●'));
     let update_index = palette_row_index(&state, "whats_new");
     let update_row = state
         .hits
@@ -746,7 +747,7 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
         .expect("update row hit")
         .0;
     let menu_buffer = menu.to_ratatui_buffer().expect("menu buffer");
-    assert_eq!(menu_buffer[(update_row.x + 2, update_row.y)].symbol(), "更");
+    assert_eq!(menu_buffer[(update_row.x + 3, update_row.y)].symbol(), "更");
     assert_eq!(
         menu_buffer[(update_row.right() - 1, update_row.y)].symbol(),
         "●"
@@ -1094,12 +1095,11 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .expect("settings row hit")
         .0;
     let menu_buffer = menu.to_ratatui_buffer().expect("menu buffer");
+    let badge_x = (settings_row.x..settings_row.right())
+        .find(|x| menu_buffer[(*x, settings_row.y)].symbol() == "●")
+        .expect("settings badge");
     assert_eq!(
-        menu_buffer[(settings_row.right() - 1, settings_row.y)].symbol(),
-        "●"
-    );
-    assert_eq!(
-        menu_buffer[(settings_row.right() - 1, settings_row.y)].fg,
+        menu_buffer[(badge_x, settings_row.y)].fg,
         state.config.palette.accent
     );
 
@@ -1110,7 +1110,7 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(settings_text.replace(' ', "").contains("●集成"));
+    assert!(settings_text.replace(' ', "").contains("集成●"));
     let integrations_tab = state
         .hits
         .settings_tabs
@@ -1120,12 +1120,16 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .expect("integrations tab");
     let settings_buffer = settings.to_ratatui_buffer().expect("settings buffer");
     assert_eq!(
-        settings_buffer[(integrations_tab.x + 1, integrations_tab.y)].fg,
-        state.config.palette.accent
+        settings_buffer[(integrations_tab.right() - 2, integrations_tab.y)].symbol(),
+        "●"
     );
     assert_eq!(
-        settings_buffer[(integrations_tab.x + 3, integrations_tab.y)].fg,
-        state.config.palette.overlay1
+        settings_buffer[(integrations_tab.right() - 2, integrations_tab.y)].fg,
+        state.config.components.status_input
+    );
+    assert_eq!(
+        settings_buffer[(integrations_tab.x + 2, integrations_tab.y)].fg,
+        state.config.palette.subtext0
     );
 }
 
@@ -1150,16 +1154,24 @@ fn combined_update_and_integration_attention_preserves_both_badges() {
     // Move the selection away so both badges keep accent color.
     state.move_palette_selection(2);
     let menu = state.compose(106, 30).expect("combined attention menu");
-    let text = menu
-        .cells
-        .iter()
-        .map(|cell| cell.symbol.as_str())
-        .collect::<String>();
-    let compact = text.replace(' ', "");
-    // Attention items lead the palette: the update row sits above settings.
-    let update = compact.find("更新就绪●").expect("update badge");
-    let settings = compact.find("设置prefix+s●").expect("settings badge");
-    assert!(update < settings);
+    let buffer = menu.to_ratatui_buffer().expect("menu buffer");
+    let mut attention_rows = Vec::new();
+    for id in ["whats_new", "binding:Settings"] {
+        let index = palette_row_index(&state, id);
+        let rect = state
+            .hits
+            .global_menu_rows
+            .iter()
+            .find(|(_, row)| *row == index)
+            .expect("attention row")
+            .0;
+        assert!(
+            (rect.x..rect.right()).any(|x| buffer[(x, rect.y)].symbol() == "●"),
+            "{id} badge remains visible"
+        );
+        attention_rows.push(rect.y);
+    }
+    assert!(attention_rows[0] < attention_rows[1]);
 
     state.overlay = None;
     state.mode = ClientShellMode::Navigate;
@@ -1217,7 +1229,7 @@ fn settings_language_choice_switches_live_and_persists_to_config() {
     assert_eq!(crate::i18n::lang(), crate::i18n::Lang::En);
     assert_eq!(
         crate::i18n::texts().settings.section_language,
-        "language",
+        "general",
         "labels must switch after the choice"
     );
     let persisted = std::fs::read_to_string(&config_path).expect("config written");
@@ -1719,4 +1731,195 @@ fn onboarding_subtitle_and_body_fit_at_44_columns() {
         assert!(screen.contains(&squeeze(text)), "missing {text:?}");
     }
     assert!(!state.hits.overlay_primary.is_empty());
+}
+
+fn settings_boundary_config(name: &str) -> std::path::PathBuf {
+    let base = std::env::temp_dir().join(format!(
+        "herdr-settings-boundary-{name}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&base).expect("config directory");
+    let path = base.join("config.toml");
+    std::fs::write(&path, "[theme]\nname = \"catppuccin\"\n").expect("seed config");
+    crate::config::test_dirs::set_config_path(path.clone());
+    path
+}
+
+#[test]
+fn settings_boundary_welcome_respects_monitor_focus_and_returns_to_terminal() {
+    for docked in [false, true] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut empty = snapshot();
+        empty.workspaces.clear();
+        empty.tabs.clear();
+        empty.panes.clear();
+        empty.agents.clear();
+        empty.focused_workspace_id = None;
+        empty.focused_tab_id = None;
+        empty.focused_pane_id = None;
+        state.set_snapshot(Box::new(empty));
+        state.set_pane_surface(surface());
+        if docked {
+            state.set_endpoint_methods(Some(vec!["client.views.set".into()]));
+            state.compose(160, 45).expect("initial workbench");
+            state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+            assert!(state.workbench.enabled);
+        }
+        state.open_observation_page(
+            super::super::observability::Page::Monitor,
+            &mut ClientShellInput::default(),
+        );
+        state.compose(160, 45).expect("empty-session monitor");
+        assert!(
+            state.hits.welcome_actions.is_empty(),
+            "monitor owns the page"
+        );
+        state.handle_input_bytes(b"\r");
+        assert!(
+            state.overlay.is_none(),
+            "monitor Enter must not open a directory input"
+        );
+        assert_eq!(
+            state.observability.page,
+            Some(super::super::observability::Page::Monitor)
+        );
+        state.handle_input_bytes(b"\x1b");
+        state.compose(160, 45).expect("terminal welcome restored");
+        assert_eq!(state.hits.welcome_actions.len(), 3);
+    }
+}
+
+#[test]
+fn settings_boundary_late_integration_list_preserves_theme_preview_and_apply() {
+    let path = settings_boundary_config("late-list");
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+    let request = match &outcome.actions[0] {
+        ClientShellAction::Endpoint { request, .. } => request.clone(),
+        other => panic!("{other:?}"),
+    };
+    state.select_settings_section(
+        ClientSettingsSection::Theme,
+        &mut ClientShellInput::default(),
+    );
+    let selected = crate::config::THEME_NAMES.len() - 1;
+    state.select_settings_choice(selected);
+    let preview = state.config.palette.panel_bg;
+    state.handle_endpoint_result(
+        "boot-1",
+        &request.id,
+        Ok(crate::api::schema::ResponseResult::IntegrationList {
+            integrations: Vec::new(),
+        }),
+    );
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::Settings(ref settings)) if settings.selected == selected)
+    );
+    assert_eq!(state.config.palette.panel_bg, preview);
+    state.apply_settings_choice(&mut ClientShellInput::default());
+    assert_eq!(
+        state.config.theme_name,
+        crate::config::THEME_NAMES[selected]
+    );
+    assert!(std::fs::read_to_string(path)
+        .expect("saved config")
+        .contains(crate::config::THEME_NAMES[selected]));
+}
+
+#[test]
+fn settings_boundary_reopened_settings_reject_old_list_request() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut outcome);
+    let request = match &outcome.actions[0] {
+        ClientShellAction::Endpoint { request, .. } => request.clone(),
+        other => panic!("{other:?}"),
+    };
+    state.cancel_settings_overlay();
+    state.open_settings_overlay();
+    let mut reopened = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Integrations, &mut reopened);
+    let current_id = match &reopened.actions[0] {
+        ClientShellAction::Endpoint { request, .. } => request.id.clone(),
+        other => panic!("{other:?}"),
+    };
+    let stale = state.handle_endpoint_result(
+        "boot-1",
+        &request.id,
+        Ok(crate::api::schema::ResponseResult::IntegrationList {
+            integrations: vec![crate::api::schema::IntegrationInfo {
+                target: crate::api::schema::IntegrationTarget::Codex,
+                label: "stale".into(),
+                command: "codex".into(),
+                available: true,
+                state: crate::api::schema::IntegrationState::Current,
+            }],
+        }),
+    );
+    assert!(!stale.0 && stale.1.is_empty());
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::Settings(ref settings)) if settings.loading_integrations && settings.integrations.is_empty())
+    );
+    if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
+        settings.selected = 99;
+    }
+    state.handle_endpoint_result(
+        "boot-1",
+        &current_id,
+        Ok(crate::api::schema::ResponseResult::IntegrationList {
+            integrations: vec![crate::api::schema::IntegrationInfo {
+                target: crate::api::schema::IntegrationTarget::Codex,
+                label: "current".into(),
+                command: "codex".into(),
+                available: true,
+                state: crate::api::schema::IntegrationState::Current,
+            }],
+        }),
+    );
+    assert!(
+        matches!(state.overlay, Some(ClientShellOverlay::Settings(ref settings))
+        if !settings.loading_integrations && settings.selected == 0 && settings.integrations[0].label == "current")
+    );
+}
+
+#[test]
+fn settings_boundary_graphite_preview_uses_host_appearance_and_matches_apply() {
+    for appearance in [
+        crate::terminal_theme::HostAppearance::Light,
+        crate::terminal_theme::HostAppearance::Dark,
+    ] {
+        settings_boundary_config("appearance");
+        let config: Config = toml::from_str("[theme]\nname = \"catppuccin\"\n").expect("config");
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        state.host_appearance = Some(appearance);
+        state.open_settings_overlay();
+        let original = state.config.palette.panel_bg;
+        let index = crate::config::THEME_NAMES
+            .iter()
+            .position(|name| *name == "graphite")
+            .expect("adaptive theme");
+        state.select_settings_choice(index);
+        let expected = match appearance {
+            crate::terminal_theme::HostAppearance::Light => Palette::graphite_light(),
+            crate::terminal_theme::HostAppearance::Dark => Palette::graphite_dark(),
+        };
+        assert_eq!(
+            state.config.palette.panel_bg, expected.panel_bg,
+            "{appearance:?} preview"
+        );
+        state.handle_input_bytes(b"\x1b");
+        assert_eq!(state.config.palette.panel_bg, original);
+        state.open_settings_overlay();
+        state.select_settings_choice(index);
+        state.apply_settings_choice(&mut ClientShellInput::default());
+        assert_eq!(
+            state.config.palette.panel_bg, expected.panel_bg,
+            "{appearance:?} apply"
+        );
+    }
 }

@@ -220,6 +220,9 @@ impl ClientShellState {
             hovered: None,
             scroll: 0,
             filter: None,
+            overview: Box::new(super::chrome::overview::State::for_endpoints(
+                &self.endpoints,
+            )),
         };
         let rows =
             render::client_navigator_rows(&self.endpoints, &self.active_endpoint_id, &navigator);
@@ -228,6 +231,8 @@ impl ClientShellState {
             .find(|row| row.current)
             .map(|row| row.target.clone());
         self.overlay = Some(ClientShellOverlay::Navigator(navigator));
+        let (cols, rows) = self.last_composed_size.unwrap_or((120, 40));
+        self.compute_overview_view(Rect::new(0, 0, cols, rows));
     }
 
     pub(super) fn move_navigator_selection(&mut self, delta: isize) {
@@ -248,6 +253,9 @@ impl ClientShellState {
     }
 
     pub(super) fn scroll_navigator_to(&mut self, scroll: usize, viewport_rows: usize) {
+        if self.scroll_overview_to(scroll, viewport_rows) {
+            return;
+        }
         let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() else {
             return;
         };
@@ -262,7 +270,7 @@ impl ClientShellState {
         navigator.selected = rows.get(selected).map(|row| row.target.clone());
     }
 
-    fn move_navigator_workspace(&mut self, forward: bool) {
+    pub(in crate::client::shell) fn move_navigator_workspace(&mut self, forward: bool) {
         let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() else {
             return;
         };
@@ -297,6 +305,13 @@ impl ClientShellState {
     }
 
     pub(super) fn accept_navigator_selection(&mut self, outcome: &mut ClientShellInput) {
+        if matches!(self.overlay, Some(ClientShellOverlay::Navigator(ref n)) if super::chrome::overview::ready(n))
+        {
+            let (cols, rows) = self.last_composed_size.unwrap_or((120, 40));
+            self.compute_overview_view(Rect::new(0, 0, cols, rows));
+            self.activate_overview(super::chrome::overview::Action::Jump, outcome);
+            return;
+        }
         let target = self.overlay.as_ref().and_then(|overlay| match overlay {
             ClientShellOverlay::Navigator(navigator) => {
                 let rows = render::client_navigator_rows(
@@ -468,6 +483,9 @@ impl ClientShellState {
     }
 
     pub(super) fn insert_overlay_text(&mut self, text: &str) -> bool {
+        if self.insert_overview_text(text) {
+            return true;
+        }
         if self.insert_worktree_overlay_text(text) {
             return true;
         }
@@ -657,10 +675,8 @@ impl ClientShellState {
                     outcome.repaint = true;
                 }
                 KeyCode::Enter => {
-                    // 冒烟 B1：目录视图滚轮滚走键盘高亮后，`palette.selected`
-                    // 本身仍是画面上看不见的下标；改用
-                    // `palette_enter_target` 落到当前可见窗口内的项。
                     let Some(selected) = self.palette_enter_target() else {
+                        outcome.repaint = true;
                         return;
                     };
                     self.activate_palette_item(selected, outcome);
@@ -746,6 +762,9 @@ impl ClientShellState {
         }
 
         if self.route_worktree_overlay_key(key, outcome) {
+            return;
+        }
+        if self.route_overview_key(key, outcome) {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Navigator(_))) {
@@ -1073,7 +1092,21 @@ impl ClientShellState {
             return;
         };
         let trimmed = rename.input.trim();
+        if matches!(rename.target, ClientRenameTarget::OpenDirectory) && trimmed.is_empty() {
+            self.overlay = Some(ClientShellOverlay::Rename(rename));
+            outcome.repaint = true;
+            return;
+        }
         let method = match rename.target {
+            ClientRenameTarget::OpenDirectory => Some(crate::api::schema::Method::WorkspaceCreate(
+                crate::api::schema::WorkspaceCreateParams {
+                    source_workspace_id: None,
+                    cwd: Some(trimmed.to_owned()),
+                    focus: true,
+                    label: None,
+                    env: Default::default(),
+                },
+            )),
             ClientRenameTarget::NewWorkspace {
                 source_workspace_id,
                 cwd,

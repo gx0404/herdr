@@ -138,6 +138,7 @@ pub(crate) fn keybind_help_groups(
                     t.workspace_navigation,
                 ),
                 entry(binding_label(&keybinds.goto), t.session_navigator),
+                entry(binding_label(&keybinds.next_attention), t.next_attention),
                 entry(binding_label(&keybinds.new_workspace), t.new_workspace),
                 entry(binding_label(&keybinds.new_worktree), t.new_worktree),
                 entry(binding_label(&keybinds.open_worktree), t.open_worktree),
@@ -202,6 +203,10 @@ pub(crate) fn keybind_help_groups(
                     t.resize_pane_right,
                 ),
                 entry(binding_label(&keybinds.toggle_sidebar), t.toggle_sidebar),
+                entry(
+                    binding_label(&keybinds.toggle_inspector),
+                    t.toggle_inspector,
+                ),
                 entry(binding_label(&keybinds.focus_pane_left), t.focus_pane_left),
                 entry(binding_label(&keybinds.focus_pane_down), t.focus_pane_down),
                 entry(binding_label(&keybinds.focus_pane_up), t.focus_pane_up),

@@ -669,6 +669,12 @@
           "description": "Open the session navigator."
         },
         {
+          "key": "keys.next_attention",
+          "type": "keybinding",
+          "default": "\"prefix+a\"",
+          "description": "Jump to the next session that needs you (needs input, then failed, then review), cycling across workspaces and online machines."
+        },
+        {
           "key": "keys.navigate_workspace_up",
           "type": "keybinding",
           "default": "\"up\"",
@@ -967,6 +973,12 @@
           "type": "keybinding",
           "default": "\"prefix+b\"",
           "description": "Toggle sidebar collapse."
+        },
+        {
+          "key": "keys.toggle_inspector",
+          "type": "keybinding",
+          "default": "\"prefix+i\"",
+          "description": "Toggle the Inspector in the docked layout. Visibility is saved per endpoint."
         },
         {
           "key": "keys.indexed.tabs",

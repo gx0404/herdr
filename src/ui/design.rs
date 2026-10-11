@@ -98,8 +98,6 @@ pub fn meta(palette: &Palette) -> Style {
 }
 
 /// 分区标题（侧栏「工作区」、Inspector 小节名）：元信息色加粗。
-// 会话侧栏与 Inspector（改版后续阶段）接入前只有定义；接入后删掉这条 allow。
-#[allow(dead_code)]
 pub fn section(palette: &Palette) -> Style {
     Style::default()
         .fg(palette.overlay1)
@@ -125,8 +123,6 @@ pub fn key_cap_primary(palette: &Palette) -> Style {
 }
 
 /// 选中行（键盘光标）：浅一档的底色加粗，不用彩色。
-// 会话侧栏的键盘光标（改版后续阶段）接入前只有定义；接入后删掉这条 allow。
-#[allow(dead_code)]
 pub fn selected_row(palette: &Palette) -> Style {
     Style::default()
         .bg(palette.selection_row_bg())
@@ -134,8 +130,6 @@ pub fn selected_row(palette: &Palette) -> Style {
 }
 
 /// 紧凑相对时间：`now` / `12s` / `3m` / `2h` / `3d` / `5w`。
-// 会话行的「多久前」与总览（改版后续阶段）接入前只有单测使用；接入后删掉这条 allow。
-#[allow(dead_code)]
 pub fn compact_age(elapsed_ms: u64) -> String {
     let seconds = elapsed_ms / 1_000;
     match seconds {
@@ -149,8 +143,6 @@ pub fn compact_age(elapsed_ms: u64) -> String {
 }
 
 /// 计时（运行时长）：`42s` / `3m 05s` / `1h 12m`。
-// Inspector 的运行时长（改版后续阶段）接入前只有单测使用；接入后删掉这条 allow。
-#[allow(dead_code)]
 pub fn duration_label(elapsed_ms: u64) -> String {
     let seconds = elapsed_ms / 1_000;
     if seconds < 60 {

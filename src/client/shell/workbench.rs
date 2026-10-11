@@ -21,6 +21,8 @@ pub(super) struct State {
     pub enabled: bool,
     pub dock: DockLayout,
     pub saved: HashMap<String, DockLayout>,
+    pub inspector_visibility: HashMap<String, dock::InspectorVisibility>,
+    pub migrated: HashSet<String>,
     pub source: String,
     pub boot: String,
     pub revision: u64,
@@ -173,20 +175,27 @@ fn surface_panes_match(view: &View, snapshot: &ClientShellSnapshot) -> bool {
 
 impl State {
     pub fn new(config: &ClientShellConfig) -> Self {
+        let mut migrated = HashSet::new();
+        let saved = config
+            .preferences
+            .layouts
+            .iter()
+            .filter_map(|(key, layout)| {
+                let mut layout = layout.clone();
+                if layout.migrate_v1() {
+                    migrated.insert(key.clone());
+                }
+                layout.discard_accounts_panel();
+                layout.valid().then(|| (key.clone(), layout))
+            })
+            .collect();
         Self {
             agent_keyboard_target: None,
             enabled: false,
             dock: DockLayout::default(),
-            saved: config
-                .preferences
-                .layouts
-                .iter()
-                .filter_map(|(key, layout)| {
-                    let mut layout = layout.clone();
-                    layout.discard_accounts_panel();
-                    layout.valid().then(|| (key.clone(), layout))
-                })
-                .collect(),
+            saved,
+            migrated,
+            inspector_visibility: config.preferences.inspector_visibility.clone(),
             source: String::new(),
             boot: String::new(),
             revision: 0,
@@ -245,8 +254,61 @@ impl State {
         self.stale_until = None;
     }
 
+    pub fn control_geometry(&self, cols: u16) -> Geometry {
+        self.project_geometry(cols, Rect::new(0, 0, 4096, 4096), true)
+    }
+
+    pub fn geometry(&self, cols: u16, rows: u16) -> Geometry {
+        self.project_geometry(cols, content_area(cols, rows), false)
+    }
+
+    pub fn compute_geometry(&self, cols: u16, rows: u16) -> Geometry {
+        self.geometry(cols, rows)
+    }
+
+    fn project_geometry(&self, cols: u16, area: Rect, controls: bool) -> Geometry {
+        let inspector = self
+            .inspector_visibility
+            .get(&self.source)
+            .copied()
+            .unwrap_or_default()
+            .visible(cols);
+        if cols < super::chrome::sessions::RAIL_BELOW_COLS {
+            if let Some(geometry) =
+                self.dock
+                    .rail_geometry(area, super::chrome::sessions::RAIL_WIDTH, inspector)
+            {
+                return geometry;
+            }
+        }
+        if controls {
+            if inspector {
+                self.dock.layout_geometry(area)
+            } else {
+                self.dock.layout_geometry_with(area, false)
+            }
+        } else if self
+            .inspector_visibility
+            .get(&self.source)
+            .copied()
+            .unwrap_or_default()
+            == dock::InspectorVisibility::Auto
+        {
+            self.dock.geometry(area)
+        } else {
+            self.dock.geometry_with(
+                area,
+                if inspector {
+                    dock::InspectorVisibility::Shown
+                } else {
+                    dock::InspectorVisibility::Hidden
+                },
+            )
+        }
+    }
+
     pub fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
-        let geometry = self.dock.geometry(content_area(cols, rows));
+        let geometry = self.compute_geometry(cols, rows);
         let area = geometry
             .panels
             .iter()
@@ -277,14 +339,14 @@ impl State {
     }
 
     pub fn focused_view(&self) -> Option<&View> {
-        let PanelId::Terminal(id) = self.dock.focused else {
+        let PanelId::Terminal(id) = self.dock.projected_focus(&self.geometry) else {
             return None;
         };
         self.views.get(&id.to_string()).filter(|view| {
             self.dock
                 .groups
                 .iter()
-                .any(|group| group.id == id && group.active.as_ref() == Some(&view.tab))
+                .any(|group| group.id == *id && group.active.as_ref() == Some(&view.tab))
         })
     }
 }
@@ -294,14 +356,10 @@ fn set_sidebar(dock: &mut DockLayout, collapsed: bool) {
     dock.locked = false;
     if collapsed {
         dock.close_panel(&PanelId::Workspaces);
-        dock.close_panel(&PanelId::Agents);
     } else if let Some(group) = dock.groups.first() {
         let target = PanelId::Terminal(group.id);
         if !dock.root.contains(&PanelId::Workspaces) {
             dock.dock(PanelId::Workspaces, &target, dock::Edge::Left);
-        }
-        if !dock.root.contains(&PanelId::Agents) {
-            dock.dock(PanelId::Agents, &PanelId::Workspaces, dock::Edge::Bottom);
         }
         dock.focused = target;
     }
@@ -310,11 +368,7 @@ fn set_sidebar(dock: &mut DockLayout, collapsed: bool) {
 
 impl ClientShellState {
     pub(super) fn default_dock(&self) -> DockLayout {
-        let cols = self.last_composed_size.map_or(120, |size| size.0).max(1);
-        DockLayout::from_sidebar(
-            f32::from(self.sidebar_width) / f32::from(cols),
-            self.sidebar_section_split.max(0.6),
-        )
+        DockLayout::default()
     }
 
     pub(super) fn workbench_sidebar(&mut self, collapsed: bool) {
@@ -459,10 +513,12 @@ impl ClientShellState {
                 .iter()
                 .find(|group| group.active == snapshot.focused_tab_id && group.active.is_some())
             {
-                if matches!(
-                    self.workbench.dock.focused,
-                    PanelId::Terminal(_) | PanelId::Workspaces | PanelId::Agents
-                ) {
+                if !restored
+                    && matches!(
+                        self.workbench.dock.focused,
+                        PanelId::Terminal(_) | PanelId::Workspaces | PanelId::Agents
+                    )
+                {
                     self.workbench.dock.focused = PanelId::Terminal(group.id);
                 }
             }
@@ -474,7 +530,7 @@ impl ClientShellState {
         let Some((cols, rows)) = self.last_composed_size else {
             return;
         };
-        let geometry = self.workbench.dock.geometry(content_area(cols, rows));
+        let geometry = self.workbench.compute_geometry(cols, rows);
         let mut views = geometry
             .panels
             .iter()
@@ -496,7 +552,7 @@ impl ClientShellState {
                     tab_id: tab.clone(),
                     cols: area.width,
                     rows: area.height,
-                    focused: panel == &self.workbench.dock.focused,
+                    focused: panel == self.workbench.dock.projected_focus(&geometry),
                 })
             })
             .collect::<Vec<_>>();
@@ -506,6 +562,18 @@ impl ClientShellState {
             }
         }
         self.workbench.geometry = geometry;
+        if self.workbench.migrated.remove(&self.workbench.source) {
+            outcome.repaint |= self.push_endpoint_notice(
+                ClientEndpointNoticeKind::Success,
+                "dock-layout-v2",
+                super::observability::tr("Layout upgraded", "布局已升级"),
+                super::observability::tr(
+                    "Your terminal groups are preserved. Inspector is now on the right.",
+                    "终端分组已保留，Inspector 已移到右侧。",
+                ),
+            );
+            self.schedule_chrome_preferences(now);
+        }
         if self.workbench.pending
             || now < self.workbench.next_request
             || (views == self.workbench.requested

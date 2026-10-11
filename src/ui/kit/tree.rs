@@ -147,7 +147,7 @@ pub(crate) fn render_tree_prefix(
     let mut cursor = Cursor {
         x,
         y,
-        max_width,
+        max_width: max_width.min(tree_prefix_width(depth)),
         used: 0,
     };
 

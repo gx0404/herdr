@@ -238,6 +238,12 @@ impl ClientShellState {
                 },
                 other => other,
             };
+            if self.notification_focused
+                && matches!(event, RawInputEvent::Text(_) | RawInputEvent::Paste(_))
+            {
+                self.notification_focused = false;
+                outcome.repaint = true;
+            }
             if let Some(update) = host_theme_update(&event) {
                 push_host_theme_update(&mut outcome.requests, update);
             }
@@ -599,6 +605,10 @@ impl ClientShellState {
         {
             return true;
         }
+        if matches!(self.overlay.as_ref(), Some(ClientShellOverlay::Navigator(n)) if n.overview.editing)
+        {
+            return true;
+        }
         matches!(
             self.overlay.as_ref(),
             Some(ClientShellOverlay::Rename(_))
@@ -691,6 +701,9 @@ impl ClientShellState {
         if let Some(target) = self.popup_input_target() {
             return Some(target);
         }
+        if self.route_notification_key(key, outcome) {
+            return None;
+        }
         if self.popup_pending && self.overlay.is_none() {
             return None;
         }
@@ -757,8 +770,14 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return None;
                 }
+                if self.welcome_key(key, outcome) {
+                    return None;
+                }
                 if self.workbench_key(key, outcome)
-                    || self.agent_tree_key(key, outcome)
+                    || self.inspector_key(key, outcome)
+                    || ((!self.workbench.enabled
+                        || self.workbench.dock.focused != super::dock::PanelId::Agents)
+                        && self.agent_tree_key(key, outcome))
                     || self.observation_key(key, outcome)
                 {
                     return None;
@@ -1166,6 +1185,7 @@ impl ClientShellState {
                 ClientInputTarget::Pane(_) => None,
             }),
             popup_pending: self.popup_pending,
+            notification_focused: self.notification_focused,
             retained_selection: self
                 .selection
                 .as_ref()

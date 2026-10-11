@@ -417,6 +417,9 @@ pub struct KeysConfig {
     /// Enter link hints mode: visible pane URLs get two-letter markers opened by
     /// typing them. Default: "prefix+u".
     pub link_hints: BindingConfig,
+    /// Jump to the next session that needs you (needs input, then failed, then
+    /// review), cycling across workspaces and online machines. Default: "prefix+a".
+    pub next_attention: BindingConfig,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: BindingConfig,
     /// Select the next workspace. Unset by default.
@@ -497,6 +500,8 @@ pub struct KeysConfig {
     pub resize_pane_right: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
+    /// Toggle the Inspector. Default: "prefix+i"
+    pub toggle_inspector: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -562,6 +567,8 @@ pub(crate) struct KeysConfigOverlay {
     open_notification_target: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     link_hints: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_attention: Option<BindingConfig>,
     /// Retired binding Herdr accepted before the floating usage dashboard was
     /// removed. Swallowed (any value shape) so a leftover key neither warns as
     /// unknown nor invalidates the whole `[keys]` section. Not `IgnoredAny`:
@@ -648,6 +655,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_inspector: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
     command: Option<Vec<CommandKeybindConfig>>,
@@ -723,6 +732,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(reload_config);
         apply_field!(open_notification_target);
         apply_field!(link_hints);
+        apply_field!(next_attention);
         apply_field!(previous_workspace);
         apply_field!(next_workspace);
         apply_field!(previous_agent);
@@ -763,6 +773,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_pane_up);
         apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
+        apply_field!(toggle_inspector);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -832,6 +843,7 @@ impl KeysConfig {
         copy_effective_action_field!(reload_config, keybinds.reload_config);
         copy_effective_action_field!(open_notification_target, keybinds.open_notification_target);
         copy_effective_action_field!(link_hints, keybinds.link_hints);
+        copy_effective_action_field!(next_attention, keybinds.next_attention);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
@@ -872,6 +884,7 @@ impl KeysConfig {
         copy_effective_action_field!(resize_pane_up, keybinds.resize_pane_up);
         copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(toggle_inspector, keybinds.toggle_inspector);
         copy_user_field!(indexed);
 
         profile
@@ -1352,6 +1365,7 @@ impl Default for KeysConfig {
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),
             link_hints: BindingConfig::one("prefix+u"),
+            next_attention: BindingConfig::one("prefix+a"),
             previous_workspace: BindingConfig::empty(),
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),
@@ -1392,6 +1406,7 @@ impl Default for KeysConfig {
             resize_pane_up: BindingConfig::empty(),
             resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+b"),
+            toggle_inspector: BindingConfig::one("prefix+i"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),

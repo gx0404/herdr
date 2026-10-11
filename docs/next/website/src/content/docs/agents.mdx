@@ -5,7 +5,15 @@ description: See which coding agents work with Herdr, either supported by Herdr 
 
 Herdr is built for running more than one coding agent at a time. Each agent stays in a real terminal pane with its shell, logs, prompts, and running processes intact. Herdr tracks which panes contain agents, rolls their state up to tabs and workspaces, and lets you jump straight to the pane that needs attention instead of polling every terminal by hand.
 
+The [Sessions sidebar](/docs/concepts/#session-sidebar) brings workspaces, tabs, agent sessions, ordinary terminals, and read-only External activity into one tree. `prefix+a` cycles through online pane sessions that need input, failed, or await review, in that order; it excludes offline caches and External entries.
+
 To coordinate agents from scripts or from another agent, see [Agent automation](/docs/agent-automation/).
+
+The agent overview (`prefix+g`) groups sessions as **Needs input → Failed → To review → Working → Idle**. Press `g` to switch to location navigation, which retains machines, workspaces, and ordinary terminals. Space opens a preview of the received insight, including questions, options, failure details, model and location; it does not claim to recover text already shortened by the server. Enter jumps to the real pane.
+
+Use `r` / `u` / `R` to mark read, mark unread, or mark all read locally. A manual unread mark survives viewing that pane until you explicitly mark it read or the next turn/agent identity/server boot invalidates it. Up to 256 manual marks are saved per client across endpoints. Failure attention and lifecycle are not changed. Offline cached sessions are dimmed and cannot send actions.
+
+For idle or review sessions, `e` opens a multiline reply draft only when that endpoint explicitly advertises `agent.prompt`. Enter inserts a newline; Ctrl+Enter or **Send** confirms submission with `wait = None`. Working, failed, and permission/question-blocked agents cannot be replied to here: use **Jump and answer** instead. Sending is single-flight; errors and timeouts keep the draft but never trigger an automatic retry. A changed target, boot, replacement identity, or closed overview fences late responses. A timeout does not prove the server failed to submit the prompt, so check the terminal before retrying.
 
 ## Supported agents
 

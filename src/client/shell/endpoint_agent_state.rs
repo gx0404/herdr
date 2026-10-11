@@ -3,8 +3,28 @@ use std::collections::{HashMap, HashSet};
 use crate::api::schema::AgentStatus;
 use crate::protocol::{ClientShellAgent, ClientShellSnapshot, PaneSurfaceFrame};
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct ReadMark {
+    pub(super) boot: String,
+    pub(super) pane: String,
+    pub(super) launch: u64,
+    pub(super) sequence: u64,
+    pub(super) read: bool,
+}
+
+impl ReadMark {
+    fn matches(&self, boot: &str, agent: &ClientShellAgent) -> bool {
+        self.boot == boot
+            && self.pane == agent.pane_id
+            && self.launch == agent.launch_seq
+            && self.sequence == agent.state_change_seq
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct EndpointAgentPresentation {
+    manual: Vec<ReadMark>,
+    imported: bool,
     boot_id: Option<String>,
     acknowledged: HashMap<String, u64>,
     completed: HashMap<String, u64>,
@@ -16,6 +36,69 @@ pub(super) struct EndpointAgentPresentation {
 }
 
 impl EndpointAgentPresentation {
+    pub(super) fn import_marks(&mut self, marks: &[ReadMark]) {
+        if !self.imported {
+            self.manual = marks.iter().take(256).cloned().collect();
+            self.imported = true;
+        }
+    }
+
+    pub(super) fn marks(&self) -> &[ReadMark] {
+        &self.manual
+    }
+
+    pub(super) fn marks_imported(&self) -> bool {
+        self.imported
+    }
+
+    pub(super) fn acknowledge_agent(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        pane: &str,
+    ) -> bool {
+        let Some(agent) = snapshot.agents.iter_mut().find(|agent| {
+            agent.pane_id == pane
+                && matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
+        }) else {
+            return false;
+        };
+        self.acknowledged
+            .insert(pane.to_owned(), agent.state_change_seq);
+        agent.agent_status = self.projected_status(agent);
+        project_aggregate_status(snapshot);
+        true
+    }
+
+    pub(super) fn mark(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        pane: &str,
+        read: bool,
+    ) -> bool {
+        let Some(agent) = snapshot.agents.iter().find(|agent| agent.pane_id == pane) else {
+            return false;
+        };
+        if !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done) {
+            return false;
+        }
+        self.manual.retain(|mark| mark.pane != pane);
+        if self.manual.len() >= 256 {
+            self.manual.remove(0);
+        }
+        self.manual.push(ReadMark {
+            boot: snapshot.boot_id.clone(),
+            pane: pane.into(),
+            launch: agent.launch_seq,
+            sequence: agent.state_change_seq,
+            read,
+        });
+        for agent in &mut snapshot.agents {
+            agent.agent_status = self.projected_status(agent);
+        }
+        project_aggregate_status(snapshot);
+        true
+    }
+
     pub(super) fn receive_completions(
         &mut self,
         generation: Option<u64>,
@@ -57,6 +140,12 @@ impl EndpointAgentPresentation {
                     .map(|agent| (agent.pane_id.clone(), agent.state_change_seq)),
             );
         }
+        self.manual.retain(|mark| {
+            snapshot.agents.iter().any(|agent| {
+                mark.matches(&snapshot.boot_id, agent)
+                    && matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
+            })
+        });
         let pane_ids: HashSet<&str> = snapshot
             .agents
             .iter()
@@ -154,6 +243,13 @@ impl EndpointAgentPresentation {
     }
 
     pub(super) fn seen(&self, agent: &ClientShellAgent) -> bool {
+        if let Some(mark) = self.manual.iter().find(|mark| {
+            self.boot_id
+                .as_deref()
+                .is_some_and(|boot| mark.matches(boot, agent))
+        }) {
+            return mark.read;
+        }
         self.completed.get(&agent.pane_id).is_none_or(|completion| {
             self.acknowledged
                 .get(&agent.pane_id)

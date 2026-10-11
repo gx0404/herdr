@@ -2647,6 +2647,84 @@ mod tests {
         remove_temp_dir(repo);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn deferred_api_worktree_remove_checks_pending_identity_before_dirty_files() {
+        let _dirs = isolate_test_dirs();
+        for by_checkout_path in [false, true] {
+            let repo = create_committed_repo("api-remove-pending-dirty-repo");
+            let checkout = unique_temp_path("api-remove-pending-dirty-checkout");
+            run_git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "worktree/pending-dirty",
+                    checkout.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+            std::fs::write(checkout.join("README.md"), "changed during removal\n").unwrap();
+            assert!(crate::worktree::checkout_has_dirty_files(&checkout, false).unwrap());
+            let mut app = test_app();
+            let mut child = Workspace::test_new("child");
+            child.identity_cwd = checkout.clone();
+            child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                key: crate::workspace::git_space_metadata(&repo).unwrap().key,
+                label: "api-remove-pending-dirty-repo".into(),
+                repo_root: repo.clone(),
+                checkout_path: checkout.clone(),
+                is_linked_worktree: true,
+            });
+            let child_id = child.id.clone();
+            app.state.workspaces.push(child);
+            app.state.ensure_test_terminals();
+            let checkout_key = crate::worktree::canonical_or_original(&checkout);
+            if by_checkout_path {
+                app.pending_api_worktree_remove_paths
+                    .insert(checkout_key.clone(), 7);
+            } else {
+                app.pending_api_worktree_removes.insert(child_id.clone(), 7);
+            }
+            let (respond_to, response_rx) = response_channel();
+            assert!(app.handle_deferred_worktree_api_request(
+                Request {
+                    id: "pending-dirty".into(),
+                    method: crate::api::schema::Method::WorktreeRemove(WorktreeRemoveParams {
+                        workspace_id: child_id.clone(),
+                        force: false,
+                        trust_repository: false,
+                    }),
+                },
+                respond_to,
+                false,
+            ));
+            let response = response_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("pending removal must reject without checking files being removed");
+            let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(error.error.code, "worktree_operation_in_progress");
+            assert_eq!(app.state.workspaces.len(), 1);
+            assert!(app.event_rx.try_recv().is_err());
+            assert_eq!(
+                std::fs::read_to_string(checkout.join("README.md")).unwrap(),
+                "changed during removal\n"
+            );
+            assert_eq!(
+                if by_checkout_path {
+                    app.pending_api_worktree_remove_paths.get(&checkout_key)
+                } else {
+                    app.pending_api_worktree_removes.get(&child_id)
+                },
+                Some(&7)
+            );
+            remove_temp_dir(checkout);
+            remove_temp_dir(repo);
+        }
+    }
+
     #[test]
     fn deferred_api_worktree_create_rejects_checkout_with_remove_in_flight() {
         let _dirs = isolate_test_dirs();

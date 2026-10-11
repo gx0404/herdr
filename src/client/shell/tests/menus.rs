@@ -351,7 +351,8 @@ fn pane_context_menu_draws_separators_right_aligned_shortcuts_and_dimmed_rows() 
         (t.split_down, &keybinds.split_horizontal),
         (t.close_pane, &keybinds.close_pane),
     ] {
-        let shortcut = keys.labels().into_iter().next().expect("默认键位");
+        let shortcut =
+            super::super::chrome::key_sequence(&state.config.keybinds, keys).expect("默认键位");
         let y = menu_row_with(&state, area, label);
         let cells = row_cells(&state, area, y);
         let start = find_cells(&cells, &shortcut)
@@ -1022,7 +1023,14 @@ fn search_footer_drops_the_press_slash_to_search_hint() {
 
     state.open_command_search();
     let frame = state.compose(100, 24).expect("search frame");
-    let text = compact_text(&frame);
+    let popup = state.hits.menu_popup;
+    let footer_y = popup.bottom() - 2;
+    let text = frame.cells[usize::from(footer_y) * usize::from(frame.width)
+        ..usize::from(footer_y + 1) * usize::from(frame.width)]
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    let text = compact(&text);
     let slash_hint = format!("/{}", compact(t.global_menu.command_search));
     assert!(
         !text.contains(&slash_hint),
@@ -1056,22 +1064,32 @@ fn palette_search_scrollbar_thumb_length_matches_the_visible_ratio() {
 
     let rows = state.hits.global_menu_rows.clone();
     assert!(!rows.is_empty(), "夹具前提：搜索态列表非空");
-    let body_y = rows.iter().map(|(rect, _)| rect.y).min().expect("min y");
-    let viewport_rows = rows.len();
-    let (row_x, row_width) = {
-        let (rect, _) = rows[0];
-        (rect.x, rect.width)
-    };
-    let scrollbar_x = row_x + row_width;
+    let palette = palette_overlay(&state);
+    let projected = palette_rows(palette);
+    let visual = super::super::chrome::command::visual(&projected);
+    let window = super::super::command_palette::palette_window(
+        Rect::new(0, 0, 100, 30),
+        state.floating_page_rect(100, 30),
+        palette,
+    )
+    .expect("search viewport");
+    let viewport_rows = window.visible;
+    let scrollbar_x = window.body.right() - 1;
+    assert!(visual.len() > projected.len(), "分区标题必须占显示行");
+    assert!(rows.iter().all(|(rect, _)| {
+        rect.y >= window.body.y
+            && rect.bottom() <= window.body.bottom()
+            && rect.right() == scrollbar_x
+    }));
 
-    let total_rows = palette_rows(palette_overlay(&state)).len();
+    let total_rows = visual.len();
     assert!(
         total_rows > viewport_rows,
-        "夹具前提：条目数超过一屏才需要滚动条（{total_rows} vs {viewport_rows}）"
+        "夹具前提：显示行数超过一屏才需要滚动条（{total_rows} vs {viewport_rows}）"
     );
 
     let buffer = state.compose_buffer.as_ref().expect("帧缓冲");
-    let thumb_rows = (body_y..body_y + viewport_rows as u16)
+    let thumb_rows = (window.body.y..window.body.bottom())
         .filter(|&y| buffer[(scrollbar_x, y)].symbol() == "┃")
         .count();
 
@@ -1447,7 +1465,7 @@ fn pointer_opened_menus_start_without_a_keyboard_selection() {
     let selected_rows = |state: &ClientShellState, area: Rect| {
         let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
         (area.y + 1..area.bottom().saturating_sub(1))
-            .filter(|y| buffer[(area.x + 2, *y)].bg == state.config.palette.accent)
+            .filter(|y| buffer[(area.x + 2, *y)].bg == state.config.palette.surface1)
             .collect::<Vec<_>>()
     };
 

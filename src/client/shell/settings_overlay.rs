@@ -1,93 +1,106 @@
+use super::super::super::chrome::settings as chrome;
 use super::*;
+use chrome::{NavItem, OptionList, OptionRow};
 
-/// 按显示宽度截断，放不下时以 `…` 收尾（冒烟 M13：集成页头部说明改用这个
-/// 而不是 `put_text` 的硬截断）。
-fn truncate_with_ellipsis(text: &str, max_width: u16) -> String {
-    if usize::from(display_width(text)) <= usize::from(max_width) {
-        return text.to_owned();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_owned();
-    }
-    let budget = usize::from(max_width - 1);
-    let mut used = 0usize;
-    let mut out = String::new();
-    for ch in text.chars() {
-        let width = char_width(ch);
-        if used + width > budget {
-            break;
-        }
-        out.push(ch);
-        used += width;
-    }
-    out.push('…');
-    out
+fn navigation(settings: &ClientSettingsOverlay, updates: bool) -> Vec<NavItem<'static>> {
+    let badge = updates
+        || settings
+            .integrations
+            .iter()
+            .any(|row| row.state == crate::api::schema::IntegrationState::Outdated);
+    ClientSettingsSection::ALL
+        .iter()
+        .map(|section| NavItem {
+            section: *section,
+            label: section.label(),
+            badge: *section == ClientSettingsSection::Integrations && badge,
+        })
+        .collect()
 }
 
-fn choice_style(selected: bool, palette: &Palette) -> Style {
-    if selected {
-        Style::default()
-            .fg(panel_contrast_fg(palette))
-            .bg(palette.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(palette.text).bg(palette.panel_bg)
+fn section_header(section: ClientSettingsSection) -> (&'static str, &'static str) {
+    let t = &crate::i18n::texts().settings;
+    match section {
+        ClientSettingsSection::Language => (t.language, t.language_hint),
+        ClientSettingsSection::Theme => (t.theme, t.theme_hint),
+        ClientSettingsSection::Indicators => (t.indicators, t.indicators_hint),
+        ClientSettingsSection::Toast => (t.toasts, t.toasts_hint),
+        ClientSettingsSection::Sound => (t.sound, t.sound_hint),
+        ClientSettingsSection::Integrations => (t.integrations, t.integrations_hint),
+        ClientSettingsSection::Keyboard => (t.keyboard, t.keyboard_hint),
+        ClientSettingsSection::Monitor => (t.monitor, t.monitor_hint),
     }
 }
 
-fn draw_choice(
-    buffer: &mut Buffer,
-    rect: Rect,
-    label: &str,
-    selected: bool,
-    current: bool,
-    palette: &Palette,
-) {
-    let style = choice_style(selected, palette);
-    buffer.set_style(rect, style);
-    let marker = if selected { "▸" } else { " " };
-    // 冒烟 M9：当前值标记放在行首 marker 位，与标签里可能出现的样例字符
-    // （指示器页 indicator_symbols 的样例串本身就带一个 "✓"）分开，避免
-    // 两个 ✓ 挨在一起分不清哪个是"当前值"。
-    let current_marker = if current { "✓" } else { " " };
-    put_text(
-        buffer,
-        rect.x,
-        rect.y,
-        rect.width,
-        &format!(" {marker}{current_marker} {label}"),
-        style,
-    );
+fn option_rows(settings: &ClientSettingsOverlay) -> Vec<OptionRow<'static>> {
+    let t = &crate::i18n::texts().settings;
+    let options: Vec<(&str, &str)> = match settings.section {
+        ClientSettingsSection::Language => vec![(t.lang_zh, "中文"), (t.lang_en, "English")],
+        ClientSettingsSection::Theme => crate::config::THEME_NAMES
+            .iter()
+            .map(|name| {
+                (
+                    crate::i18n::theme_display_name(name),
+                    if *name == "graphite" {
+                        t.theme_adaptive
+                    } else {
+                        ""
+                    },
+                )
+            })
+            .collect(),
+        ClientSettingsSection::Indicators => vec![
+            (t.indicator_graphite, t.indicator_graphite_detail),
+            (t.indicator_dots, t.indicator_dots_detail),
+            (t.indicator_symbols, t.indicator_symbols_detail),
+        ],
+        ClientSettingsSection::Toast => vec![
+            (t.toast_off, t.toast_off_detail),
+            (t.toast_herdr, t.toast_herdr_detail),
+            (t.toast_terminal, t.toast_terminal_detail),
+            (t.toast_system, t.toast_system_detail),
+        ],
+        ClientSettingsSection::Sound => vec![
+            (t.sound_on, t.sound_on_detail),
+            (t.sound_off, t.sound_off_detail),
+        ],
+        ClientSettingsSection::Keyboard => vec![(t.keyboard, t.keyboard_hint)],
+        ClientSettingsSection::Monitor => vec![
+            (t.monitor_preferences, t.monitor_preferences_detail),
+            (t.monitor_system, t.monitor_system_detail),
+        ],
+        ClientSettingsSection::Integrations => vec![],
+    };
+    options
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, detail))| {
+            let current = if settings.section == ClientSettingsSection::Theme {
+                crate::config::THEME_NAMES.get(index).is_some_and(|name| {
+                    super::super::settings::normalized_theme_name(name)
+                        == super::super::settings::normalized_theme_name(
+                            &settings.original_theme_name,
+                        )
+                })
+            } else {
+                !matches!(
+                    settings.section,
+                    ClientSettingsSection::Keyboard | ClientSettingsSection::Monitor
+                ) && index == settings.current
+            };
+            let row = OptionRow::new(label).detail(detail).current(current);
+            if matches!(
+                settings.section,
+                ClientSettingsSection::Keyboard | ClientSettingsSection::Monitor
+            ) {
+                row.key("enter")
+            } else {
+                row
+            }
+        })
+        .collect()
 }
 
-/// 设置浮层的尺寸：视图计算与渲染共用（STATE-04）。集成页按集成数与安装消息
-/// 折行后的行数加高（消息最多加 6 行，再多就在列表里滚动），其余分区固定 22 行。
-/// 浮层宽度与高度无关，先按默认高度取宽度，再按这个宽度算消息折成几行（N13）。
-fn settings_modal_size(area: Rect, settings: &ClientSettingsOverlay) -> crate::ui::ModalSize {
-    let base = crate::ui::ModalSize::Large.with_height(22);
-    if settings.section != ClientSettingsSection::Integrations {
-        return base;
-    }
-    let message_rows = crate::ui::modal_rect(area, base)
-        .and_then(super::render::panel_inner)
-        .map_or(settings.integration_messages.len(), |inner| {
-            integration_lines(settings, integrations_layout(inner).1)
-                .iter()
-                .filter(|line| line.entry >= settings.integrations.len())
-                .count()
-        });
-    let height = 14u16
-        .saturating_add(settings.integrations.len().max(1) as u16)
-        .saturating_add(message_rows.min(6) as u16);
-    crate::ui::ModalSize::Large.with_height(height.max(22))
-}
-
-/// 列表型分区（主题、集成）的滚动口径：列表区矩形、总行数、选中条目占的
-/// 行区间（首行下标, 行数）。集成页的安装消息折行后一条可能占多行（N13），
-/// 滚动按行计，键盘选中仍按条目计。
 #[derive(Debug, Clone, Copy)]
 pub(in crate::client::shell) struct SettingsListWindow {
     body: Rect,
@@ -96,6 +109,10 @@ pub(in crate::client::shell) struct SettingsListWindow {
 }
 
 impl SettingsListWindow {
+    pub(in crate::client::shell) fn page_rows(&self) -> usize {
+        usize::from(self.body.height).max(1)
+    }
+
     /// 列表首个可见行：先夹到最后一屏；`reveal` 时再把选中条目整条滚进视野，
     /// 条目比视野还高时保证它的首行可见。
     pub(in crate::client::shell) fn start(&self, requested: usize, reveal: bool) -> usize {
@@ -111,43 +128,37 @@ impl SettingsListWindow {
     }
 }
 
-/// 设置浮层列表型分区的滚动窗口：视图计算阶段与渲染阶段共用同一份几何与
-/// 行展开（STATE-04）。非列表分区返回 `None`，滚动位置保持不动。
 pub(in crate::client::shell) fn settings_list_window(
     area: Rect,
     page_bounds: Option<Rect>,
     settings: &ClientSettingsOverlay,
+    integration_updates_available: bool,
 ) -> Option<SettingsListWindow> {
     let outer = page_bounds
         .map(|rect| rect.intersection(area))
-        .or_else(|| crate::ui::modal_rect(area, settings_modal_size(area, settings)))?;
-    let inner = super::render::panel_inner(outer)?;
-    if inner.width < 20 || inner.height < 8 {
-        return None;
+        .or_else(|| crate::ui::modal_rect(area, chrome::modal_size(area)))?;
+    let layout = chrome::settings_layout(
+        super::render::panel_inner(outer)?,
+        &navigation(settings, integration_updates_available),
+    )?;
+    let body = chrome::list_body(layout.content);
+    if settings.section == ClientSettingsSection::Integrations {
+        let (_, list) = integrations_layout(body);
+        let lines = integration_lines(settings, list);
+        return Some(SettingsListWindow {
+            body: list,
+            rows: lines.len(),
+            selected: entry_rows(&lines, settings.selected),
+        });
     }
-    let labels = ClientSettingsSection::ALL
-        .iter()
-        .map(|section| section.label())
-        .collect::<Vec<_>>();
-    let nav_rows = super::super::page::navigation_rows(inner.width, &labels);
-    let layout = super::super::page::PageLayout::new(inner, nav_rows, false, true);
-    match settings.section {
-        ClientSettingsSection::Theme => Some(SettingsListWindow {
-            body: layout.content,
-            rows: crate::config::THEME_NAMES.len(),
-            selected: (settings.selected, 1),
-        }),
-        ClientSettingsSection::Integrations => {
-            let (_, list) = integrations_layout(layout.content);
-            let lines = integration_lines(settings, list);
-            Some(SettingsListWindow {
-                body: list,
-                rows: lines.len(),
-                selected: entry_rows(&lines, settings.selected),
-            })
-        }
-        _ => None,
-    }
+    let rows = option_rows(settings).len();
+    let gap = chrome::option_gap(body, rows);
+    let step = if gap { 2 } else { 1 };
+    Some(SettingsListWindow {
+        body,
+        rows: rows * step,
+        selected: (settings.selected * step, 1),
+    })
 }
 
 pub(super) fn render_settings_overlay(
@@ -158,200 +169,55 @@ pub(super) fn render_settings_overlay(
 ) -> Option<OverlayRender> {
     let palette = cx.palette;
     let t = &crate::i18n::texts().settings;
-    let size = settings_modal_size(buffer.area, settings);
-    let (popup, inner) = modal_panel(buffer, size, palette.accent, cx)?;
-    if inner.width < 20 || inner.height < 8 {
-        return None;
-    }
-    let labels = ClientSettingsSection::ALL
-        .iter()
-        .map(|section| section.label())
-        .collect::<Vec<_>>();
-    let nav_rows = super::super::page::navigation_rows(inner.width, &labels);
-    let stack = super::super::page::PageLayout::new(inner, nav_rows, false, true);
-    // 焦点指示（TOOL-17）：`focus` 此前只写不读，Tab 在导航/正文/按钮之间移动
-    // 时画面没有任何变化。
+    let (popup, inner) = modal_panel(buffer, chrome::modal_size(buffer.area), palette.accent, cx)?;
+    let nav = navigation(settings, integration_updates_available);
+    let layout = chrome::settings_layout(inner, &nav)?;
     let focus = settings.focus;
     let nav_focused = focus == super::super::page::PageFocus::Navigation;
     let content_focused = focus == super::super::page::PageFocus::Content;
-
-    put_text(
+    chrome::paint_frame(buffer, &layout, t.title, palette);
+    let hovered_section = match cx.hover {
+        Some(ChromeHover::SettingsSection(section)) => Some(*section),
+        _ => None,
+    };
+    let tab_hits = chrome::paint_nav(
         buffer,
-        stack.header.x,
-        stack.header.y,
-        stack.header.width,
-        t.title,
-        Style::default()
-            .fg(palette.text)
-            .bg(palette.panel_bg)
-            .add_modifier(Modifier::BOLD),
+        &layout,
+        &nav,
+        settings.section,
+        nav_focused,
+        hovered_section,
+        palette,
+        cx.components,
     );
-
-    let integration_badge = integration_updates_available
-        || settings
-            .integrations
-            .iter()
-            .any(|integration| integration.state == crate::api::schema::IntegrationState::Outdated);
-    let mut tab_x = inner.x;
-    let mut tab_y = stack.navigation.y;
-    let mut tab_hits = Vec::new();
-    for section in ClientSettingsSection::ALL {
-        let badge = *section == ClientSettingsSection::Integrations && integration_badge;
-        let label = if badge {
-            format!(" ● {} ", section.label())
-        } else {
-            format!(" {} ", section.label())
+    let (title, description) = section_header(settings.section);
+    chrome::paint_section_header(buffer, layout.content, title, description, palette);
+    let body = chrome::list_body(layout.content);
+    let choice_hits = if settings.section == ClientSettingsSection::Integrations {
+        let mut hits = Vec::new();
+        render_integrations(buffer, body, settings, cx, &mut hits);
+        hits
+    } else {
+        let rows = option_rows(settings);
+        let gap = chrome::option_gap(body, rows.len());
+        let hovered = match cx.hover {
+            Some(ChromeHover::SettingsChoice(index)) => Some(*index),
+            _ => None,
         };
-        let width = display_width(&label).min(inner.width);
-        if tab_x > inner.x && tab_x.saturating_add(width) > inner.right() {
-            tab_x = inner.x;
-            tab_y += 1;
-        }
-        let rect = Rect::new(tab_x, tab_y, width, 1);
-        let active = *section == settings.section;
-        let style = if active {
-            let style = Style::default()
-                .fg(panel_contrast_fg(palette))
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD);
-            if nav_focused {
-                style.add_modifier(Modifier::UNDERLINED)
-            } else {
-                style
-            }
-        } else {
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg)
-        };
-        buffer.set_style(rect, style);
-        put_text(buffer, rect.x, rect.y, rect.width, &label, style);
-        if badge && !active {
-            put_text(
-                buffer,
-                rect.x.saturating_add(1),
-                rect.y,
-                rect.width.saturating_sub(1).min(2),
-                "● ",
-                Style::default()
-                    .fg(palette.accent)
-                    .bg(palette.panel_bg)
-                    .add_modifier(Modifier::BOLD),
-            );
-        }
-        tab_hits.push((rect, *section));
-        tab_x = tab_x.saturating_add(width.saturating_add(1));
-    }
-    put_text(
-        buffer,
-        inner.x,
-        stack.navigation.bottom(),
-        inner.width,
-        &"─".repeat(inner.width as usize),
-        Style::default().fg(palette.surface0).bg(palette.panel_bg),
-    );
-
-    let content = stack.content;
-    let mut choice_hits = Vec::new();
-    match settings.section {
-        ClientSettingsSection::Language => {
-            render_choice_section(
-                buffer,
-                content,
-                t.language,
-                t.language_hint,
-                &[t.lang_zh, t.lang_en],
-                settings.selected,
-                settings.current,
-                content_focused,
-                palette,
-                &mut choice_hits,
-            );
-        }
-        ClientSettingsSection::Theme => {
-            let visible = usize::from(content.height);
-            // 窗口起点由视图计算阶段写好的 `scroll` 决定（STATE-04）。
-            let scroll = super::super::page::list_start(
-                settings.scroll,
-                settings.selected,
-                crate::config::THEME_NAMES.len(),
-                visible,
-                settings.reveal,
-            );
-            for (visible_index, (index, name)) in crate::config::THEME_NAMES
-                .iter()
-                .enumerate()
-                .skip(scroll)
-                .take(visible)
-                .enumerate()
-            {
-                let rect = Rect::new(
-                    content.x,
-                    content.y + visible_index as u16,
-                    content.width,
-                    1,
-                );
-                draw_choice(
-                    buffer,
-                    rect,
-                    crate::i18n::theme_display_name(name),
-                    index == settings.selected && content_focused,
-                    super::super::settings::normalized_theme_name(name)
-                        == super::super::settings::normalized_theme_name(
-                            &settings.original_theme_name,
-                        ),
-                    palette,
-                );
-                choice_hits.push((rect, index));
-            }
-        }
-        ClientSettingsSection::Indicators => {
-            render_choice_section(
-                buffer,
-                content,
-                t.indicators,
-                t.indicators_hint,
-                &[t.indicator_graphite, t.indicator_dots, t.indicator_symbols],
-                settings.selected,
-                settings.current,
-                content_focused,
-                palette,
-                &mut choice_hits,
-            );
-        }
-        ClientSettingsSection::Sound => {
-            render_choice_section(
-                buffer,
-                content,
-                t.sound,
-                t.sound_hint,
-                &[t.sound_on, t.sound_off],
-                settings.selected,
-                settings.current,
-                content_focused,
-                palette,
-                &mut choice_hits,
-            );
-        }
-        ClientSettingsSection::Toast => {
-            render_choice_section(
-                buffer,
-                content,
-                t.toasts,
-                t.toasts_hint,
-                &[t.toast_off, t.toast_herdr, t.toast_terminal, t.toast_system],
-                settings.selected,
-                settings.current,
-                content_focused,
-                palette,
-                &mut choice_hits,
-            );
-        }
-        ClientSettingsSection::Integrations => {
-            render_integrations(buffer, content, settings, cx, &mut choice_hits);
-        }
-    }
-
-    // 主按钮的作用域是「安装选中」，可点性就取选中行的判据（TOOL-04）：
-    // 别的行待装不该让一个按下去注定无效的主按钮维持可点状态。
+        chrome::paint_options(
+            buffer,
+            body,
+            &OptionList {
+                rows: &rows,
+                start: settings.scroll / if gap { 2 } else { 1 },
+                selected: settings.selected,
+                focused: content_focused,
+                hovered,
+                gap,
+            },
+            palette,
+        )
+    };
     let selected_installable = settings
         .integrations
         .get(settings.selected)
@@ -363,16 +229,21 @@ pub(super) fn render_settings_overlay(
         t.installing
     } else if settings.section == ClientSettingsSection::Integrations {
         t.install_button
+    } else if matches!(
+        settings.section,
+        ClientSettingsSection::Keyboard | ClientSettingsSection::Monitor
+    ) {
+        t.open_button
     } else {
         t.apply_button
     };
     let close_label = crate::ui::modal_close_button_text();
-    let labels: Vec<&str> = if show_primary {
+    let labels = if show_primary {
         vec![primary_label, close_label]
     } else {
         vec![close_label]
     };
-    let buttons = modal_button_row(stack.actions, &labels, 2);
+    let buttons = chrome::footer_button_rects(&layout, &labels);
     let (primary, close) = match buttons.as_slice() {
         [primary, close] => (*primary, *close),
         [close] => (Rect::default(), *close),
@@ -385,8 +256,12 @@ pub(super) fn render_settings_overlay(
             primary_label,
             crate::ui::ModalButtonTone::Primary,
             cx.button_state(
-                &super::feedback::ChromeHover::OverlayPrimary,
-                crate::ui::ModalButtonState::Focused,
+                &ChromeHover::OverlayPrimary,
+                if focus == super::super::page::PageFocus::Actions {
+                    crate::ui::ModalButtonState::Focused
+                } else {
+                    crate::ui::ModalButtonState::Normal
+                },
             ),
             palette,
         );
@@ -397,31 +272,40 @@ pub(super) fn render_settings_overlay(
         close_label,
         crate::ui::ModalButtonTone::Secondary,
         cx.button_state(
-            &super::feedback::ChromeHover::OverlayCancel,
+            &ChromeHover::OverlayCancel,
             crate::ui::ModalButtonState::Normal,
         ),
         palette,
     );
-    {
-        let footer = stack.footer;
-        // `a` 是无确认的批量安装键，只在 Integrations 分区生效，也只在那里
-        // 进键位提示；这个分区的主按钮是「安装选中」而不是「应用」，页脚
-        // 用专属的 `footer_integrations` 措辞与头部 `integrations_hint`
-        // 对齐，不重用通用 `footer`（冒烟 L7）。
-        let line = if settings.section == ClientSettingsSection::Integrations {
-            format!("{}{}", t.footer_integrations, t.footer_install_all)
-        } else {
-            t.footer.to_owned()
-        };
-        put_text(
-            buffer,
-            footer.x,
-            footer.y,
-            footer.width,
-            &line,
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-        );
+    let action_hint = match settings.section {
+        ClientSettingsSection::Integrations => t.hint_install,
+        ClientSettingsSection::Keyboard | ClientSettingsSection::Monitor => t.hint_open,
+        _ => t.hint_apply,
+    };
+    let mut hints = vec![
+        ("←→".into(), t.hint_section.into()),
+        ("↑↓".into(), t.hint_select.into()),
+        ("enter".into(), action_hint.into()),
+    ];
+    if settings.section == ClientSettingsSection::Integrations {
+        hints.push(("a".into(), t.hint_install_all.into()));
     }
+    hints.push((
+        "esc".into(),
+        if settings.section == ClientSettingsSection::Theme {
+            t.hint_cancel_preview
+        } else {
+            t.hint_close
+        }
+        .into(),
+    ));
+    super::super::render_key_hints(
+        buffer,
+        chrome::footer_hint_area(&layout, &buttons),
+        &hints,
+        palette,
+        cx.components,
+    );
 
     Some(OverlayRender {
         area: popup,
@@ -432,68 +316,6 @@ pub(super) fn render_settings_overlay(
         settings_choices: choice_hits,
         ..OverlayRender::default()
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_choice_section(
-    buffer: &mut Buffer,
-    area: Rect,
-    title: &str,
-    description: &str,
-    choices: &[&str],
-    selected: usize,
-    current: usize,
-    focused: bool,
-    palette: &Palette,
-    hits: &mut Vec<(Rect, usize)>,
-) {
-    // 标题与说明离边框留 1 列（冒烟 L4）；选项行整行高亮，文字自带前导空格。
-    let text = super::text_inset(area);
-    put_text(
-        buffer,
-        text.x,
-        text.y,
-        text.width,
-        title,
-        Style::default()
-            .fg(palette.text)
-            .bg(palette.panel_bg)
-            .add_modifier(Modifier::BOLD),
-    );
-    if area.height >= 2 {
-        put_text(
-            buffer,
-            text.x,
-            text.y + 1,
-            text.width,
-            description,
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-        );
-    }
-    // 标题与说明无论如何都会画，所以矮区域也得给它们留行；第三行留白只在有余量
-    // 时才留。否则第一个选项会跟标题写在同一条线上（TOOL-20）。
-    let header_rows = if area.height >= choices.len() as u16 + 3 {
-        3
-    } else {
-        area.height.min(2)
-    };
-    let row_gap = u16::from(area.height >= header_rows + choices.len() as u16 * 2);
-    for (index, choice) in choices.iter().enumerate() {
-        let y = area.y + header_rows + index as u16 * (1 + row_gap);
-        if y >= area.bottom() {
-            break;
-        }
-        let rect = Rect::new(area.x, y, area.width, 1);
-        draw_choice(
-            buffer,
-            rect,
-            choice,
-            focused && index == selected,
-            index == current,
-            palette,
-        );
-        hits.push((rect, index));
-    }
 }
 
 fn installed_count(settings: &ClientSettingsOverlay) -> usize {
@@ -606,7 +428,7 @@ fn render_integrations(
             } else {
                 t.no_targets
             },
-            Style::default().fg(p.overlay0),
+            Style::default().fg(p.subtext0),
         );
         return;
     }
@@ -614,8 +436,8 @@ fn render_integrations(
     if let Some(header) = header.map(super::text_inset) {
         // 一次性提示（「选中的集成无需安装」）占用说明行，不挤掉下方承载
         // 服务端安装结果的消息区。
-        let (line, style) = match settings.integration_notice.as_deref() {
-            Some(notice) => (notice.to_owned(), Style::default().fg(p.yellow)),
+        let (line, color) = match settings.integration_notice.as_deref() {
+            Some(notice) => (notice.to_owned(), p.yellow),
             None => (
                 format!(
                     "{} · ✓ {}/{} · {}",
@@ -624,27 +446,23 @@ fn render_integrations(
                     settings.integrations.len(),
                     t.integrations_hint
                 ),
-                Style::default().fg(p.overlay0),
+                p.subtext0,
             ),
         };
-        // 冒烟 M13：面板窄、文案长时 `put_text` 硬截断不留提示，改先按显示
-        // 宽度截到 `…` 收尾（与其它浮层的省略号风格一致）。
         put_text(
             buffer,
             header.x,
             header.y,
             header.width,
-            &truncate_with_ellipsis(&line, header.width),
-            style,
+            &chrome::truncate_with_ellipsis(&line, header.width),
+            Style::default().fg(color),
         );
     }
     let lines = integration_lines(settings, list);
-    // Fixed status column: labels longer than the old hard-coded 12 columns
-    // (antigravity-cli) otherwise pushed their status out of alignment.
     let label_width = settings
         .integrations
         .iter()
-        .map(|integration| UnicodeWidthStr::width(integration.label.as_str()))
+        .map(|row| display_width(&row.label))
         .max()
         .unwrap_or(12)
         .clamp(10, 18);
@@ -671,27 +489,44 @@ fn render_integrations(
                 crate::api::schema::IntegrationState::NotInstalled if integration.available => {
                     ("+", p.accent, t.state_available)
                 }
-                _ => ("–", p.overlay0, t.state_not_found),
+                _ => ("–", p.overlay1, t.state_not_found),
             };
-            let style = if line.entry == settings.selected {
-                choice_style(true, p)
-            } else {
-                Style::default().fg(color).bg(p.panel_bg)
-            };
-            buffer.set_style(rect, style);
+            let selected = line.entry == settings.selected
+                && settings.focus == super::super::page::PageFocus::Content;
+            let hovered = cx.hover == Some(&ChromeHover::SettingsChoice(line.entry));
+            chrome::paint_options(
+                buffer,
+                rect,
+                &OptionList {
+                    rows: &[OptionRow::new(integration.label.as_str())],
+                    start: 0,
+                    selected: 0,
+                    focused: selected,
+                    hovered: hovered.then_some(0),
+                    gap: false,
+                },
+                p,
+            );
+            let bg = buffer[(rect.x, rect.y)].bg;
             put_text(
                 buffer,
-                rect.x,
+                rect.x + 1,
                 rect.y,
-                rect.width,
-                &format!(
-                    " {marker} {:<width$}  {status}",
-                    integration.label,
-                    width = label_width
-                ),
-                style,
+                1,
+                marker,
+                Style::default().fg(color).bg(bg),
             );
-            // 命中区就是画出来的这一行：滚出视野的集成行不留命中区（N13）。
+            let status_x = rect.x + 3 + label_width + 3;
+            if status_x < rect.right() {
+                put_text(
+                    buffer,
+                    status_x,
+                    rect.y,
+                    rect.right() - status_x,
+                    status,
+                    Style::default().fg(color).bg(bg),
+                );
+            }
             hits.push((rect, line.entry));
         } else if let Some(text) = settings
             .integration_messages
@@ -859,21 +694,13 @@ mod tests {
     fn footer_wording_is_consistent_between_apply_and_integrations() {
         let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
         let t = &crate::i18n::texts().settings;
+        assert_eq!(t.hint_apply, "应用");
         assert!(
-            t.footer.contains("应用"),
-            "通用页脚应该说应用：{}",
-            t.footer
+            !t.hint_apply.contains("保存"),
+            "不能再说保存：{}",
+            t.hint_apply
         );
-        assert!(!t.footer.contains("保存"), "不能再说保存：{}", t.footer);
-        assert!(
-            t.footer_integrations.contains("安装"),
-            "集成页页脚要跟头部一致说安装：{}",
-            t.footer_integrations
-        );
-        assert!(
-            !t.footer_integrations.contains("应用"),
-            "集成页页脚不该说应用：{}",
-            t.footer_integrations
-        );
+        assert_eq!(t.hint_install, "安装选中");
+        assert!(!t.hint_install.contains("应用"));
     }
 }

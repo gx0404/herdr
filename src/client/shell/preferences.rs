@@ -28,6 +28,20 @@ pub(super) struct ClientChromePreferences {
         skip_serializing_if = "std::collections::HashMap::is_empty"
     )]
     pub(super) layouts: std::collections::HashMap<String, super::dock::DockLayout>,
+    #[serde(
+        default,
+        deserialize_with = "read_inspector_visibility",
+        skip_serializing_if = "std::collections::HashMap::is_empty"
+    )]
+    pub(super) inspector_visibility:
+        std::collections::HashMap<String, super::dock::InspectorVisibility>,
+    #[serde(
+        default,
+        deserialize_with = "read_agent_marks",
+        skip_serializing_if = "std::collections::HashMap::is_empty"
+    )]
+    pub(super) agent_marks:
+        std::collections::HashMap<String, Vec<super::endpoint_agent_state::ReadMark>>,
     /// 监控卡片配置；结构不合法（旧版本 / 手改）时按未设置处理，不让整份偏好失效。
     #[serde(
         default,
@@ -63,6 +77,12 @@ pub(super) struct ClientChromePreferences {
         skip_serializing_if = "Option::is_none"
     )]
     pub(super) agent_panel_sort: Option<crate::config::AgentPanelSortConfig>,
+    #[serde(
+        default,
+        deserialize_with = "lenient::session_grouping",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) session_grouping: Option<super::chrome::sessions::SessionGrouping>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) collapsed_groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -75,6 +95,40 @@ pub(super) struct ClientChromePreferences {
     /// Command palette MRU ids (newest first), capped on write.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) palette_recent: Vec<String>,
+}
+
+fn read_agent_marks<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, Vec<super::endpoint_agent_state::ReadMark>>, D::Error>
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    let mut remaining = 256usize;
+    Ok(raw
+        .as_object()
+        .into_iter()
+        .flatten()
+        .take(128)
+        .filter_map(|(key, values)| {
+            if key.len() > 512 {
+                return None;
+            }
+            let marks = values
+                .as_array()?
+                .iter()
+                .take(256)
+                .filter_map(|value| {
+                    let mark: super::endpoint_agent_state::ReadMark =
+                        serde_json::from_value(value.clone()).ok()?;
+                    if remaining == 0 || mark.boot.len() > 128 || mark.pane.len() > 512 {
+                        return None;
+                    }
+                    remaining -= 1;
+                    Some(mark)
+                })
+                .collect::<Vec<_>>();
+            (!marks.is_empty()).then(|| (key.clone(), marks))
+        })
+        .collect())
 }
 
 fn read_pages<'de, D: serde::Deserializer<'de>>(
@@ -151,7 +205,13 @@ macro_rules! lenient_fields {
     };
 }
 
-lenient_fields!(monitor, monitor_tab, monitor_chart_glyphs, agent_panel_sort,);
+lenient_fields!(
+    monitor,
+    monitor_tab,
+    monitor_chart_glyphs,
+    agent_panel_sort,
+    session_grouping,
+);
 
 fn read_layouts<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -165,6 +225,22 @@ fn read_layouts<'de, D: serde::Deserializer<'de>>(
         .filter_map(|(id, value)| {
             let layout: super::dock::DockLayout = serde_json::from_value(value.clone()).ok()?;
             (id.len() <= 512 && layout.valid()).then(|| (id.clone(), layout))
+        })
+        .collect())
+}
+
+fn read_inspector_visibility<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, super::dock::InspectorVisibility>, D::Error> {
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(raw
+        .as_object()
+        .into_iter()
+        .flatten()
+        .take(128)
+        .filter_map(|(id, value)| {
+            let visibility = serde_json::from_value(value.clone()).ok()?;
+            (id.len() <= 512).then(|| (id.clone(), visibility))
         })
         .collect())
 }
@@ -314,6 +390,35 @@ mod tests {
             preferences.pages.keys().collect::<Vec<_>>()
         );
         assert_eq!(preferences.pages.len(), 2, "未知键被丢弃");
+    }
+
+    #[test]
+    fn inspector_preferences_are_lenient_endpoint_scoped_and_accept_v1_layouts() {
+        let preferences: ClientChromePreferences = serde_json::from_str(r#"{"inspector_visibility":{"local":"shown","ssh:dev":"hidden","future":"unknown","bad":42},"sidebar_width":31}"#).expect("lenient preferences");
+        assert_eq!(preferences.inspector_visibility.len(), 2);
+        assert_eq!(
+            preferences.inspector_visibility["local"],
+            super::super::dock::InspectorVisibility::Shown
+        );
+        assert_eq!(
+            preferences.inspector_visibility["ssh:dev"],
+            super::super::dock::InspectorVisibility::Hidden
+        );
+        assert_eq!(preferences.sidebar_width, Some(31));
+        let layout = super::super::dock::DockLayout {
+            version: 1,
+            ..Default::default()
+        };
+        let raw = serde_json::json!({"layouts": {"local": layout}});
+        let preferences: ClientChromePreferences =
+            serde_json::from_value(raw).expect("v1 preferences");
+        assert_eq!(preferences.layouts["local"].version, 1);
+        let mut future = layout;
+        future.version = 3;
+        let preferences: ClientChromePreferences =
+            serde_json::from_value(serde_json::json!({"layouts":{"future":future}}))
+                .expect("future preferences");
+        assert!(preferences.layouts.is_empty());
     }
 
     #[test]

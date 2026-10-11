@@ -13,7 +13,6 @@ pub(super) enum PageFocus {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PageLayout {
     pub header: Rect,
-    pub navigation: Rect,
     pub search: Rect,
     pub content: Rect,
     pub actions: Rect,
@@ -56,7 +55,7 @@ impl PageLayout {
             result
         };
         let header = take(1);
-        let navigation = take(navigation_rows);
+        take(navigation_rows);
         let search = take(u16::from(search));
         take(u16::from(area.height >= 10));
         // `footer_rows == 1` 与旧行为逐格一致：剩余高度为 0 时没有页脚。
@@ -84,7 +83,6 @@ impl PageLayout {
         );
         Self {
             header,
-            navigation,
             search,
             content,
             actions,
@@ -139,24 +137,6 @@ pub(super) fn list_window(
         visible,
         start,
     }
-}
-
-/// 分类窄屏换行，所有入口都保留；内容区域随实际导航高度调整。
-pub(super) fn navigation_rows(width: u16, labels: &[&str]) -> u16 {
-    use unicode_width::UnicodeWidthStr;
-    let mut rows = 1u16;
-    let mut used = 0u16;
-    for label in labels {
-        let size = (label.width().min(u16::MAX as usize) as u16)
-            .saturating_add(3)
-            .min(width);
-        if used > 0 && used.saturating_add(size) > width {
-            rows += 1;
-            used = 0;
-        }
-        used = used.saturating_add(size);
-    }
-    rows
 }
 
 impl super::ClientShellState {

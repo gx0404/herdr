@@ -4,8 +4,9 @@
 //! 每个动作只在 [`ACTIONS`] 里定义一次：稳定 id（最近使用持久化用）、标题与
 //! 菜单短标签的 i18n 键、分类与组、快捷键来源、出现在哪些入口、在右键菜单里的
 //! 身份。可用性由本模块的纯函数判定（[`global_action_state`]、
-//! [`machine_action_state`]），执行只走 [`ClientShellState::run_action`] 这一个
-//! 分派。同一个动作可以作用在「当前聚焦对象」（快捷键语义：命令面板、主菜单）
+//! [`machine_action_state`]），执行由 [`ClientShellState::run_action`] 分派；未读
+//! 标记共用带成功结果的执行接缝，命令面板先执行再关闭与记录最近使用。
+//! 同一个动作可以作用在「当前聚焦对象」（快捷键语义：命令面板、主菜单）
 //! 或「右键点中的对象」上，由 [`ActionTarget`] 区分，条目本身只有一份。
 //!
 //! 机器动作（重连、切换、重命名、编辑、启用、复制修复命令、移除）是同一组条目：
@@ -52,6 +53,10 @@ pub(super) enum ActionId {
     ReloadConfig,
     WorkspacePicker,
     OpenNavigator,
+    NextAttention,
+    ToggleSessionGrouping,
+    MarkUnread,
+    MarkAllRead,
     NewWorkspace,
     NewWorktree,
     OpenWorktree,
@@ -91,6 +96,7 @@ pub(super) enum ActionId {
     LastPane,
     LinkHints,
     ToggleSidebar,
+    ToggleInspector,
     Detach,
     CustomCommand,
     MachineImport,
@@ -394,6 +400,43 @@ pub(super) static ACTIONS: &[ActionSpec] = &[
             Id::OpenNavigator,
             "binding:OpenNavigator",
             |t| t.keybinds.session_navigator,
+            Cat::Workspaces,
+            0,
+        )
+    },
+    ActionSpec {
+        binding: bind!(NextAttention, next_attention),
+        ..spec(
+            Id::NextAttention,
+            "binding:NextAttention",
+            |t| t.keybinds.next_attention,
+            Cat::Workspaces,
+            0,
+        )
+    },
+    ActionSpec {
+        ..spec(
+            Id::ToggleSessionGrouping,
+            "sessions:grouping",
+            |t| t.keybinds.toggle_session_grouping,
+            Cat::Workspaces,
+            0,
+        )
+    },
+    ActionSpec {
+        ..spec(
+            Id::MarkUnread,
+            "agent:mark-unread",
+            |t| t.keybinds.mark_agent_unread,
+            Cat::Workspaces,
+            0,
+        )
+    },
+    ActionSpec {
+        ..spec(
+            Id::MarkAllRead,
+            "agent:mark-all-read",
+            |t| t.keybinds.mark_all_agents_read,
             Cat::Workspaces,
             0,
         )
@@ -825,6 +868,16 @@ pub(super) static ACTIONS: &[ActionSpec] = &[
         )
     },
     ActionSpec {
+        binding: bind!(ToggleInspector, toggle_inspector),
+        ..spec(
+            Id::ToggleInspector,
+            "binding:ToggleInspector",
+            |t| t.keybinds.toggle_inspector,
+            Cat::Settings,
+            1,
+        )
+    },
+    ActionSpec {
         binding: bind!(Detach, detach),
         mobile: true,
         ..spec(
@@ -1237,7 +1290,7 @@ pub(super) fn context_action(
         .map(|spec| spec.id)
 }
 
-/// 全局动作判定所需的上下文。mobile 渲染层只有快照，布局相关字段取假。
+/// 全局动作判定所需的上下文。mobile 渲染层只有快照，布局与未读标记字段取假。
 #[derive(Clone, Copy, Default)]
 pub(super) struct GlobalActionContext<'a> {
     pub(super) snapshot: Option<&'a ClientShellSnapshot>,
@@ -1246,6 +1299,7 @@ pub(super) struct GlobalActionContext<'a> {
     pub(super) layout_locked: bool,
     /// 「调整布局」模式开着（布局菜单里该项打勾）。
     pub(super) arranging: bool,
+    pub(super) can_mark_unread: bool,
 }
 
 impl<'a> GlobalActionContext<'a> {
@@ -1286,6 +1340,8 @@ pub(super) fn global_action_state(id: ActionId, cx: &GlobalActionContext<'_>) ->
                 .is_some_and(|snapshot| snapshot.integration_updates_available),
             ..ActionState::ENABLED
         },
+        ActionId::MarkUnread => ActionState::enabled_if(cx.can_mark_unread),
+        ActionId::ToggleInspector => ActionState::enabled_if(cx.workbench),
         ActionId::CloseMonitor => {
             if !cx.workbench {
                 return ActionState::HIDDEN;
@@ -1343,6 +1399,7 @@ impl ClientShellState {
                     .contains(&super::dock::PanelId::Monitor),
             layout_locked: self.workbench.dock.locked,
             arranging: self.workbench.arranging,
+            can_mark_unread: self.can_mark_focused_agent_unread(),
         }
     }
 
@@ -1394,7 +1451,16 @@ impl ClientShellState {
             | ActionId::LastPane
             | ActionId::LinkHints
             | ActionId::ToggleSidebar
+            | ActionId::ToggleInspector
             | ActionId::Detach => {}
+            ActionId::NextAttention => {
+                self.focus_next_attention(outcome);
+            }
+            ActionId::ToggleSessionGrouping => self.toggle_session_grouping(outcome),
+            ActionId::MarkUnread => {
+                self.mark_focused_agent_unread(outcome);
+            }
+            ActionId::MarkAllRead => self.mark_all_agents_read(),
             ActionId::WhatsNew => self.open_release_notes(),
             ActionId::Notifications => self.open_notification_history(),
             ActionId::ManageMachines => self.open_machines_overlay(),
@@ -1782,6 +1848,10 @@ mod tests {
         ActionId::ReloadConfig,
         ActionId::WorkspacePicker,
         ActionId::OpenNavigator,
+        ActionId::NextAttention,
+        ActionId::ToggleSessionGrouping,
+        ActionId::MarkUnread,
+        ActionId::MarkAllRead,
         ActionId::NewWorkspace,
         ActionId::NewWorktree,
         ActionId::OpenWorktree,
@@ -1821,6 +1891,7 @@ mod tests {
         ActionId::LastPane,
         ActionId::LinkHints,
         ActionId::ToggleSidebar,
+        ActionId::ToggleInspector,
         ActionId::Detach,
         ActionId::CustomCommand,
         ActionId::MachineImport,
@@ -1858,6 +1929,10 @@ mod tests {
             | ActionId::ReloadConfig
             | ActionId::WorkspacePicker
             | ActionId::OpenNavigator
+            | ActionId::NextAttention
+            | ActionId::ToggleSessionGrouping
+            | ActionId::MarkUnread
+            | ActionId::MarkAllRead
             | ActionId::NewWorkspace
             | ActionId::NewWorktree
             | ActionId::OpenWorktree
@@ -1897,6 +1972,7 @@ mod tests {
             | ActionId::LastPane
             | ActionId::LinkHints
             | ActionId::ToggleSidebar
+            | ActionId::ToggleInspector
             | ActionId::Detach
             | ActionId::CustomCommand
             | ActionId::MachineImport
@@ -2065,6 +2141,16 @@ mod tests {
             Some(true),
             "调整布局是二态开关"
         );
+    }
+
+    #[test]
+    fn mark_unread_global_state_requires_a_markable_focused_agent() {
+        let unavailable =
+            global_action_state(ActionId::MarkUnread, &GlobalActionContext::default());
+        assert!(unavailable.visible && !unavailable.enabled);
+        let snapshot = crate::client::shell::tests::snapshot();
+        let shell_only = GlobalActionContext::from_snapshot(&snapshot);
+        assert!(!global_action_state(ActionId::MarkUnread, &shell_only).enabled);
     }
 
     #[test]

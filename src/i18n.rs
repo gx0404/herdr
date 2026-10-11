@@ -260,6 +260,10 @@ pub struct KeybindTexts {
     pub switch_workspace: &'static str,
     pub workspace_navigation: &'static str,
     pub session_navigator: &'static str,
+    pub next_attention: &'static str,
+    pub toggle_session_grouping: &'static str,
+    pub mark_agent_unread: &'static str,
+    pub mark_all_agents_read: &'static str,
     pub new_workspace: &'static str,
     pub new_worktree: &'static str,
     pub open_worktree: &'static str,
@@ -294,6 +298,7 @@ pub struct KeybindTexts {
     pub resize_pane_up: &'static str,
     pub resize_pane_right: &'static str,
     pub toggle_sidebar: &'static str,
+    pub toggle_inspector: &'static str,
     pub focus_pane_left: &'static str,
     pub focus_pane_down: &'static str,
     pub focus_pane_up: &'static str,
@@ -331,6 +336,14 @@ pub struct OverlayTexts {
     pub search_footer: &'static str,
     pub no_matching_keybinds: &'static str,
     pub link_hints_no_links: &'static str,
+}
+
+pub struct WelcomeTexts {
+    pub subtitle: &'static str,
+    pub open_folder: &'static str,
+    pub new_workspace: &'static str,
+    pub help: &'static str,
+    pub path_hint: &'static str,
 }
 
 pub struct DialogTexts {
@@ -406,16 +419,45 @@ pub struct SettingsTexts {
     pub toast_herdr: &'static str,
     pub toast_terminal: &'static str,
     pub toast_system: &'static str,
+    pub section_keyboard: &'static str,
+    pub section_monitor: &'static str,
+    pub theme: &'static str,
+    pub theme_hint: &'static str,
+    /// 自适应主题（`graphite`）行的说明列。
+    pub theme_adaptive: &'static str,
+    pub indicator_graphite_detail: &'static str,
+    pub indicator_dots_detail: &'static str,
+    pub indicator_symbols_detail: &'static str,
+    pub sound_on_detail: &'static str,
+    pub sound_off_detail: &'static str,
+    pub toast_off_detail: &'static str,
+    pub toast_herdr_detail: &'static str,
+    pub toast_terminal_detail: &'static str,
+    pub toast_system_detail: &'static str,
+    pub keyboard: &'static str,
+    pub keyboard_hint: &'static str,
+    pub monitor: &'static str,
+    pub monitor_hint: &'static str,
+    pub monitor_preferences: &'static str,
+    pub monitor_preferences_detail: &'static str,
+    pub monitor_system: &'static str,
+    pub monitor_system_detail: &'static str,
     pub install_button: &'static str,
     pub apply_button: &'static str,
-    pub footer: &'static str,
-    /// Integrations 分区专用页脚：与 `integrations_hint` 用同一套动词
-    /// （Enter 安装选中），不重用通用 `footer` 的「应用」措辞——两者原本
-    /// 各写各的，Enter 的效果在头部与页脚间自相矛盾（冒烟 L7）。
-    pub footer_integrations: &'static str,
-    /// Appended to the footer in the Integrations section: `a` installs every
-    /// pending target without a confirmation, so it belongs in the key hints.
-    pub footer_install_all: &'static str,
+    /// 快捷键 / 监控分区的主按钮：这两页的 Enter 打开对应页面，不写配置。
+    pub open_button: &'static str,
+    /// 页脚键位提示的说明词。集成分区的 Enter 说「安装选中」、与头部
+    /// `integrations_hint` 同一套动词，不重用其它分区的「应用」（冒烟 L7）。
+    pub hint_select: &'static str,
+    pub hint_section: &'static str,
+    pub hint_apply: &'static str,
+    pub hint_install: &'static str,
+    /// `a` installs every pending target without a confirmation, so the
+    /// Integrations section lists it among the key hints.
+    pub hint_install_all: &'static str,
+    pub hint_open: &'static str,
+    pub hint_close: &'static str,
+    pub hint_cancel_preview: &'static str,
     pub integrations: &'static str,
     pub integrations_hint: &'static str,
     pub loading: &'static str,
@@ -499,11 +541,6 @@ pub struct MonitorTexts {
 }
 
 pub struct SidebarTexts {
-    pub spaces: &'static str,
-    pub agents: &'static str,
-    pub new: &'static str,
-    pub machines: &'static str,
-    pub new_endpoint_fmt: &'static str,
     pub menu: &'static str,
     pub attention_menu: &'static str,
     pub local: &'static str,
@@ -513,7 +550,6 @@ pub struct SidebarTexts {
     pub wt_detached: &'static str,
     pub wt_root: &'static str,
     pub wt_prunable: &'static str,
-    pub sort_grouped: &'static str,
     pub no_matching_agents: &'static str,
 }
 
@@ -581,12 +617,8 @@ pub struct MobileTexts {
     pub tab_label_pos_fmt: &'static str,
     pub no_agents: &'static str,
     pub all_idle: &'static str,
-    pub section_machines: &'static str,
-    pub section_spaces: &'static str,
     pub section_tabs: &'static str,
     pub section_menu: &'static str,
-    pub agents_label_fmt: &'static str,
-    pub agents_plain: &'static str,
     pub new_workspace: &'static str,
     pub new_tab: &'static str,
     pub close: &'static str,
@@ -1104,13 +1136,8 @@ pub struct ScenesTexts {
 /// Agents 面板（统一树）与 agent 行右键菜单的文案。
 /// `*_fmt` entries are `fill` templates; placeholders are documented inline.
 pub struct AgentPanelTexts {
-    pub sort_launch: &'static str,
     pub external_group: &'static str,
     pub external_unreadable: &'static str,
-    /// 属主在运行、有运行中的节点时的徽标。
-    pub activity_badge_running_fmt: &'static str, // args: running
-    /// 属主在运行、没有运行中的节点但有已结束（完成 + 失败）的节点时的徽标。
-    pub activity_badge_finished_fmt: &'static str, // args: n
     /// 活动摘要里还有没下发的活跃节点（点击打开活动窗口）。
     pub activity_more_fmt: &'static str, // args: n
     /// 活动摘要末尾「已完成 · 失败」行的两段，为 0 的段不画，两段之间用 ` · `。
@@ -2131,6 +2158,7 @@ pub struct CliErrorTexts {
 pub struct Texts {
     pub chrome: ChromeTexts,
     pub onboarding: OnboardingTexts,
+    pub welcome: WelcomeTexts,
     pub context_menu: ContextMenuTexts,
     pub global_menu: GlobalMenuTexts,
     pub keybinds: KeybindTexts,

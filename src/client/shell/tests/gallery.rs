@@ -70,7 +70,40 @@ fn agent(
     activity: ClientShellAgentActivity,
 ) -> ClientShellAgent {
     ClientShellAgent {
-        insight: Default::default(),
+        insight: crate::protocol::ClientShellAgentInsight {
+            session_title: Some(title.into()),
+            model: Some(
+                if name == "codex" {
+                    "gpt-6.1-sol"
+                } else {
+                    "Opus"
+                }
+                .into(),
+            ),
+            working_since_ms: Some(
+                crate::harness::time::system_time_ms(std::time::SystemTime::now())
+                    .unwrap_or_default()
+                    .saturating_sub(185_000),
+            ),
+            last_turn_ms: Some(125_000),
+            updated_at_ms: Some(
+                crate::harness::time::system_time_ms(std::time::SystemTime::now())
+                    .unwrap_or_default()
+                    .saturating_sub(300_000),
+            ),
+            current_tool: (status == AgentStatus::Working)
+                .then(|| "Edit src/client/shell/input.rs".into()),
+            last_message: Some("身份隔离已补齐，正在核对布局和活动读取。".into()),
+            last_prompt: Some("修复断线重连后的焦点与旧响应污染。".into()),
+            question: (status == AgentStatus::Blocked)
+                .then(|| "允许执行 cargo nextest 并修改 src/client/shell.rs 吗？".into()),
+            options: if status == AgentStatus::Blocked {
+                vec!["允许一次".into(), "拒绝".into()]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        },
         pane_id: pane.into(),
         workspace_id: workspace.into(),
         tab_id: tab.into(),
@@ -586,6 +619,52 @@ fn shoot_workbench(
         };
         state.receive_view(GENERATION, view);
     }
+    let mut activity = ClientShellInput::default();
+    state.tick_inspector(now, &mut activity);
+    let reads = state
+        .pending_requests
+        .iter()
+        .filter(|(_, pending)| matches!(pending.kind, PendingEndpointKind::InspectorRead { .. }))
+        .map(|(id, pending)| (id.clone(), pending.boot_id.clone()))
+        .collect::<Vec<_>>();
+    for (request_id, boot_id) in reads {
+        let nodes = (0..8)
+            .map(|index| crate::api::schema::AgentActivityNode {
+                id: format!("detail-{index}"),
+                label: [
+                    "Explore 检测模块",
+                    "Read src/detect/mod.rs",
+                    "Edit src/client/shell.rs",
+                    "Run cargo nextest",
+                    "Check translations",
+                    "Review geometry",
+                    "Validate target race",
+                    "Background build",
+                ][index]
+                    .into(),
+                parent_id: (index == 1 || index == 2).then(|| "detail-0".into()),
+                kind: if index == 0 {
+                    AgentActivityKind::Subagent
+                } else {
+                    AgentActivityKind::Task
+                },
+                status: if index < 2 {
+                    AgentActivityStatus::Running
+                } else {
+                    AgentActivityStatus::Done
+                },
+                ..Default::default()
+            })
+            .collect();
+        state.handle_endpoint_result(
+            &boot_id,
+            &request_id,
+            Ok(crate::api::schema::ResponseResult::AgentActivity {
+                nodes,
+                content: None,
+            }),
+        );
+    }
     state.compose(cols, rows).expect("画廊帧").frame.clone()
 }
 
@@ -924,6 +1003,470 @@ fn ui_gallery() {
     let frame = shoot_classic(&mut state, 140, 40);
     shots.push(Shot::dark("classic prefix 140x40".into(), frame));
 
+    for (name, pane, size, light_theme) in [
+        ("inspector working", "p1", (200, 50), false),
+        ("inspector needs-input", "p3", (160, 45), false),
+        ("inspector failed", "p5", (160, 45), false),
+        ("inspector idle", "p6", (160, 45), false),
+        ("inspector plain", "p2", (160, 45), false),
+        ("inspector narrow-i", "p3", (120, 40), false),
+        ("inspector graphite-light", "p3", (200, 50), true),
+    ] {
+        let config = if light_theme {
+            ClientShellConfig::from_config(&light)
+        } else {
+            config()
+        };
+        let mut state = workbench_state(config);
+        let _ = shoot_workbench(&mut state, size.0, size.1, &mut step);
+        let mut next = gallery_snapshot();
+        next.revision += 1;
+        next.focused_pane_id = Some(pane.into());
+        for entry in &mut next.panes {
+            entry.focused = entry.pane_id == pane;
+        }
+        for entry in &mut next.agents {
+            entry.focused = entry.pane_id == pane;
+        }
+        if let Some(selected) = next.panes.iter().find(|entry| entry.pane_id == pane) {
+            next.focused_tab_id = Some(selected.tab_id.clone());
+            next.focused_workspace_id = Some(selected.workspace_id.clone());
+        }
+        if name == "inspector failed" {
+            let agent = next
+                .agents
+                .iter_mut()
+                .find(|entry| entry.pane_id == pane)
+                .expect("failed agent");
+            agent.agent_status = AgentStatus::Idle;
+            agent.insight.error = Some("测试命令退出码 1：活动读取的目标已经失效。".into());
+            agent.insight.attention = Some(crate::protocol::ClientShellAgentAttention {
+                kind: crate::api::schema::AgentAttentionKind::Failed,
+                ..Default::default()
+            });
+        }
+        state.set_endpoint_snapshot_for_generation(
+            &ClientEndpointId::Local,
+            GENERATION,
+            Box::new(next),
+        );
+        if size.0 < 140 {
+            state.handle_input_bytes(b"\x02i");
+        }
+        let frame = shoot_workbench(&mut state, size.0, size.1, &mut step);
+        shots.push(Shot {
+            title: format!("{name} {}x{}", size.0, size.1),
+            frame,
+            host: if light_theme { LIGHT_HOST } else { DARK_HOST },
+        });
+        if name == "inspector working" {
+            let mut timeline_snapshot = state
+                .snapshot
+                .as_deref()
+                .cloned()
+                .expect("timeline snapshot");
+            for turn in 0..10 {
+                timeline_snapshot.revision += 1;
+                timeline_snapshot.agents[0].agent_status = if turn % 2 == 0 {
+                    AgentStatus::Blocked
+                } else {
+                    AgentStatus::Working
+                };
+                timeline_snapshot.agents[0].insight.state_changed_at_ms = Some(
+                    crate::harness::time::system_time_ms(std::time::SystemTime::now())
+                        .unwrap_or_default()
+                        .saturating_sub((10 - turn) * 60_000),
+                );
+                state.set_endpoint_snapshot_for_generation(
+                    &ClientEndpointId::Local,
+                    GENERATION,
+                    Box::new(timeline_snapshot.clone()),
+                );
+            }
+            state.workbench.dock.focused = PanelId::Agents;
+            state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+                KeyCode::End,
+                KeyModifiers::NONE,
+            ))]);
+            shots.push(Shot::dark(
+                "inspector timeline 200x50".into(),
+                shoot_workbench(&mut state, 200, 50, &mut step),
+            ));
+        }
+    }
+    let mut migrated_config = config();
+    let mut legacy = crate::client::shell::dock::DockLayout::default();
+    legacy.dock(
+        PanelId::Agents,
+        &PanelId::Workspaces,
+        crate::client::shell::dock::Edge::Bottom,
+    );
+    legacy.version = 1;
+    migrated_config
+        .preferences
+        .layouts
+        .insert("local".into(), legacy);
+    let mut migrated = workbench_state(migrated_config);
+    let frame = shoot_workbench(&mut migrated, 200, 50, &mut step);
+    shots.push(Shot::dark("inspector v1 migration 200x50".into(), frame));
+
+    for theme in ["graphite-dark", "graphite-light"] {
+        for (cols, rows) in [(160, 45), (80, 24), (60, 20)] {
+            let mut themed = Config::default();
+            themed.theme.name = Some(theme.into());
+            let host = if theme == "graphite-light" {
+                LIGHT_HOST
+            } else {
+                DARK_HOST
+            };
+            for section in ClientSettingsSection::ALL {
+                let mut state = workbench_state(ClientShellConfig::from_config(&themed));
+                let _ = shoot_workbench(&mut state, cols, rows, &mut step);
+                state.open_settings_overlay();
+                state.select_settings_section(*section, &mut ClientShellInput::default());
+                if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
+                    settings.focus = super::super::page::PageFocus::Content;
+                    settings.loading_integrations = false;
+                    if *section == ClientSettingsSection::Integrations {
+                        settings.integrations = vec![
+                            crate::api::schema::IntegrationInfo {
+                                target: crate::api::schema::IntegrationTarget::Codex,
+                                label: "codex".into(),
+                                command: "codex".into(),
+                                available: true,
+                                state: crate::api::schema::IntegrationState::Outdated,
+                            },
+                            crate::api::schema::IntegrationInfo {
+                                target: crate::api::schema::IntegrationTarget::Claude,
+                                label: "claude".into(),
+                                command: "claude".into(),
+                                available: true,
+                                state: crate::api::schema::IntegrationState::Current,
+                            },
+                        ];
+                        settings.integration_messages = vec!["codex: installation complete; restart the agent to activate the updated hooks.".into()];
+                    }
+                }
+                shots.push(Shot {
+                    title: format!("settings {theme} {section:?} {cols}x{rows}"),
+                    frame: state
+                        .compose(cols, rows)
+                        .expect("settings gallery")
+                        .frame
+                        .clone(),
+                    host,
+                });
+            }
+            let mut state = workbench_state(ClientShellConfig::from_config(&themed));
+            let mut empty = gallery_snapshot();
+            empty.workspaces.clear();
+            empty.tabs.clear();
+            empty.panes.clear();
+            empty.agents.clear();
+            empty.external_agents.clear();
+            empty.focused_workspace_id = None;
+            empty.focused_tab_id = None;
+            empty.focused_pane_id = None;
+            state.set_endpoint_snapshot_for_generation(
+                &ClientEndpointId::Local,
+                GENERATION,
+                Box::new(empty),
+            );
+            shots.push(Shot {
+                title: format!("welcome {theme} {cols}x{rows}"),
+                frame: shoot_workbench(&mut state, cols, rows, &mut step),
+                host,
+            });
+            let mut classic = classic_state(ClientShellConfig::from_config(&themed));
+            classic.set_snapshot(Box::new(
+                state.snapshot.as_deref().cloned().expect("empty snapshot"),
+            ));
+            shots.push(Shot {
+                title: format!("welcome classic {theme} {cols}x{rows}"),
+                frame: shoot_classic(&mut classic, cols, rows),
+                host,
+            });
+            state.overlay = Some(ClientShellOverlay::Help(ClientHelpOverlay {
+                query: TextEditor::default(),
+                search_focused: false,
+                scroll: 0,
+                max_scroll: 0,
+            }));
+            shots.push(Shot {
+                title: format!("help {theme} {cols}x{rows}"),
+                frame: state
+                    .compose(cols, rows)
+                    .expect("help gallery")
+                    .frame
+                    .clone(),
+                host,
+            });
+        }
+    }
+    for theme in ["graphite-dark", "graphite-light"] {
+        for (cols, rows) in [(160, 45), (80, 24), (60, 20)] {
+            let mut themed = Config::default();
+            themed.theme.name = Some(theme.into());
+            let host = if theme == "graphite-light" {
+                LIGHT_HOST
+            } else {
+                DARK_HOST
+            };
+            let mut state = workbench_state(ClientShellConfig::from_config(&themed));
+            let _ = shoot_workbench(&mut state, cols, rows, &mut step);
+            state.config.feedback.animations = false;
+            state.palette_recent = vec!["binding:Settings".into(), "binding:Help".into()];
+            state.open_command_search();
+            shots.push(Shot {
+                title: format!("command sections {theme} {cols}x{rows}"),
+                frame: state
+                    .compose(cols, rows)
+                    .expect("command sections")
+                    .frame
+                    .clone(),
+                host,
+            });
+            if let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_mut() {
+                palette.query = TextEditor::new("settings", false);
+                palette.selected = 0;
+                palette.reveal = true;
+            }
+            shots.push(Shot {
+                title: format!("command filtered keys {theme} {cols}x{rows}"),
+                frame: state
+                    .compose(cols, rows)
+                    .expect("filtered command")
+                    .frame
+                    .clone(),
+                host,
+            });
+            state.overlay = None;
+            state.open_pane_context_menu("p1".into(), 4, 3);
+            shots.push(Shot {
+                title: format!("menu descriptions {theme} {cols}x{rows}"),
+                frame: state
+                    .compose(cols, rows)
+                    .expect("menu descriptions")
+                    .frame
+                    .clone(),
+                host,
+            });
+            state.overlay = None;
+            state.workbench.dock.locked = true;
+            state.toggle_layout_menu();
+            shots.push(Shot {
+                title: format!("menu checked disabled {theme} {cols}x{rows}"),
+                frame: state
+                    .compose(cols, rows)
+                    .expect("layout disabled")
+                    .frame
+                    .clone(),
+                host,
+            });
+            state.overlay = None;
+            let profile = SavedSshEndpoint::new("Remote", "dev@example.com", "gallery")
+                .expect("remote profile");
+            let remote = ClientEndpointId::Ssh(profile.id.clone());
+            state.set_endpoint_catalog(&[profile]);
+            state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+            state.set_endpoint_snapshot(&remote, Box::new(gallery_snapshot()));
+            for (name, kind, sound, title) in [
+                (
+                    "needsinput",
+                    SemanticNotificationKind::NeedsAttention,
+                    None,
+                    "codex 需要你的输入",
+                ),
+                (
+                    "failed",
+                    SemanticNotificationKind::Custom,
+                    Some(SemanticNotificationSound::Request),
+                    "codex 运行失败",
+                ),
+            ] {
+                let body = if name == "failed" {
+                    "远端工具运行失败：无法写入 src/client/shell/state.rs。请检查文件权限与路径，修复后重新运行任务。"
+                } else {
+                    "请确认 src/client/shell/state.rs 的修改。远端智能体正在等待本次操作；完整权限问题含中文和长路径。"
+                };
+                state.record_notification(
+                    super::super::feedback::ClientToastLevel::Error,
+                    title,
+                    Some(body.into()),
+                    Some(super::super::feedback::ClientNotificationTarget {
+                        endpoint_id: remote.clone(),
+                        pane_id: Some("p3".into()),
+                        boot_id: Some("boot-1".into()),
+                    }),
+                );
+                if let Some(record) = state.notification_history.back_mut() {
+                    record.bucket = Some(if name == "failed" {
+                        crate::harness::AgentBucket::Failed
+                    } else {
+                        crate::harness::AgentBucket::NeedsInput
+                    });
+                }
+                state.visible_notification = Some(ClientVisibleNotification {
+                    endpoint_id: remote.clone(),
+                    event: SemanticNotification {
+                        kind,
+                        title: title.into(),
+                        body: Some(body.into()),
+                        sound,
+                        agent: Some("codex".into()),
+                        workspace_id: Some("ws1".into()),
+                        tab_id: Some("ws1-t2".into()),
+                        pane_id: Some("p3".into()),
+                        position: Some(crate::config::ToastHerdrPosition::BottomRight),
+                    },
+                    deadline: Instant::now() + Duration::from_secs(30),
+                });
+                state.notification_focused = true;
+                shots.push(Shot {
+                    title: format!("notification {name} {theme} {cols}x{rows}"),
+                    frame: state
+                        .compose(cols, rows)
+                        .expect("notification card")
+                        .frame
+                        .clone(),
+                    host,
+                });
+            }
+            state.visible_notification = None;
+            state.notification_focused = false;
+            state.open_notification_history();
+            shots.push(Shot {
+                title: format!("notification history body {theme} {cols}x{rows}"),
+                frame: state
+                    .compose(cols, rows)
+                    .expect("history body")
+                    .frame
+                    .clone(),
+                host,
+            });
+        }
+    }
+    for (name, pane, size, light_theme, reply, supported) in [
+        ("overview status", "p1", (160, 45), false, false, true),
+        (
+            "overview permission preview",
+            "p3",
+            (160, 45),
+            false,
+            false,
+            true,
+        ),
+        (
+            "overview permission narrow",
+            "p3",
+            (80, 30),
+            false,
+            false,
+            true,
+        ),
+        (
+            "overview failed preview",
+            "p5",
+            (160, 45),
+            false,
+            false,
+            true,
+        ),
+        ("overview reply", "p6", (160, 45), false, true, true),
+        ("overview reply narrow", "p6", (60, 24), false, true, true),
+        (
+            "overview old-server disabled",
+            "p6",
+            (80, 30),
+            false,
+            true,
+            false,
+        ),
+        ("overview graphite-light", "p6", (160, 45), true, true, true),
+    ] {
+        let cfg = if light_theme {
+            ClientShellConfig::from_config(&light)
+        } else {
+            config()
+        };
+        let mut state = workbench_state(cfg);
+        let _ = shoot_workbench(&mut state, size.0, size.1, &mut step);
+        if supported {
+            state.set_endpoint_methods(Some(vec![
+                "client.views.set".into(),
+                "pane.focus".into(),
+                "agent.prompt".into(),
+            ]));
+        }
+        let mut next = gallery_snapshot();
+        next.revision += 1;
+        {
+            let agent = next
+                .agents
+                .iter_mut()
+                .find(|agent| agent.pane_id == "p5")
+                .expect("failed");
+            agent.agent_status = AgentStatus::Idle;
+            agent.insight.error = Some("退出码 1：活动读取目标已经失效。".into());
+            agent.insight.attention = Some(crate::protocol::ClientShellAgentAttention {
+                kind: crate::api::schema::AgentAttentionKind::Failed,
+                ..Default::default()
+            });
+        }
+        state.set_endpoint_snapshot_for_generation(
+            &ClientEndpointId::Local,
+            GENERATION,
+            Box::new(next),
+        );
+        let review = state.snapshot.as_deref().and_then(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.pane_id == "p4")
+                .map(|agent| {
+                    crate::client::shell::chrome::inspector::Target::for_agent(
+                        ClientEndpointId::Local,
+                        snapshot,
+                        agent,
+                    )
+                })
+        });
+        if let Some(target) = review {
+            state.mark_agent_read(&target, false);
+        }
+        state.open_navigator_overlay();
+        if let Some(ClientShellOverlay::Navigator(n)) = state.overlay.as_mut() {
+            n.selected = Some(ClientNavigatorTarget::Pane {
+                endpoint_id: ClientEndpointId::Local,
+                pane_id: pane.into(),
+            });
+        }
+        state.compose(size.0, size.1).expect("overview selection");
+        if name != "overview status" {
+            state.activate_overview(
+                crate::client::shell::chrome::overview::Action::Preview,
+                &mut ClientShellInput::default(),
+            );
+        }
+        if reply {
+            state.activate_overview(
+                crate::client::shell::chrome::overview::Action::Reply,
+                &mut ClientShellInput::default(),
+            );
+            state
+                .insert_overview_text("请继续核对窄屏布局。\n补齐焦点和旧响应测试，不要代答权限。");
+        }
+        let frame = state
+            .compose(size.0, size.1)
+            .expect("overview frame")
+            .frame
+            .clone();
+        shots.push(Shot {
+            title: format!("{name} {}x{}", size.0, size.1),
+            frame,
+            host: if light_theme { LIGHT_HOST } else { DARK_HOST },
+        });
+    }
     write_shots("gallery", &shots);
 }
 

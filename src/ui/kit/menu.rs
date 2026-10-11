@@ -36,6 +36,7 @@ pub(crate) enum MenuItemKind {
 pub(crate) struct MenuItem<'a> {
     pub kind: MenuItemKind,
     pub label: &'a str,
+    pub description: &'a str,
     pub shortcut: Option<&'a str>,
     pub enabled: bool,
     pub checked: Option<bool>,
@@ -48,6 +49,7 @@ impl<'a> MenuItem<'a> {
         Self {
             kind,
             label,
+            description: "",
             shortcut: None,
             enabled: true,
             checked: None,
@@ -116,6 +118,7 @@ const MIN_LABEL_WITH_SHORTCUT: u16 = 8;
 struct Columns {
     check: u16,
     label: u16,
+    description: u16,
     badge: u16,
     shortcut: u16,
     arrow: u16,
@@ -128,6 +131,9 @@ impl Columns {
             if item.kind == MenuItemKind::Separator {
                 continue;
             }
+            columns.description = columns
+                .description
+                .max(display_width_u16(item.description).min(34));
             columns.label = columns.label.max(display_width_u16(item.label));
             if let Some(shortcut) = item.shortcut {
                 columns.shortcut = columns.shortcut.max(display_width_u16(shortcut));
@@ -160,6 +166,11 @@ pub(crate) fn menu_size(items: &[MenuItem<'_>]) -> (u16, u16) {
     let inner = columns
         .check
         .saturating_add(columns.label)
+        .saturating_add(if columns.description > 0 {
+            columns.description + 2
+        } else {
+            0
+        })
         .saturating_add(columns.badge)
         .saturating_add(columns.shortcut_span())
         .saturating_add(columns.arrow)
@@ -189,10 +200,21 @@ fn row_styles(
                 .bg(palette.red)
                 .fg(contrast_fg(palette, palette.red))
                 .add_modifier(Modifier::BOLD)
+        } else if !item.description.is_empty() {
+            base.fg(palette.text)
+                .bg(palette.surface1)
+                .add_modifier(Modifier::BOLD)
         } else {
             selected_style(palette)
         };
-        return (style, style);
+        return (
+            style,
+            if !item.description.is_empty() && !item.danger {
+                style.fg(palette.subtext0).remove_modifier(Modifier::BOLD)
+            } else {
+                style
+            },
+        );
     }
     let row = if hovered { base.bg(hover_bg) } else { base };
     let label = row.fg(if item.danger {
@@ -234,8 +256,8 @@ pub(crate) fn menu_scroll(items: &[MenuItem<'_>], state: &MenuState, visible: us
 
 /// 画菜单。`anchor` 是左上角的期望位置，放不下时向左 / 向上平移贴住 `bounds`
 /// （与既有右键菜单一致；子菜单要「翻到父菜单左侧」由调用方按 [`menu_size`]
-/// 算好 anchor）。`bounds` 比自然尺寸小时收窄：先截断标签，标签列不足 8 列再丢
-/// 快捷键列（徽标列保留）；行数放不下时只画 [`menu_scroll`] 算出的窗口，上 / 下
+/// 算好 anchor）。收窄时先让出说明列，再让快捷键列，最后截标签；没有说明列的
+/// 传统菜单保留原有标签预算（徽标列保留）。行数放不下时只画滚动窗口，上 / 下
 /// 还有项时在上 / 下边框正中画 `▲` / `▼`。`ascii` 把 `✓` / `▸` / `●` / `▲` /
 /// `▼` 降级为 `*` / `>` / `o` / `^` / `v`。
 pub(crate) fn render_menu(
@@ -294,11 +316,27 @@ pub(crate) fn render_menu(
     }
     let flexible = content.saturating_sub(columns.check + columns.badge + columns.arrow);
     if columns.shortcut > 0
-        && flexible < columns.label.min(MIN_LABEL_WITH_SHORTCUT) + columns.shortcut_span()
+        && flexible
+            < (if columns.description > 0 {
+                columns.label
+            } else {
+                columns.label.min(MIN_LABEL_WITH_SHORTCUT)
+            }) + columns.shortcut_span()
     {
         columns.shortcut = 0;
     }
     let label_budget = flexible.saturating_sub(columns.shortcut_span());
+    let description_width =
+        if columns.description > 0 && label_budget >= columns.label.saturating_add(10) {
+            columns.description.min(label_budget - columns.label - 2)
+        } else {
+            0
+        };
+    let label_budget = if description_width > 0 {
+        columns.label
+    } else {
+        label_budget
+    };
     let hover_bg = state.hover_bg.unwrap_or_else(|| palette.hover_row_bg());
     let (check_glyph, arrow_glyph, badge_glyph) = if ascii {
         ("*", ">", "o")
@@ -350,6 +388,20 @@ pub(crate) fn render_menu(
                     cursor += columns.check;
                 }
                 put_str_ellipsis(buffer, cursor, row_y, label_budget, item.label, label_style);
+                if description_width > 0 {
+                    put_str_ellipsis(
+                        buffer,
+                        cursor + label_budget + 2,
+                        row_y,
+                        description_width,
+                        item.description,
+                        if item.enabled && !highlighted {
+                            aside_style.fg(palette.subtext0)
+                        } else {
+                            aside_style
+                        },
+                    );
+                }
                 // 右侧自右向左：内边距、箭头列、快捷键列、徽标列。
                 let mut end = inner.right() - 1;
                 if columns.arrow > 0 {
@@ -958,5 +1010,33 @@ mod tests {
         assert_eq!(menu_first_letter(&items, 'x', 0), None);
         assert_eq!(menu_first_letter(&items, 'f', usize::MAX), Some(0));
         assert_eq!(menu_first_letter(&[], 'f', 0), None);
+    }
+
+    #[test]
+    fn description_column_drops_before_shortcut_and_preserves_cjk_hits() {
+        let items = [MenuItem {
+            description: "停止当前终端进程",
+            shortcut: Some("ctrl+shift+w"),
+            danger: true,
+            checked: Some(true),
+            ..MenuItem::action("关闭窗格")
+        }];
+        let state = MenuState {
+            highlighted: usize::MAX,
+            ..MenuState::default()
+        };
+        let (wide, wide_hit, _) = paint(80, 4, (0, 0), &items, state, false);
+        assert!(row_text(&wide, 1).contains("停止当前终端进程"));
+        assert!(row_text(&wide, 1).contains("ctrl+shift+w"));
+        let (medium, hit, _) = paint(31, 4, (0, 0), &items, state, false);
+        assert!(!row_text(&medium, 1).contains("停止"));
+        assert!(row_text(&medium, 1).contains("ctrl+shift+w"));
+        let (narrow, narrow_hit, _) = paint(18, 4, (0, 0), &items, state, false);
+        assert!(!row_text(&narrow, 1).contains("ctrl"));
+        assert!(row_text(&narrow, 1).contains("关闭窗格"));
+        for rendered in [wide_hit, hit, narrow_hit] {
+            assert_eq!(rendered.rows.len(), 1);
+            assert_eq!(rendered.rows[0].0.width, rendered.area.width - 2);
+        }
     }
 }

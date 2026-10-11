@@ -12,6 +12,9 @@ impl ClientShellState {
                 self.browser_return = None;
                 outcome.detach = true;
             }
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::ToggleInspector) => {
+                self.toggle_inspector(outcome);
+            }
             crate::input::KeybindMatch::Action(crate::input::KeybindAction::ToggleSidebar) => {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
                 self.sidebar_collapsed_manual = true;
@@ -190,6 +193,16 @@ impl ClientShellState {
                 }
                 if action == crate::input::KeybindAction::LinkHints {
                     self.enter_link_hints(outcome);
+                    return;
+                }
+                if action == crate::input::KeybindAction::NextAttention {
+                    if !self.focus_next_attention(outcome) {
+                        self.set_endpoint_error(super::observability::tr(
+                            "No sessions need attention",
+                            "没有待处理的会话",
+                        ));
+                        outcome.repaint = true;
+                    }
                     return;
                 }
                 if self.handle_endpoint_navigation(action, outcome) {
@@ -585,6 +598,8 @@ impl ClientShellState {
                         | PendingEndpointKind::CrossEndpointAction { .. }
                         | PendingEndpointKind::Observation { .. }
                         | PendingEndpointKind::AgentActivityRead { .. }
+                        | PendingEndpointKind::InspectorRead { .. }
+                        | PendingEndpointKind::OverviewPrompt { .. }
                 )
             })
     }
@@ -699,6 +714,18 @@ impl ClientShellState {
             PendingEndpointKind::TextRelease => return (false, Vec::new()),
             PendingEndpointKind::AgentActivityRead { epoch, node_id } => {
                 return self.receive_agent_activity_read(*epoch, node_id.clone(), result);
+            }
+            PendingEndpointKind::OverviewPrompt { epoch, target } => {
+                return (
+                    self.receive_overview_prompt(*epoch, target, boot_id, result),
+                    Vec::new(),
+                );
+            }
+            PendingEndpointKind::InspectorRead { epoch, target } => {
+                return (
+                    self.receive_inspector_read(*epoch, target, boot_id, result),
+                    Vec::new(),
+                );
             }
             _ => {}
         }
@@ -868,6 +895,8 @@ impl ClientShellState {
             | PendingEndpointKind::TextRelease
             | PendingEndpointKind::Observation { .. }
             | PendingEndpointKind::AgentActivityRead { .. }
+            | PendingEndpointKind::InspectorRead { .. }
+            | PendingEndpointKind::OverviewPrompt { .. }
             | PendingEndpointKind::Views { .. } => {
                 unreachable!("后台响应已提前处理")
             }

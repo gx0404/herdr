@@ -75,6 +75,7 @@ pub(super) struct Geometry {
     pub panels: Vec<(PanelId, Rect)>,
     pub dividers: Vec<Divider>,
     pub compact: bool,
+    pub rail: bool,
 }
 
 impl DockNode {
@@ -137,31 +138,60 @@ impl DockNode {
         }
     }
 
-    fn minimum(&self) -> (u16, u16) {
+    fn minimum(&self, inspector: bool) -> Option<(u16, u16)> {
         match self {
-            Self::Panel { panel } => match panel {
+            Self::Panel {
+                panel: PanelId::Agents,
+            } if !inspector => None,
+            Self::Panel { panel } => Some(match panel {
                 PanelId::Workspaces | PanelId::Agents => (18, 5),
                 PanelId::Monitor | PanelId::Accounts => (28, 8),
                 PanelId::Terminal(_) => (18, 5),
-            },
+            }),
             Self::Split {
                 axis,
                 first,
                 second,
                 ..
-            } => {
-                let (aw, ah) = first.minimum();
-                let (bw, bh) = second.minimum();
-                match axis {
+            } => match (first.minimum(inspector), second.minimum(inspector)) {
+                (Some((aw, ah)), Some((bw, bh))) => Some(match axis {
                     Axis::Horizontal => (aw.saturating_add(bw).saturating_add(1), ah.max(bh)),
                     Axis::Vertical => (aw.max(bw), ah.saturating_add(bh).saturating_add(1)),
+                }),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
+    fn gutters(&self, axis: Axis, inspector: bool) -> u16 {
+        match self {
+            Self::Panel { .. } => 0,
+            Self::Split {
+                axis: split,
+                first,
+                second,
+                ..
+            } => {
+                let a = first.gutters(axis, inspector);
+                let b = second.gutters(axis, inspector);
+                if first.minimum(inspector).is_none() {
+                    b
+                } else if second.minimum(inspector).is_none() {
+                    a
+                } else if *split == axis {
+                    a.saturating_add(b).saturating_add(1)
+                } else {
+                    a.max(b)
                 }
             }
         }
     }
 
-    fn geometry(&self, area: Rect, path: &mut Vec<bool>, result: &mut Geometry) {
+    fn geometry(&self, area: Rect, path: &mut Vec<bool>, result: &mut Geometry, inspector: bool) {
         match self {
+            Self::Panel {
+                panel: PanelId::Agents,
+            } if !inspector => {}
             Self::Panel { panel } => result.panels.push((panel.clone(), area)),
             Self::Split {
                 axis,
@@ -169,14 +199,31 @@ impl DockNode {
                 first,
                 second,
             } => {
+                let (Some(a_min), Some(b_min)) =
+                    (first.minimum(inspector), second.minimum(inspector))
+                else {
+                    let branch = first.minimum(inspector).is_none();
+                    path.push(branch);
+                    if branch {
+                        second.geometry(area, path, result, inspector);
+                    } else {
+                        first.geometry(area, path, result, inspector);
+                    }
+                    path.pop();
+                    return;
+                };
                 let (first_min, second_min, available) = match axis {
-                    Axis::Horizontal => (first.minimum().0, second.minimum().0, area.width),
-                    Axis::Vertical => (first.minimum().1, second.minimum().1, area.height),
+                    Axis::Horizontal => (a_min.0, b_min.0, area.width),
+                    Axis::Vertical => (a_min.1, b_min.1, area.height),
                 };
                 let usable = available.saturating_sub(1);
                 let lower = first_min.min(usable);
                 let upper = usable.saturating_sub(second_min).max(lower);
-                let size = ((f32::from(usable) * ratio.clamp(0.05, 0.95)).round() as u16)
+                let a_gutters = first.gutters(*axis, inspector);
+                let b_gutters = second.gutters(*axis, inspector);
+                let content = usable.saturating_sub(a_gutters).saturating_sub(b_gutters);
+                let size = ((f32::from(content) * ratio.clamp(0.05, 0.95)).round() as u16)
+                    .saturating_add(a_gutters)
                     .clamp(lower, upper)
                     .min(usable);
                 let remaining = usable.saturating_sub(size);
@@ -219,17 +266,17 @@ impl DockNode {
                     handle,
                 });
                 path.push(false);
-                first.geometry(a, path, result);
+                first.geometry(a, path, result, inspector);
                 path.pop();
                 path.push(true);
-                second.geometry(b, path, result);
+                second.geometry(b, path, result, inspector);
                 path.pop();
             }
         }
     }
 
-    fn validate(&self, depth: usize, panels: &mut Vec<PanelId>) -> bool {
-        if depth > 16 || panels.len() > 64 {
+    fn validate(&self, depth: usize, panels: &mut Vec<PanelId>, max_depth: usize) -> bool {
+        if depth > max_depth || panels.len() > 64 {
             return false;
         }
         match self {
@@ -248,33 +295,53 @@ impl DockNode {
             } => {
                 ratio.is_finite()
                     && (0.05..=0.95).contains(ratio)
-                    && first.validate(depth + 1, panels)
-                    && second.validate(depth + 1, panels)
+                    && first.validate(depth + 1, panels, max_depth)
+                    && second.validate(depth + 1, panels, max_depth)
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum InspectorVisibility {
+    #[default]
+    Auto,
+    Shown,
+    Hidden,
+}
+
+impl InspectorVisibility {
+    pub fn visible(self, cols: u16) -> bool {
+        match self {
+            Self::Auto => cols >= 140,
+            Self::Shown => true,
+            Self::Hidden => false,
         }
     }
 }
 
 impl Default for DockLayout {
     fn default() -> Self {
-        Self::from_sidebar(0.22, 0.6)
+        Self::from_sidebar(0.20, 0.6)
     }
 }
 
 impl DockLayout {
-    pub fn from_sidebar(width_ratio: f32, section_ratio: f32) -> Self {
+    pub fn from_sidebar(width_ratio: f32, _section_ratio: f32) -> Self {
+        let width = width_ratio.clamp(0.05, 0.70);
         Self {
-            version: 1,
+            version: 2,
             root: DockNode::split(
                 Axis::Horizontal,
-                width_ratio.clamp(0.05, 0.95),
+                width,
+                DockNode::panel(PanelId::Workspaces),
                 DockNode::split(
-                    Axis::Vertical,
-                    section_ratio.clamp(0.05, 0.95),
-                    DockNode::panel(PanelId::Workspaces),
+                    Axis::Horizontal,
+                    (1.0 - width - 0.24) / (1.0 - width),
+                    DockNode::panel(PanelId::Terminal(1)),
                     DockNode::panel(PanelId::Agents),
                 ),
-                DockNode::panel(PanelId::Terminal(1)),
             ),
             groups: vec![TabGroup {
                 id: 1,
@@ -288,10 +355,31 @@ impl DockLayout {
         }
     }
 
+    pub fn migrate_v1(&mut self) -> bool {
+        if self.version != 1 || !self.valid() {
+            return false;
+        }
+        self.discard_accounts_panel();
+        let Some(root) = self.root.clone().without(&PanelId::Agents) else {
+            return false;
+        };
+        self.root = DockNode::split(
+            Axis::Horizontal,
+            0.76,
+            root,
+            DockNode::panel(PanelId::Agents),
+        );
+        self.version = 2;
+        self.revision = self.revision.saturating_add(1);
+        true
+    }
+
     pub fn valid(&self) -> bool {
         let mut panels = Vec::new();
-        if self.version != 1
-            || !self.root.validate(0, &mut panels)
+        if !matches!(self.version, 1 | 2)
+            || !self
+                .root
+                .validate(0, &mut panels, 16 + usize::from(self.version == 2))
             || !panels.contains(&self.focused)
             || self.maximized.as_ref().is_some_and(|p| !panels.contains(p))
             || self.groups.is_empty()
@@ -315,26 +403,104 @@ impl DockLayout {
         })
     }
 
+    pub fn projected_focus<'a>(&'a self, geometry: &'a Geometry) -> &'a PanelId {
+        geometry
+            .panels
+            .iter()
+            .find(|(panel, _)| panel == &self.focused)
+            .or_else(|| {
+                geometry
+                    .panels
+                    .iter()
+                    .find(|(panel, _)| matches!(panel, PanelId::Terminal(_)))
+            })
+            .map_or(&self.focused, |(panel, _)| panel)
+    }
+
     pub fn geometry(&self, area: Rect) -> Geometry {
-        self.projected_geometry(area, self.maximized.as_ref())
+        self.geometry_with(area, InspectorVisibility::Auto)
     }
 
-    /// 去最大化投影的几何：最大化只是呈现选择，面板轮转与分隔线调整必须看到
-    /// 完整布局树，否则 `geometry` 只返回一个面板、零分隔线，键盘动作全部成为
-    /// 无声空操作。窄屏 compact 是真实约束，此处仍然保留。
+    pub fn geometry_with(&self, area: Rect, visibility: InspectorVisibility) -> Geometry {
+        self.projected_geometry(
+            area,
+            self.maximized.as_ref(),
+            visibility.visible(area.width),
+        )
+    }
+
+    pub fn rail_geometry(&self, area: Rect, rail: u16, inspector: bool) -> Option<Geometry> {
+        let (full_width, full_height) = self.root.minimum(inspector)?;
+        if self.maximized.is_some() || area.width < full_width || area.height < full_height {
+            return None;
+        }
+        let DockNode::Split {
+            axis: Axis::Horizontal,
+            first,
+            second,
+            ..
+        } = &self.root
+        else {
+            return None;
+        };
+        if !first.contains(&PanelId::Workspaces)
+            || (first.contains(&self.focused)
+                && self.focused != PanelId::Workspaces
+                && (inspector || self.focused != PanelId::Agents))
+        {
+            return None;
+        }
+        let (min_width, min_height) = second.minimum(inspector)?;
+        if area.width < rail.saturating_add(min_width) || area.height < min_height {
+            return None;
+        }
+        let mut geometry = Geometry {
+            rail: true,
+            ..Geometry::default()
+        };
+        geometry.panels.push((
+            PanelId::Workspaces,
+            Rect::new(area.x, area.y, rail, area.height),
+        ));
+        second.geometry(
+            Rect::new(area.x + rail, area.y, area.width - rail, area.height),
+            &mut vec![true],
+            &mut geometry,
+            inspector,
+        );
+        Some(geometry)
+    }
+
     pub fn layout_geometry(&self, area: Rect) -> Geometry {
-        self.projected_geometry(area, None)
+        self.layout_geometry_with(area, true)
     }
 
-    fn projected_geometry(&self, area: Rect, maximized: Option<&PanelId>) -> Geometry {
+    pub fn layout_geometry_with(&self, area: Rect, inspector: bool) -> Geometry {
+        self.projected_geometry(area, None, inspector)
+    }
+
+    fn projected_geometry(
+        &self,
+        area: Rect,
+        maximized: Option<&PanelId>,
+        inspector: bool,
+    ) -> Geometry {
         let mut geometry = Geometry::default();
-        let minimum = self.root.minimum();
+        let minimum = self.root.minimum(inspector).unwrap_or_default();
         let compact = area.width < minimum.0 || area.height < minimum.1;
-        if let Some(panel) = maximized.or(compact.then_some(&self.focused)) {
+        let fallback = PanelId::Terminal(self.groups.first().map_or(1, |group| group.id));
+        let focused = if !inspector && self.focused == PanelId::Agents {
+            &fallback
+        } else {
+            &self.focused
+        };
+        let maximized = maximized.filter(|panel| inspector || **panel != PanelId::Agents);
+        if let Some(panel) = maximized.or(compact.then_some(focused)) {
             geometry.panels.push((panel.clone(), area));
             geometry.compact = compact;
         } else {
-            self.root.geometry(area, &mut Vec::new(), &mut geometry);
+            self.root
+                .geometry(area, &mut Vec::new(), &mut geometry, inspector);
         }
         geometry
     }
@@ -349,7 +515,7 @@ impl DockLayout {
         if !root.insert(panel.clone(), target, edge) {
             return false;
         }
-        if !root.validate(0, &mut Vec::new()) {
+        if !root.validate(0, &mut Vec::new(), 16 + usize::from(self.version == 2)) {
             return false;
         }
         self.root = root;
@@ -693,6 +859,124 @@ mod tests {
         let compact = layout.layout_geometry(narrow);
         assert!(compact.compact);
         assert_eq!(compact.panels, vec![(PanelId::Terminal(1), narrow)]);
+    }
+
+    #[test]
+    fn v2_ratios_budget_all_dividers_and_narrow_projection_keeps_paths() {
+        let layout = DockLayout::default();
+        for cols in [140, 160, 200] {
+            let geometry = layout.geometry(Rect::new(0, 0, cols, 50));
+            assert_eq!(
+                geometry
+                    .panels
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>(),
+                [PanelId::Workspaces, PanelId::Terminal(1), PanelId::Agents]
+            );
+            let content = f32::from(cols - 2);
+            for ((_, rect), ratio) in geometry.panels.iter().zip([0.20, 0.56, 0.24]) {
+                assert!((f32::from(rect.width) - content * ratio).abs() <= 1.0);
+            }
+        }
+        let narrow = layout.geometry(Rect::new(0, 0, 120, 40));
+        assert!(!narrow.panels.iter().any(|(id, _)| *id == PanelId::Agents));
+        assert_eq!(narrow.dividers[0].path, Vec::<bool>::new());
+        assert_eq!(
+            layout
+                .geometry_with(Rect::new(0, 0, 120, 40), InspectorVisibility::Shown)
+                .panels
+                .len(),
+            3
+        );
+        assert_eq!(layout.version, 2);
+    }
+
+    #[test]
+    fn v1_migration_preserves_terminal_groups_focus_lock_and_legal_maximize() {
+        let mut layout = DockLayout::default();
+        let tabs = vec!["a".into(), "b".into(), "c".into()];
+        layout.reconcile_workspace_tabs(&tabs, &tabs, Some("a"));
+        assert!(layout.move_tab("b", 1, 0, Some(Edge::Bottom)));
+        layout.version = 1;
+        assert!(layout.dock(PanelId::Accounts, &PanelId::Workspaces, Edge::Bottom));
+        layout.focused = PanelId::Terminal(2);
+        layout.maximized = Some(PanelId::Terminal(2));
+        layout.locked = true;
+        let groups = layout.groups.clone();
+        assert!(layout.migrate_v1());
+        assert_eq!(layout.version, 2);
+        assert_eq!(layout.groups, groups);
+        assert_eq!(layout.focused, PanelId::Terminal(2));
+        assert_eq!(layout.maximized, Some(PanelId::Terminal(2)));
+        assert!(layout.locked && layout.valid());
+        assert!(!layout.root.contains(&PanelId::Accounts));
+        let DockNode::Split { axis, second, .. } = &layout.root else {
+            panic!("root split");
+        };
+        assert_eq!(*axis, Axis::Horizontal);
+        assert!(matches!(
+            **second,
+            DockNode::Panel {
+                panel: PanelId::Agents
+            }
+        ));
+        let migrated = layout.clone();
+        assert!(!layout.migrate_v1());
+        assert_eq!(layout, migrated);
+    }
+
+    #[test]
+    fn migration_preserves_a_valid_v1_tree_at_its_depth_limit() {
+        let mut root = DockNode::panel(PanelId::Workspaces);
+        let mut groups = Vec::new();
+        for id in 1..=16 {
+            root = DockNode::split(
+                Axis::Horizontal,
+                0.5,
+                root,
+                DockNode::panel(PanelId::Terminal(id)),
+            );
+            groups.push(TabGroup {
+                id,
+                tabs: vec![format!("tab-{id}")],
+                active: Some(format!("tab-{id}")),
+            });
+        }
+        let mut layout = DockLayout {
+            version: 1,
+            root,
+            groups,
+            focused: PanelId::Terminal(16),
+            ..Default::default()
+        };
+        let groups = layout.groups.clone();
+        assert!(layout.valid());
+        assert!(layout.migrate_v1());
+        assert!(layout.valid());
+        assert_eq!(layout.groups, groups);
+        assert_eq!(layout.focused, PanelId::Terminal(16));
+    }
+
+    #[test]
+    fn migration_rejects_future_and_invalid_layout_without_mutation() {
+        for version in [3, u32::MAX] {
+            let mut layout = DockLayout {
+                version,
+                ..Default::default()
+            };
+            let before = layout.clone();
+            assert!(!layout.valid() && !layout.migrate_v1());
+            assert_eq!(layout, before);
+        }
+        let mut layout = DockLayout {
+            version: 1,
+            focused: PanelId::Terminal(99),
+            ..Default::default()
+        };
+        let before = layout.clone();
+        assert!(!layout.migrate_v1());
+        assert_eq!(layout, before);
     }
 
     #[test]

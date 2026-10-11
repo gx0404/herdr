@@ -280,6 +280,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             hovered: None,
             scroll: 0,
             filter: None,
+            overview: Default::default(),
         }),
         ClientShellOverlay::WorktreeCreate(ClientWorktreeCreateOverlay {
             source_workspace_id: "ws_1".into(),
@@ -380,6 +381,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
                 &state.session_log_dropped,
                 &state.active_endpoint_id,
                 &state.config.keybinds,
+                state.config.status_indicators,
                 &state.notification_history,
                 &cx,
             ),
@@ -584,4 +586,53 @@ fn popup_terminal_keeps_own_graphics_and_hides_only_background_overlap() {
         inside
     ));
     assert!(!String::from_utf8_lossy(&frame.graphics.clone().into_inline_bytes()).contains("a=t"));
+}
+
+#[test]
+fn settings_boundary_notification_cursor_preserves_uncovered_terminal_input() {
+    for (position, focused, hidden) in [
+        (crate::config::ToastHerdrPosition::BottomRight, false, false),
+        (crate::config::ToastHerdrPosition::TopLeft, false, true),
+        (crate::config::ToastHerdrPosition::BottomRight, true, true),
+    ] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        let before = state
+            .compose(106, 20)
+            .expect("terminal cursor")
+            .cursor
+            .clone()
+            .expect("cursor");
+        assert!(before.visible);
+        state.visible_notification = Some(ClientVisibleNotification {
+            endpoint_id: ClientEndpointId::Local,
+            event: SemanticNotification {
+                kind: SemanticNotificationKind::Custom,
+                title: "notice".into(),
+                body: Some("body".into()),
+                sound: None,
+                agent: None,
+                workspace_id: None,
+                tab_id: None,
+                pane_id: None,
+                position: Some(position),
+            },
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        });
+        state.notification_focused = focused;
+        let frame = state.compose(106, 20).expect("notification cursor");
+        let covered = contains(state.hits.notification_toast, (before.x, before.y));
+        assert_eq!(covered || focused, hidden);
+        if hidden {
+            assert!(frame.cursor.as_ref().is_none_or(|cursor| !cursor.visible));
+        } else {
+            let cursor = frame
+                .cursor
+                .as_ref()
+                .expect("uncovered cursor stays visible");
+            assert!(cursor.visible);
+            assert_eq!((cursor.x, cursor.y), (before.x, before.y));
+        }
+    }
 }

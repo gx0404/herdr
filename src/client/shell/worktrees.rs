@@ -598,7 +598,9 @@ impl ClientShellState {
                 | PendingEndpointKind::PaneLinkActivate { .. }
                 | PendingEndpointKind::PaneLinkResolve { .. }
                 | PendingEndpointKind::CopyMotion { .. }
-                | PendingEndpointKind::CopySearch { .. },
+                | PendingEndpointKind::CopySearch { .. }
+                | PendingEndpointKind::InspectorRead { .. }
+                | PendingEndpointKind::OverviewPrompt { .. },
                 Err(_),
             ) => true,
             // Snippet runs resolve in `handle_endpoint_result` before this.

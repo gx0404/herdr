@@ -245,7 +245,7 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
         .collect::<String>();
     assert!(header_text.contains("client-shell"));
     assert!(compact_header.contains("标签页1"));
-    assert!(compact_header.contains("已阻塞"));
+    assert!(compact_header.contains("需要输入"));
     assert!(compact_header.contains("切换"));
     assert_eq!(state.hits.mobile_switch, Rect::new(34, 0, 10, 2));
 
@@ -282,7 +282,7 @@ fn mobile_header_and_switcher_render_released_sections_and_stable_targets() {
     for expected in [
         "切换",
         "关闭",
-        "agent",
+        "智能体总览",
         "工作区",
         "+新建工作区",
         "标签页",

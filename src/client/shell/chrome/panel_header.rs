@@ -1,5 +1,5 @@
 //! 面板头（每个停靠面板的第一行）：画在面板自己的底色上——侧栏类面板用侧栏面，
-//! 终端组与监控用面板底色——不再是一条 surface0 色条。
+//! 终端组、Inspector 与监控用面板底色——不再是一条 surface0 色条。
 //!
 //! 聚焦面板的标题加粗 `text`，其余 `subtext0`（对底色不足 4.5:1 时换更强的色）。
 //! `⠿` 拖动把手、`□` / `◫` 最大化与监控面板的 `×` 关闭平时是 `overlay0`，指针悬浮在
@@ -42,6 +42,7 @@ pub(in crate::client::shell) struct PanelHeaderView<'a> {
     /// 终端组：标题后留出标签条区域，标题最多占可用宽度的四分之一。
     pub(in crate::client::shell) tabs: bool,
     pub(in crate::client::shell) bg: Color,
+    pub(in crate::client::shell) icons: &'a [(&'a str, bool)],
 }
 
 /// 画出来的区域。
@@ -53,6 +54,7 @@ pub(in crate::client::shell) struct PanelHeaderHits {
     pub(in crate::client::shell) close: Rect,
     /// 留给标签条的区域（非终端组为空）。
     pub(in crate::client::shell) tabs: Rect,
+    pub(in crate::client::shell) icons: [Rect; 2],
 }
 
 const HANDLE: &str = "⠿";
@@ -153,8 +155,31 @@ pub(in crate::client::shell) fn paint(
         hits.close = close;
     }
 
-    // 左侧：「⠿ 」把手 + 标题；空 1 列再接按钮。
-    let content_right = row.right().saturating_sub(buttons);
+    let mut content_right = row.right().saturating_sub(buttons);
+    for (index, (glyph, hovered)) in view.icons.iter().enumerate().take(2).rev() {
+        if content_right < row.x.saturating_add(BUTTON_WIDTH * 2 + 4) {
+            break;
+        }
+        let rect = Rect::new(content_right - BUTTON_WIDTH, row.y, BUTTON_WIDTH, 1);
+        let style = if *hovered {
+            Style::default().fg(palette.text).bg(components.hover_bg)
+        } else {
+            Style::default().fg(super::readable_on(
+                palette,
+                view.bg,
+                &[palette.overlay1, palette.subtext0],
+            ))
+        };
+        paint_spans(
+            buffer,
+            rect.x,
+            row.y,
+            rect.right(),
+            &[Span::new(format!(" {glyph} "), style)],
+        );
+        hits.icons[index] = rect;
+        content_right = rect.x;
+    }
     let mut x = row.x;
     if view.handle && row.width > buttons + 2 {
         x = paint_spans(
@@ -266,8 +291,8 @@ pub(in crate::client::shell) fn panel_title(
 ) -> String {
     use super::super::observability::tr;
     match panel {
-        PanelId::Workspaces => tr("WORKSPACES", "工作区").to_owned(),
-        PanelId::Agents => "Agents".to_owned(),
+        PanelId::Workspaces => tr("Sessions", "会话").to_owned(),
+        PanelId::Agents => "Inspector".to_owned(),
         // 已退役的账号面板只为解码旧布局保留（加载时即被丢弃），不会画出来。
         PanelId::Monitor | PanelId::Accounts => tr("MONITOR", "监控").to_owned(),
         PanelId::Terminal(id) => {
@@ -307,6 +332,7 @@ pub(in crate::client::shell) fn panel_title(
 pub(in crate::client::shell) struct HeaderFrame<'a> {
     pub(in crate::client::shell) dock: &'a DockLayout,
     pub(in crate::client::shell) geometry: &'a Geometry,
+    pub(in crate::client::shell) controls: &'a Geometry,
     pub(in crate::client::shell) snapshot: &'a ClientShellSnapshot,
     pub(in crate::client::shell) config: &'a ClientShellConfig,
     pub(in crate::client::shell) hover: Option<&'a ChromeHover>,
@@ -367,12 +393,12 @@ pub(in crate::client::shell) fn paint_workbench_headers(
     let mut focused_strip: Option<ShellHitMap> = None;
     let mut compact_switcher_shown = false;
     for (panel, area) in &frame.geometry.panels {
-        if area.is_empty() {
+        if area.is_empty() || (frame.geometry.rail && *panel == PanelId::Workspaces) {
             continue;
         }
-        let focused = panel == &dock.focused;
+        let focused = panel == dock.projected_focus(frame.geometry);
         let terminal = matches!(panel, PanelId::Terminal(_));
-        let bg = if terminal || *panel == PanelId::Monitor {
+        let bg = if terminal || matches!(panel, PanelId::Monitor | PanelId::Agents) {
             palette.panel_bg
         } else {
             palette.sidebar_bg
@@ -382,7 +408,7 @@ pub(in crate::client::shell) fn paint_workbench_headers(
         // 紧凑视图只投影聚焦面板：面板头改成切换条，按布局顺序（与调整布局模式里 Tab
         // 轮转同序）列出全部面板；整排放不下才退回只画聚焦面板的标题。
         let switcher = if frame.geometry.compact {
-            let panels = dock.layout_geometry(Rect::new(0, 0, 4096, 4096)).panels;
+            let panels = frame.controls.panels.clone();
             let titles = panels
                 .iter()
                 .map(|(id, _)| panel_title(dock, frame.snapshot, id))
@@ -407,7 +433,19 @@ pub(in crate::client::shell) fn paint_workbench_headers(
                     .saturating_sub(1)
                     <= area.width.saturating_sub(buttons)
         });
+        use super::sessions::SessionHit;
+        let session_icons = *panel == PanelId::Workspaces && !switcher_fits;
+        let icon_hover = |hit: &SessionHit| matches!(frame.hover, Some(ChromeHover::Session(current)) if current == hit);
+        let icons = [
+            ("✚", icon_hover(&SessionHit::NewWorkspace)),
+            ("⌕", icon_hover(&SessionHit::Search)),
+        ];
         let view = PanelHeaderView {
+            icons: if session_icons && config.mouse_capture {
+                &icons
+            } else {
+                &[]
+            },
             title: if switcher_fits { "" } else { &title },
             focused,
             // `⠿` 是拖动停靠的把手：锁定布局后拖动被拒绝（冒烟 L1）、紧凑视图与最大化
@@ -434,6 +472,21 @@ pub(in crate::client::shell) fn paint_workbench_headers(
             actions.push((header.close, Action::Close(panel.clone())));
             hits.panel_buttons
                 .push((header.close, panel.clone(), PanelButton::Close));
+        }
+        for (rect, (binding, hit)) in header.icons.into_iter().zip([
+            (
+                crate::input::KeybindAction::NewWorkspace,
+                super::sessions::SessionHit::NewWorkspace,
+            ),
+            (
+                crate::input::KeybindAction::OpenNavigator,
+                super::sessions::SessionHit::Search,
+            ),
+        ]) {
+            if !rect.is_empty() {
+                actions.push((rect, Action::Binding(binding)));
+                hits.sessions.push((rect, hit));
+            }
         }
         if let Some((panels, titles, current)) = switcher.filter(|_| switcher_fits) {
             let names = titles.iter().map(String::as_str).collect::<Vec<_>>();
@@ -547,6 +600,7 @@ mod tests {
             arranging: false,
             tabs: false,
             bg: Palette::graphite_dark().panel_bg,
+            icons: &[],
         }
     }
 

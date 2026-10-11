@@ -4,9 +4,16 @@
 //! 命中区作为返回值交给调用方登记。上游文件（`workbench/render.rs`、`render.rs`）
 //! 只留薄调用点，fork 自有的视觉代码集中在这里。
 
+pub(super) mod command;
+pub(in crate::client::shell) mod inspector;
+pub(super) mod notification;
+pub(in crate::client::shell) mod overview;
 pub(super) mod panel_header;
+pub(in crate::client::shell) mod sessions;
+pub(super) mod settings;
 pub(super) mod status_bar;
 pub(super) mod title_bar;
+pub(super) mod welcome;
 
 use std::borrow::Cow;
 

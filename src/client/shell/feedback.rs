@@ -178,6 +178,9 @@ pub(super) enum ChromeHover {
     SidebarDivider,
     SidebarSectionDivider,
     NotificationToast,
+    SettingsSection(ClientSettingsSection),
+    SettingsChoice(usize),
+    WelcomeAction(super::chrome::welcome::Action),
     OverlayPrimary,
     OverlayClear,
     OverlayCancel,
@@ -201,6 +204,8 @@ pub(super) enum ChromeHover {
     /// 「Agent 活动」窗口左列的树行（节点 id）。
     AgentActivityNode(String),
     AgentActivityButton(super::agent_activity_overlay::AgentActivityButton),
+    Inspector(Rect),
+    Session(super::chrome::sessions::SessionHit),
 }
 
 /// Resolved render context for client chrome: palette, component tokens,
@@ -258,12 +263,14 @@ impl<'a> ChromeContext<'a> {
 pub(super) struct ClientNotificationTarget {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) pane_id: Option<String>,
+    pub(super) boot_id: Option<String>,
 }
 
 /// One entry of the notification history ring.
 #[derive(Clone, Debug)]
 pub(super) struct ClientNotificationRecord {
     pub(super) level: ClientToastLevel,
+    pub(super) bucket: Option<crate::harness::AgentBucket>,
     pub(super) title: String,
     pub(super) body: Option<String>,
     pub(super) received_at: std::time::Instant,
@@ -348,9 +355,10 @@ impl ClientShellState {
     pub(super) fn spinner_active(&self) -> bool {
         self.config.feedback.spinner.enabled
             && (self
-                .federated_agent_rows
+                .agent_attention
                 .as_ref()
                 .is_some_and(|rows| rows.animated())
+                || self.inspector.animated() && !self.active_endpoint_stale()
                 || self.endpoints.iter().any(|endpoint| {
                     matches!(
                         endpoint.status,
@@ -390,6 +398,14 @@ impl ClientShellState {
                 overlay.message = None;
                 repaint = true;
             }
+        }
+        if !self.session_view.area.is_empty()
+            && self
+                .session_rows
+                .as_ref()
+                .is_some_and(|cache| cache.ages_expired(self.wall_clock_ms()))
+        {
+            repaint = true;
         }
         if self.config.feedback.animations {
             for since in [&mut self.overlay_since, &mut self.toast_since] {
@@ -479,6 +495,7 @@ impl ClientShellState {
         self.notification_history
             .push_back(ClientNotificationRecord {
                 level,
+                bucket: None,
                 title: title.into(),
                 body,
                 received_at: std::time::Instant::now(),
@@ -555,6 +572,21 @@ impl ClientShellState {
         if !self.endpoint_is_online(&target.endpoint_id) {
             let label = self.endpoint_label(&target.endpoint_id).to_owned();
             self.receive_endpoint_unavailable(format!("{label} is unavailable"));
+            outcome.repaint = true;
+            return;
+        }
+        if target
+            .boot_id
+            .as_deref()
+            .is_some_and(|boot| self.endpoint_boot_id(&target.endpoint_id) != Some(boot))
+        {
+            self.receive_endpoint_unavailable(
+                super::chrome::command::text(
+                    "This notification belongs to an earlier server session",
+                    "此通知来自较早的服务器会话",
+                )
+                .to_owned(),
+            );
             outcome.repaint = true;
             return;
         }
@@ -642,23 +674,31 @@ impl ClientShellState {
                 .any(|(rect, id)| id == key && super::contains(*rect, point)),
             ChromeHover::EndpointAgentRow(endpoint_id, pane_id) => {
                 !on_agent_tree_toggle(hits, point)
-                    && hits.endpoint_agents.iter().any(|(rect, id, pane)| {
-                        id == endpoint_id && pane == pane_id && super::contains(*rect, point)
-                    })
+                    && hits.endpoint_agents.iter().chain(&hits.session_agents).any(
+                        |(rect, id, pane)| {
+                            id == endpoint_id && pane == pane_id && super::contains(*rect, point)
+                        },
+                    )
             }
-            ChromeHover::AgentTreeToggle(endpoint_id, key) => {
-                hits.agent_tree_toggles.iter().any(|(rect, id, toggle)| {
+            ChromeHover::AgentTreeToggle(endpoint_id, key) => hits
+                .agent_tree_toggles
+                .iter()
+                .chain(&hits.session_tree_toggles)
+                .any(|(rect, id, toggle)| {
                     id == endpoint_id && toggle == key && super::contains(*rect, point)
-                })
-            }
+                }),
             ChromeHover::AgentActivityRow(endpoint_id, owner_key, node_id) => {
                 !on_agent_tree_toggle(hits, point)
-                    && hits.agent_activity_rows.iter().any(|hit| {
-                        &hit.endpoint_id == endpoint_id
-                            && &hit.owner_key == owner_key
-                            && &hit.node_id == node_id
-                            && super::contains(hit.rect, point)
-                    })
+                    && hits
+                        .agent_activity_rows
+                        .iter()
+                        .chain(&hits.session_activity_rows)
+                        .any(|hit| {
+                            &hit.endpoint_id == endpoint_id
+                                && &hit.owner_key == owner_key
+                                && &hit.node_id == node_id
+                                && super::contains(hit.rect, point)
+                        })
             }
             ChromeHover::ExternalAgentGroup(endpoint_id, source) => {
                 hits.external_agent_groups.iter().any(|(rect, id, group)| {
@@ -667,11 +707,15 @@ impl ClientShellState {
             }
             ChromeHover::ExternalAgentRow(endpoint_id, external_id) => {
                 !on_agent_tree_toggle(hits, point)
-                    && hits.external_agents.iter().any(|(rect, id, external)| {
-                        id == endpoint_id
-                            && external == external_id
-                            && super::contains(*rect, point)
-                    })
+                    && hits
+                        .external_agents
+                        .iter()
+                        .chain(&hits.session_external_agents)
+                        .any(|(rect, id, external)| {
+                            id == endpoint_id
+                                && external == external_id
+                                && super::contains(*rect, point)
+                        })
             }
             ChromeHover::AgentActivityNode(node_id) => hits
                 .agent_activity_tree_rows
@@ -681,6 +725,14 @@ impl ClientShellState {
                 .agent_activity_actions
                 .iter()
                 .any(|(rect, candidate)| candidate == button && super::contains(*rect, point)),
+            ChromeHover::Inspector(target) => hits
+                .inspector_actions
+                .iter()
+                .any(|(rect, _)| rect == target && super::contains(*rect, point)),
+            ChromeHover::Session(target) => hits
+                .sessions
+                .iter()
+                .any(|(rect, hit)| hit == target && super::contains(*rect, point)),
             ChromeHover::Tab(tab_id) => {
                 !on_tab_close(hits, point)
                     && hits
@@ -743,6 +795,18 @@ impl ClientShellState {
                 super::contains(hits.sidebar_section_divider, point)
             }
             ChromeHover::NotificationToast => super::contains(hits.notification_toast, point),
+            ChromeHover::SettingsSection(section) => hits
+                .settings_tabs
+                .iter()
+                .any(|(rect, candidate)| candidate == section && super::contains(*rect, point)),
+            ChromeHover::SettingsChoice(index) => hits
+                .settings_choices
+                .iter()
+                .any(|(rect, candidate)| candidate == index && super::contains(*rect, point)),
+            ChromeHover::WelcomeAction(action) => hits
+                .welcome_actions
+                .iter()
+                .any(|(rect, candidate)| candidate == action && super::contains(*rect, point)),
             ChromeHover::OverlayPrimary => super::contains(hits.overlay_primary, point),
             ChromeHover::OverlayClear => super::contains(hits.overlay_clear, point),
             ChromeHover::OverlayCancel => super::contains(hits.overlay_cancel, point),
@@ -785,6 +849,20 @@ impl ClientShellState {
     fn chrome_hover_at(&self, point: (u16, u16)) -> Option<ChromeHover> {
         let hits = &self.hits;
         if self.overlay.is_some() {
+            if let Some((_, section)) = hits
+                .settings_tabs
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+            {
+                return Some(ChromeHover::SettingsSection(*section));
+            }
+            if let Some((_, index)) = hits
+                .settings_choices
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+            {
+                return Some(ChromeHover::SettingsChoice(*index));
+            }
             if super::contains(hits.overlay_primary, point) {
                 return Some(ChromeHover::OverlayPrimary);
             }
@@ -869,11 +947,25 @@ impl ClientShellState {
             }
             return None;
         }
+        if let Some((_, action)) = hits
+            .welcome_actions
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+        {
+            return Some(ChromeHover::WelcomeAction(*action));
+        }
         // 指针不在任何 chrome 分组里（最常见的「浮在 pane 上」）：直接判定不是
         // chrome 悬浮，不再走下面整份线性扫描（HERDR-PERF-008）。面板头散落在各个
         // 面板顶端，并进分组会把包围盒撑成整屏，单独按面板数（个位数）查一遍。
         if !hits.chrome_bounds.contains(point) {
             return panel_header_hover(hits, point);
+        }
+        if let Some((rect, _)) = hits
+            .inspector_actions
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+        {
+            return Some(ChromeHover::Inspector(*rect));
         }
         if super::contains(hits.notification_toast, point)
             && (self.visible_endpoint_notice.is_some()
@@ -924,10 +1016,22 @@ impl ClientShellState {
         if super::contains(hits.title_arrange, point) {
             return Some(ChromeHover::TitleArrange);
         }
+        if let Some((_, hit)) = hits
+            .sessions
+            .iter()
+            .rev()
+            .find(|(rect, _)| super::contains(*rect, point))
+        {
+            return Some(ChromeHover::Session(hit.clone()));
+        }
         // 折叠开关的矩形落在行矩形之内：必须排在统一树的全部行向量（machines /
         // workspaces / agents / endpoint_agents / agent_activity_rows /
         // external_agents）之前，否则机器层与工作区层的开关永远解析不到。
-        for (rect, endpoint_id, key) in &hits.agent_tree_toggles {
+        for (rect, endpoint_id, key) in hits
+            .agent_tree_toggles
+            .iter()
+            .chain(&hits.session_tree_toggles)
+        {
             if super::contains(*rect, point) {
                 return Some(ChromeHover::AgentTreeToggle(
                     endpoint_id.clone(),
@@ -958,7 +1062,8 @@ impl ClientShellState {
                 return Some(ChromeHover::AgentGroupRow(key.clone()));
             }
         }
-        for (rect, endpoint_id, pane_id) in &hits.endpoint_agents {
+        for (rect, endpoint_id, pane_id) in hits.endpoint_agents.iter().chain(&hits.session_agents)
+        {
             if super::contains(*rect, point) {
                 return Some(ChromeHover::EndpointAgentRow(
                     endpoint_id.clone(),
@@ -966,7 +1071,11 @@ impl ClientShellState {
                 ));
             }
         }
-        for hit in &hits.agent_activity_rows {
+        for hit in hits
+            .agent_activity_rows
+            .iter()
+            .chain(&hits.session_activity_rows)
+        {
             if super::contains(hit.rect, point) {
                 return Some(ChromeHover::AgentActivityRow(
                     hit.endpoint_id.clone(),
@@ -983,7 +1092,11 @@ impl ClientShellState {
                 ));
             }
         }
-        for (rect, endpoint_id, external_id) in &hits.external_agents {
+        for (rect, endpoint_id, external_id) in hits
+            .external_agents
+            .iter()
+            .chain(&hits.session_external_agents)
+        {
             if super::contains(*rect, point) {
                 return Some(ChromeHover::ExternalAgentRow(
                     endpoint_id.clone(),
@@ -1025,7 +1138,12 @@ impl ClientShellState {
 fn on_agent_tree_toggle(hits: &ShellHitMap, point: (u16, u16)) -> bool {
     hits.agent_tree_toggles
         .iter()
+        .chain(&hits.session_tree_toggles)
         .any(|(rect, _, _)| super::contains(*rect, point))
+        || hits.sessions.iter().any(|(rect, hit)| {
+            matches!(hit, super::chrome::sessions::SessionHit::Toggle(..))
+                && super::contains(*rect, point)
+        })
 }
 
 /// 指针是否落在标签的关闭按钮上（按钮在标签矩形之内，标签悬浮的复核先排除它）。
@@ -1050,6 +1168,10 @@ fn on_panel_header_child(hits: &ShellHitMap, point: (u16, u16)) -> bool {
             .panel_buttons
             .iter()
             .any(|(rect, _, _)| super::contains(*rect, point))
+        || hits
+            .sessions
+            .iter()
+            .any(|(rect, _)| super::contains(*rect, point))
 }
 
 /// 面板头的悬浮解析：先按钮、后整行。面板数是个位数，线性查即可。
@@ -1071,7 +1193,7 @@ fn panel_header_hover(hits: &ShellHitMap, point: (u16, u16)) -> Option<ChromeHov
 }
 
 /// chrome 悬浮区的分组包围盒：侧栏（含主菜单入口）、顶部（标题栏的可点项与标签条）、
-/// 横幅。
+/// 横幅与 Inspector。
 /// 分组而不是一个大并集——标签条在顶、侧栏在左、横幅在底部，并集很快退化成
 /// 整屏，早退就永远不生效。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1079,6 +1201,7 @@ pub(super) struct ChromeBounds {
     sidebar: Rect,
     top: Rect,
     banners: Rect,
+    inspector: Rect,
 }
 
 impl ChromeBounds {
@@ -1086,6 +1209,7 @@ impl ChromeBounds {
         super::contains(self.sidebar, point)
             || super::contains(self.top, point)
             || super::contains(self.banners, point)
+            || super::contains(self.inspector, point)
     }
 }
 
@@ -1139,7 +1263,19 @@ impl ShellHitMap {
         for (rect, _) in &self.agent_group_toggles {
             extend(&mut sidebar, *rect);
         }
-        for (rect, _, _) in &self.endpoint_agents {
+        for (rect, _) in &self.sessions {
+            extend(&mut sidebar, *rect);
+        }
+        for (rect, _, _) in self.endpoint_agents.iter().chain(&self.session_agents) {
+            extend(&mut sidebar, *rect);
+        }
+        for (rect, _, _) in &self.session_tree_toggles {
+            extend(&mut sidebar, *rect);
+        }
+        for hit in &self.session_activity_rows {
+            extend(&mut sidebar, hit.rect);
+        }
+        for (rect, _, _) in &self.session_external_agents {
             extend(&mut sidebar, *rect);
         }
         // 统一树的新命中向量全部并进侧栏组：否则包围盒早退（HERDR-PERF-008）会
@@ -1169,6 +1305,7 @@ impl ShellHitMap {
             sidebar,
             top,
             banners,
+            inspector: self.inspector_body,
         };
     }
 }

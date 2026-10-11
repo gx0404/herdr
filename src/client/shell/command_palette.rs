@@ -4,8 +4,7 @@ use super::action_table::{
 };
 use super::feedback::ChromeContext;
 use super::render::{
-    display_width, modal_panel, put_right_text, put_text, render_key_hints, render_search_bar,
-    OverlayRender, SearchBar,
+    modal_panel, put_text, render_key_hints, render_search_bar, OverlayRender, SearchBar,
 };
 use super::*;
 use crate::ui::kit::menu::{menu_scroll, menu_size, menu_step, render_menu, MenuItem, MenuState};
@@ -48,6 +47,14 @@ pub(super) struct ClientPaletteItem {
 pub(super) enum ClientPaletteAction {
     /// 执行动作表里的一个动作。
     Run(ActionId, ActionTarget),
+    Workspace(ClientEndpointId, String, String),
+    Agent(
+        ClientEndpointId,
+        String,
+        crate::harness::AgentBucket,
+        String,
+        u64,
+    ),
     Category(usize),
     Search,
     Back,
@@ -349,7 +356,7 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
                     ClientPaletteAction::Category(_) | ClientPaletteAction::Search
                 ),
                 BrowserView::Menu(Some(group)) => {
-                    (!navigation(item) && item.category == group)
+                    (matches!(item.action, ClientPaletteAction::Run(..)) && item.category == group)
                         || matches!(item.action, ClientPaletteAction::Back)
                 }
                 BrowserView::Layout => layout_item(item),
@@ -361,6 +368,9 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
                     recent: false,
                 });
             }
+        }
+        if palette.view == BrowserView::Search {
+            rows.sort_by_key(super::chrome::command::section);
         }
         return rows;
     }
@@ -401,10 +411,12 @@ pub(super) fn palette_rows(palette: &ClientCommandPaletteOverlay) -> Vec<ClientP
                 .then_with(|| left_index.cmp(right_index))
         },
     );
-    scored
+    let mut rows = scored
         .into_iter()
         .map(|(_, _, row)| row)
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>();
+    rows.sort_by_key(super::chrome::command::section);
+    rows
 }
 
 /// 目录视图：主菜单与分类子菜单（查询为空）走 kit::menu 画成下拉菜单；搜索
@@ -451,8 +463,13 @@ fn catalog_item(item: &ClientPaletteItem, view: BrowserView) -> MenuItem<'_> {
         _ => MenuItem::action(&item.title),
     };
     // 右列只放快捷键：按机器铺开的条目的副标题是机器地址，改由分组标题给出。
-    let shortcut =
-        (!item.subtitle.is_empty() && !machine_item(item)).then_some(item.subtitle.as_str());
+    let shortcut = (!item.subtitle.is_empty()
+        && !machine_item(item)
+        && matches!(
+            item.action,
+            ClientPaletteAction::Run(..) | ClientPaletteAction::Search
+        ))
+    .then_some(item.subtitle.as_str());
     // `⋯` 布局菜单与主菜单一样标签贴左：只在确有一项打勾（调整布局开着、布局已锁定）
     // 时才让出勾选列，免得两个开关项让四个短标签整体右移。
     let checked = if view == BrowserView::Layout {
@@ -461,6 +478,7 @@ fn catalog_item(item: &ClientPaletteItem, view: BrowserView) -> MenuItem<'_> {
         item.checked
     };
     MenuItem {
+        description: super::chrome::command::item_description(item),
         shortcut,
         enabled: item.enabled,
         checked,
@@ -654,7 +672,12 @@ impl ClientShellState {
                         title: spec.title_text(texts, state.alternate).to_owned(),
                         subtitle: spec
                             .binding
-                            .and_then(|binding| (binding.keys)(keybinds).label())
+                            .and_then(|binding| {
+                                super::chrome::key_sequence(
+                                    &self.config.keybinds,
+                                    (binding.keys)(keybinds),
+                                )
+                            })
                             .unwrap_or_default(),
                         category: spec.category.index(),
                         group: spec.group.into(),
@@ -735,6 +758,80 @@ impl ClientShellState {
                 checked: None,
                 action,
             });
+        }
+        for endpoint in &self.endpoints {
+            let Some(snapshot) = endpoint
+                .snapshot
+                .as_deref()
+                .filter(|_| endpoint.status == ClientEndpointStatus::Online)
+            else {
+                continue;
+            };
+            for workspace in &snapshot.workspaces {
+                items.push(ClientPaletteItem {
+                    id: format!(
+                        "target:workspace:{}:{}",
+                        endpoint.endpoint_id.storage_key(),
+                        workspace.workspace_id
+                    ),
+                    title: workspace.label.clone(),
+                    subtitle: format!("{} / {}", endpoint.label, workspace.new_workspace_cwd),
+                    category: ActionCategory::Workspaces.index(),
+                    group: 0,
+                    badge: false,
+                    enabled: true,
+                    checked: None,
+                    action: ClientPaletteAction::Workspace(
+                        endpoint.endpoint_id.clone(),
+                        workspace.workspace_id.clone(),
+                        snapshot.boot_id.clone(),
+                    ),
+                });
+            }
+            for agent in &snapshot.agents {
+                items.push(ClientPaletteItem {
+                    id: format!(
+                        "target:agent:{}:{}",
+                        endpoint.endpoint_id.storage_key(),
+                        agent.pane_id
+                    ),
+                    title: agent
+                        .display_agent
+                        .as_deref()
+                        .or(agent.name.as_deref())
+                        .or(agent.agent.as_deref())
+                        .unwrap_or("terminal")
+                        .to_owned(),
+                    subtitle: format!(
+                        "{} / {} · {}",
+                        endpoint.label,
+                        snapshot
+                            .workspaces
+                            .iter()
+                            .find(|w| w.workspace_id == agent.workspace_id)
+                            .map(|w| w.label.as_str())
+                            .unwrap_or(&agent.workspace_id),
+                        agent
+                            .insight
+                            .current_tool
+                            .as_deref()
+                            .or(agent.insight.last_message.as_deref())
+                            .unwrap_or_default()
+                    ),
+                    category: ActionCategory::Workspaces.index(),
+                    group: 0,
+                    badge: false,
+                    enabled: true,
+                    checked: None,
+                    action: ClientPaletteAction::Agent(
+                        endpoint.endpoint_id.clone(),
+                        agent.pane_id.clone(),
+                        client_agent_bucket(agent),
+                        snapshot.boot_id.clone(),
+                        agent.launch_seq,
+                    ),
+                });
+            }
         }
         items
     }
@@ -950,7 +1047,7 @@ impl ClientShellState {
         palette.reveal = true;
         palette.selected =
             (palette.selected as isize + delta).clamp(0, count.saturating_sub(1) as isize) as usize;
-        // reveal 会在渲染期重算 scroll，指针下面的行可能已经换了。
+        // reveal 会在视图计算阶段重算 scroll，指针下面的行可能已经换了。
         palette.hovered = None;
     }
 
@@ -1036,20 +1133,35 @@ impl ClientShellState {
         true
     }
 
-    /// 目录视图里 Enter 应该激活的行：`selected` 是键盘上一次移动或点击
-    /// 落下的项，滚轮（`scroll_palette`）只挪 `scroll`、不跟着挪
-    /// `selected`（放弃键盘高亮，见 `kit::menu::menu_scroll` 文档），于是
-    /// `selected` 可能落在当前可见窗口外——`render_catalog` 那时不画任何
-    /// 高亮，但 `selected` 本身仍是一个"看不见"的有效下标，Enter 照样会
-    /// 激活它。这里按渲染同一套窗口口径重新判断：还在窗口内就用它自己，
-    /// 否则改用窗口内离原位置最近的可激活项（冒烟 B1）。非目录视图（搜索
-    /// 结果列表）不受此限制，直接用当前选中。
-    pub(super) fn palette_enter_target(&self) -> Option<usize> {
+    /// 目录沿用可见候选规则；搜索先揭示滚出视口的原选中项，不替换执行目标。
+    pub(super) fn palette_enter_target(&mut self) -> Option<usize> {
         let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_ref() else {
             return None;
         };
         if !is_catalog(palette) {
-            return Some(palette.selected);
+            let selected = palette.selected;
+            if let Some((cols, rows)) = self.last_composed_size {
+                let entries = palette_rows(palette);
+                let visual = super::chrome::command::visual(&entries);
+                let line = visual.iter().position(|entry| entry.0 == Some(selected))?;
+                let window = palette_window(
+                    Rect::new(0, 0, cols, rows),
+                    self.floating_page_rect(cols, rows),
+                    palette,
+                )?;
+                if window.body.is_empty()
+                    || line < palette.scroll
+                    || line >= palette.scroll.saturating_add(window.visible)
+                {
+                    if let Some(ClientShellOverlay::CommandPalette(palette)) = self.overlay.as_mut()
+                    {
+                        palette.reveal = true;
+                        palette.hovered = None;
+                    }
+                    return None;
+                }
+            }
+            return Some(selected);
         }
         let (cols, rows) = self.last_composed_size?;
         let rows_data = palette_rows(palette);
@@ -1077,6 +1189,44 @@ impl ClientShellState {
                 .and_then(|kit| menu.row(kit))
                 .unwrap_or(palette.selected),
         )
+    }
+
+    fn palette_target_is_current(&self, action: &ClientPaletteAction) -> bool {
+        let (endpoint_id, boot_id) = match action {
+            ClientPaletteAction::Workspace(endpoint, _, boot)
+            | ClientPaletteAction::Agent(endpoint, _, _, boot, _) => (endpoint, boot),
+            _ => return true,
+        };
+        let Some(snapshot) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| {
+                &endpoint.endpoint_id == endpoint_id
+                    && endpoint.status == ClientEndpointStatus::Online
+            })
+            .and_then(|endpoint| endpoint.snapshot.as_deref())
+            .filter(|snapshot| &snapshot.boot_id == boot_id)
+        else {
+            return false;
+        };
+        match action {
+            ClientPaletteAction::Workspace(_, id, _) => snapshot
+                .workspaces
+                .iter()
+                .any(|workspace| &workspace.workspace_id == id),
+            ClientPaletteAction::Agent(_, id, _, _, launch_seq) => {
+                snapshot.agents.iter().any(|agent| {
+                    &agent.pane_id == id
+                        && agent.launch_seq == *launch_seq
+                        && snapshot.panes.iter().any(|pane| {
+                            pane.pane_id == agent.pane_id
+                                && pane.workspace_id == agent.workspace_id
+                                && pane.tab_id == agent.tab_id
+                        })
+                })
+            }
+            _ => true,
+        }
     }
 
     pub(super) fn activate_palette_item(&mut self, index: usize, outcome: &mut ClientShellInput) {
@@ -1115,13 +1265,40 @@ impl ClientShellState {
                 return;
             }
         }
+        if !self.palette_target_is_current(&action) {
+            self.receive_endpoint_unavailable(
+                super::chrome::command::text(
+                    "This target is no longer available; reopen command search",
+                    "此目标已失效，请重新打开命令搜索",
+                )
+                .to_owned(),
+            );
+            outcome.repaint = true;
+            return;
+        }
+        let mark_unread = matches!(action, ClientPaletteAction::Run(ActionId::MarkUnread, _));
+        if mark_unread && !self.mark_focused_agent_unread(outcome) {
+            return;
+        }
         self.close_command_browser();
         self.palette_recent.retain(|entry| entry != &id);
         self.palette_recent.insert(0, id);
         self.palette_recent.truncate(PALETTE_RECENT_LIMIT);
         self.persist_chrome_preferences(outcome);
-        if let ClientPaletteAction::Run(id, target) = action {
-            self.run_action(id, target, outcome);
+        match action {
+            ClientPaletteAction::Run(ActionId::MarkUnread, _) => {}
+            ClientPaletteAction::Run(id, target) => self.run_action(id, target, outcome),
+            ClientPaletteAction::Workspace(endpoint, workspace, _) => {
+                self.focus_or_activate(
+                    endpoint,
+                    ClientEndpointFocusTarget::Workspace(workspace),
+                    outcome,
+                );
+            }
+            ClientPaletteAction::Agent(endpoint, pane, ..) => {
+                self.focus_or_activate(endpoint, ClientEndpointFocusTarget::Pane(pane), outcome);
+            }
+            _ => {}
         }
         outcome.repaint = true;
     }
@@ -1145,31 +1322,16 @@ pub(crate) fn palette_window(
             start: catalog_scroll(palette, &menu, geometry.visible),
         });
     }
-    let menu_height = match palette.view {
-        BrowserView::Menu(_) if palette.query.as_str().is_empty() => {
-            (rows.len().saturating_add(6).min(22)) as u16
-        }
-        _ => 22,
-    };
     let outer = page_bounds
         .map(|rect| rect.intersection(area))
-        .or_else(|| {
-            crate::ui::modal_rect(area, crate::ui::ModalSize::Large.with_height(menu_height))
-        })?;
+        .or_else(|| crate::ui::modal_rect(area, super::chrome::command::SIZE))?;
     let inner = super::render::panel_inner(outer)?;
-    let searching = palette.view == BrowserView::Search || !palette.query.as_str().is_empty();
-    let layout = super::page::PageLayout::new(inner, 0, searching, false);
-    let mut visual = Vec::new();
-    for (index, row) in rows.iter().enumerate() {
-        if (index == 0 && row.recent) || (index > 0 && rows[index - 1].recent && !row.recent) {
-            visual.push(None);
-        }
-        visual.push(Some(index));
-    }
+    let layout = super::page::PageLayout::new(inner, 0, true, false);
+    let visual = super::chrome::command::visual(&rows);
     let selected = palette.selected.min(rows.len().saturating_sub(1));
     let selected_line = visual
         .iter()
-        .position(|entry| *entry == Some(selected))
+        .position(|entry| entry.0 == Some(selected))
         .unwrap_or(0);
     Some(super::page::list_window(
         layout.content,
@@ -1228,6 +1390,7 @@ fn render_catalog(
 pub(crate) fn render_command_palette(
     b: &mut Buffer,
     palette: &ClientCommandPaletteOverlay,
+    status_indicators: crate::config::StatusIndicatorStyle,
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     use super::page::{list_start, PageLayout};
@@ -1237,18 +1400,7 @@ pub(crate) fn render_command_palette(
     let p = cx.palette;
     let t = &crate::i18n::texts().global_menu;
     let rows = palette_rows(palette);
-    let menu_height = match palette.view {
-        BrowserView::Menu(_) if palette.query.as_str().is_empty() => {
-            (rows.len().saturating_add(6).min(22)) as u16
-        }
-        _ => 22,
-    };
-    let (outer, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Large.with_height(menu_height),
-        p.accent,
-        cx,
-    )?;
+    let (outer, inner) = modal_panel(b, super::chrome::command::SIZE, p.accent, cx)?;
     let searching = palette.view == BrowserView::Search || !palette.query.as_str().is_empty();
     let layout = PageLayout::new(inner, 0, searching, false);
     let title = match palette.view {
@@ -1284,19 +1436,22 @@ pub(crate) fn render_command_palette(
     } else {
         None
     };
-    let body = layout.content;
-    let mut visual = Vec::new();
-    let has_recent = rows.first().is_some_and(|row| row.recent);
-    for (index, row) in rows.iter().enumerate() {
-        if (index == 0 && row.recent) || (index > 0 && rows[index - 1].recent && !row.recent) {
-            visual.push(None);
-        }
-        visual.push(Some(index));
+    if palette.query.as_str().is_empty() && searching {
+        put_text(
+            b,
+            layout.search.x + 3,
+            layout.search.y,
+            layout.search.width.saturating_sub(8),
+            t.search_hint,
+            crate::ui::design::meta(p).bg(p.panel_bg),
+        );
     }
+    let body = layout.content;
+    let visual = super::chrome::command::visual(&rows);
     let selected = palette.selected.min(rows.len().saturating_sub(1));
     let selected_line = visual
         .iter()
-        .position(|entry| *entry == Some(selected))
+        .position(|entry| entry.0 == Some(selected))
         .unwrap_or(0);
     let scroll = list_start(
         palette.scroll,
@@ -1327,100 +1482,27 @@ pub(crate) fn render_command_palette(
             body.width.saturating_sub(1),
             1,
         );
-        let Some(index) = visual[visual_index] else {
+        let Some(index) = visual[visual_index].0 else {
             let label = super::render::text_inset(rect);
             put_text(
                 b,
                 label.x,
                 label.y,
                 label.width,
-                if visual_index == 0 && has_recent {
-                    t.recent
-                } else {
-                    title
-                },
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                visual[visual_index].1,
+                crate::ui::design::meta(p).add_modifier(Modifier::BOLD),
             );
             continue;
         };
-        let row = &rows[index];
-        let chosen = index == selected;
-        let style = list_row_style(p, cx.components, chosen, palette.hovered == Some(index));
-        // 暂时不可用的条目只在目录视图里出现：置灰，选中也不反色成可执行的样子。
-        let style = if row.item.enabled {
-            style
-        } else {
-            style.fg(p.overlay0)
-        };
-        b.set_style(rect, style);
-        let marker_width = 2.min(rect.width);
-        // 标记列：第 1 格是键盘选中的「›」，第 2 格是开关的勾选态。
-        let marker = match (chosen, row.item.checked == Some(true)) {
-            (true, true) => "›✓",
-            (true, false) => "› ",
-            (false, true) => " ✓",
-            (false, false) => "  ",
-        };
-        put_text(b, rect.x, rect.y, marker_width, marker, style);
-        let badge_width = if row.item.badge { 2 } else { 0 };
-        let available = rect.width.saturating_sub(marker_width + badge_width);
-        let subtitle_width = if available < 28 || row.item.subtitle.is_empty() {
-            0
-        } else {
-            display_width(&row.item.subtitle)
-                .saturating_add(1)
-                .min(available / 2)
-        };
-        let title_width = available.saturating_sub(subtitle_width);
-        let mut x = rect.x + marker_width;
-        let mut used = 0;
-        use unicode_segmentation::UnicodeSegmentation;
-        let mut char_index = 0;
-        for grapheme in row.item.title.graphemes(true) {
-            let width = display_width(grapheme);
-            if used + width > title_width {
-                break;
-            }
-            let end = char_index + grapheme.chars().count();
-            let matched = row
-                .match_indices
-                .iter()
-                .any(|index| *index >= char_index && *index < end);
-            let emphasis = if !chosen && matched {
-                style.fg(p.mauve).add_modifier(Modifier::BOLD)
-            } else {
-                style
-            };
-            put_text(b, x, rect.y, width, grapheme, emphasis);
-            char_index = end;
-            x += width;
-            used += width;
-        }
-        if subtitle_width > 0 {
-            let subtitle = Rect::new(
-                rect.right() - badge_width - subtitle_width,
-                rect.y,
-                subtitle_width,
-                1,
-            );
-            put_right_text(
-                b,
-                subtitle,
-                rect.y,
-                &row.item.subtitle,
-                if chosen { style } else { style.fg(p.overlay0) },
-            );
-        }
-        if row.item.badge {
-            put_text(
-                b,
-                rect.right().saturating_sub(2),
-                rect.y,
-                2,
-                " ●",
-                if chosen { style } else { style.fg(p.accent) },
-            );
-        }
+        super::chrome::command::paint_row(
+            b,
+            rect,
+            &rows[index],
+            index == selected,
+            palette.hovered == Some(index),
+            cx,
+            status_indicators,
+        );
         row_hits.push((rect, index));
     }
     // 冒烟 L16：滑块长度按可视比例——之前恒为 1 行，与 `release_notes` /
@@ -1638,5 +1720,37 @@ mod tests {
         assert_eq!(indices("new tab", "New tab"), Some(vec![0, 1, 2, 4, 5, 6]));
         assert_eq!(indices("ne ab", "New tab"), None);
         assert_eq!(fuzzy_match("   ", "anything"), Some((0, Vec::new())));
+    }
+
+    #[test]
+    fn command_search_lists_real_workspaces_and_keeps_target_out_of_catalog() {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(super::super::tests::snapshot()));
+        state.open_command_search();
+        let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_ref() else {
+            panic!("palette");
+        };
+        let rows = palette_rows(palette);
+        let workspace = rows
+            .iter()
+            .position(|row| matches!(row.item.action, ClientPaletteAction::Workspace(..)))
+            .expect("real workspace");
+        assert_eq!(rows[workspace].item.title, "client-shell");
+        assert!(rows[workspace].item.subtitle.contains("/repo"));
+        assert!(super::super::chrome::command::visual(&rows)
+            .iter()
+            .any(|(index, label)| index.is_none()
+                && *label == super::super::chrome::command::text("Workspaces", "工作区")));
+        state.activate_palette_item(workspace, &mut ClientShellInput::default());
+        assert!(state.overlay.is_none());
+        state.toggle_global_menu();
+        let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_ref() else {
+            panic!("catalog");
+        };
+        assert!(palette_rows(palette)
+            .iter()
+            .filter(|row| !row.recent)
+            .all(|row| navigation(row.item)));
+        assert!(state.palette_recent.len() <= PALETTE_RECENT_LIMIT);
     }
 }

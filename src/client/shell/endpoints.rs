@@ -49,6 +49,7 @@ impl ClientShellState {
     /// Mirrors the local catalog into render state and rebuilds the sidebar
     /// presentation lookup in one pass.
     pub(super) fn mirror_saved_profiles(&mut self, profiles: Vec<SavedSshEndpoint>) {
+        self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
         self.machine_chrome = profiles
             .iter()
             .map(|profile| {
@@ -129,6 +130,7 @@ impl ClientShellState {
         // 「折叠写入点必须 bump」的静态守门没有例外。
         self.bump_tree_collapse_epoch();
         self.endpoints = next;
+        self.inspector.prune_endpoints(&self.endpoints);
     }
 
     pub(crate) fn select_unavailable_local(&mut self) {
@@ -164,6 +166,7 @@ impl ClientShellState {
             endpoint.server_version = None;
             endpoint.status_detail = None;
         }
+        self.inspector.prune_endpoints(&self.endpoints);
     }
 
     pub(crate) fn set_endpoint_status(
@@ -187,8 +190,8 @@ impl ClientShellState {
         }
     }
 
-    /// 状态详情只出现在侧栏端点行的副标题里，不进联邦 agents 行（`AgentRowsKey`
-    /// 不含它），因此**不**递增 `agent_rows_epoch`（独立复审 中-1 口径核对）。
+    /// Status details do not change Sessions rows or agent attention counts,
+    /// so this update does not advance `agent_rows_epoch`.
     pub(crate) fn set_endpoint_status_detail(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -423,6 +426,7 @@ impl ClientShellState {
         let generation = endpoint.snapshot_generation;
         let switching_endpoint = endpoint_id != &self.active_endpoint_id;
         let agent_scroll = self.agent_scroll;
+        let workspace_scroll = self.workspace_scroll;
         if switching_endpoint {
             self.active_endpoint_id = endpoint_id.clone();
             self.pane_surface = None;
@@ -430,8 +434,9 @@ impl ClientShellState {
         }
         self.apply_active_snapshot(snapshot, generation);
         if switching_endpoint {
-            // The aggregate agent list belongs to the client, not one endpoint.
             self.agent_scroll = agent_scroll;
+            self.workspace_scroll = workspace_scroll;
+            self.reveal_focused_workspace = false;
         }
         if let Some((_, pane_id)) = pending_agent_reveal {
             self.reveal_endpoint_agent(endpoint_id, &pane_id, agent_body_height);
@@ -774,6 +779,15 @@ impl ClientShellState {
         if boot_changed {
             self.retire_endpoint_notifications(endpoint_id);
         }
+        let key = endpoint_id.storage_key();
+        let marks = self
+            .config
+            .preferences
+            .agent_marks
+            .get(&key)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        self.endpoints[index].agent_presentation.import_marks(marks);
         self.endpoints[index]
             .agent_presentation
             .project_snapshot_for_generation(&mut snapshot, generation);
@@ -792,11 +806,12 @@ impl ClientShellState {
                 .agent_presentation
                 .acknowledge_surface(&mut snapshot, surface, self.outer_focused);
         }
-        // 端点快照换代：联邦 agents 行缓存（PERF-02）据此失效。这是**生产**
+        // 端点快照换代：Sessions 行与注意力缓存据此失效。这是**生产**
         // 快照写入路径，别在别处直接改 `endpoint.snapshot`（独立复审 中-1）。
         self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
         let endpoint = &mut self.endpoints[index];
         endpoint.snapshot_generation = generation;
+        self.inspector.observe_snapshot(endpoint_id, &snapshot);
         endpoint.snapshot = Some(snapshot);
         let pending_matches =
             endpoint
@@ -843,9 +858,11 @@ impl ClientShellState {
     }
 
     /// 写回「确认表面」原地改过的快照：`revision` 没变，但 agent_status 与聚合
-    /// 状态变了（Done → Idle），联邦 agents 行缓存必须跟着换代，否则 Done 徽标
+    /// 状态变了（Done → Idle），Sessions 行与注意力缓存必须跟着换代，否则 Done 徽标
     /// 会滞留到下一次无关的 revision 推进（独立复审 中-1）。
     pub(super) fn store_acknowledged_snapshot(&mut self, snapshot: Box<ClientShellSnapshot>) {
+        self.inspector
+            .observe_snapshot(&self.active_endpoint_id, &snapshot);
         self.snapshot = Some(snapshot);
         self.agent_rows_epoch = self.agent_rows_epoch.saturating_add(1);
     }

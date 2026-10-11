@@ -120,6 +120,8 @@ Raw socket method names use dot notation:
 
 `agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait.
 
+The client-shell endpoint now advertises `agent.prompt` for prompt submission without `wait`, reusing the same agent validation and input path. A client must check the endpoint's advertised methods before enabling replies; older endpoints without this method retain jump-only interaction. The client-shell lane rejects a request with `wait` as `unsupported_endpoint_command` before sending input. Use the ordinary JSON socket API when a prompt must also await an agent status; its waiting behavior is unchanged.
+
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep

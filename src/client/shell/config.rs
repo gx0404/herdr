@@ -129,6 +129,8 @@ impl ClientShellState {
         let preferences = preferences::ClientChromePreferences {
             pages: self.page_windows.clone(),
             layouts: self.workbench.saved_layouts(),
+            inspector_visibility: self.workbench.inspector_visibility.clone(),
+            agent_marks: self.saved_agent_marks(),
             monitor: self
                 .config
                 .preferences
@@ -146,9 +148,10 @@ impl ClientShellState {
                 .monitor_chart_glyphs
                 .map(|_| self.observability.chart_glyphs),
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
-            sidebar_section_split: self
-                .sidebar_section_split_manual
-                .then_some(self.sidebar_section_split),
+            sidebar_section_split: self.config.preferences.sidebar_section_split,
+            session_grouping: self
+                .session_grouping_manual
+                .then_some(self.session_grouping),
             sidebar_collapsed: self
                 .sidebar_collapsed_manual
                 .then_some(self.sidebar_collapsed),
@@ -188,7 +191,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn reload_client_config(&mut self) {
-        // 配置变了：联邦 agents 行缓存（PERF-02）据此失效。
+        // Configuration changes invalidate the Sessions row cache.
         self.config_epoch = self.config_epoch.saturating_add(1);
         match crate::config::load_live_config() {
             Ok(loaded) => {

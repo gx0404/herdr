@@ -120,12 +120,9 @@ impl ClientShellState {
                     })
                     .collect()
             } else {
-                let collapsed_groups = if mobile && surface_available {
-                    &empty_collapsed_groups
-                } else {
-                    self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
-                        .unwrap_or(&empty_collapsed_groups)
-                };
+                let collapsed_groups = self
+                    .collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                    .unwrap_or(&empty_collapsed_groups);
                 render::workspace_entries(snapshot, collapsed_groups)
             };
             for entry in entries {

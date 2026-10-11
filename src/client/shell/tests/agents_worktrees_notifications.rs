@@ -7,20 +7,20 @@ fn mouse_hits_use_stable_workspace_tab_and_pane_ids() {
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("composed frame");
-
+    let workspace_row = state.hits.workspaces[0].rect;
     let workspace_down =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 2,
-            row: 2,
+            column: workspace_row.x + 3,
+            row: workspace_row.y,
             modifiers: KeyModifiers::empty(),
         })]);
     assert!(workspace_down.actions.is_empty());
     let workspace =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            column: 2,
-            row: 2,
+            column: workspace_row.x + 3,
+            row: workspace_row.y,
             modifiers: KeyModifiers::empty(),
         })]);
     assert!(workspace.requests.is_empty());
@@ -147,11 +147,13 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
     state.set_pane_surface(replacement_surface);
     let collapsed = state.compose(106, 20).expect("collapsed worktree group");
     let parent = state.hits.workspaces[0].rect;
-    let status_cell = usize::from(parent.y) * usize::from(collapsed.width)
-        + usize::from(parent.x.saturating_add(1));
-    assert_eq!(
-        collapsed.cells[status_cell].fg,
-        crate::protocol::color_to_u32(state.config.components.status_input)
+    assert!(
+        (parent.x..parent.right()).any(|x| collapsed.cells
+            [usize::from(parent.y) * usize::from(collapsed.width) + usize::from(x)]
+        .fg == crate::protocol::color_to_u32(
+            state.config.components.status_input
+        )),
+        "折叠父工作区仍有需要输入的汇总字形"
     );
 
     let mut next = ClientShellInput::default();
@@ -200,6 +202,7 @@ fn duplicate_repo_parents_remain_visible_and_focusable_when_collapsed() {
         for collapsed in [false, true] {
             if collapsed {
                 state.collapsed_groups.insert("repo".into());
+                state.bump_tree_collapse_epoch();
             }
             let frame = state
                 .compose(106, 24)
@@ -756,67 +759,47 @@ fn agent_sidebar_honors_launch_order_symbols_tokens_and_stable_hits() {
     assert_eq!(
         state
             .hits
-            .agents
+            .session_agents
             .first()
-            .map(|(_, pane_id)| pane_id.as_str()),
+            .map(|(_, _, pane)| pane.as_str()),
         Some("pane_2")
     );
-
-    let first = state.hits.agents[0].0;
-    let click = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+    let first = state.hits.session_agents[0].0;
+    let click = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: first.x,
         row: first.y,
         modifiers: KeyModifiers::empty(),
     })]);
-    let [ClientShellAction::Endpoint { request, .. }] = &click.actions[..] else {
-        panic!("agent row should focus through endpoint API");
-    };
-    assert!(matches!(
-        &request.method,
-        crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2"
-    ));
-
-    state.compose(106, 10).expect("short agent sidebar frame");
-    assert_eq!(
-        state
-            .hits
-            .agents
-            .first()
-            .map(|(_, pane_id)| pane_id.as_str()),
-        Some("pane_2")
+    assert!(
+        matches!(&click.actions[..], [ClientShellAction::Endpoint { request, .. }] if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2"))
     );
-    let body = state.hits.agent_body;
-    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+    state.reveal_focused_workspace = false;
+    state.compose(106, 6).expect("short session tree");
+    assert!(
+        state.hits.workspace_max_scroll > 0,
+        "configured rows must really overflow"
+    );
+    let body = state.session_view.body;
+    let before = state.workspace_scroll;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
         kind: MouseEventKind::ScrollDown,
         column: body.x,
         row: body.y,
         modifiers: KeyModifiers::empty(),
     })]);
-    state
-        .compose(106, 10)
-        .expect("scrolled agent sidebar frame");
-    assert_eq!(
-        state
-            .hits
-            .agents
-            .first()
-            .map(|(_, pane_id)| pane_id.as_str()),
-        Some("pane_1")
-    );
-
-    state.sidebar_collapsed = true;
-    let compact = state.compose(106, 30).expect("compact agent sidebar frame");
-    let blocked = state
+    state.compose(106, 6).expect("scrolled sessions");
+    assert!(state.workspace_scroll > before);
+    assert!(state
         .hits
-        .agents
+        .session_agents
         .iter()
-        .find(|(_, pane_id)| pane_id == "pane_2")
-        .expect("blocked compact agent")
-        .0;
-    let row_start = blocked.y as usize * compact.width as usize + blocked.x as usize;
-    assert_ne!(compact.cells[row_start].fg, compact.cells[row_start + 2].fg);
-    assert_eq!(compact.cells[row_start].bg, compact.cells[row_start + 2].bg);
+        .any(|(_, _, pane)| pane == "pane_1"));
+    state.sidebar_collapsed = true;
+    state.compose(106, 30).expect("workspace rail");
+    assert!(state.hits.session_agents.is_empty() && state.hits.agents.is_empty());
+    assert_eq!(state.hits.workspaces.len(), 1);
+    assert!(state.session_view.rail);
 }
 
 #[test]
@@ -847,13 +830,20 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     let frame = state.compose(106, 30).expect("agent sidebar frame");
-    let row = state.hits.agents.first().expect("agent row hit").0;
+    let row = state
+        .hits
+        .session_agents
+        .first()
+        .expect("agent session row hit")
+        .0;
     let buffer = frame.to_ratatui_buffer().expect("agent sidebar buffer");
-
+    let glyphs = state.status_glyphs();
     for (label, needle) in [
-        ("tab", "second"),
         ("agent", "reviewer"),
-        ("tree prefix", "└"),
+        (
+            "status",
+            glyphs.bucket(crate::harness::AgentBucket::Working),
+        ),
     ] {
         let (x, y) = cell_symbol_position(&frame, row, needle);
         let cell = buffer.cell((x, y)).expect("muted sidebar cell");
@@ -965,9 +955,9 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
     assert_eq!(
         state
             .hits
-            .agents
+            .session_agents
             .iter()
-            .map(|(_, pane_id)| pane_id.as_str())
+            .map(|(_, _, pane_id)| pane_id.as_str())
             .collect::<Vec<_>>(),
         vec!["pane_2", "pane_3"]
     );
@@ -2200,12 +2190,11 @@ fn panel_agent(
     }
 }
 
-/// 统一树（视图计算阶段进 `AgentRowsCache`）：工作区头 + 子行，折叠藏子行，
-/// 状态过滤视图平铺。
 #[test]
 fn agent_tree_rows_group_by_workspace_with_collapsible_headers() {
+    use super::super::chrome::sessions::{Rollup, SessionRowKind};
     use crate::client::shell::agent_sidebar::agent_group_key;
-    use crate::client::shell::agent_tree::AgentTreeKind;
+    use crate::harness::AgentBucket;
     let mut projected = snapshot();
     let mut second_workspace = projected.workspaces[0].clone();
     second_workspace.workspace_id = "ws_2".into();
@@ -2220,55 +2209,93 @@ fn agent_tree_rows_group_by_workspace_with_collapsible_headers() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected.clone()));
     state.set_pane_surface(surface());
-    state.compose(106, 30).expect("agent panel frame");
+    state.compose(106, 30).expect("session frame");
 
-    let rows = state.federated_agent_rows.as_ref().expect("行缓存").rows();
+    let rows = &state.session_rows.as_ref().expect("session cache").rows;
     assert_eq!(rows.len(), 5, "two headers plus three agents");
-    match &rows[0].kind.kind {
-        AgentTreeKind::Workspace { label, status } => {
-            assert_eq!(rows[0].key, agent_group_key("ws_1"));
+    match &rows[0].kind {
+        SessionRowKind::Workspace {
+            label,
+            toggle,
+            rollup,
+            ..
+        } => {
+            assert_eq!(toggle, &Some((agent_group_key("ws_1"), false)));
             assert_eq!(label, "client-shell");
-            assert_eq!(rows[0].kind.count_label(), "· 2");
-            assert_eq!(*status, AgentStatus::Blocked, "header aggregates status");
-            assert!(!rows[0].collapsed);
+            assert_eq!(
+                rollup,
+                &Some(Rollup {
+                    bucket: AgentBucket::NeedsInput,
+                    count: 1
+                })
+            );
         }
         other => panic!("expected workspace header, got {other:?}"),
     }
-    let child = rows[1].kind.agent().expect("expected agent child");
-    assert_eq!(
-        child.pane_id, "pane_1",
-        "spaces sort keeps snapshot order within the workspace"
-    );
-    assert_eq!(rows[1].depth, 1);
-    assert_eq!(rows[1].last_child_mask & 0b10, 0, "first child is not last");
+    let SessionRowKind::Agent(child) = &rows[1].kind else {
+        panic!("expected agent child");
+    };
+    assert_eq!(child.pane_id, "pane_1", "spaces keeps snapshot order");
+    assert_eq!(child.indent, 0);
     assert!(
         child
-            .rows
+            .tokens
             .iter()
             .flatten()
-            .all(|token| !matches!(token.kind, crate::ui::ResolvedTokenKind::Workspace(_))),
-        "children drop the redundant workspace token"
+            .all(|token| { !matches!(token.kind, crate::ui::ResolvedTokenKind::Workspace(_)) }),
+        "children drop redundant workspace tokens"
     );
+    let ids = state
+        .hits
+        .session_agents
+        .iter()
+        .map(|(_, _, pane)| pane.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["pane_1", "pane_2", "pane_3"]);
+    assert!(state.hits.session_agents[0].0.y < state.hits.session_agents[1].0.y);
 
     state.toggle_collapsed_group(&ClientEndpointId::Local, agent_group_key("ws_1"));
-    state.compose(106, 30).expect("collapsed agent panel frame");
-    let rows = state.federated_agent_rows.as_ref().expect("行缓存").rows();
+    state.compose(106, 30).expect("collapsed session frame");
+    let rows = &state.session_rows.as_ref().expect("session cache").rows;
+    let children = rows
+        .iter()
+        .filter_map(|row| match &row.kind {
+            SessionRowKind::Agent(agent) => Some(agent.pane_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        rows.iter().filter(|row| row.kind.agent().is_some()).count(),
-        1,
+        children,
+        ["pane_3"],
         "collapsed workspace hides its children"
     );
-    assert!(rows[0].collapsed);
+    assert!(matches!(
+        &rows[0].kind,
+        SessionRowKind::Workspace {
+            toggle: Some((_, true)),
+            ..
+        }
+    ));
+    assert_eq!(state.hits.session_agents.len(), 1);
 
     projected.agent_view_label = Some("blocked".into());
+    projected.agent_order = projected
+        .agents
+        .iter()
+        .map(|agent| agent.pane_id.clone())
+        .collect();
     state.set_snapshot(Box::new(projected));
-    state.compose(106, 30).expect("filtered agent panel frame");
-    let rows = state.federated_agent_rows.as_ref().expect("行缓存").rows();
-    assert!(
-        rows.iter()
-            .all(|row| row.kind.agent().is_some() && row.depth == 0),
-        "filtered views stay flat"
-    );
+    state.compose(106, 30).expect("filtered session frame");
+    let rows = &state.session_rows.as_ref().expect("session cache").rows;
+    let agents = rows
+        .iter()
+        .filter_map(|row| match &row.kind {
+            SessionRowKind::Agent(agent) => Some((agent.pane_id.as_str(), agent.indent)),
+            SessionRowKind::Workspace { .. } => None,
+            other => panic!("filtered views must not retain nested agent groups: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(agents, [("pane_1", 0), ("pane_2", 0), ("pane_3", 0)]);
 }
 
 #[test]
@@ -2279,14 +2306,18 @@ fn clicking_workspace_header_collapses_agent_group() {
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
     state.compose(106, 30).expect("agent panel frame");
-    assert_eq!(state.hits.agents.len(), 1);
-    let (header, _, key) = state
+    assert_eq!(state.hits.session_agents.len(), 1);
+    let key = "agent-panel:ws_1".to_owned();
+    let wanted =
+        super::super::chrome::sessions::SessionHit::Toggle(ClientEndpointId::Local, key.clone());
+    let header = state
         .hits
-        .agent_tree_toggles
-        .first()
-        .cloned()
-        .expect("workspace header hit");
-    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        .sessions
+        .iter()
+        .find(|(_, hit)| hit == &wanted)
+        .expect("workspace collapse toggle")
+        .0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: header.x,
         row: header.y,
@@ -2294,9 +2325,9 @@ fn clicking_workspace_header_collapses_agent_group() {
     })]);
     assert!(state.group_is_collapsed(&state.active_endpoint_id, &key));
     state.compose(106, 30).expect("collapsed agent panel frame");
-    assert_eq!(state.hits.agent_tree_toggles.len(), 1);
+    assert!(state.hits.sessions.iter().any(|(_, hit)| hit == &wanted));
     assert!(
-        state.hits.agents.is_empty(),
+        state.hits.session_agents.is_empty(),
         "collapsed group keeps the header but hides agent rows"
     );
 }

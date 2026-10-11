@@ -24,6 +24,21 @@ fn server_with_agent_pane() -> (HeadlessServer, crate::layout::PaneId) {
     (server, pane_id)
 }
 
+fn server_with_prompt_channel(
+    state: AgentState,
+) -> (HeadlessServer, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
+    let (mut server, pane_id) = server_with_agent_pane();
+    let terminal_id = server.app.state.workspaces[0].tabs[0].panes[&pane_id]
+        .attached_terminal_id
+        .clone();
+    let terminal = server.app.state.terminals.get_mut(&terminal_id).unwrap();
+    terminal.set_detected_state(Some(Agent::OpenCode), state);
+    terminal.set_agent_name("reviewer".into());
+    let (runtime, input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+    server.app.state.insert_test_runtime(pane_id, runtime);
+    (server, input)
+}
+
 /// 连上一个客户端 shell。两个接收端都要保活：测试写端由一个转发线程排空，
 /// 任一接收端被丢弃都会让它停止转发后续控制帧。
 fn connect_shell(
@@ -1040,6 +1055,496 @@ async fn endpoint_responses(
     })
     .await
     .expect("等待端点应答")
+}
+
+#[tokio::test]
+async fn client_endpoint_agent_prompt_submits_through_the_shared_agent_api() {
+    let (mut server, mut input) = server_with_prompt_channel(AgentState::Idle);
+    let client_id = 153;
+    let (control_rx, _render_rx) = connect_shell(&mut server, client_id);
+    let _ = next_snapshot(&control_rx);
+    let boot_id = server.client_shell_boot_id.clone();
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id,
+        request: Box::new(api::schema::Request {
+            id: "client-shell:prompt".into(),
+            method: api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
+                target: "reviewer".into(),
+                text: "review response".into(),
+                wait: None,
+            }),
+        }),
+    });
+    let response =
+        endpoint_responses(&mut server, &control_rx, client_id, "client-shell:prompt").await;
+    let response: api::schema::SuccessResponse =
+        serde_json::from_value(response).expect("prompt submission success");
+    assert!(matches!(
+        response.result,
+        api::schema::ResponseResult::AgentPrompted { .. }
+    ));
+    assert_eq!(
+        input.try_recv().expect("prompt text").as_ref(),
+        b"review response"
+    );
+    assert_eq!(input.try_recv().expect("prompt submit").as_ref(), b"\r");
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn client_endpoint_agent_prompt_cannot_answer_a_blocked_agent() {
+    let (mut server, mut input) = server_with_prompt_channel(AgentState::Blocked);
+    let client_id = 154;
+    let (control_rx, _render_rx) = connect_shell(&mut server, client_id);
+    let _ = next_snapshot(&control_rx);
+    let boot_id = server.client_shell_boot_id.clone();
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id,
+        request: Box::new(api::schema::Request {
+            id: "client-shell:blocked-prompt".into(),
+            method: api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
+                target: "reviewer".into(),
+                text: "yes".into(),
+                wait: None,
+            }),
+        }),
+    });
+    let response = endpoint_responses(
+        &mut server,
+        &control_rx,
+        client_id,
+        "client-shell:blocked-prompt",
+    )
+    .await;
+    assert_eq!(response["error"]["code"], "agent_blocked");
+    assert!(input.try_recv().is_err());
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn client_endpoint_agent_prompt_rejects_waiting_before_submission() {
+    let (mut server, mut input) = server_with_prompt_channel(AgentState::Idle);
+    let client_id = 155;
+    let (control_rx, _render_rx) = connect_shell(&mut server, client_id);
+    let _ = next_snapshot(&control_rx);
+    let boot_id = server.client_shell_boot_id.clone();
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id,
+        request: Box::new(api::schema::Request {
+            id: "client-shell:prompt-wait".into(),
+            method: api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
+                target: "reviewer".into(),
+                text: "review response".into(),
+                wait: Some(api::schema::AgentPromptWaitOptions {
+                    until: vec![api::schema::AgentStatus::Idle],
+                    timeout_ms: Some(1500),
+                    submission_deadline: None,
+                }),
+            }),
+        }),
+    });
+    let bytes = control_rx
+        .recv_timeout(LOADED_WAIT)
+        .expect("direct rejection response");
+    let ServerMessage::ClientShellEndpointResponseChunk {
+        request_id,
+        final_chunk,
+        data,
+        ..
+    } = read_server_message(bytes)
+    else {
+        panic!("expected endpoint rejection response");
+    };
+    assert_eq!(request_id, "client-shell:prompt-wait");
+    assert!(final_chunk);
+    let response: serde_json::Value = serde_json::from_slice(&data).expect("JSON rejection");
+    assert_eq!(response["error"]["code"], "unsupported_endpoint_command");
+    assert!(input.try_recv().is_err());
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+    assert!(server.clients[&client_id]
+        .endpoint_responses
+        .slots
+        .is_empty());
+    shutdown_test_runtimes(&mut server);
+}
+
+fn endpoint_control_response(
+    control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    expected_boot: &str,
+    expected_request: &str,
+) -> serde_json::Value {
+    let bytes = control_rx
+        .recv_timeout(LOADED_WAIT)
+        .expect("endpoint control response");
+    let ServerMessage::ClientShellEndpointResponseChunk {
+        boot_id,
+        request_id,
+        final_chunk,
+        data,
+    } = read_server_message(bytes)
+    else {
+        panic!("expected endpoint control response chunk");
+    };
+    assert_eq!(boot_id, expected_boot);
+    assert_eq!(request_id, expected_request);
+    assert!(final_chunk);
+    let response: serde_json::Value = serde_json::from_slice(&data).expect("JSON response");
+    assert_eq!(response["id"], expected_request);
+    response
+}
+
+fn deactivate_prompt_surface(
+    server: &mut HeadlessServer,
+    control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    client_id: u64,
+) {
+    let boot_id = server.client_shell_boot_id.clone();
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id: boot_id.clone(),
+        request: Box::new(api::schema::Request {
+            id: "prompt-surface-off".into(),
+            method: api::schema::Method::ClientShellSurfaceSet(
+                api::schema::ClientShellSurfaceSetParams { active: false },
+            ),
+        }),
+    });
+    let response = endpoint_control_response(control_rx, &boot_id, "prompt-surface-off");
+    assert_eq!(response["result"]["active"], false);
+    assert!(!server.clients[&client_id].shell_surface_active);
+    assert!(server.clients[&client_id].writer.is_some());
+}
+
+fn endpoint_prompt_request(
+    request_id: &str,
+    target: &str,
+    wait: Option<api::schema::AgentPromptWaitOptions>,
+) -> Box<api::schema::Request> {
+    Box::new(api::schema::Request {
+        id: request_id.into(),
+        method: api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
+            target: target.into(),
+            text: "review response".into(),
+            wait,
+        }),
+    })
+}
+
+#[tokio::test]
+async fn client_endpoint_agent_prompt_submits_on_an_inactive_surface_without_navigation() {
+    let (mut server, mut input) = server_with_prompt_channel(AgentState::Idle);
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    let public = server.app.public_pane_id(0, pane_id).unwrap();
+    server
+        .app
+        .state
+        .workspaces
+        .push(crate::workspace::Workspace::test_new("local"));
+    server.app.state.ensure_test_terminals();
+    let client_id = 156;
+    let (control_rx, _render_rx) = connect_shell(&mut server, client_id);
+    let _ = next_snapshot(&control_rx);
+    server.app.state.switch_workspace_tab(1, 0);
+    let (local_control_rx, _local_render_rx) = connect_shell(&mut server, 157);
+    let _ = next_snapshot(&local_control_rx);
+    deactivate_prompt_surface(&mut server, &control_rx, client_id);
+    assert_eq!(server.foreground_client_id, Some(157));
+    assert!(client_commands::supported_client_shell_method_names().contains(&"agent.prompt"));
+    let boot_id = server.client_shell_boot_id.clone();
+    let default_target = server.default_shell_target();
+    let remote_focus = server.shell_focus_target(client_id);
+    let local_focus = server.shell_focus_target(157);
+    let geometry = server.tab_geometry_controllers.clone();
+    let size = server.effective_size;
+
+    for (request_id, target) in [
+        ("inactive-prompt-name", "reviewer"),
+        ("inactive-prompt-pane", public.as_str()),
+    ] {
+        let request = endpoint_prompt_request(request_id, target, None);
+        assert!(client_commands::supports_client_shell_method(
+            &request.method
+        ));
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id,
+            boot_id: boot_id.clone(),
+            request: request.clone(),
+        });
+        assert!(server.clients[&client_id].shell_endpoint_command_in_flight);
+        assert_eq!(
+            server.endpoint_response_budget.available_permits(),
+            client_commands::MAX_SERVER_RESPONSES - 1
+        );
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id,
+            boot_id: boot_id.clone(),
+            request,
+        });
+        assert_eq!(server.clients[&client_id].endpoint_responses.slots.len(), 1);
+        let response = endpoint_responses(&mut server, &control_rx, client_id, request_id).await;
+        let response: api::schema::SuccessResponse =
+            serde_json::from_value(response).expect("inactive prompt success");
+        let api::schema::ResponseResult::AgentPrompted { agent } = response.result else {
+            panic!("expected AgentPrompted");
+        };
+        assert_eq!(agent.pane_id, public);
+        assert_eq!(
+            input.try_recv().expect("prompt text").as_ref(),
+            b"review response"
+        );
+        assert_eq!(input.try_recv().expect("prompt Enter").as_ref(), b"\r");
+        assert_eq!(
+            input.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+        assert!(!server.clients[&client_id].shell_surface_active);
+        assert_eq!(server.foreground_client_id, Some(157));
+        assert_eq!(server.default_shell_target(), default_target);
+        assert_eq!(server.shell_focus_target(client_id), remote_focus);
+        assert_eq!(server.shell_focus_target(157), local_focus);
+        assert_eq!(server.tab_geometry_controllers, geometry);
+        assert_eq!(server.effective_size, size);
+        assert!(server.clients[&client_id]
+            .endpoint_responses
+            .slots
+            .is_empty());
+        assert_eq!(
+            server.endpoint_response_budget.available_permits(),
+            client_commands::MAX_SERVER_RESPONSES
+        );
+    }
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn client_endpoint_agent_prompt_on_an_inactive_surface_cannot_answer_a_blocked_agent() {
+    let (mut server, mut input) = server_with_prompt_channel(AgentState::Blocked);
+    let client_id = 158;
+    let (control_rx, _render_rx) = connect_shell(&mut server, client_id);
+    let _ = next_snapshot(&control_rx);
+    deactivate_prompt_surface(&mut server, &control_rx, client_id);
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id: server.client_shell_boot_id.clone(),
+        request: endpoint_prompt_request("inactive-blocked-prompt", "reviewer", None),
+    });
+    let response = endpoint_responses(
+        &mut server,
+        &control_rx,
+        client_id,
+        "inactive-blocked-prompt",
+    )
+    .await;
+    assert_eq!(response["error"]["code"], "agent_blocked");
+    assert_eq!(
+        input.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    );
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+    assert!(server.clients[&client_id]
+        .endpoint_responses
+        .slots
+        .is_empty());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn client_endpoint_agent_prompt_on_an_inactive_surface_retains_admission_guards() {
+    let (mut server, mut input) = server_with_prompt_channel(AgentState::Idle);
+    let client_id = 159;
+    let (control_rx, _render_rx) = connect_shell(&mut server, client_id);
+    let _ = next_snapshot(&control_rx);
+    deactivate_prompt_surface(&mut server, &control_rx, client_id);
+    let boot_id = server.client_shell_boot_id.clone();
+    let busy = super::endpoint_responses::command_ticket(
+        &mut server,
+        client_id,
+        "existing-command",
+        false,
+    );
+    let lease = server.clients[&client_id].shell_endpoint_command_surface_revision;
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id: boot_id.clone(),
+        request: endpoint_prompt_request("inactive-busy-prompt", "reviewer", None),
+    });
+    let response = endpoint_control_response(&control_rx, &boot_id, "inactive-busy-prompt");
+    assert_eq!(response["error"]["code"], "endpoint_busy");
+    assert_eq!(
+        input.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    );
+    assert!(server.clients[&client_id].shell_endpoint_command_in_flight);
+    assert_eq!(
+        server.clients[&client_id].shell_endpoint_command_surface_revision,
+        lease
+    );
+    assert!(server.clients[&client_id]
+        .endpoint_responses
+        .command
+        .as_ref()
+        .is_some_and(|identity| Arc::ptr_eq(identity, &busy.identity)));
+    assert_eq!(server.clients[&client_id].endpoint_responses.slots.len(), 1);
+    server
+        .clients
+        .get_mut(&client_id)
+        .unwrap()
+        .cancel_endpoint_command();
+    drop(busy);
+    server
+        .clients
+        .get_mut(&client_id)
+        .unwrap()
+        .prune_endpoint_responses();
+
+    let tickets: Vec<_> = (0..client_commands::MAX_CLIENT_RESPONSES)
+        .map(|index| {
+            server
+                .admit_endpoint_response(
+                    client_id,
+                    boot_id.clone(),
+                    format!("held-response-{index}"),
+                    client_commands::EndpointResponseKind::Background,
+                )
+                .unwrap()
+        })
+        .collect();
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id: boot_id.clone(),
+        request: endpoint_prompt_request("inactive-capacity-prompt", "reviewer", None),
+    });
+    let response = endpoint_control_response(&control_rx, &boot_id, "inactive-capacity-prompt");
+    assert_eq!(response["error"]["code"], "endpoint_busy");
+    assert_eq!(
+        input.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    );
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+    assert_eq!(
+        server.clients[&client_id].endpoint_responses.slots.len(),
+        client_commands::MAX_CLIENT_RESPONSES
+    );
+    assert_eq!(
+        server.endpoint_response_budget.available_permits(),
+        client_commands::MAX_SERVER_RESPONSES - client_commands::MAX_CLIENT_RESPONSES
+    );
+    drop(tickets);
+    server
+        .clients
+        .get_mut(&client_id)
+        .unwrap()
+        .prune_endpoint_responses();
+
+    for (request_id, request_boot, wait, expected_code) in [
+        (
+            "inactive-stale-prompt",
+            "stale-boot".to_owned(),
+            None,
+            "stale_boot",
+        ),
+        (
+            "inactive-wait-prompt",
+            boot_id.clone(),
+            Some(api::schema::AgentPromptWaitOptions {
+                until: vec![api::schema::AgentStatus::Idle],
+                timeout_ms: Some(1500),
+                submission_deadline: None,
+            }),
+            "unsupported_endpoint_command",
+        ),
+    ] {
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id,
+            boot_id: request_boot.clone(),
+            request: endpoint_prompt_request(request_id, "reviewer", wait),
+        });
+        let response = endpoint_control_response(&control_rx, &request_boot, request_id);
+        assert_eq!(response["error"]["code"], expected_code);
+        assert_eq!(
+            input.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+        assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+        assert!(server.clients[&client_id]
+            .endpoint_responses
+            .slots
+            .is_empty());
+        assert_eq!(
+            server.endpoint_response_budget.available_permits(),
+            client_commands::MAX_SERVER_RESPONSES
+        );
+    }
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn client_endpoint_inactive_surface_still_rejects_focus_geometry_and_commands() {
+    let (mut server, mut input) = server_with_prompt_channel(AgentState::Idle);
+    let client_id = 160;
+    let (control_rx, _render_rx) = connect_shell(&mut server, client_id);
+    let _ = next_snapshot(&control_rx);
+    deactivate_prompt_surface(&mut server, &control_rx, client_id);
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    let public = server.app.public_pane_id(0, pane_id).unwrap();
+    let tab_id = server.app.public_tab_id(0, 0).unwrap();
+    let boot_id = server.client_shell_boot_id.clone();
+    let default_target = server.default_shell_target();
+    let geometry = server.tab_geometry_controllers.clone();
+    for (index, method) in [
+        api::schema::Method::TabFocus(api::schema::TabTarget {
+            tab_id: tab_id.clone(),
+        }),
+        api::schema::Method::PaneResize(api::schema::PaneResizeParams {
+            pane_id: Some(public.clone()),
+            direction: api::schema::PaneDirection::Right,
+            amount: Some(1.0),
+        }),
+        api::schema::Method::CommandInvoke(api::schema::CommandInvokeParams {
+            command_id: "pane.focus".into(),
+            workspace_id: None,
+            tab_id: Some(tab_id),
+            pane_id: Some(public),
+            selection: None,
+        }),
+        api::schema::Method::WorkspaceRename(api::schema::WorkspaceRenameParams {
+            workspace_id: server.app.public_workspace_id(0),
+            label: "must not rename".into(),
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(client_commands::supports_client_shell_method(&method));
+        let request_id = format!("inactive-surface-command-{index}");
+        server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            client_id,
+            boot_id: boot_id.clone(),
+            request: Box::new(api::schema::Request {
+                id: request_id.clone(),
+                method,
+            }),
+        });
+        let response = endpoint_control_response(&control_rx, &boot_id, &request_id);
+        assert_eq!(response["error"]["code"], "surface_inactive");
+        assert_eq!(
+            input.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+        assert_eq!(server.default_shell_target(), default_target);
+        assert_eq!(server.tab_geometry_controllers, geometry);
+        assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+        assert!(server.clients[&client_id]
+            .endpoint_responses
+            .slots
+            .is_empty());
+    }
+    shutdown_test_runtimes(&mut server);
 }
 
 #[tokio::test]

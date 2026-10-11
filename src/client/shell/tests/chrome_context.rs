@@ -162,7 +162,7 @@ fn focused_workspace_change_reveals_new_workspace_in_full_sidebar() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(initial));
     state.set_pane_surface(surface());
-    state.compose(106, 20).expect("full sidebar");
+    state.compose(106, 14).expect("full sidebar");
     assert!(state.hits.workspace_max_scroll > 0);
     assert!(state
         .hits
@@ -180,7 +180,7 @@ fn focused_workspace_change_reveals_new_workspace_in_full_sidebar() {
     updated_surface.projection_revision = 2;
     state.set_snapshot(Box::new(update));
     state.set_pane_surface(updated_surface);
-    state.compose(106, 2).expect("zero-height workspace body");
+    state.compose(106, 1).expect("zero-height workspace body");
     assert!(state.reveal_focused_workspace);
     state.compose(106, 20).expect("updated full sidebar");
 
@@ -284,22 +284,14 @@ fn client_owned_sidebar_dividers_resize_live() {
     assert!(compact.contains("工作区"));
     assert!(recovered_text.contains("LIVE"));
     assert!(!state.hits.panes.is_empty());
-    let section_divider = state.hits.sidebar_section_divider;
-    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: section_divider.x + 2,
-        row: section_divider.y,
-        modifiers: KeyModifiers::empty(),
-    })]);
-    let split = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-        kind: MouseEventKind::Drag(MouseButton::Left),
-        column: section_divider.x + 2,
-        row: 20,
-        modifiers: KeyModifiers::empty(),
-    })]);
-    assert!(state.sidebar_section_split > 0.6);
-    assert!(split.repaint);
-    assert!(!split.resize);
+    assert!(state.hits.sidebar_section_divider.is_empty());
+    assert!(state.session_view.agents.is_empty());
+    assert_eq!(
+        state.session_view.area.bottom(),
+        state.layout(106, 30).sidebar.bottom()
+    );
+    assert!(state.hits.sidebar_toggle.height > 0);
+    assert!(state.hits.sidebar_divider.height > 0);
 }
 
 #[test]
@@ -456,6 +448,7 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
 
     state.open_command_search();
     palette_select(&mut state, "binding:Detach");
+    state.compose(106, 30).expect("detach action revealed");
     let detach = state.handle_input_bytes(b"\r");
     assert!(detach.detach);
     assert!(state.overlay.is_none());

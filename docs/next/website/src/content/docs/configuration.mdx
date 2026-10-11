@@ -10,6 +10,10 @@ Herdr works without a config file. Add one when you want custom keys, themes, si
 
 The [Config reference](/docs/config-reference/) lists every setting and keybinding, with types, defaults, and allowed values. This page covers setup, common recipes, and configuration structures that need more explanation than a reference row.
 
+Inspector visibility is a client preference saved per endpoint, not a server setting. Its default is automatic (hidden below 140 columns). Set `keys.toggle_inspector = "prefix+i"` to customize the toggle shortcut; the effective binding also appears in which-key, help, and command search.
+
+Manual agent read/unread overrides are lenient client-shell preferences (`agent_marks`), keyed by endpoint and fenced by boot/pane/launch/turn sequence, with 256 marks across endpoints. They are not TOML lifecycle settings. The command palette includes **Mark agent unread**, **Mark all agents read**, and **Agent overview**. Older clients ignore unknown preference fields.
+
 ## Config file
 
 Herdr reads config from:
@@ -44,6 +48,22 @@ Herdr shows first-run setup when `onboarding` is missing or true. Continuing fro
 ```toml
 onboarding = false
 ```
+
+## Settings and welcome screen
+
+Settings groups general (language), appearance (theme), indicators, notifications, sound, integrations, keyboard, and monitor. Wide terminals show a left-hand section list; narrow terminals wrap every section into reachable tabs. Use Left/Right or Tab to change sections, Up/Down to select, and Enter to apply. Theme changes preview immediately; Esc or leaving appearance restores the saved theme. Language changes take effect live.
+
+Integrations retain their installed/update status and complete, scrollable installation messages. Enter installs only the selected integration; `a` installs all pending integrations. Keyboard opens the searchable sheet generated from your current bindings. Monitor opens the real preferences or system page, rather than a separate copy of those settings.
+
+When the selected connected machine has no workspaces, the welcome screen offers **Open folder**, **New workspace**, and **Help**. Narrow content areas stack the complete action names and their key hints on separate lines; Help opens the shortcut sheet. Open folder (`o` or Enter) asks for a path on that machine and creates a workspace there; creation and help also support the current configured bindings. No placeholder recent workspaces are displayed. First-run onboarding and product announcements still run independently.
+
+## Command search and notification cards
+
+Command search opens a centered panel with Recent, Agents, Workspaces, and Commands sections. Session rows come from connected machines and focus their real targets. Action rows show a description and the current configured key. Recent entries remain limited to five. Search accepts English or Chinese titles, action categories, and saved machine addresses. Wheel scrolling does not change the keyboard selection. Main, layout, and context menus share description, shortcut, checked, disabled, and dangerous-action presentation; descriptions disappear before shortcuts at narrow widths.
+
+In-app notifications show the event status, source location, age, and up to two wrapped lines of the server message. Needs input and failed messages have different symbols and colors. Agent symbols in command search, notification cards, and history follow `ui.status_indicators`; truncation preserves wide and combined characters. Click a card or use the configured notification-target binding to jump. To use plain Enter or Esc, first click the card's **keys** control: Enter jumps, Esc dismisses. Ordinary terminal Enter/Esc continue to reach the running program and never dismiss or activate a notification. Notification history retains the message and rejects jump targets from an earlier server boot. System and terminal delivery continue to carry the body.
+
+In integrations, PageUp/PageDown scroll by displayed lines and Home/End reach the beginning/end of long messages; Up/Down still select entries. Adaptive theme previews honor the current host appearance, and late integration responses cannot change another section's selection or a reopened settings page. The empty-workspace welcome screen yields to Monitor and other focused panels. If wheel scrolling hides the selected search result, the first Enter reveals that same result without running it; Enter runs it once visible. Session targets are revalidated against the current connection, server boot and identity before navigation. Typing, committed IME text, or pasting returns notification keyboard focus to the normal input route. Unfocused cards only hide terminal cursors they actually cover.
 
 ## Reload config
 
@@ -162,6 +182,7 @@ A small keybinding override looks like this:
 [keys]
 prefix = "ctrl+b"
 goto = "prefix+g"
+next_attention = "prefix+a"
 new_tab = "prefix+c"
 next_tab = "prefix+n"
 previous_tab = "prefix+p"
@@ -317,7 +338,7 @@ red = "#f38ba8"
 yellow = "#f9e2af"
 ```
 
-`sidebar_bg` optionally gives the desktop sidebar its own background; in the docked layout it colors both the workspace list and the Agents panel. When you do not set it, the `graphite` themes paint the sidebar one step darker than the panels, `catppuccin` paints it in its panel color, and the other built-in themes keep the host terminal background. `active_row_bg` changes the active Space and focused Agent row background without affecting separators or scrollbar tracks. `selection_bg` changes the Navigate-mode cursor row background in the sidebar.
+`sidebar_bg` optionally gives the Sessions sidebar its own background. When you do not set it, the `graphite` themes paint the sidebar one step darker than the panels, `catppuccin` paints it in its panel color, and the other built-in themes keep the host terminal background. `active_row_bg` changes the active workspace and focused agent session row background without affecting separators or scrollbar tracks. `selection_bg` changes the Navigate-mode cursor row background in the sidebar.
 
 Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `reset`, `default`, `none`, and `transparent`.
 
@@ -352,7 +373,7 @@ Unset fields keep their semantic fallback: pane borders use `accent`/`overlay0`,
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
+The unified Sessions sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, agent session ordering, mouse behavior, pane borders, and other presentation settings. The `ui.sidebar.agents` and `ui.sidebar.spaces` keys configure agent session and workspace rows in this tree; they do not create separate panels.
 
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
@@ -410,7 +431,7 @@ status_indicators = "symbols"
 
 ### Sidebar row layouts
 
-The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:
+The default Sessions tree uses the compact summaries described in [Concepts](/docs/concepts/#session-sidebar). Custom sidebar layouts render each inner array in `rows` as one line. These are the complete TOML defaults for the compatible row settings:
 
 ```toml
 [ui.sidebar.agents]
@@ -483,7 +504,7 @@ The first matching rule wins. Its specified style fields override the occurrence
 
 Rules work with text-valued built-ins and custom `$name` tokens in Agent rows, `rows_by_agent` overrides, and Space rows. Custom tokens match their reported value: `$load` reporting `"90"` selects red and bold above, `"60"` selects yellow, and `"90%"` keeps white. Unreported tokens still disappear. `state_icon` and composite `git_status` accept fixed styles only, not rules. Unknown conditions and malformed rules are rejected when loading config; regex, fuzzy matching, and scripts are not supported.
 
-`row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+`row_gap` controls blank terminal rows between entries in the unified tree, independently for agent sessions and workspaces. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 
@@ -526,7 +547,7 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
-Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts. In the grouped agent tree, `machine`, `workspace`, and `tab` tokens are left out of agent rows whenever a group header above already shows that value; a line left with only `state_icon` joins the next line. When no row includes `state_text`, the tree adds the status text after the agent name if it fits.
+Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts. In the workspace-grouped Sessions tree, `machine`, `workspace`, and `tab` tokens are left out of agent rows whenever a group header above already shows that value; a line left with only `state_icon` joins the next line. When no row includes `state_text`, the tree adds the status text after the agent name if it fits.
 
 ## Notifications
 

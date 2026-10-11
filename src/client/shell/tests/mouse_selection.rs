@@ -1716,7 +1716,7 @@ fn context_menu_hover_is_separate_from_the_keyboard_highlight() {
     );
     assert_eq!(
         buffer[(first_row.x, first_row.y)].bg,
-        state.config.palette.accent
+        state.config.palette.surface1
     );
     assert_ne!(
         state.config.components.hover_bg,

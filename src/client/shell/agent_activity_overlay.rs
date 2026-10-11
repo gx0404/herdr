@@ -777,9 +777,9 @@ impl ClientAgentActivityOverlay {
 
 /// 应答是否表示 server 根本不认识该方法（旧 server）。来源未实现
 /// （`not_implemented`，如 pane 暂无会话引用）按普通读取失败处理，跟随时照常重试。
-fn method_unsupported(error: &ClientShellEndpointError) -> bool {
+pub(in crate::client::shell) fn method_unsupported(error: &ClientShellEndpointError) -> bool {
     match error.code.as_deref() {
-        Some("unsupported_method" | "method_not_found") => true,
+        Some("unsupported_method" | "method_not_found" | "unknown_method") => true,
         Some("invalid_request") => error.message.contains("unknown variant"),
         _ => false,
     }
@@ -787,7 +787,10 @@ fn method_unsupported(error: &ClientShellEndpointError) -> bool {
 
 /// 节点按 `parent_id` 前序展开：找不到父节点的是根；成环的链在首个节点处断开；
 /// 折叠节点的子树不展开。
-fn build_rows(nodes: &[AgentActivityNode], collapsed: &HashSet<String>) -> Vec<TreeEntry<usize>> {
+pub(in crate::client::shell) fn build_rows(
+    nodes: &[AgentActivityNode],
+    collapsed: &HashSet<String>,
+) -> Vec<TreeEntry<usize>> {
     let index: HashMap<&str, usize> = nodes
         .iter()
         .enumerate()

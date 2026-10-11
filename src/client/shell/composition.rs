@@ -69,18 +69,6 @@ impl ClientShellState {
         } else {
             Rect::new(0, 1, cols, rows.saturating_sub(2))
         };
-        let valid_navigation_target = self.mode == ClientShellMode::Navigate
-            && self
-                .navigate_workspace_id
-                .as_ref()
-                .is_some_and(|target| self.navigation_target_valid(target));
-        let pending_workspace_highlight =
-            self.pending_workspace_highlight.as_ref().filter(|pending| {
-                self.mode != ClientShellMode::Navigate
-                    && pending.target.endpoint_id == self.active_endpoint_id
-                    && self.navigation_target_valid(&pending.target)
-            });
-        // A resize invalidates pane geometry, not the healthy Local workspace chrome.
         let local_snapshot = self.snapshot.as_deref().filter(|_| {
             self.endpoints.len() == 1
                 && !self.sidebar_collapsed
@@ -90,55 +78,27 @@ impl ClientShellState {
         });
         let spinner = self.spinner_glyph();
         let status_glyphs = self.status_glyphs();
-        let federated_agent_rows = self
-            .federated_agent_rows
-            .as_ref()
-            .map(|cache| cache.view())
-            .unwrap_or_default();
-        let mut render_state = render::ShellRenderState {
-            federated_agent_rows,
+        let render_state = render::ShellRenderState {
+            session_rows: self.session_rows.as_ref(),
+            session_view: &self.session_view,
+            session_grouping: self.session_grouping,
             endpoints: &self.endpoints,
-            machine_chrome: &self.machine_chrome,
             active_endpoint_id: &self.active_endpoint_id,
-            collapsed_endpoints: &self.collapsed_endpoints,
-            collapsed_groups: &self.collapsed_groups,
-            remote_collapsed_groups: &self.remote_collapsed_groups,
-            workspace_scroll: &mut self.workspace_scroll,
-            agent_scroll: &mut self.agent_scroll,
             tab_scroll: &mut self.tab_scroll,
-            reveal_focused_workspace: &mut self.reveal_focused_workspace,
             reveal_focused_tab: &mut self.reveal_focused_tab,
-            sidebar_collapsed: false,
-            sidebar_section_split: self.sidebar_section_split,
+            sidebar_collapsed: self.sidebar_collapsed,
             tab_drag_insert_index: None,
-            selected_workspace_id: self
-                .navigate_workspace_id
-                .as_ref()
-                .filter(|_| valid_navigation_target)
-                .or_else(|| pending_workspace_highlight.map(|pending| &pending.target)),
-            reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
-            dragged_workspace_id: None,
-            workspace_drop_indicator_row: None,
             chrome_hover: self.hover.as_ref(),
             spinner,
             status_glyphs,
         };
-        if let Some(snapshot) = local_snapshot {
-            render::render_sidebar(
-                canvas.buffer(),
-                sidebar,
-                snapshot,
-                &self.config,
-                &mut render_state,
-                &mut self.hits,
-            );
-        } else {
+        if !self.session_view.mobile {
             super::endpoint_sidebar::render_expanded(
                 canvas.buffer(),
                 sidebar,
                 self.snapshot.as_deref(),
                 &self.config,
-                &mut render_state,
+                &render_state,
                 &mut self.hits,
             );
         }
@@ -226,23 +186,39 @@ impl ClientShellState {
         if self.workbench.enabled {
             return self.compose_workbench(cols, rows);
         }
-        let valid_navigation_target = self.mode == ClientShellMode::Navigate
-            && self
-                .navigate_workspace_id
-                .as_ref()
-                .is_some_and(|target| self.navigation_target_valid(target));
-        let pending_workspace_highlight =
-            self.pending_workspace_highlight.as_ref().filter(|pending| {
-                self.mode != ClientShellMode::Navigate
-                    && pending.target.endpoint_id == self.active_endpoint_id
-                    && self.navigation_target_valid(&pending.target)
-            });
         if self.snapshot.is_none() || self.pane_surface.is_none() {
             let mut canvas = self.compose_unavailable(cols, rows);
             let area = self.layout(cols, rows).pane_surface;
             self.paint_observability(&mut canvas, area);
             let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
             self.paint_shell_feedback(&mut canvas, self.layout(cols, rows), &mut occlusion)?;
+            if self.session_view.mobile {
+                if let Some(cache) = self.session_rows.as_ref() {
+                    let full = Rect::new(0, 0, cols, rows);
+                    canvas.clear_links_in(full);
+                    canvas.set_cursor(None);
+                    occlusion.cover(full);
+                    super::mobile::render_mobile_switcher(
+                        canvas.buffer(),
+                        full,
+                        &super::chrome::sessions::SessionPaint {
+                            cache,
+                            view: &self.session_view,
+                            grouping: self.session_grouping,
+                            config: &self.config,
+                            glyphs: self.status_glyphs(),
+                            hover: self.hover.as_ref(),
+                            spinner: self.spinner_glyph(),
+                            endpoints: &self.endpoints,
+                            active_endpoint_id: &self.active_endpoint_id,
+                        },
+                        &mut self.hits,
+                    );
+                    if !self.config.mouse_capture {
+                        self.hits = ShellHitMap::default();
+                    }
+                }
+            }
             self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
             let (frame, buffer) = canvas.finish(Vec::new());
             self.compose_buffer = Some(buffer);
@@ -269,16 +245,6 @@ impl ClientShellState {
             Some(ClientChromeDrag::Tab { insert_index, .. }) => *insert_index,
             _ => None,
         };
-        let (dragged_workspace_id, workspace_drop_indicator_row) = match &self.chrome_drag {
-            Some(ClientChromeDrag::Workspace {
-                source_workspace_id,
-                target,
-            }) => (
-                Some(source_workspace_id.as_str()),
-                target.as_ref().map(|(_, row)| *row),
-            ),
-            _ => (None, None),
-        };
         let visual_bell = self.visual_bell_active();
         let spinner = self.spinner_glyph();
         let status_glyphs = self.status_glyphs();
@@ -289,40 +255,21 @@ impl ClientShellState {
             cols,
             rows,
         );
-        let federated_agent_rows = self
-            .federated_agent_rows
-            .as_ref()
-            .map(|cache| cache.view())
-            .unwrap_or_default();
         self.hits = render::render_shell(
             canvas.buffer(),
             layout,
             snapshot,
             &self.config,
             render::ShellRenderState {
-                federated_agent_rows,
+                session_rows: self.session_rows.as_ref(),
+                session_view: &self.session_view,
+                session_grouping: self.session_grouping,
                 endpoints: &self.endpoints,
-                machine_chrome: &self.machine_chrome,
                 active_endpoint_id: &self.active_endpoint_id,
-                collapsed_endpoints: &self.collapsed_endpoints,
-                collapsed_groups: &self.collapsed_groups,
-                remote_collapsed_groups: &self.remote_collapsed_groups,
-                workspace_scroll: &mut self.workspace_scroll,
-                agent_scroll: &mut self.agent_scroll,
                 tab_scroll: &mut self.tab_scroll,
-                reveal_focused_workspace: &mut self.reveal_focused_workspace,
                 reveal_focused_tab: &mut self.reveal_focused_tab,
                 sidebar_collapsed: self.sidebar_collapsed,
-                sidebar_section_split: self.sidebar_section_split,
                 tab_drag_insert_index,
-                selected_workspace_id: self
-                    .navigate_workspace_id
-                    .as_ref()
-                    .filter(|_| valid_navigation_target)
-                    .or_else(|| pending_workspace_highlight.map(|pending| &pending.target)),
-                reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
-                dragged_workspace_id,
-                workspace_drop_indicator_row,
                 chrome_hover: self.hover.as_ref(),
                 spinner,
                 status_glyphs,
@@ -468,7 +415,6 @@ impl ClientShellState {
         if let Some(covered) = self.paint_observability(&mut canvas, layout.pane_surface) {
             occlusion.cover(covered);
         }
-        let snapshot = self.snapshot.as_deref()?;
         let surface = self.pane_surface.as_ref()?;
         self.hits.popup = None;
         if let Some(popup) = surface.popup.as_deref() {
@@ -542,20 +488,24 @@ impl ClientShellState {
         {
             let composed = canvas.buffer();
             occlusion.cover(composed.area);
-            super::mobile::render_mobile_switcher(
-                composed,
-                Rect::new(0, 0, cols, rows),
-                snapshot,
-                &self.endpoints,
-                &self.active_endpoint_id,
-                &self.config,
-                self.navigate_workspace_id
-                    .as_ref()
-                    .filter(|_| valid_navigation_target),
-                &mut self.mobile_switcher_scroll,
-                &mut self.reveal_mobile_workspace,
-                &mut self.hits,
-            );
+            if let Some(cache) = self.session_rows.as_ref() {
+                super::mobile::render_mobile_switcher(
+                    composed,
+                    Rect::new(0, 0, cols, rows),
+                    &super::chrome::sessions::SessionPaint {
+                        cache,
+                        view: &self.session_view,
+                        grouping: self.session_grouping,
+                        config: &self.config,
+                        glyphs: status_glyphs,
+                        hover: self.hover.as_ref(),
+                        spinner,
+                        endpoints: &self.endpoints,
+                        active_endpoint_id: &self.active_endpoint_id,
+                    },
+                    &mut self.hits,
+                );
+            }
             if let Some((_, label, status, progress)) = active_lifecycle.as_ref() {
                 let _ = endpoint_notices::render_lifecycle_banner(
                     composed,
@@ -622,6 +572,7 @@ impl ClientShellState {
             now: compose_now,
         };
         self.hits.notification_toast = Rect::default();
+        self.hits.notification_keys = Rect::default();
         self.hits.machine_auth_actions = Vec::new();
         self.hits.lifecycle_banner_retry = Rect::default();
         self.hits.lifecycle_banner_give_up = Rect::default();
@@ -711,26 +662,21 @@ impl ClientShellState {
                     )
                 };
             } else if let Some(notification) = self.visible_notification.as_ref() {
-                self.hits.notification_toast = if layout.mobile_header.is_empty() {
-                    notifications::render_visible_notification(
-                        composed,
-                        Rect::new(0, 0, cols, rows),
-                        notification,
-                        self.config.toast_position,
-                        u16::from(has_config_diagnostic) + lifecycle_offset,
-                        &cx,
-                    )
-                } else {
-                    notifications::render_mobile_notification_banner(
-                        composed,
-                        Rect::new(0, 0, cols, rows),
-                        notification,
-                        notifications::notification_agent_label(&self.endpoints, notification),
-                        has_config_diagnostic || lifecycle_offset > 0,
-                        &self.config.palette,
-                        &self.config.components,
-                    )
-                };
+                self.hits.notification_toast = notifications::render_shell_notification(
+                    composed,
+                    Rect::new(0, 0, cols, rows),
+                    notification,
+                    &notifications::NotificationContext {
+                        endpoints: &self.endpoints,
+                        keybinds: &self.config.keybinds,
+                        status_indicators: self.config.status_indicators,
+                        history: &self.notification_history,
+                        focused: self.notification_focused,
+                        position: self.config.toast_position,
+                        offset: u16::from(has_config_diagnostic) + lifecycle_offset,
+                    },
+                    &cx,
+                );
             }
             occlusion.cover(self.hits.notification_toast);
             if self.toast_since.is_some_and(|since| {
@@ -741,6 +687,21 @@ impl ClientShellState {
                     self.hits.notification_toast,
                     Style::default().add_modifier(Modifier::DIM),
                 );
+            }
+        }
+        if !self.hits.notification_toast.is_empty() {
+            canvas.clear_links_in(self.hits.notification_toast);
+            if (self.notification_focused && self.visible_notification.is_some())
+                || canvas.cursor().is_some_and(|cursor| {
+                    cursor.visible
+                        && super::contains(self.hits.notification_toast, (cursor.x, cursor.y))
+                })
+            {
+                canvas.set_cursor(None);
+            }
+            if self.visible_endpoint_notice.is_none() && self.visible_notification.is_some() {
+                self.hits.notification_keys =
+                    super::chrome::notification::keys_rect(self.hits.notification_toast);
             }
         }
         if let Some(feedback) = self.copy_feedback.as_ref() {
@@ -923,6 +884,32 @@ impl ClientShellState {
             now: compose_now,
         };
         let (frame_width, frame_height) = canvas.size();
+        self.hits.welcome_actions.clear();
+        if self.welcome_active() {
+            let area = if self.workbench.enabled {
+                self.workbench
+                    .geometry
+                    .panels
+                    .iter()
+                    .find_map(|(panel, rect)| {
+                        matches!(panel, dock::PanelId::Terminal(_)).then(|| {
+                            super::workbench::body(*rect, panel, self.workbench.geometry.compact)
+                        })
+                    })
+                    .unwrap_or_else(|| super::workbench::content_area(frame_width, frame_height))
+            } else {
+                self.layout(frame_width, frame_height).pane_surface
+            };
+            self.hits.welcome_actions = super::chrome::welcome::paint(
+                canvas.buffer(),
+                area,
+                &self.config,
+                self.hover.as_ref(),
+            );
+            occlusion.cover(area);
+            canvas.clear_links_in(area);
+            canvas.set_cursor(None);
+        }
         if self.mode == ClientShellMode::Prefix && self.config.which_key && self.overlay.is_none() {
             // which-key 不属于任何面板：工作台下与其它浮层同口径占整帧内容区
             // （标题栏与状态栏之间），不再被夹进聚焦面板的 body（冒烟 M3）。经典
@@ -971,6 +958,7 @@ impl ClientShellState {
                     &self.session_log_dropped,
                     &self.active_endpoint_id,
                     &self.config.keybinds,
+                    self.config.status_indicators,
                     &self.notification_history,
                     &cx,
                 )
@@ -983,6 +971,7 @@ impl ClientShellState {
                 self.hits.menu_popup = rendered.menu_popup;
                 self.hits.menu_search = rendered.menu_search;
                 self.hits.global_menu_rows = rendered.menu_rows;
+                self.hits.overview_actions = rendered.overview_actions;
                 self.hits.navigator_popup = rendered.navigator_popup;
                 self.hits.navigator_search = rendered.navigator_search;
                 self.hits.navigator_rows = rendered.navigator_rows;

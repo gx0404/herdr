@@ -404,6 +404,18 @@ class WindowsSmokeOwnershipTests(unittest.TestCase):
                 self.assertNotIn("GetTempPath", text)
                 self.assertNotRegex(text, r"&\s+\$exe\b")
 
+    def test_interactive_replay_hint_matches_the_default_detach_binding(self):
+        import re
+        model = (self.root() / "src/config/model.rs").read_text(encoding="utf-8")
+        defaults = model.split("impl Default for KeysConfig {", 1)[1]
+        prefix = re.search(r'prefix: BindingConfig::one\("([^"]+)"\)', defaults)
+        detach = re.search(r'detach: BindingConfig::one\("prefix\+([^"]+)"\)', defaults)
+        self.assertIsNotNone(prefix)
+        self.assertIsNotNone(detach)
+        prefix_label = "+".join(part.capitalize() for part in prefix.group(1).split("+"))
+        script = (self.root() / "scripts/windows_tui_compat.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn(f"default: {prefix_label} {detach.group(1)}", script)
+
     def test_conpty_probe_does_not_launch_msvc_background_helpers(self):
         text = (self.root() / "scripts/windows_smoke_conpty_path.ps1").read_text(encoding="utf-8-sig")
         helper = (self.root() / "scripts/windows_input/windows_smoke_helpers.ps1").read_text(encoding="utf-8-sig")

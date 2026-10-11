@@ -40,6 +40,8 @@ impl ClientShellState {
         if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
             return;
         }
+        self.pending_requests
+            .retain(|_, request| !matches!(request.kind, PendingEndpointKind::IntegrationList));
         self.overlay = Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
             focus: super::page::PageFocus::Content,
             current: theme_index(&self.config.theme_name),
@@ -67,7 +69,9 @@ impl ClientShellState {
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
-            ClientSettingsSection::Integrations => 0,
+            ClientSettingsSection::Integrations
+            | ClientSettingsSection::Keyboard
+            | ClientSettingsSection::Monitor => 0,
         }
     }
 
@@ -125,7 +129,9 @@ impl ClientShellState {
             Some(ClientShellOverlay::Settings(settings)) => match settings.section {
                 ClientSettingsSection::Language => 2,
                 ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
-                ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
+                ClientSettingsSection::Indicators => 3,
+                ClientSettingsSection::Sound | ClientSettingsSection::Monitor => 2,
+                ClientSettingsSection::Keyboard => 1,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => {
                     settings.integrations.len() + settings.integration_messages.len()
@@ -145,7 +151,7 @@ impl ClientShellState {
             return;
         }
         settings.reveal = true;
-        // 冒烟 M9：切换分区后 focus 是 Navigation，`draw_choice` 只在
+        // 冒烟 M9：切换分区后 focus 是 Navigation，`paint_options` 只在
         // Content 焦点时画键盘高亮，于是"刚进分区看不到光标"；第一次
         // ↓/↑ 只把焦点切到 Content、显示当前 `selected` 的光标，不叠加
         // delta，避免第一下直接跳到第 2 项。
@@ -193,8 +199,11 @@ impl ClientShellState {
         let mut runtime = self.config.theme_runtime.clone();
         runtime.manual_name = (*name).to_owned();
         runtime.auto_switch = false;
-        let resolved =
-            crate::app::client_resolved_theme(&runtime, None, self.config.host_color_depth);
+        let resolved = crate::app::client_resolved_theme(
+            &runtime,
+            self.host_appearance,
+            self.config.host_color_depth,
+        );
         self.config.theme_name = (*name).to_owned();
         self.config.palette = resolved.palette;
         self.config.components = resolved.components;
@@ -286,6 +295,24 @@ impl ClientShellState {
             }
             // TOOL-04：Enter 只安装当前选中行；批量安装走显式的 `a` 键。
             ClientSettingsSection::Integrations => self.install_selected_integration(outcome),
+            ClientSettingsSection::Keyboard => {
+                self.cancel_settings_overlay();
+                self.record_binding(
+                    crate::input::KeybindMatch::Action(crate::input::KeybindAction::Help),
+                    outcome,
+                );
+            }
+            ClientSettingsSection::Monitor => {
+                self.cancel_settings_overlay();
+                self.open_observation_page(
+                    if selected == 0 {
+                        super::observability::Page::Settings
+                    } else {
+                        super::observability::Page::Monitor
+                    },
+                    outcome,
+                );
+            }
         }
     }
 
@@ -400,9 +427,11 @@ impl ClientShellState {
                             integrations,
                         }) => {
                             settings.integrations = integrations;
-                            settings.selected = settings
-                                .selected
-                                .min(settings.integrations.len().saturating_sub(1));
+                            if settings.section == ClientSettingsSection::Integrations {
+                                settings.selected = settings
+                                    .selected
+                                    .min(settings.integrations.len().saturating_sub(1));
+                            }
                         }
                         Ok(_) => {
                             self.set_endpoint_error(
@@ -511,6 +540,42 @@ impl ClientShellState {
             outcome.repaint = true;
             return true;
         }
+        if matches!(
+            code,
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+        ) && modifiers.is_empty()
+            && matches!(self.overlay, Some(ClientShellOverlay::Settings(ref settings))
+                if settings.section == ClientSettingsSection::Integrations)
+        {
+            let window = self.last_composed_size.and_then(|(cols, rows)| {
+                let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_ref() else {
+                    return None;
+                };
+                super::render::settings_list_window(
+                    Rect::new(0, 0, cols, rows),
+                    self.floating_page_rect(cols, rows),
+                    settings,
+                    self.snapshot
+                        .as_deref()
+                        .is_some_and(|snapshot| snapshot.integration_updates_available),
+                )
+            });
+            if let (Some(window), Some(ClientShellOverlay::Settings(settings))) =
+                (window, self.overlay.as_mut())
+            {
+                let requested = match code {
+                    KeyCode::Home => 0,
+                    KeyCode::End => usize::MAX,
+                    KeyCode::PageUp => settings.scroll.saturating_sub(window.page_rows()),
+                    _ => settings.scroll.saturating_add(window.page_rows()),
+                };
+                settings.scroll = window.start(requested, false);
+                settings.reveal = false;
+                settings.focus = super::page::PageFocus::Content;
+            }
+            outcome.repaint = true;
+            return true;
+        }
         if matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
             self.move_settings_selection(if code == KeyCode::PageUp { -8 } else { 8 });
             outcome.repaint = true;
@@ -561,7 +626,7 @@ mod tests {
         }
     }
 
-    /// 冒烟 M9：切换分区后 `focus` 是 Navigation（`draw_choice` 只在
+    /// 冒烟 M9：切换分区后 `focus` 是 Navigation（`paint_options` 只在
     /// Content 焦点时画键盘高亮，进页面看不到光标）；第一次 ↓ 应该只把
     /// 焦点切到 Content、不移动 `selected`，否则会同时出现「看不到光标」
     /// 和「第一下直接跳到第 2 项」两个问题。

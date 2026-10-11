@@ -36,7 +36,7 @@ pub(super) struct ContextMenuEnv {
 }
 
 impl ContextMenuEnv {
-    fn resolve(kind: ContextKind, keybinds: &crate::config::Keybinds) -> Self {
+    fn resolve(kind: ContextKind, keybinds: &crate::config::LiveKeybindConfig) -> Self {
         Self {
             shortcuts: ACTIONS
                 .iter()
@@ -45,7 +45,13 @@ impl ContextMenuEnv {
                     if spec_kind != kind {
                         return None;
                     }
-                    spec.shortcut(keybinds).map(|label| (action, label))
+                    spec.shortcut(&keybinds.keybinds).map(|label| {
+                        let label = label
+                            .strip_prefix("prefix+")
+                            .map(|key| format!("{} {key}", keybinds.primary_prefix_label()))
+                            .unwrap_or(label);
+                        (action, label)
+                    })
                 })
                 .collect(),
             active_machine: false,
@@ -251,6 +257,9 @@ fn is_danger(kind: ContextKind, action: ClientContextMenuAction) -> bool {
 
 fn kit_item(item: &ClientContextMenuItem, kind: ContextKind) -> MenuItem<'_> {
     MenuItem {
+        description: context_action(kind, item.action)
+            .map(super::chrome::command::description)
+            .unwrap_or_default(),
         shortcut: item.shortcut.as_deref(),
         enabled: item.enabled,
         checked: item.checked,
@@ -355,7 +364,7 @@ impl ClientShellState {
     }
 
     fn context_env(&self, kind: ContextKind) -> ContextMenuEnv {
-        ContextMenuEnv::resolve(kind, &self.config.keybinds.keybinds)
+        ContextMenuEnv::resolve(kind, &self.config.keybinds)
     }
 
     pub(super) fn open_workspace_context_menu(&mut self, workspace_id: String, x: u16, y: u16) {
@@ -817,6 +826,11 @@ pub(super) fn render_context_menu(
     let kind = context_kind(&menu.target);
     let (items, ids) = top_menu(&model, kind);
     let bounds = buffer.area;
+    let main_bounds = if model.submenu.is_some() && bounds.width >= 100 {
+        Rect::new(bounds.x, bounds.y, bounds.width / 2, bounds.height)
+    } else {
+        bounds
+    };
     let hover_bg = Some(cx.components.hover_bg);
     let state = MenuState {
         highlighted: kit_index(&ids, menu.highlighted),
@@ -827,7 +841,7 @@ pub(super) fn render_context_menu(
     let main = render_menu(
         buffer,
         (menu.x, menu.y),
-        bounds,
+        main_bounds,
         &items,
         &state,
         cx.glyphs,
@@ -847,7 +861,18 @@ pub(super) fn render_context_menu(
         if let Some((parent, _)) = main.rows.iter().find(|(_, index)| *index == open.parent) {
             let children = sub_menu(&model, kind);
             let (width, _) = menu_size(&children);
-            let x = submenu_x(main.area, bounds, width);
+            let right_space = bounds.right().saturating_sub(main.area.right());
+            let left_space = main.area.x.saturating_sub(bounds.x);
+            let sub_bounds = if bounds.width >= 100 && right_space.max(left_space) >= 14 {
+                if right_space >= left_space {
+                    Rect::new(main.area.right(), bounds.y, right_space, bounds.height)
+                } else {
+                    Rect::new(bounds.x, bounds.y, left_space, bounds.height)
+                }
+            } else {
+                bounds
+            };
+            let x = submenu_x(main.area, bounds, width.min(sub_bounds.width));
             let sub_state = MenuState {
                 highlighted: child_kit_index(&model, open.highlighted),
                 hovered: open.hovered.map(|row| child_kit_index(&model, row)),
@@ -857,7 +882,7 @@ pub(super) fn render_context_menu(
             let sub = render_menu(
                 buffer,
                 (x, parent.y.saturating_sub(1)),
-                bounds,
+                sub_bounds,
                 &children,
                 &sub_state,
                 cx.glyphs,

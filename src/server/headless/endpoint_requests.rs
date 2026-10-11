@@ -354,12 +354,13 @@ impl HeadlessServer {
         let reading = crate::server::text_snapshots::handles(&request.method);
         let activity = crate::server::agent_activity::handles(&request.method);
         let observation = crate::server::observability::is_background_method(&request.method);
+        let prompt = matches!(&request.method, Method::AgentPrompt(_));
         let kind = if reading {
             EndpointResponseKind::Reading
         } else if activity || observation {
             EndpointResponseKind::Background
         } else {
-            if command_busy || !surface_active {
+            if command_busy || (!surface_active && !prompt) {
                 let (code, message) = if command_busy {
                     (
                         "endpoint_busy",
@@ -486,19 +487,19 @@ impl HeadlessServer {
                 slot.deferred_request_id = client.shell_deferred_navigation_request_id.clone();
             }
         }
+        let msg = api::ApiRequestMessage {
+            request: *request,
+            respond_to,
+            response_write_complete: None,
+            observation_events: None,
+            report_origin: None,
+            stream_active: None,
+        };
+        if prompt && !surface_active {
+            return self.handle_api_request_with_shutdown_check_inner(msg, false, true);
+        }
         let foreground_changed = self.promote_client_to_foreground(client_id);
-        foreground_changed
-            | self.handle_client_shell_api_request(
-                client_id,
-                api::ApiRequestMessage {
-                    request: *request,
-                    respond_to,
-                    response_write_complete: None,
-                    observation_events: None,
-                    report_origin: None,
-                    stream_active: None,
-                },
-            )
+        foreground_changed | self.handle_client_shell_api_request(client_id, msg)
     }
 
     fn observation_endpoint_reply(

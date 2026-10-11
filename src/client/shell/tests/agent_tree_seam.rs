@@ -58,17 +58,8 @@ fn key(code: KeyCode) -> RawInputEvent {
     RawInputEvent::Key(crate::input::TerminalKey::new(code, KeyModifiers::empty()))
 }
 
-fn rows_key(state: &ClientShellState) -> super::super::endpoint_agents::AgentRowsKey {
-    super::super::endpoint_agents::AgentRowsCache::key_for(
-        &state.endpoints,
-        &state.config,
-        state.config_epoch,
-        state.agent_rows_epoch,
-        state.tree_collapse_epoch,
-        state.agent_activity_epoch,
-        &state.active_endpoint_id,
-        None,
-    )
+fn rows_key(state: &ClientShellState) -> super::super::chrome::sessions::SessionRowsKey {
+    super::super::chrome::sessions::SessionRowsKey::for_state(state)
 }
 
 /// 浮层种类的存储键稳定且互不相同：偏好文件按它记住浮窗位置，`from_storage_key`
@@ -109,6 +100,10 @@ fn chrome_hover_resolves_agent_tree_hit_vectors_with_toggles_before_rows() {
         crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef")
             .expect("profile id"),
     );
+    state.hits.sessions.clear();
+    state.hits.session_agents.clear();
+    state.hits.session_tree_toggles.clear();
+    state.hits.session_activity_rows.clear();
     // 在侧栏之外的空白区域摆放合成命中区，避免与真实行重叠。
     let base_y = 21;
     let row = Rect::new(2, base_y, 30, 1);
@@ -336,7 +331,7 @@ fn collapse_state_writes_change_the_agent_rows_cache_key() {
 #[test]
 fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
     let mut state = state_with_agents();
-    let (row, pane_id) = state.hits.agents[0].clone();
+    let (row, _, pane_id) = state.hits.session_agents[0].clone();
     assert_eq!(pane_id, "pane_1");
     state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Right),
@@ -430,7 +425,7 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
     projected.agents = vec![anonymous];
     state.set_snapshot(Box::new(projected));
     state.compose(106, 24).expect("anonymous agent frame");
-    let (row, _) = state.hits.agents[0].clone();
+    let (row, _, _) = state.hits.session_agents[0].clone();
     state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Right),
         row.x + 1,
@@ -452,7 +447,7 @@ fn agent_row_context_menu_lists_seam_items_and_routes_stub_actions() {
 #[test]
 fn agent_activity_window_opens_from_the_menu_and_closes_on_esc_or_outside_click() {
     let mut state = state_with_agents();
-    let (row, pane_id) = state.hits.agents[1].clone();
+    let (row, _, pane_id) = state.hits.session_agents[1].clone();
     assert_eq!(pane_id, "pane_2");
     state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Right),

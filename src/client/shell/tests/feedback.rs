@@ -355,6 +355,7 @@ fn notification_history_overlay_navigates_and_jumps_to_the_origin_pane() {
         Some(ClientNotificationTarget {
             endpoint_id: ClientEndpointId::Local,
             pane_id: Some("pane_1".into()),
+            boot_id: None,
         }),
     );
     state.record_notification(ClientToastLevel::Info, "fyi", None, None);
@@ -400,6 +401,7 @@ fn notification_history_jump_to_an_offline_machine_keeps_the_overlay() {
         Some(ClientNotificationTarget {
             endpoint_id: remote,
             pane_id: Some("pane_9".into()),
+            boot_id: None,
         }),
     );
     state.open_notification_history();
@@ -572,7 +574,7 @@ fn chrome_hover_bounds_short_circuit_pane_pointer_without_losing_chrome_hits() {
 
     // 侧栏行同样解析得出。
     let row = state.hits.workspaces[0].rect;
-    let row_point = (row.x + 1, row.y);
+    let row_point = (row.x + 3, row.y);
     assert!(bounds.contains(row_point), "工作区行应在分组里");
     let mut outcome = ClientShellInput::default();
     state.handle_mouse(moved_mouse(row_point.0, row_point.1), &mut outcome);
@@ -583,4 +585,232 @@ fn chrome_hover_bounds_short_circuit_pane_pointer_without_losing_chrome_hits() {
             workspace_id: "ws_1".into(),
         })
     );
+}
+
+#[test]
+fn notification_card_uses_the_configured_status_indicator_style() {
+    use crate::config::StatusIndicatorStyle;
+    for (style, glyph) in [
+        (StatusIndicatorStyle::Graphite, "◆"),
+        (StatusIndicatorStyle::Dots, "●"),
+        (StatusIndicatorStyle::Symbols, "×"),
+    ] {
+        let mut config = Config::default();
+        config.ui.status_indicators = style;
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.visible_notification = Some(ClientVisibleNotification {
+            endpoint_id: ClientEndpointId::Local,
+            event: SemanticNotification {
+                kind: SemanticNotificationKind::NeedsAttention,
+                title: "permission request".into(),
+                body: Some("Confirm editing this file".into()),
+                sound: None,
+                agent: Some("codex".into()),
+                workspace_id: None,
+                tab_id: None,
+                pane_id: Some("pane_1".into()),
+                position: None,
+            },
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+        });
+        let frame = state.compose(80, 24).expect("notification frame");
+        let buffer = frame.to_ratatui_buffer().expect("notification buffer");
+        let rect = state.hits.notification_toast;
+        assert!(!rect.is_empty());
+        let cell = &buffer[(rect.x + 2, rect.y + 1)];
+        assert_eq!(cell.symbol(), glyph, "{style:?}");
+        assert_eq!(cell.fg, state.config.components.status_input);
+
+        state.visible_notification = None;
+        state.record_notification(ClientToastLevel::Error, "permission request", None, None);
+        state
+            .notification_history
+            .back_mut()
+            .expect("history record")
+            .bucket = Some(crate::harness::AgentBucket::NeedsInput);
+        state.open_notification_history();
+        let frame = state.compose(80, 24).expect("history frame");
+        let buffer = frame.to_ratatui_buffer().expect("history buffer");
+        let (rect, _) = state.hits.notification_history_rows[0];
+        assert_eq!(buffer[(rect.x + 1, rect.y)].symbol(), glyph, "{style:?}");
+
+        state.open_command_search();
+        let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_mut() else {
+            panic!("command search");
+        };
+        let mut item = palette.items[0].clone();
+        item.id = "test:agent".into();
+        item.enabled = true;
+        item.action = super::super::command_palette::ClientPaletteAction::Agent(
+            ClientEndpointId::Local,
+            "pane_1".into(),
+            crate::harness::AgentBucket::NeedsInput,
+            "boot-1".into(),
+            0,
+        );
+        palette.items = vec![item];
+        let frame = state.compose(80, 24).expect("command search frame");
+        let buffer = frame.to_ratatui_buffer().expect("command search buffer");
+        let (rect, _) = state.hits.global_menu_rows[0];
+        assert_eq!(buffer[(rect.x + 1, rect.y)].symbol(), glyph, "{style:?}");
+        assert_eq!(
+            buffer[(rect.x + 1, rect.y)].fg,
+            state.config.components.status_input
+        );
+    }
+}
+
+#[test]
+fn notification_keyboard_actions_require_explicit_card_focus() {
+    let mut state = chrome_state();
+    state.receive_notification(
+        &ClientEndpointId::Local,
+        SemanticNotification {
+            kind: SemanticNotificationKind::Custom,
+            title: "message".into(),
+            body: Some("完整正文".into()),
+            sound: None,
+            agent: Some("codex".into()),
+            workspace_id: None,
+            tab_id: None,
+            pane_id: Some("pane_1".into()),
+            position: None,
+        },
+        std::time::Instant::now(),
+    );
+    state.compose(80, 24).expect("card");
+    assert!(!state.hits.notification_keys.is_empty());
+    state.handle_input_bytes(b"\r");
+    assert!(
+        state.visible_notification.is_some(),
+        "普通 Enter 不跳转/忽略通知"
+    );
+    state.handle_input_bytes(b"\x1b");
+    assert!(state.visible_notification.is_some(), "普通 Esc 不忽略通知");
+    let rect = state.hits.notification_keys;
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: rect.x,
+        row: rect.y,
+        modifiers: KeyModifiers::NONE,
+    };
+    state.handle_mouse(click, &mut ClientShellInput::default());
+    assert!(state.notification_focused);
+    let result = state.handle_input_bytes(b"\r");
+    assert!(state.visible_notification.is_none());
+    assert!(result.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint { request, .. } if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_1"))));
+    state.receive_notification(
+        &ClientEndpointId::Local,
+        SemanticNotification {
+            kind: SemanticNotificationKind::Custom,
+            title: "dismiss me".into(),
+            body: None,
+            sound: None,
+            agent: None,
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            position: None,
+        },
+        std::time::Instant::now(),
+    );
+    state.notification_focused = true;
+    let dismissed = state.handle_input_bytes(b"\x1b");
+    assert!(state.visible_notification.is_none());
+    assert!(dismissed.actions.is_empty());
+}
+
+#[test]
+fn notification_history_rejects_a_target_from_a_previous_boot() {
+    let mut state = chrome_state();
+    state.record_notification(
+        ClientToastLevel::Error,
+        "old failure",
+        Some("error details".into()),
+        Some(ClientNotificationTarget {
+            endpoint_id: ClientEndpointId::Local,
+            pane_id: Some("pane_1".into()),
+            boot_id: Some("previous-boot".into()),
+        }),
+    );
+    state.open_notification_history();
+    let mut outcome = ClientShellInput::default();
+    state.focus_notification_history_target(&mut outcome);
+    assert!(outcome.actions.is_empty());
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::NotificationHistory(_))
+    ));
+}
+
+#[test]
+fn settings_boundary_notification_text_and_paste_release_card_focus() {
+    for paste in [false, true] {
+        let mut state = chrome_state();
+        state.receive_notification(
+            &ClientEndpointId::Local,
+            SemanticNotification {
+                kind: SemanticNotificationKind::Custom,
+                title: "input request".into(),
+                body: None,
+                sound: None,
+                agent: None,
+                workspace_id: None,
+                tab_id: None,
+                pane_id: Some("other-pane".into()),
+                position: None,
+            },
+            std::time::Instant::now(),
+        );
+        state.compose(106, 20).expect("card");
+        let keys = state.hits.notification_keys;
+        state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: keys.x,
+            row: keys.y,
+            modifiers: KeyModifiers::NONE,
+        })]);
+        assert!(state.notification_focused);
+        let commit = if paste {
+            RawInputEvent::Paste("你好".into())
+        } else {
+            RawInputEvent::Text(crate::input::TextCommit::new("你好"))
+        };
+        let outcome = state.handle_raw_events(vec![
+            commit,
+            RawInputEvent::Key(crate::input::TerminalKey::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )),
+        ]);
+        assert!(
+            outcome.actions.is_empty(),
+            "text must not jump: {:?}",
+            outcome.actions
+        );
+        let events = outcome
+            .requests
+            .iter()
+            .flat_map(|request| match request {
+                ClientMessage::ClientShellPaneInput { pane_id, events } => {
+                    assert_eq!(pane_id, "pane_1");
+                    events.clone()
+                }
+                other => panic!("unexpected input request: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(event,
+            ClientPaneInputEvent::TextCommit(text) | ClientPaneInputEvent::Paste(text) if text == "你好")));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientPaneInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Enter,
+                ..
+            }
+        )));
+        assert!(!state.notification_focused);
+        assert!(state.visible_notification.is_some());
+    }
 }

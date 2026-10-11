@@ -179,11 +179,7 @@ fn navigation_highlights_only_the_preview_and_activates_on_enter() {
                 };
                 assert_eq!(buffer[(selected.x + 2, selected.y)].bg, color);
                 assert_ne!(buffer[(other.x + 2, other.y)].bg, color);
-                let focused_bg = if cols == 44 {
-                    palette.surface_dim
-                } else {
-                    palette.active_row_bg
-                };
+                let focused_bg = palette.active_row_bg;
                 assert_eq!(buffer[(focused.x + 2, focused.y)].bg, focused_bg);
                 // 导航光标必须和「聚焦行」可区分：terminal 主题曾让两者同为
                 // DarkGray，选中位置完全看不出来（上游 #4300）。
@@ -370,7 +366,7 @@ fn workspace_navigation_respects_each_machines_visible_worktree_groups() {
     for (cols, compact, unavailable, show_child) in [
         (100, false, false, false),
         (100, true, false, true),
-        (44, false, false, true),
+        (44, false, false, false),
         (44, true, true, false),
     ] {
         let (mut state, remote) = navigation_state(grouped_workspaces());
@@ -621,12 +617,10 @@ fn agent_sidebar_state(count: usize) -> ClientShellState {
 
 #[test]
 fn sidebar_collapse_toggle_stays_clickable_when_the_agent_list_overflows() {
-    // agents 溢出时滚动条轨道曾一直画到 body 底格，正好压住右下角的 « 折叠开关；
-    // 鼠标分派里 agent_scrollbar 排在 sidebar_toggle 之前且无条件 return，
-    // 结果点 « 变成「列表跳到底」。轨道必须让出底格。
     let mut state = overflowing_agent_sidebar_state();
-    state.compose(106, 20).expect("overflowing agent sidebar");
-    let track = state.hits.agent_scrollbar;
+    state.compose(106, 14).expect("overflowing session sidebar");
+    assert!(state.hits.workspace_max_scroll > 0);
+    let track = state.hits.workspace_scrollbar;
     let toggle = state.hits.sidebar_toggle;
     assert!(track.height > 0, "agents 应当溢出并画出滚动条");
     assert!(toggle.width > 0 && toggle.height > 0, "« 开关应当可见");
@@ -646,7 +640,7 @@ fn sidebar_collapse_toggle_stays_clickable_when_the_agent_list_overflows() {
         state.sidebar_collapsed, !collapsed_before,
         "点 « 应当切换侧栏折叠而不是滚动 agents"
     );
-    assert_eq!(state.agent_scroll, 0, "点 « 不应滚动 agents 列表");
+    assert_eq!(state.workspace_scroll, 0, "点 « 不应滚动会话列表");
 }
 
 #[test]
@@ -1108,14 +1102,12 @@ fn collapsed_workspace_state(count: usize) -> ClientShellState {
 
 #[test]
 fn collapsed_sidebar_reveals_the_navigation_target_past_the_viewport() {
-    // 折叠侧栏此前 `workspaces.iter().take(height)`：第 18 个工作区在可视窗口之外，
-    // navigate ↓ 走到它时选中框直接消失且永不可达（C-26/SB-02）。
-    let mut state = collapsed_workspace_state(20);
-    state.compose(100, 28).expect("collapsed sidebar frame");
+    let mut state = collapsed_workspace_state(30);
+    state.compose(100, 28).expect("full-height rail");
     let body = state.hits.workspace_body;
     assert!(body.height > 0, "折叠侧栏必须回写 hits.workspace_body");
     assert!(
-        usize::from(body.height) < 20,
+        usize::from(body.height) < 30,
         "本用例需要工作区多于折叠侧栏可视高度，实际 {}",
         body.height
     );
@@ -1125,34 +1117,32 @@ fn collapsed_sidebar_reveals_the_navigation_target_past_the_viewport() {
     );
 
     enter_navigation(&mut state);
-    for _ in 0..17 {
+    for _ in 0..27 {
         preview_key(&mut state, b"\x1b[B");
     }
-    assert_selected(&state, &ClientEndpointId::Local, "ws_18");
-    state.compose(100, 28).expect("revealed collapsed frame");
+    assert_selected(&state, &ClientEndpointId::Local, "ws_28");
+    state.compose(100, 28).expect("revealed rail workspace");
     assert!(
         state
             .hits
             .workspaces
             .iter()
-            .any(|hit| hit.workspace_id == "ws_18"),
+            .any(|hit| hit.workspace_id == "ws_28"),
         "导航目标必须被揭示进命中表"
     );
     assert!(
         state.workspace_scroll > 0,
-        "揭示第 18 行必须真的推动 workspace_scroll"
+        "揭示第 28 行必须真的推动 workspace_scroll"
     );
 }
 
 #[test]
 fn collapsed_sidebar_scrolls_workspaces_with_the_wheel() {
-    let mut state = collapsed_workspace_state(20);
+    let mut state = collapsed_workspace_state(30);
     state.compose(100, 28).expect("collapsed sidebar frame");
     assert_eq!(state.workspace_scroll, 0);
-    assert!(
-        state.hits.agent_body.height > 0,
-        "折叠侧栏必须回写 hits.agent_body"
-    );
+    assert!(state.hits.agent_body.is_empty());
+    assert!(state.hits.workspace_max_scroll > 0);
     let body = state.hits.workspace_body;
 
     let down = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
@@ -1238,95 +1228,79 @@ fn collapsed_endpoint_sidebar_scrolls_workspaces_with_the_wheel() {
 
 #[test]
 fn collapsed_sidebar_scrolls_agents_with_the_wheel() {
-    // agents 段此前同样只有 `take(height)`。这条用例固化「滚轮真的推动列表」，
-    // 而不是只断言回写了一个矩形——后者即使把 skip/take 整段删掉也照样绿。
     let mut state = agent_sidebar_state(30);
-    state.sidebar_collapsed = true;
-    state.compose(100, 28).expect("collapsed agent sidebar");
-    let body = state.hits.agent_body;
-    assert!(body.height > 0, "折叠侧栏必须回写 hits.agent_body");
+    state.compose(100, 28).expect("session sidebar");
+    let body = state.hits.workspace_body;
+    assert!(body.height > 0, "会话侧栏必须回写 hits.workspace_body");
     assert!(
-        state.hits.agent_max_scroll > 0,
-        "30 个 agent 必须溢出折叠 agents 区，实际 body {body:?}"
+        state.hits.workspace_max_scroll > 0,
+        "30 个 agent 必须溢出会话正文，实际 body {body:?}"
     );
+    assert!(state.hits.agent_body.is_empty());
     assert_eq!(first_agent(&state), Some("pane_1"));
 
-    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
-        kind: MouseEventKind::ScrollDown,
-        column: body.x,
-        row: body.y,
-        modifiers: KeyModifiers::NONE,
-    })]);
+    let down = wheel_at(&mut state, MouseEventKind::ScrollDown, (body.x, body.y));
     assert!(down.repaint, "滚轮必须请求重绘");
-    // 步进跟 `ui.mouse_scroll_lines`（默认 3，HERDR-UX-014）：一次滚轮 = n 行。
     let step = state.config.mouse_scroll_lines;
     assert_eq!(
-        state.agent_scroll, step,
-        "滚轮应当按配置步进推动 agent_scroll"
+        state.workspace_scroll, step,
+        "滚轮应当按配置步进推动 workspace_scroll"
     );
-    state.compose(100, 28).expect("scrolled agent frame");
+    state.compose(100, 28).expect("scrolled sessions");
     assert_eq!(
         first_agent(&state),
-        Some(format!("pane_{}", step + 1).as_str()),
-        "向下滚 {step} 行后首个 agent 应当是 pane_{}",
-        step + 1
+        Some(format!("pane_{step}").as_str()),
+        "会话滚动包含工作区行，向下滚 {step} 行后首个 agent 应当是 pane_{step}"
     );
 
-    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
-        kind: MouseEventKind::ScrollUp,
-        column: body.x,
-        row: body.y,
-        modifiers: KeyModifiers::NONE,
-    })]);
-    assert_eq!(state.agent_scroll, 0);
-    state.compose(100, 28).expect("restored agent frame");
+    wheel_at(&mut state, MouseEventKind::ScrollUp, (body.x, body.y));
+    state.compose(100, 28).expect("restored sessions");
+    assert_eq!(state.workspace_scroll, 0);
     assert_eq!(first_agent(&state), Some("pane_1"));
 }
 
 fn first_agent(state: &ClientShellState) -> Option<&str> {
     state
         .hits
-        .agents
+        .session_agents
         .first()
-        .map(|(_, pane_id)| pane_id.as_str())
+        .map(|(_, _, pane)| pane.as_str())
 }
 
 #[test]
 fn collapsed_sidebar_reveals_the_next_agent_past_the_viewport() {
-    // `hits.agent_max_scroll` 同时是 `KeybindAction::NextAgent` 的钳位上限：折叠态
-    // 下它此前恒为 0，键盘揭示路径静默失效（永远把 agent_scroll 钳回 0）。
     let mut state = agent_sidebar_state(30);
-    state.sidebar_collapsed = true;
-    state.compose(100, 28).expect("collapsed agent sidebar");
-    let max_scroll = state.hits.agent_max_scroll;
-    assert!(max_scroll > 0, "本用例需要 agents 段可滚动");
+    state.compose(100, 28).expect("session sidebar");
+    let max_scroll = state.hits.workspace_max_scroll;
+    assert!(max_scroll > 0, "本用例需要会话正文可滚动");
 
-    state.agent_scroll = max_scroll;
-    state
-        .compose(100, 28)
-        .expect("agents scrolled to the bottom");
+    state.workspace_scroll = max_scroll;
+    state.compose(100, 28).expect("session bottom");
     assert!(
         state
             .hits
-            .agents
+            .session_agents
             .iter()
-            .all(|(_, pane_id)| pane_id != "pane_2"),
+            .all(|(_, _, pane_id)| pane_id != "pane_2"),
         "pane_2 应当已滚出可视窗口"
     );
 
-    // 聚焦的是 pane_1，NextAgent 的目标是窗口外的 pane_2。
     let mut input = ClientShellInput::default();
     state.record_binding(
         crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextAgent),
         &mut input,
     );
-    state.compose(100, 28).expect("revealed agent frame");
+    assert_eq!(
+        state.workspace_scroll, max_scroll,
+        "reveal waits for compute"
+    );
+    state.compose(100, 28).expect("revealed session");
     assert!(
         state
             .hits
-            .agents
+            .session_agents
             .iter()
-            .any(|(_, pane_id)| pane_id == "pane_2"),
+            .any(|(_, _, pane_id)| pane_id == "pane_2"),
         "NextAgent 必须把窗口外的 agent 揭示回可视区"
     );
 }
@@ -1766,8 +1740,7 @@ fn short_collapsed_sidebar_keeps_the_toggle_row_out_of_the_workspace_body() {
     );
 }
 
-/// D10 的夹具：本机 `local` 个、远端 Build `remote` 个 agent（各自一个窗格），侧栏
-/// 折叠成 4 列的单列视图。聚焦的是本机第一个 agent。
+/// 本机与远端各自提供 agent 窗格，会话树复用同一行缓存与滚动几何。
 fn collapsed_endpoint_agents_state(
     local: usize,
     remote: usize,
@@ -1800,62 +1773,68 @@ fn collapsed_endpoint_agents_state(
         &remote_id,
         Box::new(with_agents(remote, "remote-boot", false)),
     );
-    state.sidebar_collapsed = true;
+    state.sidebar_collapsed = false;
     (state, remote_id)
 }
 
-/// 折叠侧栏 agent 区的完整行序（与渲染同一份行缓存）：(端点, 窗格, 机器首字母)。
 fn collapsed_agent_order(state: &ClientShellState) -> Vec<(ClientEndpointId, String, char)> {
     state
-        .federated_agent_rows
+        .session_rows
         .as_ref()
-        .expect("行缓存")
-        .flat_rows()
+        .expect("session cache")
+        .rows
         .iter()
-        .filter_map(|row| match &row.kind.kind {
-            crate::client::shell::agent_tree::AgentTreeKind::Agent {
-                agent,
-                machine_initial,
-                ..
-            } => Some((
-                row.kind.endpoint_id.clone(),
+        .filter_map(|row| match &row.kind {
+            crate::client::shell::chrome::sessions::SessionRowKind::Agent(agent) => Some((
+                row.endpoint_id.clone(),
                 agent.pane_id.clone(),
-                *machine_initial,
+                state
+                    .endpoint_label(&row.endpoint_id)
+                    .chars()
+                    .next()
+                    .expect("machine label"),
             )),
             _ => None,
         })
         .collect()
 }
 
-/// 当前画在折叠 agent 区里的行（命中区即画面），并逐行核对画出来的字符：
-/// 每行首格是该 agent 所在机器的首字母。
 fn visible_collapsed_agents(
     state: &ClientShellState,
     order: &[(ClientEndpointId, String, char)],
     case: &str,
 ) -> Vec<(ClientEndpointId, String)> {
     let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
-    let body = state.hits.agent_body;
+    let body = state.session_view.body;
     state
         .hits
-        .endpoint_agents
+        .session_agents
         .iter()
-        .map(|(rect, endpoint_id, pane_id)| {
-            assert!(
-                body.contains((rect.x, rect.y).into()),
-                "{case}: 命中区在 agent 区里：{rect:?} / {body:?}"
-            );
-            let (_, _, initial) = order
-                .iter()
-                .find(|(endpoint, pane, _)| endpoint == endpoint_id && pane == pane_id)
-                .unwrap_or_else(|| panic!("{case}: {pane_id} 不在行序里"));
+        .map(|(rect, endpoint, pane)| {
             assert_eq!(
-                buffer[(rect.x, rect.y)].symbol(),
-                initial.to_string(),
-                "{case}: 第 {} 行画的是 {pane_id} 所在机器的首字母",
-                rect.y
+                rect.intersection(body),
+                *rect,
+                "{case}: real session row bounds"
             );
-            (endpoint_id.clone(), pane_id.clone())
+            assert!(order
+                .iter()
+                .any(|(id, owner, _)| id == endpoint && owner == pane));
+            let name = state
+                .endpoints
+                .iter()
+                .find(|entry| &entry.endpoint_id == endpoint)
+                .and_then(|entry| entry.snapshot.as_deref())
+                .and_then(|snapshot| snapshot.agents.iter().find(|agent| &agent.pane_id == pane))
+                .and_then(|agent| agent.name.as_deref())
+                .expect("agent name");
+            let text = (rect.x..rect.right())
+                .map(|x| buffer[(x, rect.y)].symbol())
+                .collect::<String>();
+            assert!(
+                text.contains(name),
+                "{case}: hit must correspond to rendered {name}: {text}"
+            );
+            (endpoint.clone(), pane.clone())
         })
         .collect()
 }
@@ -1888,160 +1867,162 @@ fn clicked_pane(outcome: &ClientShellInput) -> Option<String> {
     })
 }
 
-/// D10：多机时折叠侧栏的 agent 区此前 `take(height)`，没有回写 `hits.agent_body`，
-/// 滚轮推不动、溢出的 agent 永远看不到。宽 / 中 / 窄三档（agent 区高度不同）：
-/// 滚轮按 `ui.mouse_scroll_lines` 步进推动列表；滚到底夹住，最后一个 agent 可见；
-/// 越界的存量（例如从展开视图带过来的滚动位置）在输入阶段先钳位再滚，反向一格
-/// 画面就动；agent 区让出右下角的 » 开关；点滚动后的行聚焦的就是画出来的那个。
 #[test]
 fn collapsed_endpoint_sidebar_scrolls_agents_with_the_wheel() {
     for (cols, rows) in [(120u16, 40u16), (100, 28), (80, 20)] {
         let case = format!("{cols}×{rows}");
-        let (mut state, _remote) = collapsed_endpoint_agents_state(18, 12);
-        state.compose(cols, rows).expect("折叠多机侧栏");
+        let (mut state, _) = collapsed_endpoint_agents_state(30, 22);
+        state.compose(cols, rows).expect("multi-machine sessions");
         let order = collapsed_agent_order(&state);
-        assert_eq!(order.len(), 30, "{case}: 夹具前提：30 个 agent 都在行序里");
-        assert_eq!(
-            state
-                .federated_agent_rows
-                .as_ref()
-                .expect("行缓存")
-                .view()
-                .flat_agents,
-            order.len(),
-            "{case}: 行缓存构建时记下的 agent 行数与行序一致"
+        assert_eq!(order.len(), 52, "{case}: 52 个 agent 都在会话行序里");
+        let body = state.session_view.body;
+        assert!(body.height > 0);
+        assert_eq!(body, state.hits.workspace_body);
+        assert!(state.hits.agent_body.is_empty());
+        let cache = state.session_rows.as_ref().expect("cache");
+        let row_agents = cache
+            .rows
+            .iter()
+            .map(|row| match &row.kind {
+                crate::client::shell::chrome::sessions::SessionRowKind::Agent(agent) => {
+                    Some((row.endpoint_id.clone(), agent.pane_id.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(row_agents.iter().flatten().count(), order.len());
+        let expected_agent_at =
+            |offset: usize| row_agents.iter().skip(offset).flatten().next().unwrap();
+        let metrics = super::super::super::scroll::list_scroll_metrics(
+            &cache.heights,
+            &cache.gaps,
+            body.height,
+            0,
         );
-        let body = state.hits.agent_body;
-        assert!(
-            body.height > 0,
-            "{case}: 折叠多机侧栏必须回写 hits.agent_body"
-        );
-        let height = usize::from(body.height);
-        let max = order.len() - height;
-        assert_eq!(
-            state.hits.agent_max_scroll, max,
-            "{case}: 滚动上界 = 行数 − 可见行"
-        );
+        let max = metrics.max_offset_from_bottom;
+        assert!(max > 0, "fixture must overflow: {case}");
+        assert_eq!(state.hits.workspace_max_scroll, max);
         let toggle = state.hits.sidebar_toggle;
         assert!(
             !body.contains((toggle.x, toggle.y).into()),
-            "{case}: agent 区让出 » 开关所在的底格：{body:?} / {toggle:?}"
+            "{case}: 会话正文让出折叠开关所在的底格：{body:?} / {toggle:?}"
         );
         let point = (body.x, body.y + 1);
-        let key = |entry: &(ClientEndpointId, String, char)| (entry.0.clone(), entry.1.clone());
         let visible = visible_collapsed_agents(&state, &order, &case);
-        assert_eq!(visible.len(), height, "{case}: agent 区画满");
-        assert_eq!(visible[0], key(&order[0]), "{case}: 从第一个 agent 开始");
-
+        let visible_rows = visible.len() + state.hits.machines.len() + state.hits.workspaces.len();
+        let painted_height = state
+            .hits
+            .session_agents
+            .iter()
+            .map(|(rect, _, _)| usize::from(rect.height))
+            .chain(
+                state
+                    .hits
+                    .machines
+                    .iter()
+                    .map(|hit| usize::from(hit.rect.height)),
+            )
+            .chain(
+                state
+                    .hits
+                    .workspaces
+                    .iter()
+                    .map(|hit| usize::from(hit.rect.height)),
+            )
+            .sum::<usize>();
+        let gap_height = cache
+            .gaps
+            .iter()
+            .take(visible_rows)
+            .map(|gap| usize::from(*gap))
+            .sum::<usize>();
+        assert_eq!(
+            painted_height + gap_height,
+            usize::from(body.height),
+            "{case}: 机器、工作区元数据、agent 与配置间距共同画满正文"
+        );
+        assert_eq!(visible[0], (ClientEndpointId::Local, "pane_1".into()));
         let step = state.config.mouse_scroll_lines;
-        let down = wheel_at(&mut state, MouseEventKind::ScrollDown, point);
-        assert!(down.repaint, "{case}: 滚轮请求重绘");
-        assert_eq!(state.agent_scroll, step, "{case}: 按配置步进");
-        state.compose(cols, rows).expect("滚动后");
+        assert!(wheel_at(&mut state, MouseEventKind::ScrollDown, point).repaint);
+        assert_eq!(state.workspace_scroll, step);
+        state.compose(cols, rows).expect("scrolled sessions");
         let visible = visible_collapsed_agents(&state, &order, &case);
-        assert_eq!(visible[0], key(&order[step]), "{case}: 首行后移 {step} 个");
-
-        // 点滚动后的第一行：聚焦的正是画在那一行的 agent。
-        let first = state.hits.endpoint_agents[0].0;
+        assert_eq!(
+            visible[0],
+            (ClientEndpointId::Local, "pane_2".into()),
+            "scroll skips machine, workspace, and first session"
+        );
+        assert_eq!(&visible[0], expected_agent_at(step));
+        let (first, _, pane) = state.hits.session_agents[0].clone();
         let click = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: first.x,
             row: first.y,
             modifiers: KeyModifiers::NONE,
         })]);
-        assert_eq!(
-            clicked_pane(&click).as_deref(),
-            Some(order[step].1.as_str()),
-            "{case}: 点中哪行聚焦哪个"
-        );
-
+        assert_eq!(clicked_pane(&click).as_deref(), Some(pane.as_str()));
         for _ in 0..order.len() {
             wheel_at(&mut state, MouseEventKind::ScrollDown, point);
         }
-        assert_eq!(state.agent_scroll, max, "{case}: 滚到底夹住");
-        state.compose(cols, rows).expect("到底");
-        let visible = visible_collapsed_agents(&state, &order, &case);
+        assert_eq!(state.workspace_scroll, max);
+        state.compose(cols, rows).expect("bottom");
+        let bottom = visible_collapsed_agents(&state, &order, &case);
         assert_eq!(
-            visible.last(),
-            order.last().map(key).as_ref(),
-            "{case}: 最后一个 agent 滚进视野"
+            bottom.last(),
+            Some(&(
+                order.last().expect("last").0.clone(),
+                order.last().expect("last").1.clone()
+            ))
         );
+        assert_eq!(&bottom[0], expected_agent_at(max));
         wheel_at(&mut state, MouseEventKind::ScrollUp, point);
-        state.compose(cols, rows).expect("反向一格");
-        let visible = visible_collapsed_agents(&state, &order, &case);
-        assert_eq!(
-            visible[0],
-            key(&order[max - step]),
-            "{case}: 到底后反向一格画面就动"
-        );
-
-        // 越界的存量：画面按上界夹住，第一次上滚就从上界往回滚（没有死格）。
-        state.agent_scroll = 999;
-        state.compose(cols, rows).expect("越界存量");
-        let visible = visible_collapsed_agents(&state, &order, &case);
-        assert_eq!(visible[0], key(&order[max]), "{case}: 画面按上界夹住");
+        state.compose(cols, rows).expect("reverse one step");
+        assert_eq!(state.workspace_scroll, max - step);
+        let reversed = visible_collapsed_agents(&state, &order, &case);
+        assert_eq!(&reversed[0], expected_agent_at(max - step));
+        assert_ne!(reversed[0], bottom[0]);
+        state.workspace_scroll = 999;
+        state.compose(cols, rows).expect("out of range");
+        assert_eq!(state.workspace_scroll, max);
+        assert_eq!(visible_collapsed_agents(&state, &order, &case), bottom);
         wheel_at(&mut state, MouseEventKind::ScrollUp, point);
-        assert_eq!(state.agent_scroll, max - step, "{case}: 输入阶段先钳位再滚");
-        state.compose(cols, rows).expect("钳位后");
-        let visible = visible_collapsed_agents(&state, &order, &case);
-        assert_eq!(visible[0], key(&order[max - step]), "{case}: 画面随即上移");
+        state.compose(cols, rows).expect("clamped reverse");
+        assert_eq!(state.workspace_scroll, max - step);
+        assert_eq!(visible_collapsed_agents(&state, &order, &case), reversed);
     }
 }
 
-/// D10：键盘在多机之间切 agent（PreviousAgent / NextAgent / FocusAgent）时，目标
-/// 不在折叠侧栏的可见窗口里就把它滚进来：输入阶段按上一帧的 agent 区高度与
-/// 当前行序钳位写回 `agent_scroll`。宽 / 中 / 窄三档。
 #[test]
 fn collapsed_endpoint_sidebar_reveals_the_keyboard_target_agent() {
     use crate::input::{KeybindAction, KeybindMatch};
     for (cols, rows) in [(120u16, 40u16), (100, 28), (80, 20)] {
         let case = format!("{cols}×{rows}");
-        let (mut state, remote) = collapsed_endpoint_agents_state(18, 12);
-        state.compose(cols, rows).expect("折叠多机侧栏");
+        let (mut state, remote) = collapsed_endpoint_agents_state(30, 22);
+        state.compose(cols, rows).expect("multi-machine sessions");
         let order = collapsed_agent_order(&state);
-        let visible = |state: &ClientShellState| visible_collapsed_agents(state, &order, &case);
+        assert_eq!(order.len(), 52);
+        assert!(state.hits.workspace_max_scroll > 0);
         assert!(
-            !visible(&state).contains(&(remote.clone(), "pane_12".to_owned())),
+            !visible_collapsed_agents(&state, &order, &case)
+                .contains(&(remote.clone(), "pane_22".into())),
             "{case}: 用例前提：远端最后一个 agent 在窗口外"
         );
-
-        // 聚焦的是第一个 agent：PreviousAgent 绕到行尾的远端 pane_12。
-        let mut input = ClientShellInput::default();
-        state.record_binding(
-            KeybindMatch::Action(KeybindAction::PreviousAgent),
-            &mut input,
-        );
-        assert!(
-            state.agent_scroll <= state.hits.agent_max_scroll,
-            "{case}: 写回的滚动位置在上界以内"
-        );
-        state.compose(cols, rows).expect("揭示行尾");
-        assert!(
-            visible(&state).contains(&(remote.clone(), "pane_12".to_owned())),
-            "{case}: PreviousAgent 把窗口外的目标滚进视野"
-        );
-
-        // 聚焦仍在本机第一个（测试里没有服务端回写焦点）：NextAgent 的目标是本机
-        // pane_2，此时已滚出窗口上方。
-        let mut input = ClientShellInput::default();
-        state.record_binding(KeybindMatch::Action(KeybindAction::NextAgent), &mut input);
-        state.compose(cols, rows).expect("揭示第二个");
-        assert!(
-            visible(&state).contains(&(ClientEndpointId::Local, "pane_2".to_owned())),
-            "{case}: NextAgent 把窗口外的目标滚进视野"
-        );
-
-        // FocusAgent 直达第 21 个（远端 pane_3）。
-        let mut input = ClientShellInput::default();
-        state.record_binding(
-            KeybindMatch::Action(KeybindAction::FocusAgent(20)),
-            &mut input,
-        );
-        state.compose(cols, rows).expect("揭示第 21 个");
-        assert!(
-            visible(&state).contains(&(remote.clone(), "pane_3".to_owned())),
-            "{case}: FocusAgent 同样揭示目标"
-        );
+        for (action, endpoint, pane) in [
+            (KeybindAction::PreviousAgent, remote.clone(), "pane_22"),
+            (KeybindAction::NextAgent, ClientEndpointId::Local, "pane_2"),
+            (KeybindAction::FocusAgent(32), remote.clone(), "pane_3"),
+        ] {
+            let before = state.workspace_scroll;
+            let mut input = ClientShellInput::default();
+            state.record_binding(KeybindMatch::Action(action), &mut input);
+            assert_eq!(state.workspace_scroll, before, "input queues reveal");
+            state.compose(cols, rows).expect("revealed session");
+            assert!(state.workspace_scroll <= state.hits.workspace_max_scroll);
+            assert!(
+                visible_collapsed_agents(&state, &order, &case).contains(&(endpoint, pane.into())),
+                "{case}: {action:?} 必须把窗口外的目标滚进视野"
+            );
+        }
     }
 }
 
@@ -2175,24 +2156,38 @@ fn single_endpoint_indexed_agent_navigation_reveals_the_target() {
         let mut state = agent_sidebar_state(30);
         state.sidebar_collapsed = collapsed;
         state.compose(100, 28).unwrap();
+        if !collapsed {
+            assert!(state.hits.workspace_max_scroll > 0);
+        }
         let mut outcome = ClientShellInput::default();
         state.record_binding(
             crate::input::KeybindMatch::Action(crate::input::KeybindAction::FocusAgent(29)),
             &mut outcome,
+        );
+        assert_eq!(clicked_pane(&outcome).as_deref(), Some("pane_30"));
+        state.compose(100, 28).unwrap();
+        if collapsed {
+            assert!(state.hits.session_agents.is_empty());
+            assert!(state
+                .hits
+                .workspaces
+                .iter()
+                .any(|hit| hit.workspace_id == "ws_1"));
+        } else {
+            assert!(state
+                .hits
+                .session_agents
+                .iter()
+                .any(|(_, _, id)| id == "pane_30"));
+        }
+        let revealed_scroll = state.workspace_scroll;
+        state.record_binding(
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::FocusAgent(29)),
+            &mut ClientShellInput::default(),
         );
         state.compose(100, 28).unwrap();
-        assert!(
-            state.hits.agents.iter().any(|(_, id)| id == "pane_30"),
-            "collapsed={collapsed}"
-        );
-        let revealed_scroll = state.agent_scroll;
-        let mut outcome = ClientShellInput::default();
-        state.record_binding(
-            crate::input::KeybindMatch::Action(crate::input::KeybindAction::FocusAgent(29)),
-            &mut outcome,
-        );
         assert_eq!(
-            state.agent_scroll, revealed_scroll,
+            state.workspace_scroll, revealed_scroll,
             "visible target must not move"
         );
     }
@@ -2201,29 +2196,30 @@ fn single_endpoint_indexed_agent_navigation_reveals_the_target() {
 #[test]
 fn single_endpoint_next_agent_scrolls_only_enough_to_reveal() {
     let mut state = agent_sidebar_state(30);
-    state.sidebar_collapsed = true;
     state.compose(100, 28).unwrap();
-    let visible = state.hits.agents.len();
+    let visible = state.hits.session_agents.len();
     assert!(visible > 2 && visible < 30);
     let mut projected = (**state.snapshot.as_ref().unwrap()).clone();
     projected.focused_pane_id = Some(format!("pane_{visible}"));
     state.set_snapshot(Box::new(projected));
     state.compose(100, 28).unwrap();
+    assert_eq!(state.workspace_scroll, 0);
     let mut outcome = ClientShellInput::default();
     state.record_binding(
         crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextAgent),
         &mut outcome,
     );
-    assert_eq!(
-        state.agent_scroll, 1,
-        "target immediately below viewport needs one row"
-    );
+    assert_eq!(state.workspace_scroll, 0, "input does not mutate layout");
     state.compose(100, 28).unwrap();
+    assert_eq!(
+        state.workspace_scroll, 1,
+        "target immediately below viewport needs one logical row"
+    );
     assert!(state
         .hits
-        .agents
+        .session_agents
         .iter()
-        .any(|(_, id)| id == &format!("pane_{}", visible + 1)));
+        .any(|(_, _, id)| id == &format!("pane_{}", visible + 1)));
 }
 
 // Kitty keyboard protocol (CSI u) encodings of `[` (codepoint 91).

@@ -1,7 +1,6 @@
 mod tokens;
 
 use ratatui::{
-    layout::Rect,
     style::{Modifier, Style},
     text::Span,
 };
@@ -25,54 +24,6 @@ pub(crate) struct AgentPanelEntry {
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
     pub tokens: std::collections::HashMap<String, String>,
-}
-
-fn sidebar_section_heights(total_height: u16, split_ratio: f32) -> (u16, u16) {
-    if total_height == 0 {
-        return (0, 0);
-    }
-    if total_height < 6 {
-        let workspace_height = total_height.div_ceil(2);
-        return (
-            workspace_height,
-            total_height.saturating_sub(workspace_height),
-        );
-    }
-
-    let workspace_height = ((total_height as f32) * split_ratio.clamp(0.1, 0.9)).round() as u16;
-    let workspace_height = workspace_height.clamp(3, total_height.saturating_sub(3));
-    (
-        workspace_height,
-        total_height.saturating_sub(workspace_height),
-    )
-}
-
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.is_empty() {
-        return (Rect::default(), Rect::default());
-    }
-
-    let (workspace_height, detail_height) = sidebar_section_heights(content.height, split_ratio);
-    (
-        Rect::new(content.x, content.y, content.width, workspace_height),
-        Rect::new(
-            content.x,
-            content.y + workspace_height,
-            content.width,
-            detail_height,
-        ),
-    )
-}
-
-pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height < 6 {
-        return Rect::default();
-    }
-
-    let (workspace_height, _) = sidebar_section_heights(content.height, split_ratio);
-    Rect::new(content.x, content.y + workspace_height, content.width, 1)
 }
 
 pub(crate) fn agent_panel_entries_from(
@@ -130,21 +81,6 @@ fn flexible_token_width(token: &ResolvedToken) -> usize {
         | ResolvedTokenKind::Custom(text) => display_width(text),
         _ => 0,
     }
-}
-
-/// 一行 token 全部按完整文字排开（[`resolved_token_spans`] 不截断任何 token）时的
-/// 显示宽度：各 token 的固定宽度与文字全长，加相邻 token 之间的分隔符。调用方
-/// 据此判断一行在给定宽度下会不会被截短（Agents 树的徽标按「名称优先」取档）。
-pub(crate) fn resolved_tokens_width(resolved: &[ResolvedToken], state_icon: &str) -> usize {
-    let tokens = resolved
-        .iter()
-        .map(|token| fixed_token_width(token, state_icon) + flexible_token_width(token))
-        .sum::<usize>();
-    let separators = resolved
-        .windows(2)
-        .map(|pair| display_width(tokens::separator(&pair[0], &pair[1])))
-        .sum::<usize>();
-    tokens + separators
 }
 
 pub(crate) fn resolved_token_spans(

@@ -1,57 +1,21 @@
+use super::chrome::sessions::{paint_sessions, SessionHit, SessionPaint, SessionRowsCache};
+use super::render::{display_width, put_text};
+use super::*;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Clear, Paragraph, Widget},
+    style::Style,
+    widgets::{Clear, Widget},
 };
 
-use super::render::{display_width, put_segment, put_text};
-use super::*;
-
 const MOBILE_BUTTON_WIDTH: u16 = 10;
-
-struct MobileItem {
-    lines: Vec<Line<'static>>,
-    background: Color,
-    target: Option<ClientMobileTarget>,
-}
-
-impl MobileItem {
-    fn section(label: impl Into<String>, palette: &Palette) -> Self {
-        Self {
-            lines: vec![Line::from(Span::styled(
-                format!(" {} ", label.into()),
-                Style::default()
-                    .fg(palette.overlay1)
-                    .bg(palette.panel_bg)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ))],
-            background: palette.panel_bg,
-            target: None,
-        }
-    }
-
-    fn action(label: &'static str, target: ClientMobileTarget, palette: &Palette) -> Self {
-        Self {
-            lines: vec![Line::from(Span::styled(
-                label,
-                Style::default()
-                    .fg(palette.accent)
-                    .bg(palette.panel_bg)
-                    .add_modifier(Modifier::BOLD),
-            ))],
-            background: palette.panel_bg,
-            target: Some(target),
-        }
-    }
-}
 
 pub(super) fn render_mobile_header(
     buffer: &mut Buffer,
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    cache: Option<&SessionRowsCache>,
     hits: &mut ShellHitMap,
 ) {
     if area.is_empty() {
@@ -67,343 +31,180 @@ pub(super) fn render_mobile_header(
         area.height,
     );
     hits.mobile_switch = button;
-    let status_width = button.x.saturating_sub(area.x).saturating_sub(1);
-    let status = Rect::new(area.x, area.y, status_width, area.height);
-    render_header_status(buffer, status, snapshot, config);
-    render_header_button(buffer, button, snapshot, config);
-}
-
-fn render_header_status(
-    buffer: &mut Buffer,
-    area: Rect,
-    snapshot: &ClientShellSnapshot,
-    config: &ClientShellConfig,
-) {
-    if area.is_empty() {
-        return;
-    }
-    let palette = &config.palette;
-    let Some(workspace) = snapshot.focused_workspace_id.as_deref().and_then(|id| {
-        snapshot
-            .workspaces
+    let width = button.x.saturating_sub(area.x + 1);
+    if let Some(workspace) = snapshot.workspaces.iter().find(|workspace| {
+        Some(workspace.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref()
+    }) {
+        let bucket = cache
+            .and_then(|cache| {
+                cache
+                    .rail
+                    .iter()
+                    .find(|item| item.workspace_id == workspace.workspace_id && item.focused)
+            })
+            .map_or(crate::harness::AgentBucket::None, |item| item.bucket);
+        let glyph = crate::ui::design::status_glyph(bucket, config.status_indicators, 0, false);
+        put_text(
+            buffer,
+            area.x,
+            area.y,
+            3.min(width),
+            glyph,
+            crate::ui::design::status_style(bucket, palette, &config.components),
+        );
+        let tabs = snapshot
+            .tabs
             .iter()
-            .find(|workspace| workspace.workspace_id == id)
-    }) else {
-        put_text(
-            buffer,
-            area.x,
-            area.y,
-            area.width,
-            crate::i18n::texts().mobile.no_workspace,
-            Style::default().fg(palette.text).bg(palette.panel_bg),
-        );
-        return;
-    };
-    let tab_status = compact_tab_status(snapshot, workspace);
-    let tab_width = display_width(&tab_status).saturating_add(1).min(area.width);
-    let name_width = area.width.saturating_sub(tab_width);
-    put_text(
-        buffer,
-        area.x,
-        area.y,
-        name_width.min(3),
-        &format!(
-            " {} ",
-            status_icon(workspace.agent_status, config.status_indicators)
-        ),
-        Style::default()
-            .fg(status_color(
-                workspace.agent_status,
-                palette,
-                &config.components,
-            ))
-            .bg(palette.panel_bg),
-    );
-    put_text(
-        buffer,
-        area.x.saturating_add(3),
-        area.y,
-        name_width.saturating_sub(3),
-        &crate::ui::truncate_end(&workspace.label, usize::from(name_width.saturating_sub(4))),
-        Style::default()
-            .fg(palette.text)
-            .bg(palette.panel_bg)
-            .add_modifier(Modifier::BOLD),
-    );
-    put_text(
-        buffer,
-        area.right().saturating_sub(tab_width).saturating_add(1),
-        area.y,
-        tab_width.saturating_sub(1),
-        &tab_status,
-        Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-    );
-    if area.height > 1 {
-        render_agent_summary(
-            buffer,
-            Rect::new(area.x, area.y + 1, area.width, 1),
-            snapshot,
-            config,
-        );
-    }
-}
-
-fn render_header_button(
-    buffer: &mut Buffer,
-    area: Rect,
-    snapshot: &ClientShellSnapshot,
-    config: &ClientShellConfig,
-) {
-    if area.is_empty() {
-        return;
-    }
-    let palette = &config.palette;
-    buffer.set_style(area, Style::default().bg(palette.surface0));
-    for y in area.y..area.bottom() {
-        put_text(
-            buffer,
-            area.x,
-            y,
-            1,
-            "│",
-            Style::default()
-                .fg(palette.surface_dim)
-                .bg(palette.surface0),
-        );
-    }
-    let label_y = if area.height > 1 { area.y + 1 } else { area.y };
-    let label = crate::i18n::texts().mobile.switch;
-    let label_width = display_width(label);
-    put_text(
-        buffer,
-        area.x
-            .saturating_add(1)
-            .saturating_add(area.width.saturating_sub(1 + label_width) / 2),
-        label_y,
-        area.width.saturating_sub(1),
-        label,
-        Style::default()
-            .fg(palette.text)
-            .bg(palette.surface0)
-            .add_modifier(Modifier::BOLD),
-    );
-    if snapshot
-        .agents
-        .iter()
-        .any(|agent| agent.agent_status == crate::api::schema::AgentStatus::Blocked)
-    {
-        put_text(
-            buffer,
-            area.right().saturating_sub(1),
-            area.y,
-            1,
-            status_icon(
-                crate::api::schema::AgentStatus::Blocked,
-                config.status_indicators,
-            ),
-            Style::default().fg(palette.red).bg(palette.surface0),
-        );
-    }
-}
-
-fn compact_tab_status(snapshot: &ClientShellSnapshot, workspace: &ClientShellWorkspace) -> String {
-    let tabs = snapshot
-        .tabs
-        .iter()
-        .filter(|tab| tab.workspace_id == workspace.workspace_id)
-        .collect::<Vec<_>>();
-    let active = tabs
-        .iter()
-        .position(|tab| tab.tab_id == workspace.active_tab_id)
-        .unwrap_or(0);
-    let label = tabs
-        .get(active)
-        .map(|tab| tab.label.as_str())
-        .unwrap_or("1");
-    if tabs.len() <= 1 {
-        crate::i18n::fill(
-            crate::i18n::texts().mobile.tab_label_fmt,
-            &[("label", label)],
-        )
-    } else {
-        crate::i18n::fill(
-            crate::i18n::texts().mobile.tab_label_pos_fmt,
-            &[
-                ("label", label),
-                ("active", &(active + 1).to_string()),
-                ("total", &tabs.len().to_string()),
-            ],
-        )
-    }
-}
-
-fn render_agent_summary(
-    buffer: &mut Buffer,
-    area: Rect,
-    snapshot: &ClientShellSnapshot,
-    config: &ClientShellConfig,
-) {
-    use crate::api::schema::AgentStatus;
-    let counts = [
-        (AgentStatus::Blocked, crate::i18n::texts().status.blocked),
-        (AgentStatus::Done, crate::i18n::texts().status.done),
-        (AgentStatus::Working, crate::i18n::texts().status.working),
-        (AgentStatus::Idle, crate::i18n::texts().status.idle),
-    ]
-    .map(|(status, label)| {
-        (
-            status,
-            label,
-            snapshot
-                .agents
-                .iter()
-                .filter(|agent| agent.agent_status == status)
-                .count(),
-        )
-    });
-    let total = counts.iter().map(|(_, _, count)| count).sum::<usize>();
-    let pending = counts[..3].iter().map(|(_, _, count)| count).sum::<usize>();
-    if total == 0 {
-        put_text(
-            buffer,
-            area.x,
-            area.y,
-            area.width,
-            crate::i18n::texts().mobile.no_agents,
-            Style::default()
-                .fg(config.palette.overlay1)
-                .bg(config.palette.panel_bg),
-        );
-        return;
-    }
-    if pending == 0 {
-        put_text(
-            buffer,
-            area.x,
-            area.y,
-            area.width,
-            crate::i18n::texts().mobile.all_idle,
-            Style::default()
-                .fg(config.palette.overlay1)
-                .bg(config.palette.panel_bg),
-        );
-        return;
-    }
-
-    let mut x = area.x.saturating_add(1);
-    let mut shown = 0usize;
-    let mut omitted = false;
-    for (status, label, count) in counts {
-        if count == 0 {
-            continue;
-        }
-        let symbol = match (config.status_indicators, status) {
-            (crate::config::StatusIndicatorStyle::Dots, AgentStatus::Blocked) => Some("◉"),
-            (crate::config::StatusIndicatorStyle::Dots, AgentStatus::Done) => Some("●"),
-            (crate::config::StatusIndicatorStyle::Dots, _) => None,
-            _ => Some(status_icon(status, config.status_indicators)),
+            .filter(|tab| tab.workspace_id == workspace.workspace_id)
+            .collect::<Vec<_>>();
+        let position = tabs
+            .iter()
+            .position(|tab| tab.tab_id == workspace.active_tab_id)
+            .unwrap_or(0);
+        let label = tabs.get(position).map_or("1", |tab| tab.label.as_str());
+        let tab_status = if tabs.len() <= 1 {
+            crate::i18n::fill(
+                crate::i18n::texts().mobile.tab_label_fmt,
+                &[("label", label)],
+            )
+        } else {
+            crate::i18n::fill(
+                crate::i18n::texts().mobile.tab_label_pos_fmt,
+                &[
+                    ("label", label),
+                    ("active", &(position + 1).to_string()),
+                    ("total", &tabs.len().to_string()),
+                ],
+            )
         };
-        let text = symbol.map_or_else(
-            || format!("{count} {label}"),
-            |symbol| format!("{symbol} {count} {label}"),
+        let tab_width = display_width(&tab_status).min(width.saturating_sub(3));
+        put_text(
+            buffer,
+            area.x + 3,
+            area.y,
+            width.saturating_sub(tab_width + 4),
+            &crate::ui::truncate_end(
+                &workspace.label,
+                usize::from(width.saturating_sub(tab_width + 4)),
+            ),
+            crate::ui::design::title(palette),
         );
-        let separator = if shown == 0 { "" } else { " · " };
-        let needed = display_width(separator).saturating_add(display_width(&text));
-        if area.right().saturating_sub(x) < needed {
-            omitted = true;
-            break;
-        }
-        if !separator.is_empty() {
-            x = put_segment(
+        put_text(
+            buffer,
+            area.x + width.saturating_sub(tab_width),
+            area.y,
+            tab_width,
+            &tab_status,
+            crate::ui::design::meta(palette),
+        );
+    } else {
+        put_text(
+            buffer,
+            area.x,
+            area.y,
+            width,
+            crate::i18n::texts().mobile.no_workspace,
+            crate::ui::design::body(palette),
+        );
+    }
+    if area.height > 1 {
+        let counts = cache.map_or_else(Default::default, |cache| cache.counts);
+        let mut x = area.x;
+        let end = area.x + width;
+        if crate::harness::AgentBucket::LISTING
+            .iter()
+            .all(|bucket| counts.get(*bucket) == 0)
+        {
+            put_text(
                 buffer,
                 x,
-                area.y,
-                area.right(),
-                separator,
-                Style::default()
-                    .fg(config.palette.overlay0)
-                    .bg(config.palette.panel_bg),
+                area.y + 1,
+                width,
+                crate::i18n::texts().mobile.no_agents,
+                crate::ui::design::meta(palette),
             );
-        }
-        let color = if shown == 0 {
-            match status {
-                AgentStatus::Done => config.palette.blue,
-                _ => status_color(status, &config.palette, &config.components),
-            }
+        } else if counts.needs_input + counts.failed + counts.review + counts.working == 0 {
+            put_text(
+                buffer,
+                x,
+                area.y + 1,
+                width,
+                crate::i18n::texts().mobile.all_idle,
+                crate::ui::design::meta(palette),
+            );
         } else {
-            config.palette.overlay1
-        };
-        x = put_segment(
-            buffer,
-            x,
-            area.y,
-            area.right(),
-            &text,
-            Style::default()
-                .fg(color)
-                .bg(config.palette.panel_bg)
-                .add_modifier(if shown == 0 {
-                    Modifier::BOLD
+            for bucket in crate::harness::AgentBucket::LISTING {
+                let count = counts.get(bucket);
+                if count == 0 {
+                    continue;
+                }
+                let glyph =
+                    crate::ui::design::status_glyph(bucket, config.status_indicators, 0, false);
+                let full = format!(
+                    "{glyph} {count} {} ",
+                    super::chrome::sessions::bucket_label(bucket)
+                );
+                let text = if display_width(&full) <= end.saturating_sub(x) {
+                    full
                 } else {
-                    Modifier::empty()
-                }),
-        );
-        shown += 1;
+                    format!("{glyph} {count} ")
+                };
+                let needed = display_width(&text);
+                if x + needed > end {
+                    break;
+                }
+                put_text(
+                    buffer,
+                    x,
+                    area.y + 1,
+                    needed,
+                    &text,
+                    crate::ui::design::status_style(bucket, palette, &config.components),
+                );
+                x += needed;
+            }
+        }
     }
-    if omitted && area.right().saturating_sub(x) >= 2 {
-        put_text(
-            buffer,
-            x,
-            area.y,
-            2,
-            " …",
-            Style::default()
-                .fg(config.palette.overlay0)
-                .bg(config.palette.panel_bg),
-        );
-    }
+    buffer.set_style(button, Style::default().bg(palette.surface0));
+    put_text(
+        buffer,
+        button.x + 1,
+        button.bottom().saturating_sub(1),
+        button.width.saturating_sub(1),
+        crate::i18n::texts().mobile.switch,
+        crate::ui::design::title(palette),
+    );
 }
 
 pub(super) fn render_mobile_switcher(
     buffer: &mut Buffer,
     area: Rect,
-    snapshot: &ClientShellSnapshot,
-    endpoints: &[ClientShellEndpoint],
-    active_endpoint_id: &ClientEndpointId,
-    config: &ClientShellConfig,
-    selected_workspace_id: Option<&WorkspaceNavigationTarget>,
-    scroll: &mut usize,
-    reveal_workspace: &mut bool,
+    frame: &SessionPaint<'_>,
     hits: &mut ShellHitMap,
 ) {
     if area.is_empty() {
         return;
     }
-    let palette = &config.palette;
     Clear.render(area, buffer);
-    buffer.set_style(area, Style::default().bg(palette.panel_bg));
+    buffer.set_style(area, Style::default().bg(frame.config.palette.panel_bg));
     hits.mobile_switch = Rect::default();
+    hits.mobile_targets.clear();
     if area.height <= 2 {
-        *scroll = 0;
-        put_text(
-            buffer,
-            area.x,
-            area.y,
-            area.width,
-            &"─".repeat(usize::from(area.width)),
-            Style::default()
-                .fg(palette.surface_dim)
-                .bg(palette.panel_bg),
-        );
+        hits.mobile_close = Rect::default();
+        hits.mobile_max_scroll = 0;
+        for x in area.x..area.right() {
+            buffer[(x, area.y)]
+                .set_symbol("─")
+                .set_style(crate::ui::design::rule(&frame.config.palette));
+        }
         return;
     }
-    let header_height = area.height.min(2);
-    let close_width = MOBILE_BUTTON_WIDTH.min(area.width);
     let close = Rect::new(
-        area.right().saturating_sub(close_width),
+        area.right()
+            .saturating_sub(MOBILE_BUTTON_WIDTH.min(area.width)),
         area.y,
-        close_width,
-        header_height,
+        MOBILE_BUTTON_WIDTH.min(area.width),
+        area.height.min(2),
     );
     hits.mobile_close = close;
     put_text(
@@ -412,591 +213,39 @@ pub(super) fn render_mobile_switcher(
         area.y,
         close.x.saturating_sub(area.x),
         crate::i18n::texts().mobile.switch_label,
-        Style::default()
-            .fg(palette.text)
-            .bg(palette.panel_bg)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::design::title(&frame.config.palette),
     );
-    render_close_button(buffer, close, palette);
-    let rule_y = area.y + header_height;
+    buffer.set_style(close, Style::default().bg(frame.config.palette.surface0));
     put_text(
         buffer,
-        area.x,
-        rule_y,
-        area.width,
-        &"─".repeat(usize::from(area.width)),
-        Style::default()
-            .fg(palette.surface_dim)
-            .bg(palette.panel_bg),
+        close.x + 1,
+        close.y,
+        close.width.saturating_sub(1),
+        crate::i18n::texts().mobile.close,
+        crate::ui::design::meta(&frame.config.palette),
     );
-    let viewport = Rect::new(
-        area.x,
-        rule_y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(header_height + 1),
-    );
-    if viewport.is_empty() {
-        *scroll = 0;
-        return;
-    }
-
-    let items = mobile_items(
-        snapshot,
-        endpoints,
-        active_endpoint_id,
-        config,
-        selected_workspace_id,
-        viewport.width.saturating_sub(1),
-    );
-    let total_rows = items.iter().map(|item| item.lines.len()).sum::<usize>();
-    let max_scroll = total_rows.saturating_sub(usize::from(viewport.height));
-    *scroll = (*scroll).min(max_scroll);
-    if *reveal_workspace {
-        if let Some(selected_workspace_id) = selected_workspace_id {
-            let mut start = 0usize;
-            for item in &items {
-                let end = start.saturating_add(item.lines.len());
-                if matches!(
-                    item.target.as_ref(),
-                    Some(ClientMobileTarget::Workspace {
-                        endpoint_id,
-                        workspace_id,
-                    }) if selected_workspace_id.matches(endpoint_id, workspace_id)
-                ) {
-                    if start < *scroll {
-                        *scroll = start;
-                    } else if end > (*scroll).saturating_add(usize::from(viewport.height)) {
-                        *scroll = end
-                            .saturating_sub(usize::from(viewport.height))
-                            .min(max_scroll);
-                    }
-                    break;
-                }
-                start = end;
-            }
-        }
-        *reveal_workspace = false;
-    }
-    hits.mobile_max_scroll = max_scroll;
-    let content = if viewport.width > 1 {
-        Rect::new(
-            viewport.x + 1,
-            viewport.y,
-            viewport.width - 1,
-            viewport.height,
-        )
-    } else {
-        Rect::default()
-    };
-    if max_scroll > 0 {
-        render_left_scrollbar(buffer, viewport, total_rows, *scroll, palette);
-    }
-    if content.is_empty() {
-        return;
-    }
-
-    let viewport_start = *scroll;
-    let viewport_end = viewport_start.saturating_add(usize::from(viewport.height));
-    let mut document_row = 0usize;
-    for item in items {
-        let item_start = document_row;
-        let item_end = item_start.saturating_add(item.lines.len());
-        let visible_start = item_start.max(viewport_start);
-        let visible_end = item_end.min(viewport_end);
-        if visible_start < visible_end {
-            let y = viewport.y + u16::try_from(visible_start - viewport_start).unwrap_or(u16::MAX);
-            let height = u16::try_from(visible_end - visible_start).unwrap_or(u16::MAX);
-            let rect = Rect::new(content.x, y, content.width, height);
-            buffer.set_style(rect, Style::default().bg(item.background));
-            for row in visible_start..visible_end {
-                let line = item.lines[row - item_start].clone();
-                Paragraph::new(line).render(
-                    Rect::new(
-                        content.x,
-                        viewport.y + u16::try_from(row - viewport_start).unwrap_or(u16::MAX),
-                        content.width,
-                        1,
-                    ),
-                    buffer,
-                );
-            }
-            if let Some(target) = item.target {
-                hits.mobile_targets.push((rect, target));
-            }
-        }
-        document_row = item_end;
-    }
-}
-
-fn render_close_button(buffer: &mut Buffer, area: Rect, palette: &Palette) {
-    if area.is_empty() {
-        return;
-    }
-    buffer.set_style(area, Style::default().bg(palette.surface0));
-    for y in area.y..area.bottom() {
+    if close.height > 1 {
         put_text(
             buffer,
-            area.x,
-            y,
-            1,
-            "│",
-            Style::default()
-                .fg(palette.surface_dim)
-                .bg(palette.surface0),
-        );
-    }
-    let label_width = 5;
-    let label = crate::i18n::texts().mobile.close;
-    let label_x = area
-        .x
-        .saturating_add(1)
-        .saturating_add(area.width.saturating_sub(1 + label_width) / 2);
-    put_text(
-        buffer,
-        label_x,
-        area.y,
-        area.width.saturating_sub(1),
-        label,
-        Style::default()
-            .fg(palette.overlay1)
-            .bg(palette.surface0)
-            .add_modifier(Modifier::BOLD),
-    );
-    if area.height > 1 {
-        put_text(
-            buffer,
-            area.x.saturating_add(area.width / 2),
-            area.y + 1,
+            close.x + close.width / 2,
+            close.y + 1,
             1,
             "×",
-            Style::default()
-                .fg(palette.text)
-                .bg(palette.surface0)
-                .add_modifier(Modifier::BOLD),
+            crate::ui::design::title(&frame.config.palette),
         );
     }
-}
-
-fn mobile_items(
-    snapshot: &ClientShellSnapshot,
-    endpoints: &[ClientShellEndpoint],
-    active_endpoint_id: &ClientEndpointId,
-    config: &ClientShellConfig,
-    selected_workspace_id: Option<&WorkspaceNavigationTarget>,
-    content_width: u16,
-) -> Vec<MobileItem> {
-    let palette = &config.palette;
-    let mut items = Vec::new();
-    if endpoints.len() > 1 {
-        items.push(MobileItem::section(
-            crate::i18n::texts().mobile.section_machines,
-            palette,
-        ));
-        for endpoint in endpoints {
-            let background = palette.panel_bg;
-            // The mobile switcher is a static browsing surface: keep the
-            // first spinner frame rather than plumbing animation state in.
-            let (symbol, state, color) =
-                endpoint_status_presentation(endpoint.status, palette, "◐");
-            items.push(MobileItem {
-                lines: vec![
-                    Line::from(vec![
-                        Span::styled("  ", Style::default().bg(background)),
-                        Span::styled(symbol, Style::default().fg(color).bg(background)),
-                        Span::styled(
-                            format!(" {}", endpoint.label),
-                            Style::default()
-                                .fg(palette.text)
-                                .bg(background)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        format!("    {state}"),
-                        Style::default().fg(palette.overlay0).bg(background),
-                    )),
-                ],
-                background,
-                target: Some(ClientMobileTarget::Machine(endpoint.endpoint_id.clone())),
-            });
+    if area.height > 2 {
+        for x in area.x..area.right() {
+            buffer[(x, area.y + 2)]
+                .set_symbol("─")
+                .set_style(crate::ui::design::rule(&frame.config.palette));
         }
     }
-    let agents = super::aggregate_navigation::aggregate_agent_rows(
-        endpoints,
-        active_endpoint_id,
-        config.agent_panel_sort,
-    );
-    let agent_view_label = snapshot.agent_view_label.as_deref();
-    // agent 行详情行的缩进与字段分隔符；活动徽标按两者算剩余宽度。
-    const DETAIL_INDENT: &str = "  ";
-    const DETAIL_SEPARATOR: &str = " · ";
-    if !agents.is_empty() || agent_view_label.is_some() {
-        let title = agent_view_label
-            .map(|label| {
-                crate::i18n::fill(
-                    crate::i18n::texts().mobile.agents_label_fmt,
-                    &[("label", label)],
-                )
-            })
-            .unwrap_or_else(|| crate::i18n::texts().mobile.agents_plain.to_owned());
-        items.push(MobileItem::section(title, palette));
-        if agents.is_empty() {
-            items.push(MobileItem {
-                lines: vec![Line::from(Span::styled(
-                    crate::i18n::texts().sidebar.no_matching_agents,
-                    Style::default()
-                        .fg(palette.overlay0)
-                        .bg(palette.panel_bg)
-                        .add_modifier(Modifier::DIM),
-                ))],
-                background: palette.panel_bg,
-                target: None,
-            });
-        }
-        for row in agents {
-            let endpoint = row.endpoint;
-            let agent = row.agent;
-            let workspace = endpoint
-                .snapshot
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.workspace_id == agent.workspace_id);
-            let tab = endpoint
-                .snapshot
-                .tabs
-                .iter()
-                .find(|tab| tab.tab_id == agent.tab_id);
-            let agent_label = agent
-                .display_agent
-                .as_deref()
-                .or(agent.name.as_deref())
-                .or(agent.agent.as_deref())
-                .unwrap_or("agent");
-            let primary = workspace
-                .map(|workspace| workspace.label.as_str())
-                .unwrap_or(agent_label);
-            let mut detail = Vec::new();
-            let workspace_tab_count = endpoint
-                .snapshot
-                .tabs
-                .iter()
-                .filter(|candidate| candidate.workspace_id == agent.workspace_id)
-                .count();
-            if let Some(tab) = tab.filter(|tab| tab.custom_label || workspace_tab_count > 1) {
-                detail.push(tab.label.clone());
-            }
-            let status_key = status_text(agent.agent_status);
-            detail.push(
-                agent
-                    .state_labels
-                    .iter()
-                    .find(|(key, _)| key == status_key)
-                    .map(|(_, label)| label.clone())
-                    .unwrap_or_else(|| {
-                        let status_texts = &crate::i18n::texts().status;
-                        match agent.agent_status {
-                            crate::api::schema::AgentStatus::Working => status_texts.working,
-                            crate::api::schema::AgentStatus::Blocked => status_texts.blocked,
-                            crate::api::schema::AgentStatus::Done => status_texts.done,
-                            crate::api::schema::AgentStatus::Idle
-                            | crate::api::schema::AgentStatus::Unknown => status_texts.idle,
-                        }
-                        .to_owned()
-                    }),
-            );
-            detail.push(agent_label.to_owned());
-            let badge_index = detail.len();
-            if endpoint.stale() {
-                detail.push(endpoint_status_label(endpoint.status).to_owned());
-            }
-            // 活动徽标只拿其余详情排完后剩下的宽度，按与桌面树相同的三档退化
-            // （完整文案 → 只留数字 → 不画）：行尾截断落不进徽标，不会画出
-            // 「运行中 2…」这种看着像只有 2 个活动的残段。其余字段各带一个
-            // 分隔符（字段之间的，加上徽标前的那个）。
-            let used = detail
-                .iter()
-                .fold(display_width(DETAIL_INDENT), |used, part| {
-                    used.saturating_add(display_width(part))
-                        .saturating_add(display_width(DETAIL_SEPARATOR))
-                });
-            let room = content_width.saturating_sub(used);
-            if let Some(badge) = super::agent_tree::mobile_activity_badge(agent, room) {
-                detail.insert(badge_index, badge);
-            }
-            let background = if endpoint.endpoint_id == active_endpoint_id && agent.focused {
-                palette.surface_dim
-            } else {
-                palette.panel_bg
-            };
-            let foreground = if endpoint.stale() {
-                palette.overlay0
-            } else {
-                palette.text
-            };
-            let dim = if endpoint.stale() {
-                Modifier::DIM
-            } else {
-                Modifier::empty()
-            };
-            items.push(MobileItem {
-                lines: vec![
-                    Line::from(vec![
-                        Span::styled("  ", Style::default().bg(background)),
-                        Span::styled(
-                            status_icon(agent.agent_status, config.status_indicators),
-                            Style::default()
-                                .fg(if endpoint.stale() {
-                                    palette.overlay0
-                                } else {
-                                    status_color(agent.agent_status, palette, &config.components)
-                                })
-                                .bg(background)
-                                .add_modifier(dim),
-                        ),
-                        Span::styled(" ", Style::default().bg(background)),
-                        Span::styled(
-                            crate::ui::truncate_end(
-                                &format!("{} · {primary}", endpoint.label),
-                                usize::from(content_width.saturating_sub(5)),
-                            ),
-                            Style::default()
-                                .fg(foreground)
-                                .bg(background)
-                                .add_modifier(Modifier::BOLD | dim),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        crate::ui::truncate_end(
-                            &format!("{DETAIL_INDENT}{}", detail.join(DETAIL_SEPARATOR)),
-                            usize::from(content_width),
-                        ),
-                        Style::default()
-                            .fg(palette.overlay0)
-                            .bg(background)
-                            .add_modifier(dim),
-                    )),
-                ],
-                background,
-                target: Some(ClientMobileTarget::Agent {
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                    pane_id: agent.pane_id.clone(),
-                }),
-            });
-        }
-    }
-
-    items.push(MobileItem::section(
-        crate::i18n::texts().mobile.section_spaces,
-        palette,
-    ));
-    items.push(MobileItem::action(
-        crate::i18n::texts().mobile.new_workspace,
-        ClientMobileTarget::NewWorkspace,
-        palette,
-    ));
-    for endpoint in super::aggregate_navigation::cached_endpoint_snapshots(endpoints) {
-        for entry in super::render::workspace_entries(endpoint.snapshot, &HashSet::new()) {
-            let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
-                continue;
-            };
-            let selected = selected_workspace_id.is_some_and(|target| {
-                target.matches(endpoint.endpoint_id, &workspace.workspace_id)
-            });
-            let background = if selected {
-                palette.surface_selection_bg()
-            } else if endpoint.endpoint_id == active_endpoint_id && workspace.focused {
-                if selected_workspace_id.is_some()
-                    && palette.surface0 == ratatui::style::Color::Reset
-                {
-                    palette.panel_bg
-                } else {
-                    palette.surface_dim
-                }
-            } else {
-                palette.panel_bg
-            };
-            let connector = if entry.indented {
-                if entry.last_child {
-                    "└─ "
-                } else {
-                    "├─ "
-                }
-            } else {
-                ""
-            };
-            let name = if entry.indented && !workspace.custom_label {
-                workspace
-                    .branch
-                    .as_deref()
-                    .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
-                    .unwrap_or(&workspace.label)
-            } else {
-                &workspace.label
-            };
-            let branch = workspace.branch.as_deref().unwrap_or("shell");
-            let detail_prefix = if entry.indented {
-                if entry.last_child {
-                    "       "
-                } else {
-                    "  │    "
-                }
-            } else {
-                "  "
-            };
-            let dim = if endpoint.stale() {
-                Modifier::DIM
-            } else {
-                Modifier::empty()
-            };
-            let foreground = if endpoint.stale() {
-                palette.overlay0
-            } else {
-                palette.text
-            };
-            let status = if endpoint.stale() {
-                palette.overlay0
-            } else {
-                status_color(workspace.agent_status, palette, &config.components)
-            };
-            let stale_detail = if endpoint.stale() {
-                format!(" · {}", endpoint_status_label(endpoint.status))
-            } else {
-                String::new()
-            };
-            items.push(MobileItem {
-                lines: vec![
-                    Line::from(vec![
-                        Span::styled(
-                            format!("  {connector}"),
-                            Style::default()
-                                .fg(palette.overlay0)
-                                .bg(background)
-                                .add_modifier(dim),
-                        ),
-                        Span::styled(
-                            status_icon(workspace.agent_status, config.status_indicators),
-                            Style::default().fg(status).bg(background).add_modifier(dim),
-                        ),
-                        Span::styled(" ", Style::default().bg(background)),
-                        Span::styled(
-                            crate::ui::truncate_end(
-                                &format!("{} · {name}", endpoint.label),
-                                usize::from(content_width.saturating_sub(if entry.indented {
-                                    8
-                                } else {
-                                    5
-                                })),
-                            ),
-                            Style::default()
-                                .fg(foreground)
-                                .bg(background)
-                                .add_modifier(Modifier::BOLD | dim),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        crate::ui::truncate_end(
-                            &format!(
-                                "{detail_prefix}{branch} · {}{stale_detail}",
-                                compact_tab_status(endpoint.snapshot, workspace)
-                            ),
-                            usize::from(content_width),
-                        ),
-                        Style::default()
-                            .fg(palette.overlay0)
-                            .bg(background)
-                            .add_modifier(dim),
-                    )),
-                ],
-                background,
-                target: Some(ClientMobileTarget::Workspace {
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                    workspace_id: workspace.workspace_id.clone(),
-                }),
-            });
-        }
-    }
-
-    if let Some(workspace_id) = snapshot.focused_workspace_id.as_deref() {
-        items.push(MobileItem::section(
-            crate::i18n::texts().mobile.section_tabs,
-            palette,
-        ));
-        items.push(MobileItem::action(
-            crate::i18n::texts().mobile.new_tab,
-            ClientMobileTarget::NewTab,
-            palette,
-        ));
-        for (index, tab) in snapshot
-            .tabs
-            .iter()
-            .filter(|tab| tab.workspace_id == workspace_id)
-            .enumerate()
-        {
-            let background = if tab.focused {
-                palette.surface_dim
-            } else {
-                palette.panel_bg
-            };
-            let label = if tab.custom_label {
-                format!("{} · {}", index + 1, tab.label)
-            } else {
-                crate::i18n::fill(
-                    crate::i18n::texts().mobile.tab_label_fmt,
-                    &[("label", tab.label.as_str())],
-                )
-            };
-            let label = format!(
-                "  {}",
-                crate::ui::truncate_end(&label, usize::from(content_width.saturating_sub(3)),)
-            );
-            items.push(MobileItem {
-                lines: vec![Line::from(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(palette.text)
-                        .bg(background)
-                        .add_modifier(Modifier::BOLD),
-                ))],
-                background,
-                target: Some(ClientMobileTarget::Tab {
-                    endpoint_id: active_endpoint_id.clone(),
-                    tab_id: tab.tab_id.clone(),
-                }),
-            });
-        }
-    }
-
-    items.push(MobileItem::section(
-        crate::i18n::texts().mobile.section_menu,
-        palette,
-    ));
-    for (index, entry) in super::global_menu::global_menu_items(snapshot)
-        .into_iter()
-        .enumerate()
-    {
-        // 暂时不可用的条目照样列出（与桌面菜单的置灰同义），标注后缀并压暗。
-        let (text, fg) = if entry.enabled {
-            (format!("  {}", entry.label), palette.overlay1)
-        } else {
-            (
-                format!(
-                    "  {}{}",
-                    entry.label,
-                    crate::i18n::texts().menu.unavailable_suffix
-                ),
-                palette.overlay0,
-            )
-        };
-        items.push(MobileItem {
-            lines: vec![Line::from(Span::styled(
-                text,
-                Style::default().fg(fg).bg(palette.panel_bg),
-            ))],
-            background: palette.panel_bg,
-            target: Some(ClientMobileTarget::Menu(index)),
-        });
-    }
-    items
+    paint_sessions(buffer, frame, hits);
+    hits.mobile_max_scroll = frame
+        .view
+        .metrics
+        .map_or(0, |metrics| metrics.max_offset_from_bottom);
 }
 
 impl ClientShellState {
@@ -1030,7 +279,6 @@ impl ClientShellState {
             }
             return false;
         }
-
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.mobile_switcher_scroll = self.mobile_switcher_scroll.saturating_sub(2);
@@ -1045,14 +293,81 @@ impl ClientShellState {
                 outcome.repaint = true;
                 return true;
             }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let (
+                    Some(ClientChromeDrag::WorkspaceScrollbar { grab_row_offset }),
+                    Some(metrics),
+                ) = (&self.chrome_drag, self.hits.workspace_scroll_metrics)
+                {
+                    let offset = crate::ui::scrollbar_offset_from_drag_row(
+                        metrics,
+                        self.hits.workspace_scrollbar,
+                        mouse.row,
+                        *grab_row_offset,
+                    );
+                    self.mobile_switcher_scroll =
+                        metrics.max_offset_from_bottom.saturating_sub(offset);
+                    outcome.repaint = true;
+                }
+                return true;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if matches!(
+                    self.chrome_drag,
+                    Some(ClientChromeDrag::WorkspaceScrollbar { .. })
+                ) {
+                    self.chrome_drag = None;
+                }
+                return true;
+            }
             MouseEventKind::Down(MouseButton::Left) => {}
             _ => return true,
         }
-
+        if super::contains(self.hits.workspace_scrollbar, point) {
+            if let Some(metrics) = self.hits.workspace_scroll_metrics {
+                if let Some(grab_row_offset) = crate::ui::scrollbar_thumb_grab_offset(
+                    metrics,
+                    self.hits.workspace_scrollbar,
+                    mouse.row,
+                ) {
+                    self.chrome_drag =
+                        Some(ClientChromeDrag::WorkspaceScrollbar { grab_row_offset });
+                } else {
+                    let offset = crate::ui::scrollbar_offset_from_row(
+                        metrics,
+                        self.hits.workspace_scrollbar,
+                        mouse.row,
+                    );
+                    self.mobile_switcher_scroll =
+                        metrics.max_offset_from_bottom.saturating_sub(offset);
+                    outcome.repaint = true;
+                }
+            }
+            return true;
+        }
         if super::contains(self.hits.mobile_close, point) {
             self.mode = ClientShellMode::Terminal;
             self.navigate_workspace_id = None;
             outcome.repaint = true;
+            return true;
+        }
+        if self.hits.sessions.iter().any(|(rect, hit)| {
+            super::contains(*rect, point)
+                && !matches!(hit, SessionHit::Terminal(..) | SessionHit::Rail(..))
+        }) && self.handle_session_click(point, outcome)
+        {
+            return true;
+        }
+        if self
+            .hits
+            .machines
+            .iter()
+            .any(|hit| super::contains(hit.collapse_toggle, point))
+            && self.handle_endpoint_machine_click(point, outcome)
+        {
+            return true;
+        }
+        if self.handle_agent_tree_click(point, outcome) {
             return true;
         }
         let target = self
@@ -1142,49 +457,5 @@ impl ClientShellState {
         }
         outcome.repaint = true;
         true
-    }
-}
-
-fn render_left_scrollbar(
-    buffer: &mut Buffer,
-    viewport: Rect,
-    total_rows: usize,
-    scroll: usize,
-    palette: &Palette,
-) {
-    if viewport.is_empty() {
-        return;
-    }
-    let metrics = crate::pane::ScrollMetrics {
-        offset_from_bottom: total_rows
-            .saturating_sub(usize::from(viewport.height))
-            .saturating_sub(scroll),
-        max_offset_from_bottom: total_rows.saturating_sub(usize::from(viewport.height)),
-        viewport_rows: usize::from(viewport.height),
-    };
-    let track = Rect::new(viewport.x, viewport.y, 1, viewport.height);
-    for y in track.y..track.bottom() {
-        put_text(
-            buffer,
-            track.x,
-            y,
-            1,
-            "│",
-            Style::default()
-                .fg(palette.surface_dim)
-                .bg(palette.panel_bg),
-        );
-    }
-    if let Some(thumb) = crate::ui::scrollbar_thumb(metrics, track) {
-        for y in thumb.top..thumb.top.saturating_add(thumb.len) {
-            put_text(
-                buffer,
-                track.x,
-                y,
-                1,
-                "▌",
-                Style::default().fg(palette.accent).bg(palette.panel_bg),
-            );
-        }
     }
 }

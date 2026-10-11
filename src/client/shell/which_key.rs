@@ -58,14 +58,8 @@ pub(super) fn render_which_key(
         return;
     }
     let p = cx.palette;
-    let cap = Style::default()
-        .fg(p.accent)
-        .bg(p.surface0)
-        .add_modifier(Modifier::BOLD);
-    let title = Style::default()
-        .fg(p.accent)
-        .bg(p.panel_bg)
-        .add_modifier(Modifier::BOLD);
+    let cap = crate::ui::design::key_cap(p);
+    let title = crate::ui::design::title(p).bg(p.panel_bg);
     let text = Style::default().fg(p.text).bg(p.panel_bg);
 
     // One column per group; columns that no longer fit are dropped whole.
@@ -117,7 +111,13 @@ pub(super) fn render_which_key(
         width,
         height,
     );
-    let Some(inner) = panel(buffer, panel_area, p.accent, p.panel_bg, cx.glyphs) else {
+    let Some(inner) = panel(
+        buffer,
+        panel_area,
+        p.accent,
+        p.panel_bg,
+        crate::ui::BorderGlyphs::ROUNDED,
+    ) else {
         return;
     };
     occlusion.cover(panel_area.intersection(buffer.area));

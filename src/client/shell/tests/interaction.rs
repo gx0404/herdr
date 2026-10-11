@@ -58,7 +58,18 @@ fn search_click_and_wheel_preserve_the_browser_and_unicode_matches() {
     assert_eq!(palette_overlay(&state).scroll, 6);
     state.move_palette_selection(1);
     state.compose(80, 24).unwrap();
-    assert!(palette_overlay(&state).scroll <= 1);
+    let palette = palette_overlay(&state);
+    let rows = super::command_palette::palette_rows(palette);
+    let selected_line = super::super::chrome::command::visual(&rows)
+        .iter()
+        .position(|(index, _)| *index == Some(palette.selected))
+        .expect("selected visual row");
+    assert!(palette.scroll <= selected_line);
+    assert!(state
+        .hits
+        .global_menu_rows
+        .iter()
+        .any(|(_, index)| *index == palette_overlay(&state).selected));
     // Unicode 下标：`İ` 的小写展开成 "i" + 组合点两个字符，命中下标仍按原文
     // 字符计。夹具保持 "İİB" 不变；冒烟 L6 起首字符必须落在词首，B 与前面
     // 的 İ 同属一个全大写词、不是词首，单查 "b" 从词中间起步不再命中（L6
@@ -563,4 +574,346 @@ fn triple_click_selects_the_whole_line_and_copies() {
             .is_some_and(|selection| selection.is_in_progress()),
         "fourth click is a fresh drag anchor"
     );
+}
+
+#[test]
+fn settings_boundary_palette_dynamic_targets_revalidate_boot_and_identity() {
+    for agent_target in [false, true] {
+        for transition in ["restart", "offline", "removed", "valid"] {
+            let mut state =
+                ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+            state.set_snapshot(Box::new(snapshot()));
+            state.set_pane_surface(surface());
+            let profile =
+                SavedSshEndpoint::new("Remote", "dev@example.com", "default").expect("profile");
+            let endpoint = ClientEndpointId::Ssh(profile.id.clone());
+            state.set_endpoint_catalog(&[profile]);
+            state.set_endpoint_status(&endpoint, ClientEndpointStatus::Online);
+            let mut remote = snapshot();
+            remote.agents.push(crate::protocol::ClientShellAgent {
+                pane_id: "pane_1".into(),
+                workspace_id: "ws_1".into(),
+                tab_id: "tab_1".into(),
+                name: Some("codex".into()),
+                display_agent: None,
+                agent: Some("codex".into()),
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                agent_status: crate::api::schema::AgentStatus::Idle,
+                state_change_seq: 1,
+                state_labels: Vec::new(),
+                tokens: Vec::new(),
+                focused: false,
+                launch_seq: 7,
+                activity: Default::default(),
+                insight: Default::default(),
+            });
+            state.set_endpoint_snapshot(&endpoint, Box::new(remote.clone()));
+            state.open_command_search();
+            let prefix = if agent_target {
+                "target:agent:"
+            } else {
+                "target:workspace:"
+            };
+            let rows = super::command_palette::palette_rows(palette_overlay(&state));
+            let index = rows
+                .iter()
+                .position(|row| {
+                    row.item.id.starts_with(prefix) && row.item.id.contains(&endpoint.storage_key())
+                })
+                .expect("remote target");
+            let id = rows[index].item.id.clone();
+            match transition {
+                "restart" => {
+                    remote.boot_id = "boot-2".into();
+                    state.set_endpoint_snapshot(&endpoint, Box::new(remote));
+                }
+                "offline" => {
+                    state.set_endpoint_status(&endpoint, ClientEndpointStatus::Reconnecting)
+                }
+                "removed" => {
+                    remote.revision += 1;
+                    remote.agents.clear();
+                    remote.panes.clear();
+                    remote.workspaces.clear();
+                    state.set_endpoint_snapshot(&endpoint, Box::new(remote));
+                }
+                _ => {}
+            }
+            let mut outcome = ClientShellInput::default();
+            state.activate_palette_item(index, &mut outcome);
+            if transition == "valid" {
+                assert!(outcome.actions.iter().any(|action| matches!(action,
+                    ClientShellAction::ActivateEndpoint { endpoint_id, .. } if endpoint_id == &endpoint)));
+                assert_eq!(state.palette_recent.first(), Some(&id));
+            } else {
+                assert!(
+                    outcome.actions.is_empty(),
+                    "{agent_target} {transition}: {:?}",
+                    outcome.actions
+                );
+                assert!(!state.palette_recent.contains(&id));
+                assert!(matches!(
+                    state.overlay,
+                    Some(ClientShellOverlay::CommandPalette(_))
+                ));
+            }
+        }
+    }
+}
+
+fn mark_unread_snapshot() -> ClientShellSnapshot {
+    let mut projected = snapshot();
+    projected.agents.push(ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("kimi".into()),
+        display_agent: None,
+        agent: Some("kimi".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+        launch_seq: 7,
+        activity: Default::default(),
+        insight: Default::default(),
+    });
+    projected
+}
+
+fn fill_other_agent_marks(state: &mut ClientShellState, projected: &mut ClientShellSnapshot) {
+    let template = projected.agents[0].clone();
+    for index in 0..256 {
+        let mut agent = template.clone();
+        agent.pane_id = format!("capacity-{index}");
+        agent.focused = false;
+        projected.agents.push(agent);
+    }
+    projected.revision += 1;
+    state.set_snapshot(Box::new(projected.clone()));
+    for agent in projected.agents.iter().skip(1) {
+        let target = super::super::chrome::inspector::Target::for_agent(
+            ClientEndpointId::Local,
+            projected,
+            agent,
+        );
+        assert!(state.mark_agent_read(&target, false));
+    }
+}
+
+#[test]
+fn mark_unread_catalog_and_search_disable_unavailable_focused_targets() {
+    use super::super::action_table::{global_action_state, ActionId};
+    for condition in [
+        "shell", "working", "blocked", "failed", "offline", "full", "idle", "review",
+    ] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut projected = mark_unread_snapshot();
+        match condition {
+            "shell" => projected.agents.clear(),
+            "working" => projected.agents[0].agent_status = AgentStatus::Working,
+            "blocked" => projected.agents[0].agent_status = AgentStatus::Blocked,
+            "failed" => {
+                projected.agents[0].insight.attention =
+                    Some(crate::protocol::ClientShellAgentAttention {
+                        kind: crate::api::schema::AgentAttentionKind::Failed,
+                        ..Default::default()
+                    });
+            }
+            _ => {}
+        }
+        state.set_snapshot(Box::new(projected.clone()));
+        if condition == "offline" {
+            state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Reconnecting);
+        } else if condition == "full" {
+            fill_other_agent_marks(&mut state, &mut projected);
+        } else if condition == "review" {
+            let target = super::super::chrome::inspector::Target::for_agent(
+                ClientEndpointId::Local,
+                &projected,
+                &projected.agents[0],
+            );
+            assert!(state.mark_agent_read(&target, false));
+        }
+        let available = matches!(condition, "idle" | "review");
+        assert_eq!(
+            global_action_state(ActionId::MarkUnread, &state.global_action_context()).enabled,
+            available,
+            "{condition}"
+        );
+        state.toggle_global_menu();
+        let category = palette_row_index(&state, "category:0");
+        state.activate_palette_item(category, &mut ClientShellInput::default());
+        let index = palette_row_index(&state, "agent:mark-unread");
+        let rows = super::command_palette::palette_rows(palette_overlay(&state));
+        assert_eq!(rows[index].item.enabled, available, "{condition}");
+        if !available {
+            state.activate_palette_item(index, &mut ClientShellInput::default());
+            assert!(matches!(
+                state.overlay,
+                Some(ClientShellOverlay::CommandPalette(_))
+            ));
+            assert!(state.palette_recent.is_empty());
+        }
+        state.open_command_search();
+        assert_eq!(
+            super::command_palette::palette_rows(palette_overlay(&state))
+                .iter()
+                .any(|row| row.item.id == "agent:mark-unread"),
+            available,
+            "{condition}"
+        );
+    }
+}
+
+#[test]
+fn cached_mark_unread_palette_rechecks_target_and_capacity_before_closing_or_mru() {
+    for browser in ["menu", "search"] {
+        for transition in [
+            "working", "blocked", "failed", "offline", "none", "full", "valid", "review",
+        ] {
+            let mut state =
+                ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+            let mut projected = mark_unread_snapshot();
+            state.set_snapshot(Box::new(projected.clone()));
+            if transition == "review" {
+                let target = super::super::chrome::inspector::Target::for_agent(
+                    ClientEndpointId::Local,
+                    &projected,
+                    &projected.agents[0],
+                );
+                assert!(state.mark_agent_read(&target, false));
+            }
+            if browser == "menu" {
+                state.toggle_global_menu();
+                let category = palette_row_index(&state, "category:0");
+                state.activate_palette_item(category, &mut ClientShellInput::default());
+            } else {
+                state.open_command_search();
+            }
+            let index = palette_row_index(&state, "agent:mark-unread");
+            assert!(
+                super::command_palette::palette_rows(palette_overlay(&state))[index]
+                    .item
+                    .enabled
+            );
+            match transition {
+                "working" => projected.agents[0].agent_status = AgentStatus::Working,
+                "blocked" => projected.agents[0].agent_status = AgentStatus::Blocked,
+                "failed" => {
+                    projected.agents[0].insight.attention =
+                        Some(crate::protocol::ClientShellAgentAttention {
+                            kind: crate::api::schema::AgentAttentionKind::Failed,
+                            ..Default::default()
+                        });
+                }
+                "none" => projected.agents.clear(),
+                "full" => fill_other_agent_marks(&mut state, &mut projected),
+                _ => {}
+            }
+            if transition == "offline" {
+                state.set_endpoint_status(
+                    &ClientEndpointId::Local,
+                    ClientEndpointStatus::Reconnecting,
+                );
+            } else if transition != "full" {
+                projected.revision += 1;
+                state.set_snapshot(Box::new(projected));
+            }
+            let before = state.saved_agent_marks();
+            let mut outcome = ClientShellInput::default();
+            state.activate_palette_item(index, &mut outcome);
+            assert!(outcome.requests.is_empty() && outcome.actions.is_empty());
+            if matches!(transition, "valid" | "review") {
+                assert!(!matches!(
+                    state.overlay,
+                    Some(ClientShellOverlay::CommandPalette(_))
+                ));
+                assert_eq!(
+                    state.palette_recent.first().map(String::as_str),
+                    Some("agent:mark-unread")
+                );
+                assert_eq!(
+                    state.snapshot.as_ref().expect("snapshot").agents[0].agent_status,
+                    AgentStatus::Done
+                );
+                assert_eq!(state.saved_agent_marks()["local"].len(), 1);
+            } else {
+                assert!(
+                    matches!(state.overlay, Some(ClientShellOverlay::CommandPalette(_))),
+                    "{browser} {transition}"
+                );
+                assert!(!state
+                    .palette_recent
+                    .iter()
+                    .any(|id| id == "agent:mark-unread"));
+                assert_eq!(state.saved_agent_marks(), before, "{browser} {transition}");
+                assert!(
+                    state.endpoint_error.is_some(),
+                    "{browser} {transition}: visible feedback"
+                );
+                assert!(outcome.repaint);
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_mark_unread_action_reports_missing_target_instead_of_silent_success() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let mut outcome = ClientShellInput::default();
+    state.run_action(
+        super::super::action_table::ActionId::MarkUnread,
+        super::super::action_table::ActionTarget::Focused,
+        &mut outcome,
+    );
+    assert!(state.endpoint_error.is_some());
+    assert!(outcome.repaint);
+    assert!(outcome.requests.is_empty() && outcome.actions.is_empty());
+    assert!(state.saved_agent_marks().is_empty());
+}
+
+#[test]
+fn settings_boundary_search_enter_reveals_the_original_offscreen_action() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_command_search();
+    let selected = palette_row_index(&state, "binding:ClosePane");
+    if let Some(ClientShellOverlay::CommandPalette(palette)) = state.overlay.as_mut() {
+        palette.selected = selected;
+        palette.reveal = true;
+    }
+    state.compose(80, 16).expect("selected action");
+    state.scroll_palette(-1000);
+    state.compose(80, 16).expect("wheel viewport");
+    assert_eq!(palette_overlay(&state).selected, selected);
+    assert!(!state
+        .hits
+        .global_menu_rows
+        .iter()
+        .any(|(_, index)| *index == selected));
+    let first = state.handle_input_bytes(b"\r");
+    assert!(first.actions.is_empty());
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::CommandPalette(_))
+    ));
+    assert_eq!(palette_overlay(&state).selected, selected);
+    state.compose(80, 16).expect("revealed original action");
+    assert!(state
+        .hits
+        .global_menu_rows
+        .iter()
+        .any(|(_, index)| *index == selected));
+    let second = state.handle_input_bytes(b"\r");
+    assert!(second.actions.iter().any(|action| matches!(action,
+        ClientShellAction::Endpoint { request, .. } if matches!(request.method, crate::api::schema::Method::PaneClose(_)))));
 }

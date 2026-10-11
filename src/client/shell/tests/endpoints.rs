@@ -362,11 +362,10 @@ fn state_with_scrollable_agents() -> (ClientShellState, ClientEndpointId) {
             .collect();
         state.set_endpoint_snapshot(&endpoint_id, projection);
     }
-    state.compose(100, 28).unwrap();
-    // 统一树（W3）：每个端点多了机器行与工作区头，起始行相应后移。
-    state.agent_scroll = 8;
-    state.compose(100, 28).unwrap();
-    assert_eq!(state.agent_scroll, 8);
+    state.compose(100, 18).unwrap();
+    state.workspace_scroll = 6;
+    state.compose(100, 18).unwrap();
+    assert_eq!(state.workspace_scroll, 6);
     (state, remote)
 }
 
@@ -380,17 +379,16 @@ fn sidebar_toggle_remains_clickable_with_overflowing_agents() {
                 if !saved_machine {
                     state.set_endpoint_catalog(&[]);
                 }
-                state.agent_scroll = if scroll_to_bottom { usize::MAX } else { 0 };
-                // Eight local agents fit in the compact tree at 28 rows; this viewport
-                // overflows even after removing the remote endpoint.
-                let frame = state.compose(100, 18).expect("overflowing agent panel");
-                assert!(state.hits.agent_max_scroll > 0);
-                assert!(!state.hits.agent_scrollbar.is_empty());
-                let scroll = state.agent_scroll;
+                state.workspace_scroll = if scroll_to_bottom { usize::MAX } else { 0 };
+                state.reveal_focused_workspace = false;
+                let frame = state.compose(100, 10).expect("overflowing session tree");
+                assert!(state.hits.workspace_max_scroll > 0);
+                assert!(!state.hits.workspace_scrollbar.is_empty());
+                let scroll = state.workspace_scroll;
                 assert_eq!(
                     scroll,
                     if scroll_to_bottom {
-                        state.hits.agent_max_scroll
+                        state.hits.workspace_max_scroll
                     } else {
                         0
                     }
@@ -399,14 +397,20 @@ fn sidebar_toggle_remains_clickable_with_overflowing_agents() {
                 let toggle = state.hits.sidebar_toggle;
                 let buffer = frame.to_ratatui_buffer().expect("sidebar buffer");
                 assert_eq!(buffer[(toggle.x, toggle.y)].symbol(), "«");
-                assert!(!contains(state.hits.agent_scrollbar, (toggle.x, toggle.y)));
+                assert!(!contains(
+                    state.hits.workspace_scrollbar,
+                    (toggle.x, toggle.y)
+                ));
                 if overlapping_hits {
                     // The fork reserves the bottom cell. Extend only the hit rectangle
                     // to exercise routing precedence independently of that safeguard.
-                    assert_eq!(state.hits.agent_scrollbar.x, toggle.x);
-                    state.hits.agent_scrollbar.height =
-                        toggle.bottom() - state.hits.agent_scrollbar.y;
-                    assert!(contains(state.hits.agent_scrollbar, (toggle.x, toggle.y)));
+                    assert_eq!(state.hits.workspace_scrollbar.x, toggle.x);
+                    state.hits.workspace_scrollbar.height =
+                        toggle.bottom() - state.hits.workspace_scrollbar.y;
+                    assert!(contains(
+                        state.hits.workspace_scrollbar,
+                        (toggle.x, toggle.y)
+                    ));
                 }
                 let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
@@ -421,7 +425,7 @@ fn sidebar_toggle_remains_clickable_with_overflowing_agents() {
                 assert!(state.sidebar_collapsed_manual);
                 assert!(state.reveal_focused_workspace);
                 assert!(outcome.repaint && outcome.resize);
-                assert_eq!(state.agent_scroll, scroll);
+                assert_eq!(state.workspace_scroll, scroll);
                 assert!(state.chrome_drag.is_none());
 
                 state.compose(100, 18).expect("collapsed sidebar");
@@ -455,15 +459,17 @@ fn agent_navigation_reveals_offscreen_targets() {
             KeybindAction::PreviousAgent => (remote, "pane_8"),
             _ => (ClientEndpointId::Local, "pane_1"),
         };
-        state.agent_scroll = if action == KeybindAction::PreviousAgent {
+        state.workspace_scroll = if action == KeybindAction::PreviousAgent {
             0
         } else {
-            state.hits.agent_max_scroll
+            usize::MAX
         };
-        state.compose(100, 28).unwrap();
+        state.reveal_focused_workspace = false;
+        state.compose(100, 10).unwrap();
+        assert!(state.hits.workspace_max_scroll > 0);
         assert!(!state
             .hits
-            .endpoint_agents
+            .session_agents
             .iter()
             .any(|(_, endpoint, pane)| { endpoint == &endpoint_id && pane == pane_id }));
 
@@ -473,11 +479,11 @@ fn agent_navigation_reveals_offscreen_targets() {
         if endpoint_id != state.active_endpoint_id {
             assert!(state.activate_endpoint_projection(&endpoint_id));
         }
-        state.compose(100, 28).unwrap();
+        state.compose(100, 10).unwrap();
         assert!(
             state
                 .hits
-                .endpoint_agents
+                .session_agents
                 .iter()
                 .any(|(_, endpoint, pane)| { endpoint == &endpoint_id && pane == pane_id }),
             "{action:?} must reveal the selected agent"
@@ -537,7 +543,7 @@ fn agent_navigation_reveals_target_using_destination_sort() {
     state.compose(100, 28).unwrap();
     assert!(state
         .hits
-        .endpoint_agents
+        .session_agents
         .iter()
         .any(|(_, endpoint, pane)| { endpoint == &remote && pane == "pane_8" }));
 }
@@ -546,11 +552,12 @@ fn agent_navigation_reveals_target_using_destination_sort() {
 fn agent_navigation_reveal_is_cancelled_by_another_selection() {
     for select_pane in [false, true] {
         let (mut state, remote) = state_with_scrollable_agents();
-        let scroll = state.agent_scroll;
+        let scroll = state.workspace_scroll;
         let mut outcome = ClientShellInput::default();
         assert!(state
-            .handle_endpoint_navigation(crate::input::KeybindAction::PreviousAgent, &mut outcome,));
-        assert_eq!(state.agent_scroll, scroll);
+            .handle_endpoint_navigation(crate::input::KeybindAction::PreviousAgent, &mut outcome));
+        assert_eq!(state.workspace_scroll, scroll);
+        assert!(state.reveal_session_target.is_some());
         if select_pane {
             assert!(state.focus_or_activate(
                 remote.clone(),
@@ -560,16 +567,17 @@ fn agent_navigation_reveal_is_cancelled_by_another_selection() {
         } else {
             assert!(state.activate_endpoint(remote.clone(), &mut outcome));
         }
+        assert!(state.reveal_session_target.is_none());
         assert!(state.activate_endpoint_projection(&remote));
-        state.compose(100, 28).unwrap();
-        assert_eq!(state.agent_scroll, scroll);
+        state.compose(100, 18).unwrap();
+        assert_eq!(state.workspace_scroll, scroll);
     }
 }
 
 #[test]
 fn agent_navigation_keeps_scroll_when_target_is_visible() {
     let (mut state, _) = state_with_scrollable_agents();
-    let (_, endpoint_id, pane_id) = state.hits.endpoint_agents[1].clone();
+    let (_, endpoint_id, pane_id) = state.hits.session_agents[1].clone();
     let targets = super::super::aggregate_navigation::online_agent_targets(
         &state.endpoints,
         &state.active_endpoint_id,
@@ -579,20 +587,20 @@ fn agent_navigation_keeps_scroll_when_target_is_visible() {
         .iter()
         .position(|target| target.endpoint_id == endpoint_id && target.pane_id == pane_id)
         .unwrap();
-    let scroll = state.agent_scroll;
+    let scroll = state.workspace_scroll;
     assert!(state.handle_endpoint_navigation(
         crate::input::KeybindAction::FocusAgent(index),
         &mut ClientShellInput::default(),
     ));
-    state.compose(100, 28).unwrap();
-    assert_eq!(state.agent_scroll, scroll);
+    state.compose(100, 18).unwrap();
+    assert_eq!(state.workspace_scroll, scroll);
 }
 
 #[test]
 fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
     let (mut state, remote) = state_with_scrollable_agents();
     for endpoint_id in [remote.clone(), ClientEndpointId::Local, remote] {
-        let visible = state.hits.endpoint_agents.clone();
+        let visible = state.hits.session_agents.clone();
         let (rect, _, pane_id) = visible
             .iter()
             .find(|(_, endpoint, _)| endpoint == &endpoint_id)
@@ -611,20 +619,19 @@ fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
             }] if target == &endpoint_id && target_pane == pane_id
         ));
 
-        state.workspace_scroll = 3;
+        let scroll = state.workspace_scroll;
+        assert_eq!(scroll, 6);
         state.tab_scroll = 2;
         assert!(state.activate_endpoint_projection(&endpoint_id));
-        assert_eq!(state.agent_scroll, 8);
-        assert_eq!(state.workspace_scroll, 0);
+        assert_eq!(state.workspace_scroll, scroll);
         assert_eq!(state.tab_scroll, 0);
         assert!(state.pane_surface.is_none());
-
         let mut next_surface = surface();
         next_surface.boot_id = state.endpoint_boot_id(&endpoint_id).unwrap().into();
         state.set_pane_surface(next_surface);
-        state.compose(100, 28).unwrap();
-        assert_eq!(state.agent_scroll, 8);
-        assert_eq!(state.hits.endpoint_agents, visible);
+        state.compose(100, 18).unwrap();
+        assert_eq!(state.workspace_scroll, scroll);
+        assert_eq!(state.hits.session_agents, visible);
     }
 }
 
@@ -639,7 +646,7 @@ fn local_agent_click_can_cancel_a_pending_remote_switch() {
         state.compose(100, 28).unwrap();
         let (rect, _, pane_id) = state
             .hits
-            .endpoint_agents
+            .session_agents
             .iter()
             .find(|(_, endpoint, _)| endpoint.is_local())
             .unwrap()
@@ -677,9 +684,9 @@ fn aggregate_agent_scroll_still_clamps_when_rows_shrink_on_activation() {
     }
     assert!(state.activate_endpoint_projection(&remote));
     state.compose(100, 28).unwrap();
-    assert_eq!(state.agent_scroll, 0);
-    assert_eq!(state.hits.agent_max_scroll, 0);
-    assert_eq!(state.hits.endpoint_agents.len(), 2);
+    assert_eq!(state.workspace_scroll, 0);
+    assert_eq!(state.hits.workspace_max_scroll, 0);
+    assert_eq!(state.hits.session_agents.len(), 2);
 }
 
 #[test]
@@ -689,7 +696,7 @@ fn same_machine_reboot_still_resets_agent_scroll() {
     projection.boot_id = "restarted-local".into();
     state.cache_endpoint_snapshot(&ClientEndpointId::Local, projection);
     assert!(state.activate_endpoint_projection(&ClientEndpointId::Local));
-    assert_eq!(state.agent_scroll, 0);
+    assert_eq!(state.workspace_scroll, 0);
 }
 
 #[test]
@@ -867,10 +874,10 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
         .expect("remote machine row")
         .rect;
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
-    assert_ne!(buffer[(local.right() - 1, local.y)].symbol(), "●");
-    assert_eq!(buffer[(remote.right() - 1, remote.y)].symbol(), "●");
+    assert_ne!(buffer[(local.right() - 2, local.y)].symbol(), "●");
+    assert_eq!(buffer[(remote.right() - 2, remote.y)].symbol(), "●");
     assert_eq!(
-        buffer[(remote.right() - 1, remote.y)].fg,
+        buffer[(remote.right() - 2, remote.y)].fg,
         state.config.palette.green
     );
 
@@ -1251,7 +1258,7 @@ fn expanded_machine_sidebar_reveals_newly_focused_workspace() {
     let mut updated_surface = surface();
     updated_surface.projection_revision = 2;
     state.set_pane_surface(updated_surface);
-    state.compose(106, 2).expect("zero-height workspace body");
+    state.compose(106, 1).expect("zero-height workspace body");
     assert!(state.reveal_focused_workspace);
     state.compose(106, 20).expect("new workspace revealed");
     assert!(state
@@ -1324,7 +1331,7 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     assert_eq!(local_workspaces.len(), 2);
     assert_eq!(
         local_workspaces[1].rect.y,
-        local_workspaces[0].rect.bottom() + 1
+        local_workspaces[0].rect.bottom() + 2
     );
 
     let local_machine = state
@@ -1352,7 +1359,7 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     assert_eq!(remote_workspaces[0].rect.y, remote_machine.rect.bottom());
     assert_eq!(
         remote_workspaces[1].rect.y,
-        remote_workspaces[0].rect.bottom()
+        remote_workspaces[0].rect.bottom() + 1
     );
     assert_eq!(
         remote_workspaces[2].rect.y,
@@ -1360,7 +1367,7 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     );
 
     state.workspace_scroll = usize::MAX;
-    state.compose(100, 18).expect("scrolled endpoint frame");
+    state.compose(100, 10).expect("scrolled endpoint frame");
     let metrics = state
         .hits
         .workspace_scroll_metrics
@@ -1374,10 +1381,14 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
         .iter()
         .filter(|hit| hit.endpoint_id == remote_id)
         .collect::<Vec<_>>();
-    assert_eq!(visible_remote.len(), 3);
-    let gap_y = visible_remote[1].rect.bottom();
-    assert_eq!(visible_remote[2].rect.y, gap_y + 1);
-    assert!(visible_remote[2].rect.bottom() <= state.hits.workspace_body.bottom());
+    assert_eq!(
+        visible_remote.len(),
+        2,
+        "共同会话树包含终端行，小视口滚到底时保留末尾两个工作区"
+    );
+    let gap_y = visible_remote[0].rect.bottom();
+    assert_eq!(visible_remote[1].rect.y, gap_y + 1);
+    assert!(visible_remote[1].rect.bottom() <= state.hits.workspace_body.bottom());
     assert!(state
         .hits
         .workspaces
@@ -1419,6 +1430,7 @@ fn active_workspace_is_the_only_highlight_when_machine_is_expanded() {
     );
 
     state.collapsed_endpoints.insert(endpoint_id.clone());
+    state.bump_tree_collapse_epoch();
     let frame = state.compose(100, 28).expect("collapsed endpoint frame");
     let machine = state
         .hits
@@ -1473,13 +1485,13 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
         .collect::<Vec<_>>()
         .join("\n");
     // 统一树（W3）：多端点时机器层承载机器名，agent 行不再重复机器 token。
-    assert!(text.contains("▾ ● Local"), "frame: {text}");
-    assert!(text.contains("▾ ● Build"), "frame: {text}");
+    assert!(text.contains("▾ Local"), "frame: {text}");
+    assert!(text.contains("▾ Build"), "frame: {text}");
     assert!(text.contains("○ local agent"), "frame: {text}");
     assert!(text.contains("× remote agent"), "frame: {text}");
     assert!(!text.contains("Local · local agent"), "frame: {text}");
     let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    assert!(compact.contains("按工作区分组"), "frame: {text}");
+    assert!(compact.contains("按工作区▾"), "frame: {text}");
     let toggle = state.hits.agent_sort_toggle;
     assert!(!toggle.is_empty());
     let click = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
@@ -1689,12 +1701,12 @@ fn selected_default_view_ignores_inactive_endpoint_projection() {
         .collect::<Vec<_>>()
         .join("\n");
     // 统一树（W3）：机器名在机器行，agent 行只剩 agent token。
-    assert!(text.contains("▾ ● Local"), "frame: {text}");
+    assert!(text.contains("▾ Local"), "frame: {text}");
     assert!(text.contains("local agent"), "frame: {text}");
-    assert!(text.contains("▾ ● Build"), "frame: {text}");
+    assert!(text.contains("▾ Build"), "frame: {text}");
     assert!(text.contains("remote agent"), "frame: {text}");
     let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    assert!(compact.contains("按工作区分组"), "frame: {text}");
+    assert!(compact.contains("按工作区▾"), "frame: {text}");
 }
 
 #[test]
@@ -3061,7 +3073,7 @@ fn navigator_foreign_workspace_heading_keeps_the_workspace_target() {
 /// 物化一遍再只画一屏。
 #[test]
 fn federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change() {
-    use crate::client::shell::endpoint_agents::AgentRowsCache;
+    use crate::client::shell::chrome::sessions::SessionRowsKey;
 
     let (mut state, endpoint_id) = state_with_remote();
     let mut remote = snapshot();
@@ -3072,27 +3084,15 @@ fn federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change() {
 
     state.compose(100, 28).expect("first frame");
     let rows = state
-        .federated_agent_rows
+        .session_rows
         .as_ref()
-        .map(|cache| cache.rows().len())
+        .map(|cache| cache.rows.len())
         .unwrap_or(0);
     assert!(rows >= 1, "缓存里有行: {rows}");
-    let key = AgentRowsCache::key_for(
-        &state.endpoints,
-        &state.config,
-        state.config_epoch,
-        state.agent_rows_epoch,
-        state.tree_collapse_epoch,
-        state.agent_activity_epoch,
-        &state.active_endpoint_id,
-        state
-            .snapshot
-            .as_deref()
-            .and_then(|snapshot| snapshot.agent_view_label.as_deref()),
-    );
+    let key = SessionRowsKey::for_state(&state);
     assert!(
         state
-            .federated_agent_rows
+            .session_rows
             .as_ref()
             .expect("有缓存")
             .key_matches(&key),
@@ -3103,7 +3103,7 @@ fn federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change() {
     state.compose(100, 28).expect("second frame");
     assert!(
         state
-            .federated_agent_rows
+            .session_rows
             .as_ref()
             .expect("有缓存")
             .key_matches(&key),
@@ -3119,7 +3119,7 @@ fn federated_agent_rows_are_cached_between_frames_and_refresh_on_data_change() {
     state.compose(100, 28).expect("third frame");
     assert!(
         !state
-            .federated_agent_rows
+            .session_rows
             .as_ref()
             .expect("有缓存")
             .key_matches(&key),
@@ -3141,12 +3141,11 @@ fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
     state.compose(100, 28).expect("first frame");
 
     let status = |state: &ClientShellState| {
-        state.federated_agent_rows.as_ref().and_then(|cache| {
-            cache
-                .rows()
-                .iter()
-                .find_map(|row| row.kind.agent())
-                .map(|agent| agent.status)
+        state.session_rows.as_ref().and_then(|cache| {
+            cache.rows.iter().find_map(|row| match &row.kind {
+                super::super::chrome::sessions::SessionRowKind::Agent(agent) => Some(agent.bucket),
+                _ => None,
+            })
         })
     };
 
@@ -3155,8 +3154,12 @@ fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
     projected.revision = 2;
     projected.agents = vec![agent("done agent", AgentStatus::Idle, 7)];
     state.set_endpoint_snapshot(&ClientEndpointId::Local, Box::new(projected));
-    state.refresh_federated_agent_rows();
-    assert_eq!(status(&state), Some(AgentStatus::Done), "未确认前显示 Done");
+    state.refresh_session_rows();
+    assert_eq!(
+        status(&state),
+        Some(crate::harness::AgentBucket::Review),
+        "未确认前显示 Done"
+    );
 
     // 匹配表面帧到达：`revision` 不变，但 Done 被原地改写成 Idle。
     let mut matching = surface();
@@ -3168,10 +3171,10 @@ fn acknowledging_a_surface_refreshes_cached_federated_agent_rows() {
         2,
         "确认不推进 revision"
     );
-    state.refresh_federated_agent_rows();
+    state.refresh_session_rows();
     assert_eq!(
         status(&state),
-        Some(AgentStatus::Idle),
+        Some(crate::harness::AgentBucket::Idle),
         "确认之后缓存的行必须重建为 Idle"
     );
 }

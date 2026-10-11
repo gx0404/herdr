@@ -8,6 +8,7 @@ pub(super) struct TextEditor {
     cursor: usize,
     replace_on_type: bool,
     killed: String,
+    multiline: bool,
 }
 
 impl std::ops::Deref for TextEditor {
@@ -30,6 +31,13 @@ impl From<&str> for TextEditor {
 }
 
 impl TextEditor {
+    pub fn multiline() -> Self {
+        Self {
+            multiline: true,
+            ..Self::default()
+        }
+    }
+
     pub fn new(text: &str, replace_on_type: bool) -> Self {
         let mut editor = Self::default();
         editor.insert(text);
@@ -92,8 +100,9 @@ impl TextEditor {
                     if chars.peek() == Some(&'\n') {
                         chars.next();
                     }
-                    normalized.push(' ');
+                    normalized.push(if self.multiline { '\n' } else { ' ' });
                 }
+                '\n' if self.multiline => normalized.push('\n'),
                 '\n' | '\t' => normalized.push(' '),
                 ch if !ch.is_control() => normalized.push(ch),
                 _ => {}
@@ -180,6 +189,9 @@ impl TextEditor {
     pub fn handle_key(&mut self, key: &crate::input::TerminalKey) -> Option<bool> {
         if key.kind == KeyEventKind::Release {
             return None;
+        }
+        if key.code == KeyCode::Enter && self.multiline {
+            return Some(self.insert("\n"));
         }
         if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
             return None;
