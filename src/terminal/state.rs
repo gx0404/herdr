@@ -2174,6 +2174,15 @@ impl TerminalState {
         self.turn.failure_announced()
     }
 
+    pub(crate) fn note_completion_announced(&mut self) {
+        let agent = self.effective_agent_label().map(str::to_owned);
+        self.turn.note_completion_announced(agent.as_deref());
+    }
+
+    pub(crate) fn completion_announced(&self) -> bool {
+        self.turn.completion_announced()
+    }
+
     /// 用户看过这个 pane：确认已经通知过的失败。返回是否有变化。
     pub(crate) fn acknowledge_attention(&mut self) -> bool {
         self.turn.acknowledge()

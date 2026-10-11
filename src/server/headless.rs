@@ -3558,6 +3558,7 @@ impl HeadlessServer {
                     interrupted_recently: interrupted,
                     failed_latched: failed,
                     failure_announced: terminal_after.failure_announced(),
+                    completion_held: self.app.state.completion_is_held(*pane_id),
                     body: body.as_deref(),
                 });
             let Some(kind) = decision.kind else {
@@ -3681,6 +3682,16 @@ impl HeadlessServer {
             .is_some_and(|deadline| now >= deadline)
         {
             let previous_toast = self.app.state.toast.clone();
+            let updates = self.app.state.drain_due_agent_completions(now);
+            for update in &updates {
+                self.app.emit_pane_state_update(update);
+                self.forward_semantic_agent_notification(update);
+                self.forward_pane_state_update_notifications_to_clients(update);
+            }
+            if !updates.is_empty() {
+                self.app.sync_toast_deadline(previous_toast.clone());
+                impact.chrome = true;
+            }
             let mut deliveries = self.app.state.drain_due_agent_notifications(now);
             if !deliveries.is_empty() {
                 self.app

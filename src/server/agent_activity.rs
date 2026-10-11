@@ -1283,6 +1283,9 @@ impl Service {
                     revision: stored.revision,
                     nodes: &stored.nodes,
                 });
+                if state.completion_needs_read(pane_id) {
+                    scheduler.panes.entry(pane_id).or_default().last_started = None;
+                }
                 if let Some(started) = scheduler.should_refresh(pane_id, working, tree, now) {
                     due.push((pane_id, source, started));
                 }
@@ -1304,6 +1307,8 @@ impl Service {
                 .is_err()
             {
                 self.scheduler.submission_failed(pane_id, &started);
+            } else {
+                state.bind_completion_read(pane_id, &started);
             }
         }
         let external = (self.sources.external)();
@@ -1635,6 +1640,72 @@ mod tests {
     use super::*;
     use crate::api::schema::{AgentActivityKind, AgentActivityStatus, AgentStatus};
     use crate::detect::{Agent, AgentState};
+
+    #[tokio::test]
+    async fn completion_refresh_bypasses_hint_throttle_and_old_turn_results() {
+        let (mut app, pane_id, public) = app_with_agent_in(Some(Agent::Claude), AgentState::Idle);
+        let response = app.handle_api_request(Request {
+            id: "session".into(),
+            method: Method::PaneReportAgentSession(
+                crate::api::schema::PaneReportAgentSessionParams {
+                    pane_id: public,
+                    source: "herdr:claude".into(),
+                    agent: "claude".into(),
+                    seq: Some(1),
+                    agent_session_id: Some("completion-session".into()),
+                    agent_session_path: None,
+                    session_start_source: Some("startup".into()),
+                    resume_argv: None,
+                },
+            ),
+        });
+        assert!(response.contains("\"ok\""), "{response}");
+        let home = crate::config::test_dirs::TempDir::new("completion-refresh");
+        let (events, mut received) = tokio::sync::mpsc::channel(8);
+        let (mut service, mut workers) = test_support::ControlledWorkers::service(
+            events,
+            Sources {
+                source_for: fake_source_for,
+                external: fake_external,
+            },
+            home.path().to_path_buf(),
+        );
+        let now = Instant::now();
+        service.tick(&mut app.state, now, false);
+        for state in [AgentState::Working, AgentState::Idle] {
+            app.handle_internal_event(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(Agent::Claude),
+                state,
+                visible_blocker: false,
+                visible_working: state == AgentState::Working,
+                process_exited: false,
+                observed_at: Instant::now(),
+            });
+        }
+        assert!(app.state.completion_needs_read(pane_id));
+        workers = workers.run_next(test_support::Lane::Discovery).await;
+        let old = recv_event(&mut received);
+        let AppEvent::AgentActivityRefreshedFor { started, .. } = &old else {
+            panic!("discovery")
+        };
+        service.pane_refreshed_for(pane_id, started, false);
+        assert!(app.handle_internal_event_with_pane_updates(old).is_empty());
+        assert!(app.state.completion_is_held(pane_id));
+        service.tick(&mut app.state, now + Duration::from_millis(50), false);
+        assert!(
+            !app.state.completion_needs_read(pane_id),
+            "idle refresh does not wait a second"
+        );
+        let _workers = workers.run_next(test_support::Lane::Discovery).await;
+        let updates = app.handle_internal_event_with_pane_updates(recv_event(&mut received));
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            crate::server::attention::decide(&updates[0].attention_input(false, None)).kind,
+            Some(crate::server::attention::AttentionKind::Finished)
+        );
+        assert!(!app.state.completion_is_held(pane_id));
+    }
 
     #[test]
     fn every_registered_source_answers_to_its_own_id() {
@@ -4499,12 +4570,23 @@ mod tests {
             error_at_ms: Some(crate::server::observability::now_ms()),
             ..AgentInsight::default()
         };
-        assert!(
-            app.state
-                .apply_agent_insight(pane_id, Some(current))
-                .1
-                .is_some(),
-            "本回合里的错误锁存失败"
+        let (changed, update) = app.state.apply_agent_insight(pane_id, Some(current));
+        assert!(changed);
+        assert!(update.is_none(), "本回合已宣告完成：迟到的错误不再通知");
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("pane")
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).expect("terminal");
+        assert_eq!(
+            terminal
+                .agent_attention()
+                .and_then(|attention| attention.detail)
+                .as_deref(),
+            Some("rate limited"),
+            "本回合里的错误仍锁存详情"
         );
+        assert!(!terminal.take_failure_notice(), "没有第二次结局通知");
     }
 }

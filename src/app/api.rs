@@ -69,10 +69,12 @@ impl App {
                 identity,
                 result,
                 insight,
+                started,
                 ..
             } => {
-                let (changed, updates) =
-                    self.apply_agent_activity_refreshed_for(pane_id, &identity, result, insight);
+                let (changed, updates) = self.apply_agent_activity_refreshed_for(
+                    pane_id, &identity, result, insight, &started,
+                );
                 changed || !updates.is_empty()
             }
             AppEvent::AgentActivityReadFor {
@@ -151,6 +153,7 @@ impl App {
         identity: &crate::app::state::AgentActivityIdentity,
         result: Result<Vec<crate::api::schema::AgentActivityNode>, String>,
         insight: Option<Box<crate::api::schema::AgentInsight>>,
+        started: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> (bool, Vec<crate::app::actions::PaneStateUpdate>) {
         if !self.state.agent_activity_is_current(pane_id, identity) {
             return (false, Vec::new());
@@ -160,7 +163,10 @@ impl App {
         let (insight_changed, update) = self
             .state
             .apply_agent_insight(pane_id, insight.map(|insight| *insight));
-        let updates = update.into_iter().collect::<Vec<_>>();
+        let updates = update
+            .into_iter()
+            .chain(self.state.finish_completion_read(pane_id, started))
+            .collect::<Vec<_>>();
         for update in &updates {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
@@ -259,11 +265,12 @@ impl App {
             identity,
             result,
             insight,
+            started,
             ..
         } = ev
         {
             return self
-                .apply_agent_activity_refreshed_for(pane_id, &identity, result, insight)
+                .apply_agent_activity_refreshed_for(pane_id, &identity, result, insight, &started)
                 .1;
         }
         if let AppEvent::AgentActivityReadFor {

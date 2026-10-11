@@ -52,6 +52,12 @@ pub(crate) struct TurnTracker {
     failure_announced: bool,
     /// 那次失败通知所属的 agent（锁存被用户看过、清掉之后仍要知道它属于谁）。
     announced_agent: Option<String>,
+    /// 本回合已经发过「已完成」。一个回合只通知一次：之后才报来的失败（洞察读取超过
+    /// 等待期限才读到会话里的错误、迟到的钩子上报）照常锁存、在待处理事项里露面，但
+    /// 不再通知。清除时机同 `failure_announced`。
+    completion_announced: bool,
+    /// 那次「已完成」所属的 agent。
+    completion_agent: Option<String>,
     /// 最近一次只带载荷的 needs_input 上报；状态离开 Blocked 时清掉。
     needs_input: Option<AgentAttention>,
     /// `pane.report_agent_attention` 的逐来源序号。
@@ -84,6 +90,7 @@ impl TurnTracker {
             self.last_interrupt_input_at = None;
             self.observed_error = None;
             self.forget_announced_failure();
+            self.forget_announced_completion();
             self.clear_failure();
         } else if previous == AgentState::Working {
             self.last_turn_ms = self
@@ -139,7 +146,7 @@ impl TurnTracker {
     }
 
     /// 锁存一次失败。同一失败重复上报不算变化（也不再通知）；本回合已经通知过失败时
-    /// 不再锁存。
+    /// 不再锁存；本回合已经发过「已完成」时只锁存、不再通知（用户看过即确认）。
     pub(crate) fn latch_failure(
         &mut self,
         title: Option<String>,
@@ -163,7 +170,7 @@ impl TurnTracker {
                 since_ms: Some(now_ms),
             },
             agent_label: agent_label.map(str::to_owned),
-            notice_pending: true,
+            notice_pending: !self.completion_announced && !self.last_completion_interrupted,
         });
         self.bump();
         true
@@ -228,12 +235,29 @@ impl TurnTracker {
         self.failed_attention.is_some()
     }
 
+    /// 记下本回合发过「已完成」（规则见 `completion_announced` 字段）。
+    pub(crate) fn note_completion_announced(&mut self, agent_label: Option<&str>) {
+        self.completion_announced = true;
+        self.completion_agent = agent_label.map(str::to_owned);
+    }
+
+    /// 本回合已经发过「已完成」。
+    pub(crate) fn completion_announced(&self) -> bool {
+        self.completion_announced
+    }
+
+    fn forget_announced_completion(&mut self) {
+        self.completion_announced = false;
+        self.completion_agent = None;
+    }
+
     /// agent 被释放：与它绑定的待处理事项一并作废。
     pub(crate) fn forget_agent(&mut self) {
         let failure = self.failed_attention.take().is_some();
         let needs_input = self.needs_input.take().is_some();
         self.observed_error = None;
         self.forget_announced_failure();
+        self.forget_announced_completion();
         if failure || needs_input {
             self.bump();
         }
@@ -258,6 +282,13 @@ impl TurnTracker {
             .is_some_and(|announced| announced != current)
         {
             self.forget_announced_failure();
+        }
+        if self
+            .completion_agent
+            .as_deref()
+            .is_some_and(|announced| announced != current)
+        {
+            self.forget_announced_completion();
         }
     }
 
@@ -469,6 +500,47 @@ mod tests {
         tracker.on_state_change(AgentState::Blocked, AgentState::Working, now, 500);
         assert!(!tracker.failure_announced(), "新回合");
         assert!(tracker.latch_failure(None, Some("again".into()), Some("kimi"), 550));
+    }
+
+    /// 回合已经发过「已完成」：之后读到的同一回合的错误只锁存（待处理事项里露面、看过
+    /// 即确认），不再产生通知；新回合、释放与换 agent 恢复通知。
+    #[test]
+    fn a_failure_after_the_completion_notice_latches_silently() {
+        let mut tracker = tracker_after_turn(100);
+        tracker.note_completion_announced(Some("codex"));
+        assert!(tracker.completion_announced());
+        assert!(tracker.observe_error("late", Some(120), AgentState::Idle, Some("codex"), 300));
+        assert!(
+            !tracker.take_failure_notice(AgentState::Idle),
+            "同一回合不再通知"
+        );
+        assert!(!tracker.failure_announced());
+        assert_eq!(
+            tracker
+                .attention(AgentState::Idle, None)
+                .and_then(|attention| attention.detail)
+                .as_deref(),
+            Some("late"),
+            "失败照常露面"
+        );
+        assert!(tracker.acknowledge(), "没有待发通知的失败可被看过");
+
+        let now = Instant::now();
+        tracker.on_state_change(AgentState::Idle, AgentState::Working, now, 400);
+        assert!(!tracker.completion_announced(), "新回合");
+        tracker.on_state_change(AgentState::Working, AgentState::Idle, now, 450);
+        assert!(tracker.observe_error("boom", Some(420), AgentState::Idle, Some("codex"), 500));
+        assert!(tracker.take_failure_notice(AgentState::Idle));
+
+        let mut tracker = tracker_after_turn(100);
+        tracker.note_completion_announced(Some("claude"));
+        tracker.reconcile_agent(Some("claude"));
+        assert!(tracker.completion_announced(), "同一个 agent");
+        tracker.reconcile_agent(Some("codex"));
+        assert!(!tracker.completion_announced(), "换成别的 agent");
+        tracker.note_completion_announced(Some("codex"));
+        tracker.forget_agent();
+        assert!(!tracker.completion_announced(), "释放");
     }
 
     #[test]

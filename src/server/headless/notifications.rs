@@ -20,7 +20,7 @@ impl HeadlessServer {
     }
 
     /// 一条 pane 状态更新的语义通知（发给客户端 shell，不做 tab 抑制）。
-    fn forward_semantic_agent_notification(
+    pub(super) fn forward_semantic_agent_notification(
         &mut self,
         update: &crate::app::actions::PaneStateUpdate,
     ) -> bool {
@@ -108,7 +108,7 @@ impl HeadlessServer {
         ))
     }
 
-    fn forward_pane_state_update_notifications_to_clients(
+    pub(super) fn forward_pane_state_update_notifications_to_clients(
         &mut self,
         update: &crate::app::actions::PaneStateUpdate,
     ) {
@@ -217,6 +217,7 @@ impl HeadlessServer {
                 interrupted_recently: interrupted,
                 failed_latched: failed,
                 failure_announced,
+                completion_held: self.app.state.completion_is_held(pane_id),
                 body: None,
             });
 
@@ -698,9 +699,9 @@ impl HeadlessServer {
                         result,
                         insight,
                         ..
-                    } if store => self
-                        .app
-                        .apply_agent_activity_refreshed_for(pane_id, &identity, result, insight),
+                    } if store => self.app.apply_agent_activity_refreshed_for(
+                        pane_id, &identity, result, insight, &started,
+                    ),
                     _ => (false, Vec::new()),
                 };
                 // 洞察带来的错误锁存了失败：与其他状态更新同样投递通知（herdr toast

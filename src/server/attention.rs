@@ -11,6 +11,12 @@ use crate::sound::Sound;
 /// 通知正文（问题或最后一条消息的摘要）的字符上限。
 pub(crate) const BODY_MAX_CHARS: usize = 220;
 
+/// 失败只写在会话文件里的 agent（屏幕主导的 Claude / Codex 等），回合结束时「已完成」
+/// 最多为一次洞察读取等这么久：读到本回合的错误就只发「失败」，读完没有错误或到期
+/// 就发「已完成」。与默认 toast 延迟（1 s）同量级，只扣留这一个 pane 的完成通知。
+pub(crate) const COMPLETION_INSIGHT_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(1500);
+
 /// 一次通知的种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AttentionKind {
@@ -80,6 +86,9 @@ pub(crate) struct AttentionInput<'a> {
     /// 本回合已经发过失败通知（`TerminalState::failure_announced`）：一个失败的回合只
     /// 通知一次，之后进入 Idle / Blocked 都不再通知，新的 Working 才是新回合。
     pub failure_announced: bool,
+    /// 这次完成迁移的「已完成」正在等洞察读取（[`COMPLETION_INSIGHT_WAIT`]）：此刻不发，
+    /// 读取结束或到期时按结果只发一次「失败」或「已完成」。
+    pub completion_held: bool,
     /// 正文原文（问题、失败原因或最后一条消息）。
     pub body: Option<&'a str>,
 }
@@ -135,7 +144,7 @@ fn classify(input: &AttentionInput<'_>) -> Option<AttentionKind> {
     match (input.previous_state, input.state) {
         (_, AgentState::Blocked) => Some(AttentionKind::NeedsAttention),
         (AgentState::Working | AgentState::Blocked, AgentState::Idle)
-            if !input.interrupted_recently =>
+            if !input.interrupted_recently && !input.completion_held =>
         {
             Some(AttentionKind::Finished)
         }
@@ -157,6 +166,7 @@ mod tests {
             interrupted_recently: false,
             failed_latched: false,
             failure_announced: false,
+            completion_held: false,
             body: None,
         }
     }
@@ -246,6 +256,69 @@ mod tests {
                 decision.semantic,
                 kind.map(AttentionKind::semantic_kind),
                 "语义通知不受 tab 抑制：{row:?}"
+            );
+        }
+    }
+
+    type HeldRow = (
+        AgentState,
+        AgentState,
+        bool,
+        bool,
+        bool,
+        bool,
+        Option<AttentionKind>,
+    );
+
+    /// 等洞察的完成（[`COMPLETION_INSIGHT_WAIT`]）只扣「已完成」：等待期间锁存的失败照发
+    /// 「失败」，受阻照发「需要处理」；中断与「本回合已通知过失败」的规则不受影响。放行
+    /// （读完没有错误或到期）的那次更新不再带扣留标记，按普通完成发一次「已完成」。
+    #[test]
+    fn held_completion_table() {
+        use AttentionKind::{Failed, Finished, NeedsAttention};
+        // (前状态, 新状态, 等洞察, 刚中断, 新失败, 本回合已通知过失败) → 种类
+        #[rustfmt::skip]
+        let rows: &[HeldRow] = &[
+            (Working, Idle, true, false, false, false, None),
+            (Blocked, Idle, true, false, false, false, None),
+            // 等待期间读到本回合的错误（洞察或钩子）：只发「失败」。
+            (Working, Idle, true, false, true, false, Some(Failed)),
+            (Idle, Idle, false, false, true, false, Some(Failed)),
+            // 读完没有错误 / 到期放行：只发「已完成」。
+            (Working, Idle, false, false, false, false, Some(Finished)),
+            (Blocked, Idle, false, false, false, false, Some(Finished)),
+            // 只扣完成，不扣受阻。
+            (Working, Blocked, true, false, false, false, Some(NeedsAttention)),
+            // 中断后的完成本来就不通知；已宣告失败的回合也不。
+            (Working, Idle, true, true, false, false, None),
+            (Working, Idle, false, true, false, false, None),
+            (Working, Idle, true, false, false, true, None),
+            (Working, Idle, false, false, false, true, None),
+        ];
+        for &(previous, state, held, interrupted, failed, announced, kind) in rows {
+            let decision = decide(&AttentionInput {
+                completion_held: held,
+                interrupted_recently: interrupted,
+                failed_latched: failed,
+                failure_announced: announced,
+                ..input(previous, state)
+            });
+            let row = (previous, state, held, interrupted, failed, announced);
+            assert_eq!(decision.kind, kind, "{row:?}");
+            assert_eq!(
+                decision.toast,
+                kind.map(AttentionKind::toast_kind),
+                "{row:?}"
+            );
+            assert_eq!(
+                decision.semantic,
+                kind.map(AttentionKind::semantic_kind),
+                "声音、toast 与语义通知随同一个决定：{row:?}"
+            );
+            assert_eq!(
+                decision.sound,
+                kind.and_then(|kind| sound_for(kind, false)),
+                "{row:?}"
             );
         }
     }

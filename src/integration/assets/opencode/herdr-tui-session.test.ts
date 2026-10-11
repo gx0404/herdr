@@ -580,9 +580,16 @@ test("V2 completes and interrupts without legacy idle events", async () => {
     await flushReports();
     requests.length = 0;
     tui.emit("session.execution.started", { sessionID: "a" });
-    tui.emit(`session.execution.${terminal}`, { sessionID: "a" });
+    tui.emit(`session.execution.${terminal}`, { sessionID: "a", error: { type: "ProviderError", message: "quota exceeded" } });
     await flushReports();
-    expect(states()).toEqual(["working", terminal === "failed" ? "blocked" : "idle"]);
+    expect(states()).toEqual(["working", "idle"]);
+    const failures = requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention");
+    expect(failures.length).toBe(terminal === "failed" ? 1 : 0);
+    if (terminal === "failed") {
+      expect(requestParam(failures[0], "kind")).toBe("failed");
+      expect(requestParam(failures[0], "detail")).toBe("quota exceeded");
+      expect(requests.indexOf(failures[0])).toBeLessThan(requests.length - 1);
+    }
     dispose();
   }
 });
@@ -688,6 +695,75 @@ test("V2 settles a connection that never completes", async () => {
   }
   expect(connections.length).toBeGreaterThan(1);
   dispose();
+});
+
+test("V1 publishes a root failure before idle, never as a blocker", async () => {
+  const plugin = await loadPlugin();
+  const tui = fakeApi();
+  tui.addSession({ id: "root" });
+  tui.select("root");
+  await plugin.tui(tui.api);
+  await flushReports();
+  tui.emit("session.status", { sessionID: "root", status: { type: "busy" } });
+  await flushReports();
+  requests.length = 0;
+  tui.emit("session.error", { sessionID: "root", error: { name: "APIError", data: { message: "quota exceeded" } } });
+  await flushReports();
+  expect(requests).toEqual([]);
+  tui.emit("session.status", { sessionID: "root", status: { type: "idle" } });
+  tui.emit("session.idle", { sessionID: "root" });
+  await flushReports();
+  expect(states()).toEqual(["idle"]);
+  const failures = requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention");
+  expect(failures.length).toBe(1);
+  expect(requestParam(failures[0], "kind")).toBe("failed");
+  expect(requestParam(failures[0], "detail")).toBe("quota exceeded");
+  expect(requests.indexOf(failures[0])).toBeLessThan(requests.length - 1);
+});
+
+test("V1 recovery, abort and child errors do not fail the selected root", async () => {
+  const plugin = await loadPlugin();
+  const tui = fakeApi();
+  tui.addSession({ id: "root" });
+  tui.addSession({ id: "child", parentID: "root" });
+  tui.select("root");
+  await plugin.tui(tui.api);
+  await flushReports();
+  requests.length = 0;
+  tui.emit("session.status", { sessionID: "root", status: { type: "busy" } });
+  tui.emit("session.error", { sessionID: "root", error: { name: "APIError" } });
+  tui.emit("session.status", { sessionID: "root", status: { type: "retry" } });
+  tui.emit("session.error", { sessionID: "root", error: { name: "MessageAbortedError" } });
+  tui.emit("session.error", { sessionID: "child", error: { name: "APIError" } });
+  tui.emit("session.idle", { sessionID: "child" });
+  tui.emit("session.idle", { sessionID: "root" });
+  await flushReports();
+  expect(requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention")).toEqual([]);
+  expect(states()).not.toContain("blocked");
+  expect(states().at(-1)).toBe("idle");
+});
+
+test("V2 failure clears obsolete blockers before idle and remains selection scoped", async () => {
+  const plugin = await loadPlugin();
+  const tui = v2Api();
+  const dispose = await plugin.setup(tui.api);
+  activeDisposers.push(dispose);
+  await flushReports();
+  tui.emit("session.execution.started", { sessionID: "a" });
+  tui.emit("permission.asked", { sessionID: "a", id: "pending" });
+  await flushReports();
+  requests.length = 0;
+  tui.emit("session.execution.failed", { sessionID: "child", error: { type: "ChildError", message: "child failure" } });
+  tui.emit("session.execution.failed", { sessionID: "b", error: { type: "OtherError", message: "other root" } });
+  await flushReports();
+  expect(requests).toEqual([]);
+  tui.emit("session.execution.failed", { sessionID: "a", error: { type: "ProviderError", message: "bad key" } });
+  await flushReports();
+  expect(states()).toEqual(["idle"]);
+  expect(requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention").length).toBe(1);
+  tui.emit("session.execution.started", { sessionID: "a" });
+  await flushReports();
+  expect(states().at(-1)).toBe("working");
 });
 
 test("V2 resends the latest state after a failed delivery", async () => {

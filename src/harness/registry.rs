@@ -60,6 +60,10 @@ pub struct HarnessSpec {
     pub resume: Option<(&'static str, &'static [&'static str], ResumeRef)>,
     /// 活动来源的发现车道。
     pub discovery: DiscoveryLane,
+    /// 会话洞察能读到带时刻的回合错误（`AgentInsight::error_at_ms`）。屏幕主导的回合结束
+    /// 时，「已完成」通知先等一次洞察读取，失败的回合只发「失败」
+    /// （`AppState::completion_needs_read`）。
+    pub insight_failures: bool,
 }
 
 /// 六家官方 harness。顺序即展示顺序。
@@ -75,6 +79,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_default: &[".claude"],
         resume: Some(("claude", &["--resume"], ResumeRef::Id)),
         discovery: DiscoveryLane::Files,
+        insight_failures: true,
     },
     HarnessSpec {
         id: "codex",
@@ -87,6 +92,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_default: &[".codex"],
         resume: Some(("codex", &["resume"], ResumeRef::Id)),
         discovery: DiscoveryLane::Files,
+        insight_failures: true,
     },
     HarnessSpec {
         id: "kimi",
@@ -99,6 +105,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_default: &[".kimi-code"],
         resume: Some(("kimi", &["--session"], ResumeRef::Id)),
         discovery: DiscoveryLane::Files,
+        insight_failures: true,
     },
     HarnessSpec {
         id: "opencode",
@@ -111,6 +118,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_default: &[".config", "opencode"],
         resume: Some(("opencode", &["--session"], ResumeRef::Id)),
         discovery: DiscoveryLane::Subprocess,
+        insight_failures: true,
     },
     HarnessSpec {
         id: "pi",
@@ -123,6 +131,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_default: &[".pi", "agent"],
         resume: Some(("pi", &["--session"], ResumeRef::PathOrId)),
         discovery: DiscoveryLane::Files,
+        insight_failures: false,
     },
     HarnessSpec {
         id: "zcode",
@@ -135,6 +144,7 @@ pub const HARNESSES: &[HarnessSpec] = &[
         config_default: &[".zcode", "cli"],
         resume: None,
         discovery: DiscoveryLane::Subprocess,
+        insight_failures: false,
     },
 ];
 
@@ -172,6 +182,11 @@ pub fn reports_transcript(source: &str, agent: &str) -> bool {
 /// 活动来源的发现车道；不在表里的来源按读文件处理。
 pub fn discovery_lane(id: &str) -> DiscoveryLane {
     by_id(id).map_or(DiscoveryLane::Files, |spec| spec.discovery)
+}
+
+/// 该 harness 的会话洞察能否读到回合错误（见 [`HarnessSpec::insight_failures`]）。
+pub fn insight_reports_failures(id: &str) -> bool {
+    by_id(id).is_some_and(|spec| spec.insight_failures)
 }
 
 /// 该 harness 的配置目录：环境变量覆盖优先（支持 `~` 前缀），否则 `home` 下的默认目录。
@@ -251,6 +266,16 @@ mod tests {
         }
         for id in ["opencode", "zcode"] {
             assert_eq!(discovery_lane(id), DiscoveryLane::Subprocess, "{id}");
+        }
+    }
+
+    #[test]
+    fn insight_failure_capability_matches_the_adapters_that_read_turn_errors() {
+        for id in ["claude", "codex", "kimi", "opencode"] {
+            assert!(insight_reports_failures(id), "{id}");
+        }
+        for id in ["pi", "zcode", "unknown"] {
+            assert!(!insight_reports_failures(id), "{id}");
         }
     }
 

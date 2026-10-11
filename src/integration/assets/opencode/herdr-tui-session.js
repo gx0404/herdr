@@ -10,7 +10,21 @@ const AGENT = "opencode";
 const ROUTE_POLL_INTERVAL_MS = 100;
 const SELECTION_RETRY_DELAYS_MS = [100, 400, 1_000];
 
-function requestOnce(sessionID, state, seq, isCurrent = () => true) {
+function failureDetails(error) {
+  function clip(value, max) {
+    if (typeof value !== "string") return;
+    const text = value.replace(/\s+/g, " ").trim();
+    if (!text) return;
+    return [...text].slice(0, max).join("");
+  }
+  return {
+    kind: "failed",
+    title: clip(error?.type ?? error?.name, 200),
+    detail: clip(error?.message ?? error?.data?.message, 2000),
+  };
+}
+
+function requestOnce(sessionID, state, seq, isCurrent = () => true, failure) {
   const paneId = process.env.HERDR_PANE_ID;
   const socketPath = process.env.HERDR_SOCKET_PATH;
   if (!paneId || !socketPath) {
@@ -23,13 +37,15 @@ function requestOnce(sessionID, state, seq, isCurrent = () => true) {
     id: `${SOURCE}:tui:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
       .toString()
       .padStart(6, "0")}`,
-    method: state === undefined ? "pane.report_agent_session" : "pane.report_agent",
+    method: failure ? "pane.report_agent_attention" : state === undefined ? "pane.report_agent_session" : "pane.report_agent",
     params: {
       pane_id: paneId,
       source: SOURCE,
       agent: AGENT,
-      agent_session_id: sessionID,
-      ...(state === undefined ? { session_start_source: "select" } : { state, seq }),
+      ...(failure ? { ...failure, seq } : {
+        agent_session_id: sessionID,
+        ...(state === undefined ? { session_start_source: "select" } : { state, seq }),
+      }),
     },
   };
 
@@ -143,7 +159,7 @@ async function tui(api) {
     for (const request of ctx.blockers.values()) {
       if (root(ctx, request.sessionID) === ctx.selected) return "blocked";
     }
-    if (ctx.errors.has(ctx.selected)) return "blocked";
+
     for (const id of ctx.statuses.keys()) {
       if (root(ctx, id) === ctx.selected) return "working";
     }
@@ -171,6 +187,15 @@ async function tui(api) {
         ctx.lastState = undefined;
       }
       const value = state(ctx);
+      const failure = !ctx.settled && value === "idle" ? ctx.errors.get(selected) : undefined;
+      if (failure && failure !== ctx.lastError) {
+        if (!await requestOnce(selected, undefined, ++sequence, isCurrent, failureDetails(failure))) {
+          ctx.retryAt = Date.now() + 500;
+          return;
+        }
+        if (!isCurrent()) return;
+        ctx.lastError = failure;
+      }
       if (value === undefined || value === ctx.lastState) return;
       const delivered = await requestOnce(selected, value, ++sequence, isCurrent);
       if (!isCurrent()) return;
@@ -263,14 +288,16 @@ async function tui(api) {
         if (status === "busy" || status === "retry") {
           ctx.statuses.set(id, status);
           ctx.errors.delete(id);
+          if (id === ctx.selected) ctx.lastError = undefined;
         } else if (status === "idle") {
           ctx.statuses.delete(id);
-          ctx.errors.delete(id);
+          if (ctx.errors.has(id)) clearRequests(ctx, (r) => root(ctx, r.sessionID) === id);
         }
         break;
       }
       case "session.error":
-        if (data.error?.name !== "MessageAbortedError") ctx.errors.add(id);
+        if (data.error?.name !== "MessageAbortedError") ctx.errors.set(id, data.error ?? {});
+        else ctx.errors.delete(id);
         break;
       case "permission.asked":
       case "question.asked":
@@ -352,7 +379,7 @@ async function tui(api) {
       context?.controller?.abort();
       const ctx = {
         route: id, boundary, controller: new AbortController(), sessions: new Map(), lookups: new Map(),
-        statuses: new Map(), blockers: new Map(), errors: new Set(), deleted: new Set(),
+        statuses: new Map(), blockers: new Map(), errors: new Map(), deleted: new Set(),
         events: [], hydrated: false, loading: false, resolving: false,
         retryAt: Infinity, selectionAt: 0, retryIndex: 0,
       };
@@ -414,6 +441,7 @@ function setup(api) {
   let retryIndex = 0;
   let nextSelectionAt = 0;
   let state = "idle";
+  let pendingFailure;
   let retryTimer;
   const sessions = new Map();
   let blockers = new Map();
@@ -439,12 +467,20 @@ function setup(api) {
 
   // Selection and lifecycle use one queue. Recheck attribution at dispatch,
   // not just when receiving the event, and reject A -> B -> A stale work too.
-  function enqueue(value) {
+  function enqueue(value, failure = value === "idle" ? pendingFailure : undefined) {
     const sessionID = selected;
     const revision = generation;
     const isCurrent = () => !disposed && revision === generation && !!sessionID && current() === sessionID;
     chain = chain.then(async () => {
       if (!isCurrent()) return;
+      if (failure) {
+        if (!await requestOnce(sessionID, undefined, ++sequence, isCurrent, failure)) {
+          scheduleStateRetry();
+          return;
+        }
+        if (!isCurrent()) return;
+        if (pendingFailure === failure) pendingFailure = undefined;
+      }
       const delivered = await requestOnce(sessionID, value, value === undefined ? undefined : ++sequence, isCurrent);
       if (!delivered) scheduleStateRetry();
     }).catch(() => {});
@@ -511,6 +547,7 @@ function setup(api) {
     const id = current();
     if (id !== selected) {
       selected = id;
+      pendingFailure = undefined;
       generation += 1;
       retryIndex = 0;
       nextSelectionAt = 0;
@@ -571,16 +608,23 @@ function setup(api) {
         break;
       case "session.execution.started":
         if (id !== selected) return;
+        pendingFailure = undefined;
         state = "working";
         break;
       case "session.execution.succeeded":
       case "session.execution.interrupted":
         if (id !== selected) return;
+        pendingFailure = undefined;
         state = "idle";
         break;
       case "session.execution.failed":
         if (id !== selected) return;
-        state = "blocked";
+        pendingFailure = failureDetails(data.error);
+        for (const [key, owner] of blockers) {
+          const [kind, requestID] = key.split(":");
+          changeBlocker(owner, kind, requestID, false);
+        }
+        state = "idle";
         break;
       default:
         return;

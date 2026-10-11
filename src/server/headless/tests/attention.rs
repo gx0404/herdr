@@ -731,30 +731,219 @@ fn an_agent_exiting_while_working_notifies_failed_once() {
     );
 }
 
-/// 会话洞察（2b）读到的错误：屏幕先报回合结束（这时还不知道失败，照常「已完成」），
-/// 洞察读到错误时发一次「失败」；同一回合之后的重复错误、另一个错误、屏幕上的受阻与
-/// 空闲都不再通知；新回合照常「已完成」。
 #[test]
-fn an_insight_error_notifies_failed_once_and_silences_the_rest_of_the_turn() {
+fn without_a_session_completion_is_immediate_and_late_errors_are_silent() {
     for (agent, label) in [(Agent::Codex, "codex"), (Agent::Claude, "claude")] {
         let mut path = FailurePath::new(agent, label);
         path.detect(AgentState::Idle);
         path.detect(AgentState::Working);
         path.notices();
-
         path.detect(AgentState::Idle);
         assert_notified_once(&path.notices(), Finished, label);
         path.insight_error("stream disconnected before completion");
-        assert_notified_once(&path.notices(), Custom, label);
-
-        path.insight_error("stream disconnected before completion");
-        path.insight_error("another error in the same turn");
-        path.detect(AgentState::Blocked);
-        path.detect(AgentState::Idle);
-        assert_eq!(path.notices(), [], "{label}：同一回合不再通知");
-
+        assert_eq!(path.notices(), [], "{label}: completion already announced");
+        assert_eq!(
+            path.failure_detail().as_deref(),
+            Some("stream disconnected before completion")
+        );
         path.detect(AgentState::Working);
         path.detect(AgentState::Idle);
         assert_notified_once(&path.notices(), Finished, label);
     }
+}
+
+impl FailurePath {
+    fn anchor_session(&mut self, id: &str) {
+        let response = api_response(
+            &mut self.server,
+            Method::PaneReportAgentSession(crate::api::schema::PaneReportAgentSessionParams {
+                pane_id: self.public_pane_id.clone(),
+                source: format!("herdr:{}", self.agent_label),
+                agent: self.agent_label.into(),
+                seq: None,
+                agent_session_id: Some(id.into()),
+                agent_session_path: None,
+                session_start_source: Some("select".into()),
+                resume_argv: None,
+            }),
+        );
+        assert_eq!(response["result"]["type"], "ok", "{response}");
+    }
+
+    fn read_result(
+        &mut self,
+        started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        error: Option<&str>,
+        unavailable: bool,
+    ) {
+        self.ticket += 1;
+        let identity = self
+            .server
+            .app
+            .state
+            .agent_activity_subject(self.pane_id)
+            .expect("identity")
+            .identity;
+        self.server
+            .handle_internal_event_with_forwarding(AppEvent::AgentActivityRefreshedFor {
+                pane_id: self.pane_id,
+                identity,
+                started,
+                ticket: self.ticket,
+                result: if unavailable {
+                    Err("unavailable".into())
+                } else {
+                    Ok(Vec::new())
+                },
+                insight: error.map(|error| {
+                    Box::new(crate::api::schema::AgentInsight {
+                        error: Some(error.into()),
+                        error_at_ms: Some(crate::server::observability::now_ms()),
+                        ..Default::default()
+                    })
+                }),
+            });
+    }
+}
+
+#[test]
+fn completion_waits_for_its_read_and_notifies_one_real_outcome() {
+    for (agent, label) in [(Agent::Codex, "codex"), (Agent::Claude, "claude")] {
+        for (error, unavailable) in [
+            (Some("provider failed"), false),
+            (None, false),
+            (None, true),
+        ] {
+            let mut path = FailurePath::new(agent, label);
+            path.detect(AgentState::Idle);
+            path.anchor_session("notification-session");
+            path.detect(AgentState::Working);
+            path.notices();
+            path.detect(AgentState::Idle);
+            assert_eq!(path.notices(), [], "held: {label}");
+            assert!(path.server.app.state.completion_is_held(path.pane_id));
+            let started = Default::default();
+            path.server
+                .app
+                .state
+                .bind_completion_read(path.pane_id, &started);
+            path.read_result(Default::default(), None, false);
+            assert_eq!(path.notices(), [], "older read cannot settle completion");
+            path.read_result(started, error, unavailable);
+            assert_notified_once(
+                &path.notices(),
+                if error.is_some() { Custom } else { Finished },
+                label,
+            );
+            assert!(!path.server.app.state.completion_is_held(path.pane_id));
+            path.insight_error("late provider error");
+            assert_eq!(path.notices(), [], "same turn is settled");
+        }
+    }
+}
+
+#[test]
+fn completion_deadline_late_error_new_turn_interruption_and_identity_are_isolated() {
+    let mut path = FailurePath::new(Agent::Codex, "codex");
+    path.detect(AgentState::Idle);
+    path.anchor_session("notification-session");
+    path.detect(AgentState::Working);
+    path.detect(AgentState::Idle);
+    path.notices();
+    let deadline = path
+        .server
+        .app
+        .state
+        .next_pending_agent_notification_deadline()
+        .expect("deadline");
+    assert!(
+        deadline.saturating_duration_since(Instant::now())
+            <= crate::server::attention::COMPLETION_INSIGHT_WAIT
+    );
+    path.server.handle_scheduled_tasks_headless(deadline, false);
+    assert_notified_once(&path.notices(), Finished, "timeout");
+    path.insight_error("late error");
+    assert_eq!(path.notices(), [], "late error only adds detail");
+    assert_eq!(path.failure_detail().as_deref(), Some("late error"));
+
+    path.detect(AgentState::Working);
+    path.detect(AgentState::Idle);
+    assert_eq!(path.notices(), []);
+    path.insight_error("new turn error");
+    assert_notified_once(&path.notices(), Custom, "new turn");
+
+    path.detect(AgentState::Working);
+    let terminal_id = path.server.app.state.workspaces[0]
+        .pane_state(path.pane_id)
+        .expect("pane")
+        .attached_terminal_id
+        .clone();
+    path.server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .expect("terminal")
+        .note_interrupt_input(Instant::now());
+    path.detect(AgentState::Idle);
+    assert!(!path.server.app.state.completion_is_held(path.pane_id));
+    path.insight_error("interrupted error");
+    assert_eq!(
+        path.notices(),
+        [],
+        "interruption is not completion or failure"
+    );
+
+    path.detect(AgentState::Working);
+    path.detect(AgentState::Idle);
+    assert!(
+        path.server.app.state.completion_is_held(path.pane_id),
+        "old turn held"
+    );
+    assert_eq!(path.notices(), [], "old turn not yet settled");
+    let identity = path
+        .server
+        .app
+        .state
+        .agent_activity_subject(path.pane_id)
+        .expect("identity")
+        .identity;
+    let started = Default::default();
+    path.server
+        .app
+        .state
+        .bind_completion_read(path.pane_id, &started);
+    path.server
+        .app
+        .state
+        .agent_activity
+        .advance_identity(path.pane_id);
+    assert!(!path
+        .server
+        .app
+        .state
+        .agent_activity_is_current(path.pane_id, &identity));
+    path.server
+        .handle_internal_event_with_forwarding(AppEvent::AgentActivityRefreshedFor {
+            pane_id: path.pane_id,
+            identity,
+            started,
+            ticket: 999,
+            result: Ok(Vec::new()),
+            insight: None,
+        });
+    assert!(path
+        .server
+        .app
+        .state
+        .drain_due_agent_completions(
+            Instant::now() + crate::server::attention::COMPLETION_INSIGHT_WAIT
+        )
+        .is_empty());
+    assert!(!path.server.app.state.completion_is_held(path.pane_id));
+    assert_eq!(
+        path.notices(),
+        [],
+        "old session response cannot announce completion"
+    );
 }

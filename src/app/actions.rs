@@ -111,6 +111,15 @@ pub struct PaneStateUpdate {
     pub failed: bool,
     /// 本回合已经发过失败通知（含这次）：同一回合之后的迁移不再通知。
     pub failure_announced: bool,
+    pub completion_held: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingAgentCompletion {
+    update: PaneStateUpdate,
+    identity: crate::app::state::AgentActivityIdentity,
+    deadline: Instant,
+    read: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl PaneStateUpdate {
@@ -128,6 +137,7 @@ impl PaneStateUpdate {
             interrupted_recently: self.interrupted,
             failed_latched: self.failed,
             failure_announced: self.failure_announced,
+            completion_held: self.completion_held,
             body,
         }
     }
@@ -249,43 +259,10 @@ impl AppState {
             .collect();
         pane_terminals
             .into_iter()
-            .filter_map(|(ws_idx, pane_id, terminal_id)| {
-                let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
-                let terminal = self.terminals.get_mut(&terminal_id)?;
-                let change = terminal
-                    .expire_agent_metadata_at(scheduled_deadline, now)?
-                    .effective_state_change?;
-                let failure_announced = terminal.failure_announced();
-                let seen = self.apply_pane_state_change(
-                    ws_idx,
-                    pane_id,
-                    &change,
-                    false,
-                    false,
-                    failure_announced,
-                )?;
-                let update = PaneStateUpdate {
-                    pane_id,
-                    ws_idx,
-                    previous_agent_label: change.previous_agent_label.clone(),
-                    previous_known_agent: change.previous_known_agent,
-                    previous_state: change.previous_state,
-                    previous_seen,
-                    previous_presentation: change.previous_presentation.clone(),
-                    agent_label: change.agent_label.clone(),
-                    known_agent: change.known_agent,
-                    state: change.state,
-                    seen,
-                    presentation: change.presentation.clone(),
-                    agent_name_changed: false,
-                    agent_released: false,
-                    agent_release_status: None,
-                    suppress_completion: false,
-                    interrupted: change.interrupted,
-                    failed: false,
-                    failure_announced,
-                };
-                Some(update)
+            .filter_map(|(_, pane_id, _)| {
+                self.update_terminal_state(pane_id, |terminal| {
+                    terminal.expire_agent_metadata_at(scheduled_deadline, now)
+                })
             })
             .collect()
     }
@@ -1653,6 +1630,7 @@ impl AppState {
                 identity,
                 result,
                 insight,
+                started,
                 ..
             } => {
                 if !self.agent_activity_is_current(pane_id, &identity) {
@@ -1669,6 +1647,7 @@ impl AppState {
                 self.apply_agent_insight(pane_id, insight.map(|insight| *insight))
                     .1
                     .into_iter()
+                    .chain(self.finish_completion_read(pane_id, &started))
                     .collect()
             }
             AppEvent::AgentActivityReadFor {
@@ -1945,11 +1924,16 @@ impl AppState {
             || mutation
                 .effective_state_change
                 .as_ref()
-                .is_some_and(|change| change.previous_known_agent != change.known_agent)
+                .is_some_and(|change| {
+                    change.previous_known_agent != change.known_agent
+                        || (change.state == AgentState::Working
+                            && change.previous_state != AgentState::Working)
+                })
         {
             self.agent_activity.advance_identity(pane_id);
         }
         if completion_reset {
+            self.pending_agent_completions.remove(&pane_id);
             self.pending_agent_notifications.remove(&pane_id);
             self.workspaces[ws_idx].pane_state_mut(pane_id)?.seen = true;
         }
@@ -1985,15 +1969,31 @@ impl AppState {
         if launch_changed {
             self.bump_projection_epoch();
         }
-        let seen = self.apply_pane_state_change(
-            ws_idx,
-            pane_id,
-            &change,
-            suppress_completion,
-            failure_notice,
-            failure_announced,
-        )?;
-        let update = PaneStateUpdate {
+        if completion_reset
+            || agent_released
+            || change.previous_state != change.state
+            || failure_notice
+        {
+            self.pending_agent_completions.remove(&pane_id);
+        }
+        let completion_candidate = !suppress_completion
+            && !failure_notice
+            && !failure_announced
+            && !change.interrupted
+            && !agent_released
+            && is_completion_transition(&change);
+        let identity = completion_candidate
+            .then(|| self.agent_activity_subject(pane_id))
+            .flatten()
+            .filter(|subject| {
+                subject.session.is_some()
+                    && crate::harness::registry::insight_reports_failures(&subject.agent)
+                    && crate::server::agent_activity::source_for(&subject.agent).is_some()
+            })
+            .map(|subject| subject.identity);
+        let completion_held = identity.is_some();
+        let seen = previous_seen;
+        let mut update = PaneStateUpdate {
             pane_id,
             ws_idx,
             previous_agent_label: change.previous_agent_label.clone(),
@@ -2021,7 +2021,38 @@ impl AppState {
             interrupted: change.interrupted,
             failed: failure_notice,
             failure_announced,
+            completion_held,
         };
+        if let Some(identity) = identity.filter(|_| completion_held) {
+            self.pending_agent_notifications.remove(&pane_id);
+            self.pending_agent_completions.insert(
+                pane_id,
+                PendingAgentCompletion {
+                    update: update.clone(),
+                    identity,
+                    deadline: now + crate::server::attention::COMPLETION_INSIGHT_WAIT,
+                    read: None,
+                },
+            );
+            self.agent_activity.note_hint(pane_id);
+        }
+        update.seen = self.apply_pane_state_change(
+            ws_idx,
+            pane_id,
+            &change,
+            suppress_completion,
+            failure_notice,
+            failure_announced,
+        )?;
+        update.agent_release_status =
+            agent_released.then(|| pane_agent_status(change.state, update.seen));
+        if crate::server::attention::decide(&update.attention_input(false, None)).kind
+            == Some(crate::server::attention::AttentionKind::Finished)
+        {
+            if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+                terminal.note_completion_announced();
+            }
+        }
         Some(update)
     }
 
@@ -2127,6 +2158,7 @@ impl AppState {
                 interrupted_recently: change.interrupted,
                 failed_latched: failure_notice,
                 failure_announced,
+                completion_held: self.completion_is_held(pane_id),
                 body: None,
             });
         if decision.toast.is_none() && decision.sound.is_none() {
@@ -2263,10 +2295,103 @@ impl AppState {
         }
     }
 
+    pub(crate) fn completion_is_held(&self, pane_id: PaneId) -> bool {
+        self.pending_agent_completions.contains_key(&pane_id)
+    }
+
+    pub(crate) fn completion_needs_read(&self, pane_id: PaneId) -> bool {
+        self.pending_agent_completions
+            .get(&pane_id)
+            .is_some_and(|pending| pending.read.is_none())
+    }
+
+    pub(crate) fn bind_completion_read(
+        &mut self,
+        pane_id: PaneId,
+        started: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        if let Some(pending) = self.pending_agent_completions.get_mut(&pane_id) {
+            if pending.read.is_none() {
+                pending.read = Some(started.clone());
+            }
+        }
+    }
+
+    pub(crate) fn finish_completion_read(
+        &mut self,
+        pane_id: PaneId,
+        started: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Option<PaneStateUpdate> {
+        let matching = self
+            .pending_agent_completions
+            .get(&pane_id)
+            .and_then(|pending| pending.read.as_ref())
+            .is_some_and(|read| std::sync::Arc::ptr_eq(read, started));
+        matching
+            .then(|| self.release_agent_completion(pane_id))
+            .flatten()
+    }
+
+    fn release_agent_completion(&mut self, pane_id: PaneId) -> Option<PaneStateUpdate> {
+        let pending = self.pending_agent_completions.remove(&pane_id)?;
+        if !self.agent_activity_is_current(pane_id, &pending.identity) {
+            return None;
+        }
+        let mut update = pending.update;
+        update.ws_idx = self
+            .workspaces
+            .iter()
+            .position(|ws| ws.pane_state(pane_id).is_some())?;
+        let terminal_id = self.workspaces[update.ws_idx]
+            .pane_state(pane_id)?
+            .attached_terminal_id
+            .clone();
+        let terminal = self.terminals.get_mut(&terminal_id)?;
+        if terminal.state != AgentState::Idle
+            || terminal.failure_announced()
+            || terminal.completion_announced()
+        {
+            return None;
+        }
+        terminal.note_completion_announced();
+        update.completion_held = false;
+        let change = EffectiveStateChange {
+            previous_agent_label: update.previous_agent_label.clone(),
+            previous_known_agent: update.previous_known_agent,
+            previous_state: update.previous_state,
+            previous_presentation: update.previous_presentation.clone(),
+            agent_label: update.agent_label.clone(),
+            known_agent: update.known_agent,
+            state: update.state,
+            presentation: update.presentation.clone(),
+            interrupted: update.interrupted,
+        };
+        update.seen =
+            self.apply_pane_state_change(update.ws_idx, pane_id, &change, false, false, false)?;
+        self.bump_projection_epoch();
+        Some(update)
+    }
+
+    pub(crate) fn drain_due_agent_completions(&mut self, now: Instant) -> Vec<PaneStateUpdate> {
+        let due: Vec<_> = self
+            .pending_agent_completions
+            .iter()
+            .filter_map(|(&pane_id, pending)| (pending.deadline <= now).then_some(pane_id))
+            .collect();
+        due.into_iter()
+            .filter_map(|pane_id| self.release_agent_completion(pane_id))
+            .collect()
+    }
+
     pub fn next_pending_agent_notification_deadline(&self) -> Option<std::time::Instant> {
         self.pending_agent_notifications
             .values()
             .map(|pending| pending.deadline)
+            .chain(
+                self.pending_agent_completions
+                    .values()
+                    .map(|pending| pending.deadline),
+            )
             .min()
     }
 
@@ -2311,6 +2436,7 @@ impl AppState {
     }
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
+        self.pending_agent_completions.remove(&pane_id);
         self.pending_agent_notifications.remove(&pane_id);
         self.agent_activity.forget_pane(pane_id);
         self.remove_plugin_pane_records([pane_id]);
@@ -3737,6 +3863,11 @@ mod tests {
                     });
                 }
                 assert!(!app.workspaces[1].panes[&pane_id].seen);
+                assert!(app.completion_is_held(pane_id));
+                let deadline = app
+                    .next_pending_agent_notification_deadline()
+                    .expect("insight deadline");
+                assert_eq!(app.drain_due_agent_completions(deadline).len(), 1);
                 assert!(app.pending_agent_notifications.contains_key(&pane_id));
             } else {
                 assert!(
@@ -3873,6 +4004,7 @@ mod tests {
             interrupted_recently: false,
             failed_latched: false,
             failure_announced: false,
+            completion_held: false,
             body: None,
         })
         .sound
