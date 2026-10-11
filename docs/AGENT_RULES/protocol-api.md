@@ -82,6 +82,52 @@ stable 和 preview 两个渠道已发布的协议对比：当前源码协议已�
 wire 格式不兼容变更时 bump 一次；该协议发布前不因多次不兼容变更重复 bump。
 同步更新测试中的硬编码协议期望与手工 fixture。
 
+## harness 投影与可选交互
+
+- `AgentStatus` 仍表达生命周期与客户端完成投影；失败通过 `AgentAttention.kind` 表达，
+  不为一个新界面擅自扩展冻结 codec 可达的状态枚举。API `AgentInfo.attention/insight`
+  与 `ClientShellAgent.insight` 的缺省和未知种类回退必须保持可解码。
+- `ClientShellAgentInsight` 是 wire 镜像，沿用固定字段序列；JSON 的可选性不能通过
+  `skip_serializing_if` 破坏 legacy bincode 的对称。增加该镜像时，同安装协议
+  `protocol::wire::PROTOCOL_VERSION` 已由 23 升至 24；后续修改继续遵守发布渠道与
+  generation 规则。
+- renderer 不读会话文件或启动查询进程。`agent.activity.read` 承载按需完整树/内容，
+  快照只提供有界洞察和活动摘要；Inspector 以
+  `client::shell::chrome::inspector::Target` 隔离端点/boot/pane/launch，响应另验读取代次。
+  隐藏或切目标后的旧响应不能污染新目标。本地停止读取不是 generation 1 服务端单请求
+  取消，不能虚报立即释放 server lease。
+- `agent.prompt` 是新增的可选端点方法，请求形状独立冻结在
+  `tests/fixtures/endpoint-agent-prompt-shapes-v1.json`，不改写既有 fixture/codec。
+  总览仅对在线 Idle/Review pane agent 且宣告存在时提供回复，缺失则只跳转；失败或
+  受阻权限对话不得用回复代答，ZCode 外部只读来源不支持 prompt/focus。
+- client-shell 通道只支持 `wait: None` 的提示提交；
+  `server::client_commands::supports_client_shell_method` 拒绝任何 `wait: Some`，在发送
+  输入前返回 `unsupported_endpoint_command`；普通 JSON socket API 保留原有事件驱动等待。
+  验证、输入与返回复用共享 API，不做私有 socket-only 实现。
+- `server::headless::endpoint_requests` 只为显式目标 `agent.prompt` 放行 inactive surface，
+  经共享 API 执行，不为此提升该 surface 到前台；其他命令仍保留 active-surface 门。
+  可选方法宣告、连接代际/boot、command-busy 与响应容量/lease 身份守门不因此放宽。
+- 总览本地超时或关闭不等于服务端取消/回滚；
+  `client::shell::chrome::overview::ClientShellState::tick_overview` 保留草稿并提示可能已
+  提交、重试前检查终端。迟到响应按端点/boot/launch/请求代次核验，不把本地清理说成
+  server lease 已释放。
+
+## 客户端本地呈现与保存
+
+- 已读/未读、停靠布局、Inspector 预览和 notice focus 属于客户端；不新增共享 runtime
+  字段来保存这些 UI 状态，不通过它们改写检测或 server 通知决定。
+- `endpoint_agent_state::ReadMark` 绑定 boot/pane/launch/state-change sequence，端点以
+  storage key 分组。`preferences::read_agent_marks` 与
+  `chrome::overview::ClientShellState::saved_agent_marks` 约束全局最多 256 条；
+  `EndpointAgentPresentation::{import_marks,mark}` 约束每端点最多 256 条。
+- 保存时保留尚未导入、首个快照未到的启用远端 profile 标记；disabled/退役端点清理。
+  首次导入后 `EndpointAgentPresentation::project_snapshot_for_generation` 按当前
+  boot/launch/sequence 和生命周期校验，不能把陈旧标记套到重启后的新 agent。
+- MarkUnread 只接受在线 Idle/Review；Failed、NeedsInput、Working、未知或离线均拒绝。
+  全局满额时允许更新已有标记但拒绝新增未读标记；菜单启用态与执行时复核共用
+  `chrome::overview::ClientShellState::can_mark_focused_agent_unread` / `mark_agent_read`，
+  拒绝不得先关闭命令面板或写成功 MRU。
+
 ## CLI 面
 
 `src/cli*` 是人与 agent 共同的产品入口：命令语义、输出格式（`--json`）与

@@ -68,9 +68,12 @@ detach_reattach、cross_area、server_headless 等）、bun 契约测试
 （`just docs-contract-test`、`just integration-assets-test`）、性能画像
 （`bench-render-scale`、`bench-terminal-targets`、`bench-bsp-layout`、
 `bench-retained-graphics`、`bench-api-fairness`）与发布前 `bench-release-smoke`。
-UI 截图对 TUI 不适用（N/A）：等效证据是 throwaway-repro 真会话 +
-`scripts/capture_agent_screen.py` 读回；Windows handshake/PTY admission/Codex
-native-tools 只在 Windows 实机或 Windows CI 证据成立时标 PASS。
+TUI 视觉回归使用 `just ui-gallery`（`scripts/ui_gallery.py`）：从真实 compose 路径生成
+合成 HTML/PNG，并实际读回代表性深浅主题、宽窄屏与状态场景。合成画廊不证明桌面
+输入或 PTY 运行；端到端证据另用隔离真会话与 `scripts/capture_agent_screen.py` 读回，
+Windows 可复用下述私有 Job smoke。GUI/IME/剪贴板需要独立实际验证，工具拒绝或未运行
+保持 PENDING，不写截图 N/A 代替。Windows handshake/PTY admission/Codex native-tools
+只在 Windows 实机或 Windows CI 证据成立时标 PASS。
 
 - `windows_tui_compat.ps1`、`windows_smoke_conpty_path.ps1` 共用
   `scripts/windows_input/windows_smoke_helpers.ps1`：挂起创建后先加入私有 Job，再恢复执行，
