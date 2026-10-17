@@ -9,7 +9,7 @@
 3. 代码结构：src/**/*.rs（排除生成物 bindings.rs）的模块文档与公开项签名。
 
 默认 check 模式：内存重建并与现有产物 diff，不一致退出 1；--confirm 才写入。
-语料闭集 = Git 可见文件；新增语料文件需先 git add（或调整本脚本清单）。
+语料闭集 = Git 跟踪文件与未忽略的新文件；新文件同时须落入下列受控语料范围，无需暂存。
 """
 
 from __future__ import annotations
@@ -28,7 +28,8 @@ SCHEMA_VERSION = 1
 MAX_CHUNK_CHARS = 1500
 MAX_CODE_CHUNK_CHARS = 4000
 CHANGELOG_HEAD_CHARS = 6000
-EXCLUDED_CODE = {"src/ghostty/bindings.rs"}
+# Bindings now live outside the src/ index in crates/ghostty-vt/src/bindings.rs.
+EXCLUDED_CODE: set[str] = set()
 
 DOC_FILES = [
     "AGENTS.md",

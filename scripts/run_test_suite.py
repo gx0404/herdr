@@ -1,6 +1,6 @@
 """并行编排 `just test` 的五个测试阶段。
 
-各阶段的命令真源在 justfile recipe（nextest-all / maintenance-test /
+各阶段的命令真源在 justfile recipe（rust-test / maintenance-test /
 ui-hot-path-architecture-test / integration-assets-test / docs-contract-test），
 本脚本只负责有界并发调度、实时前缀转发输出、按 run-id 隔离日志、原子结果
 manifest 与失败聚合；任一阶段失败即整体非零退出，工具链缺失记为该阶段失败，
@@ -13,6 +13,8 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 LOG_DIR = PROJECT_ROOT / "target" / "test-suite-logs"
 FAILURE_RECAP_LINES = 40
 PHASE_JOBS_ENV = "HERDR_TEST_PHASE_JOBS"
@@ -34,7 +37,7 @@ MANIFEST_NAME = "manifest.json"
 
 # (阶段名, 对应 just recipe 名)；顺序仅决定汇总打印顺序，执行受 phase jobs 限制。
 PHASES: tuple[tuple[str, str], ...] = (
-    ("nextest", "nextest-all"),
+    ("nextest", "rust-test"),
     ("maintenance", "maintenance-test"),
     ("ui-hot-path", "ui-hot-path-architecture-test"),
     ("integration-assets", "integration-assets-test"),
@@ -73,7 +76,7 @@ def resolve_phase_jobs(
     raw = environment.get(PHASE_JOBS_ENV)
     if raw is not None:
         return _positive_int(raw, PHASE_JOBS_ENV)
-    return min(2, len(PHASES), resolve_test_budget(test_budget, environment))
+    return min(3, len(PHASES), resolve_test_budget(test_budget, environment))
 
 
 def resolve_test_budget(value: int | None = None, environ: Mapping[str, str] | None = None) -> int:
@@ -225,10 +228,10 @@ def _write_manifest(
     maintenance_jobs: int,
     nextest_jobs: int,
     phase_started: Mapping[str, float],
+    suite: str = "default",
+    started: float | None = None,
 ) -> None:
-    _atomic_write_json(
-        manifest_path,
-        _manifest_payload(
+    payload = _manifest_payload(
             run_id,
             run_dir,
             results,
@@ -238,8 +241,39 @@ def _write_manifest(
             maintenance_jobs,
             nextest_jobs,
             phase_started,
-        ),
-    )
+        )
+    payload["suite"] = suite
+    payload["total_seconds"] = round(time.monotonic() - started, 3) if started is not None else None
+    payload["target_seconds"] = 60 if suite == "default" else None
+    payload["target_met"] = (payload["total_seconds"] <= 60) if status == "passed" and suite == "default" and started is not None else None
+    payload["extended_tests"] = "included" if suite == "full" else "not_run"
+    for name, (code, _) in results.items():
+        payload["phases"][name]["counts"] = read_counts(run_dir / f"{name}.log") if code == 0 else None
+    _atomic_write_json(manifest_path, payload)
+
+
+def read_counts(path: Path) -> dict[str, int] | None:
+    """Parse executed counts, keeping filtered/ignored tests separate from passes."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    recorded = re.findall(r"HERDR_TEST_COUNTS (\{[^\n]+\})", text)
+    if recorded:
+        return json.loads(recorded[-1])
+    nextest = re.findall(r"Summary .*? (\d+) tests run:.*?(\d+) passed(?:, (\d+) skipped)?", text)
+    native = re.findall(r"test result: ok\. (\d+) passed; 0 failed; (\d+) ignored; \d+ measured; (\d+) filtered out", text)
+    if nextest or native:
+        return {"executed": sum(int(row[0]) for row in nextest + native),
+                "skipped": sum(int(row[2] or 0) for row in nextest) + sum(int(row[1]) + int(row[2]) for row in native)}
+    python = re.findall(r"^Ran (\d+) tests in .*?(?:\(skipped=(\d+)\))?$", text, re.MULTILINE)
+    bun_pass = sum(map(int, re.findall(r"^\s*(\d+) pass$", text, re.MULTILINE)))
+    bun_skip = sum(map(int, re.findall(r"^\s*(\d+) skip$", text, re.MULTILINE)))
+    if not python and not re.search(r"^\s*\d+ pass$", text, re.MULTILINE):
+        return None
+    skipped = sum(int(skip or 0) for _, skip in python)
+    return {"executed": sum(int(count) for count, _ in python) - skipped + bun_pass,
+            "skipped": skipped + bun_skip}
 
 
 def run_phase(
@@ -248,6 +282,8 @@ def run_phase(
     log_path: Path,
     command: list[str] | None = None,
     environment: Mapping[str, str] | None = None,
+    ownership: Callable | None = None,
+    release_ownership: Callable | None = None,
 ) -> tuple[int | None, float]:
     """运行单个阶段，输出实时带前缀转发并写入日志，返回 (退出码, 耗时秒)。
 
@@ -269,8 +305,7 @@ def run_phase(
         try:
             # 子进程（cargo、bun、git、已重配 UTF-8 的脚本）输出 UTF-8；按 locale 解码在
             # Windows CI（cp1252）遇到 0x90 等未定义字节会让转发线程崩溃、阶段结果丢失。
-            process = subprocess.Popen(
-                command,
+            arguments = dict(
                 cwd=PROJECT_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -278,6 +313,8 @@ def run_phase(
                 errors="replace",
                 env=None if environment is None else dict(environment),
             )
+            owner = ownership(command, arguments) if ownership is not None else None
+            process = owner.process if owner is not None else subprocess.Popen(command, **arguments)
         except OSError as error:
             message = f"阶段启动失败: {error}"
             log.write(message + "\n")
@@ -293,14 +330,29 @@ def run_phase(
                     sys.stdout.write(prefix + line)
                     sys.stdout.flush()
             code = process.wait()
-        except OSError as error:
+        except BaseException as error:
             message = f"阶段输出失败: {error}"
-            print(prefix + message, flush=True)
-            log.write(message + "\n")
+            if owner is not None:
+                owner.stop()
+            elif process.poll() is None:
+                process.terminate()
+                process.wait(timeout=15)
+            try:
+                print(prefix + message, flush=True)
+                log.write(message + "\n")
+            except OSError:
+                pass  # Original I/O failure still makes this phase fail.
+            if not isinstance(error, Exception):
+                raise
             return None, time.monotonic() - started
         finally:
             if stream is not None:
                 stream.close()
+            if owner is not None:
+                if release_ownership is not None:
+                    release_ownership(owner)
+                else:
+                    owner.close()
     return code, time.monotonic() - started
 
 
@@ -312,6 +364,8 @@ def run_all(
     test_budget: int | None = None,
     maintenance_jobs: int | None = None,
     nextest_jobs: int | None = None,
+    suite: str = "default",
+    filterset: str = "all()",
 ) -> dict[str, tuple[int | None, float]]:
     """Run all phases with a bounded number of concurrent workers.
 
@@ -319,6 +373,9 @@ def run_all(
     the parent directory; each invocation gets its own `<run-id>` child directory.
     """
     global LAST_RUN_DIR
+    if suite not in {"default", "full"}:
+        raise ValueError("unknown test suite")
+    started_at = time.monotonic()
 
     budget = resolve_test_budget(test_budget)
     phase_limit = resolve_phase_jobs(phase_jobs, test_budget=budget)
@@ -334,6 +391,8 @@ def run_all(
     phase_environment = os.environ.copy()
     phase_environment[MAINTENANCE_JOBS_ENV] = str(maintenance_limit)
     phase_environment[NEXTEST_JOBS_ENV] = str(nextest_limit)
+    phase_environment["HERDR_TEST_SUITE"] = suite
+    phase_environment["HERDR_TEST_FILTER"] = filterset
     selected_run_id = run_id or new_run_id()
     run_dir = (log_root or LOG_DIR) / selected_run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -342,10 +401,30 @@ def run_all(
     results: dict[str, tuple[int | None, float]] = {}
     phase_started: dict[str, float] = {}
     manifest_lock = threading.Lock()
+    owner_lock = threading.Lock()
+    owners = []
+    cancelled = threading.Event()
+
+    def ownership(command, arguments):
+        from scripts.run_nextest import OwnedProcess
+        with owner_lock:
+            if cancelled.is_set():
+                raise OSError("suite cancelled before phase admission")
+            owner = OwnedProcess(command, **arguments)
+            owners.append(owner)
+            return owner
+
+    def release_ownership(owner):
+        # Serialize close with cancellation: a closed Windows Job must never be
+        # mistaken for a POSIX process group by the concurrent cancellation path.
+        with owner_lock:
+            owners.remove(owner)
+            owner.close()
     if phase_runner is None:
 
         def runner(name: str, recipe: str, log_path: Path) -> tuple[int | None, float]:
-            return run_phase(name, recipe, log_path, environment=phase_environment)
+            return run_phase(name, recipe, log_path, environment=phase_environment,
+                             ownership=ownership, release_ownership=release_ownership)
 
     else:
         runner = phase_runner
@@ -362,6 +441,8 @@ def run_all(
             maintenance_limit,
             nextest_limit,
             phase_started,
+            suite,
+            started_at,
         )
 
     write_manifest()
@@ -378,6 +459,10 @@ def run_all(
             write_manifest()
         try:
             result = runner(name, recipe, run_dir / f"{name}.log")
+            if result[0] == 0:
+                # A zero exit without its evidence file is not an auditable pass.
+                with (run_dir / f"{name}.log").open("rb") as evidence:
+                    evidence.read(1)
         except Exception as error:  # noqa: BLE001 - a worker crash is a failed phase.
             print(f"[{name}] 阶段线程异常: {error}", flush=True)
             result = (None, time.monotonic() - started)
@@ -385,10 +470,25 @@ def run_all(
             results[name] = result
             write_manifest()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=phase_limit) as pool:
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=phase_limit)
+    try:
         futures = [pool.submit(worker, name, recipe) for name, recipe in PHASES]
         for future in concurrent.futures.as_completed(futures):
             future.result()
+    except BaseException:
+        cancelled.set()
+        with owner_lock:
+            for owner in owners:
+                if owner.process.poll() is None:
+                    try:
+                        owner.stop()
+                    except OSError as error:
+                        print(f"phase cleanup failed: {error}", flush=True)
+        pool.shutdown(wait=True, cancel_futures=True)
+        write_manifest("cancelled")
+        raise
+    else:
+        pool.shutdown(wait=True)
 
     exit_code, _ = summarize(results)
     write_manifest("passed" if exit_code == 0 else "failed")
@@ -429,12 +529,14 @@ _force_utf8_streams()
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--suite", choices=("default", "full"), default=os.environ.get("HERDR_TEST_SUITE", "default"))
+    parser.add_argument("--filterset", default="all()", help="additional platform selection (CI)")
     parser.add_argument(
         "--phase-jobs",
         "--jobs",
         dest="phase_jobs",
         type=int,
-        help=f"并发测试阶段数（默认 min(2, {len(PHASES)}, test_budget)；也可用 {PHASE_JOBS_ENV}）",
+        help=f"并发测试阶段数（默认 min(3, {len(PHASES)}, test_budget)；也可用 {PHASE_JOBS_ENV}）",
     )
     parser.add_argument(
         "--test-budget",
@@ -470,6 +572,8 @@ def main(argv: list[str] | None = None) -> int:
             test_budget=test_budget,
             maintenance_jobs=maintenance_jobs,
             nextest_jobs=nextest_jobs,
+            suite=args.suite,
+            filterset=args.filterset,
         )
     except (OSError, ValueError) as error:
         print(f"测试编排失败: {error}", file=sys.stderr, flush=True)
@@ -492,10 +596,17 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print(f"\n失败阶段: {', '.join(failures)}")
     else:
-        print("\n全部阶段通过。")
+        print("\n完整回归通过。" if args.suite == "full" else "\n默认回归通过；扩展测试未执行（just test-full）。")
     print(f"结果 manifest: {run_dir / MANIFEST_NAME}")
     return exit_code
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(f"received signal {signum}")
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("test suite cancelled; incomplete phases are not passes", file=sys.stderr)
+        sys.exit(130)

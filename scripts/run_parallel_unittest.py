@@ -239,7 +239,12 @@ def run_unit(unit: Unit, python: str = sys.executable, cwd: Path = PROJECT_ROOT)
     except OSError as error:
         return UnitResult(unit, None, f"failed to start unittest: {error}", time.monotonic() - started, 0, 0)
     ran, skipped = parse_counts(completed.stdout)
-    return UnitResult(unit, completed.returncode, completed.stdout, time.monotonic() - started, ran, skipped)
+    code = completed.returncode
+    output = completed.stdout
+    if code == 0 and ran == 0:
+        code = 1
+        output += "\nempty or unreported unittest execution\n"
+    return UnitResult(unit, code, output, time.monotonic() - started, ran, skipped)
 
 
 def run_units(units: list[Unit], jobs: int, runner=run_unit) -> list[UnitResult]:

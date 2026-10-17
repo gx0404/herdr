@@ -3,7 +3,7 @@ description: 终端/PTY/输入规则入口
 paths:
   - "src/terminal/**"
   - "src/pty/**"
-  - "src/ghostty/**"
+  - "crates/ghostty-vt/src/**"
   - "src/kitty_graphics.rs"
   - "src/kitty_graphics/**"
   - "src/input/**"

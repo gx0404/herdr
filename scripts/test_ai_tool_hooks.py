@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import functools
+import importlib.util
+import io
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,14 +25,26 @@ RECORD_EDIT = PROJECT_ROOT / ".claude" / "hooks" / "record_edit.py"
 NOTIFY_REVIEW = PROJECT_ROOT / ".claude" / "hooks" / "notify_review.py"
 
 
+@functools.cache
+def _gate_module():
+    spec = importlib.util.spec_from_file_location("herdr_gate_matrix", GATE)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load hook decision entry: {GATE}")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    return gate
+
+
 def _run_gate(tool: str, payload: dict, *extra: str) -> subprocess.CompletedProcess[bytes]:
-    stdin = json.dumps({"tool_name": tool, "tool_input": payload})
-    return subprocess.run(
-        [sys.executable, str(GATE), *extra],
-        input=stdin.encode("utf-8"),
-        capture_output=True,
-        check=False,
-    )
+    # Exercise the real JSON/argument/config entry for every matrix row without
+    # starting an interpreter per row. RegisteredEntryProbeTests and the explicit
+    # Bash/Codex protocol tests below still execute the installed commands.
+    stdin = io.StringIO(json.dumps({"tool_name": tool, "tool_input": payload}))
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = _gate_module().main(list(extra))
+    return subprocess.CompletedProcess([str(GATE), *extra], code,
+                                       stdout.getvalue().encode("utf-8"), stderr.getvalue().encode("utf-8"))
 
 
 def _decision(result: subprocess.CompletedProcess[bytes]) -> tuple[str, str]:

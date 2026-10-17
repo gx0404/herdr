@@ -2,25 +2,32 @@
 
 范围：`tests/**`、`scripts/test_*.py`（与各领域并集）、
 `scripts/run_test_suite.py`、`scripts/run_nextest.py`、`scripts/run_parallel_unittest.py`、
-`.config/nextest.toml`、`scripts/smoke_live_handoff_sessions.sh`。
+`.config/nextest.toml`、`.config/test-suites.toml`、`scripts/run_test_catalog.py`、
+`scripts/smoke_live_handoff_sessions.sh`。
 
 ## 命令入口（上游 Testing 全文语义）
 
 默认用 `just` recipe 而非直接 cargo/脚本：
 
 ```bash
-just test     # cargo nextest + maintenance 脚本测试 + 热路径架构测试 + 资产/docs 契约测试
-just check    # 格式检查 + nextest + maintenance + Windows 目标 lint
+just test        # 固定默认回归（目标热缓存端到端 60 秒；扩展项未执行）
+just test-full   # 完整自动回归（Rust 全部 nextest 隔离）
+just check       # 格式 + lint + 默认回归 + 平台编译检查
+just check-full  # 完整开发验收（测试框架修改、广泛回归与发布准备）
 ```
 
 提交前跑 `just check`，除非明确接受更窄的验证；不得绕过失败检查——修好，或
 准确说明为何更窄的检查足够。`just test` 由 `scripts/run_test_suite.py` 编排五个阶段：
 `nextest`、`maintenance`、`ui-hot-path`、`integration-assets`、`docs-contract`。
+阶段名 nextest 为日志兼容保留，实际执行器由分类入口选择：默认 Rust 线程单测，
+清单中的进程级资源/初始 ID 断言另用 nextest；完整集全部 nextest。分类真源是
+`.config/test-suites.toml`，新测试默认纳入，扩展项必须有原因。不得缓存成功结果。
+空集合、失效选择器、缺工具失败；60 秒是目标，超时继续完成。
 worker 配置按以下优先级解析：命令行 > 环境变量 > 默认值，所有显式值必须是正整数：
 
 - combined `test_budget` 默认 `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET` 或
   `--test-budget` 覆盖；它是 maintenance 与 nextest 的默认合并预算。
-- `phase_jobs` 默认 `min(2, 5, test_budget)`，可用 `HERDR_TEST_PHASE_JOBS`、
+- `phase_jobs` 默认 `min(3, 5, test_budget)`，可用 `HERDR_TEST_PHASE_JOBS`、
   `--phase-jobs` 或兼容别名 `--jobs` 覆盖，限制五个 phase 同时运行数。
 - 并发 phase 时 `maintenance_jobs` 默认 `min(4, max(1, test_budget-1))`，为 nextest
   预留一个 worker；串行时默认 `min(4, test_budget)`。可用 `HERDR_MAINTENANCE_JOBS` 或
@@ -35,7 +42,9 @@ worker 配置按以下优先级解析：命令行 > 环境变量 > 默认值，�
 `maintenance_jobs`、`nextest_jobs`、`failures`；`phases` 下每项记录 `recipe`、`status`、
 `exit_code`、`seconds`、`log`。阶段启动时标为 `running`，待执行阶段保留 `pending`，
 只有执行完毕才写通过/失败；外部强制终止留下的 `running` 不是通过证据。`seconds` 是最近
-一次 manifest 更新时的已运行时间，完成时记录最终耗时。直接运行 `just nextest-all`、`just test-one` 或 `just ci-tests` 时，
+一次 manifest 更新时的已运行时间，完成时记录最终耗时。另记录 suite、total_seconds、
+target_seconds/target_met、extended_tests 与执行/跳过计数；取消不是通过。
+直接运行 `just nextest-all` 或 `just test-one` 时，
 justfile 通过 `HERDR_NEXTEST_JOBS` 传递 nextest 线程数，未设置时默认 4。维护脚本执行器
 默认 `min(4, cpu_count)` 个 worker，耗时表在同目录原子替换写回。
 
@@ -46,14 +55,14 @@ justfile 通过 `HERDR_NEXTEST_JOBS` 传递 nextest 线程数，未设置时默�
 彼此无交集；空分片明确记录，整个集合为空不能假绿。每个 runner 的 nextest store、日志与
 结果独立，任一启动、输出、退出或覆盖校验失败均使整体非零；运行中或取消不算通过。
 不兼容的自定义 profile、跨测试组调度等配置必须拒绝分片并提示恢复单 runner，不能忽略约束。
-`test-one` 与 `ci-tests` 保持原单 runner 行为；不把分片小样本收益当成全量提速证明。
+`test-one` 保持单 runner；CI 完整集沿用同一分片入口。不把分片小样本收益当成全量提速证明。
 
 - 单测贴代码放 `#[cfg(test)] mod tests`；新 `AppState`/`Workspace` 行为必须可用
   `AppState::test_new()` / `Workspace::test_new()` 无 PTY 测试（不变量武器见
   `persistence-session.md`）。
-- 维护脚本测试是 `scripts.test_<name>` 模块清单（见 justfile `maintenance-test`），
-  新增脚本测试必须加入清单，否则不会被收集。清单由 `scripts/run_parallel_unittest.py`
-  按类（慢类按历史耗时再拆块）放进子进程并发跑，所以脚本测试必须跨进程并发安全：
+- 维护脚本由 `scripts/run_test_catalog.py` 自动发现 `scripts/test_*.py`，UI 热路径
+  模块由独立阶段收集；扩展分类写 `.config/test-suites.toml`，不另维护模块白名单。
+  默认按类放进子进程、从长到短并发跑，历史耗时只影响顺序。因此必须跨进程并发安全：
   不写仓库工作树（git 写操作只在唯一临时仓库）、不共用固定临时路径/端口/管道/锁文件。
 - 在既有 herdr 会话内测试新构建时，用 `cargo run -- ...` 并清除继承的 socket
   覆盖，让 debug 二进制连 debug `herdr-dev` server：
@@ -121,8 +130,9 @@ ID、workspace/tab/pane 身份、restore/handoff、agent 检测权威或 UI/输�
 
 ## 测试隔离与并发
 
-`just test`（nextest，每测一进程）是标准入口；线程模式的 `cargo test`（同进程多线程）
-也须保持可靠。新测试按以下约定写：
+`just test` 的普通 Rust 单测同进程多线程；进程级不变量在清单登记并单独 nextest。
+`just test-full` 全部逐测隔离。两种模式均须可靠，不能把隔离依赖误判为业务失败。
+新测试按以下约定写：
 
 - 目录：单测不得读写开发机真实的 herdr 配置/状态目录。需要时用
   `config::test_dirs::isolate_dirs(name)`：本线程的 `config_dir()`、`state_dir()`、

@@ -153,7 +153,11 @@ class ReleasePerfScriptContractTests(unittest.TestCase):
 
     def test_maintenance_manifest_registers_this_contract(self):
         justfile = (ROOT / "justfile").read_text(encoding="utf-8")
-        self.assertIn("scripts.test_release_perf", justfile)
+        self.assertIn("scripts/run_test_catalog.py maintenance", justfile)
+        from scripts.run_test_catalog import load_catalog, python_tests
+        selected, deferred = python_tests(load_catalog(), "default")
+        self.assertTrue(any(name.startswith(__name__ + ".ReleasePerfScriptContractTests.") for name in selected))
+        self.assertTrue(any(name.startswith(__name__ + ".ReleasePerfEnvironmentContractTests.") for name in deferred))
 
 
 class ReleasePerfEnvironmentContractTests(unittest.TestCase):
@@ -248,7 +252,10 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
                 CONTRACT_STATUS=str(status), CONTRACT_FAULT=fault,
                 CONTRACT_READINESS_STDERR=readiness_stderr,
                 CONTRACT_STARTUP_STDERR=startup_stderr,
-                CONTRACT_PROCESS_TMP=f"{shell_root}/process tmp",
+                # TMP/TEMP are read during native MSYS process initialization,
+                # before BASH_ENV runs. Keep the existing drive-qualified path on
+                # Windows rather than exporting /e/... to that native boundary.
+                CONTRACT_PROCESS_TMP=process_tmp.as_posix(),
                 BASH_ENV=f"{shell_root}/private-bash-env.sh",
             )
             (root / "private-bash-env.sh").write_text(

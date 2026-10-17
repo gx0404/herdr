@@ -1,3 +1,8 @@
+//! Durable snapshot and recovery publication. A successful rename is a commit
+//! point even if the following directory sync fails: keep the published file and
+//! report uncertain durability. Recovery ownership is checked before retry/prune;
+//! matching bytes alone do not establish ownership of an existing file.
+
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};

@@ -232,7 +232,7 @@ This fork ships official integrations for Pi, Claude Code, Codex, Kimi Code CLI,
 - Hooks or plugins that an earlier build installed into a retired agent's config directory are left untouched. Remove them by hand if you no longer want them; their session reports are treated as unofficial and are not used for restore. Since `herdr integration uninstall` also rejects retired names, this fork cannot remove them for you: open that agent's own config directory yourself and delete the hook or plugin file, using that agent's own documentation to find its exact location.
 - A retired agent running in a pane is an ordinary program: it is not detected automatically, and config keys that named it (such as `[ui.sound.agents]` overrides) are ignored.
 
-Any agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is supported as an external agent source rather than as a built-in integration: it is a desktop app that never runs in a pane, so Herdr lists its running recent sessions under the agents panel's External group (see [Agent](/docs/concepts/#agent)), without installing anything into ZCode.
+Any agent, retired or not, can still report state through the generic interface described in [Integrate your own agent](#integrate-your-own-agent). ZCode is supported as an external agent source rather than as a built-in integration: it is a desktop app that never runs in a pane, so Herdr lists its running recent sessions under the Sessions sidebar's External group (see [Agent](/docs/concepts/#agent)), without installing anything into ZCode.
 
 ## Removed account usage monitoring
 

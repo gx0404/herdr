@@ -10,8 +10,9 @@
 | `ARCHITECTURE.md` | 进程模型、src 模块地图、状态所有者、数据流 |
 | `DEVELOPMENT.md` | 环境准备与开发交付闭环 |
 | `MAKE_COMMANDS.md` | 全部 `just` 命令：用途、前置、副作用、证据 |
-| `TESTING.md` | 测试分层、入口、失败路径与证据要求 |
+| `TESTING.md` | 默认/完整测试分层、60 秒目标、失败路径与证据要求 |
 | `AI_TOOLS.md` | AI 工具接入矩阵与逐工具验证账 |
+| `REPOSITORY_AUDIT.md` | 本轮知识维护范围、历史版本证据与默认测试覆盖变化 |
 | `AGENT_RULES/` | 16 个领域规则 + 路由（README 讲用法与维护） |
 | `kb/` | agent 知识库产物（`chunks.json`，生成物，勿手改） |
 | `graphify/` | 代码图谱报告镜像（与 `graphify-out/GRAPH_REPORT.md` 字节一致） |
@@ -28,7 +29,7 @@
 | `distribution/agent-detection/*.toml` | `src/detect/manifests/*.toml` | 复制 + index | 稳定客户端运行时下载 | `python3 scripts/agent_detection_manifest_check.py`（maintenance-test） |
 | `crates/ghostty-vt/src/bindings.rs` | vendored C API | `just libghostty-bindings`（bindgen-cli 0.72.1） | `crates/ghostty-vt/src` | 编译本身 + `test_vendor_libghostty_vt` |
 | `docs/kb/chunks.json` | 上述文档、manifest、config 契约、`src/**/*.rs` 结构 | `scripts/build_agent_kb.py` | `scripts/agent_kb.py` 检索 | `just kb-check` + `scripts/test_agent_kb.py` golden |
-| `graphify-out/GRAPH_REPORT.md`（镜像 `docs/graphify/`）、标签+sig、指纹 | `src/**`（Rust） | `scripts/graphify.sh rebuild` | 图查询、overview | `just graph-check` |
+| `graphify-out/GRAPH_REPORT.md`（镜像 `docs/graphify/`）、标签+sig、指纹 | `src/**`（Rust 与宿主集成脚本） | `scripts/graphify.sh rebuild` | 图查询、overview | `just graph-check` |
 | `CHANGELOG.md` / `docs/versions/<v>/` / `distribution/latest.json` | `docs/next` + tag | 上游 release 流程（`just release*`；release.yml 在本 fork 已归档） | 用户/更新器/网站 | `just release-docs-check`；上游 distribution.yml 在本 fork 已归档 |
 
 约定：新增生成物时在本表登记输入→生成器→产物→消费者→检查，并默认提供只读

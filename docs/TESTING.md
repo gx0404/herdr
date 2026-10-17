@@ -1,42 +1,57 @@
 # herdr 测试分层
 
-## 入口与分层
+## 入口与范围
 
-| 层 | 入口 | 证明 / 不证明 |
+| 入口 | 范围 | 边界 |
 |---|---|---|
-| 格式与静态 | `just lint`（fmt + clippy -D warnings）、`just windows-lint` | 格式与静态契约 / 真实行为 |
-| Rust 单测（贴代码） | `cargo nextest`（`just test` 并行编排、`just nextest-all`、`just test-one <filter>`） | 边界与纯状态逻辑（`AppState::test_new()` 等）/ 真实装配 |
-| 集成（`tests/`） | `just test`（api_ping、client_mode、live_handoff、detach_reattach、cross_area、multi_client、remote_attach、machine_api…） | 入口、生命周期、多客户端交接 / 真实外部机器 |
-| 维护脚本契约 | `just maintenance-test`（`scripts.test_*` 清单经 `scripts/run_parallel_unittest.py` 按类并行） | changelog/preview/manifest/翻译/打包脚本行为 |
-| UI 热路径架构 | `just ui-hot-path-architecture-test` | 渲染热路径边界（确定性）/ 运行时性能 |
-| bun 契约 | `just docs-contract-test`、`just integration-assets-test` | docs 生命周期与集成资产 / Rust 行为 |
-| 框架守门 | `just agent-rules-check`、`just framework-check`、`just graph-check`、`just kb-check` | 规则闭集、hook 探针、图谱/KB 新鲜度 |
-| 性能 | `just bench-render-scale`（非门禁）、`just bench-release-smoke`（发布前，vs stable 基线） | 声明条件下的扩展与耗时 / 普遍结论 |
+| `just test` | 固定默认回归：Rust、维护脚本、UI 热路径、集成资产、文档契约 | 热缓存端到端目标 60 秒，扩展集未执行 |
+| `just test-full` | 默认集与所有扩展自动测试；Rust 全部 nextest 隔离 | 不隐含 ignored 性能、真实桌面输入或安装资格 |
+| `just check` | fmt、clippy、默认回归、平台编译检查 | Windows 还构建普通二进制；不受 60 秒目标约束 |
+| `just check-full` | lint、完整自动回归、平台编译检查 | 测试框架变更、广泛回归和发布准备使用 |
+| `just test-one <filter>` / `just nextest-all` | 指定 Rust 集 / 完整 nextest | 每测试独立进程，不受默认集排除项限制 |
+| `just maintenance-test` | Python 自动收集、顶层 Bun 契约、fork 丢弃路径检查 | `HERDR_TEST_SUITE=full` 包含扩展项 |
+| `just integration-assets-test` / `just docs-contract-test` | 对应目录 Bun 自动收集 | 分类同上，不代证真实 CLI 兼容 |
+| `just framework-check` | resolver、hook 探针、KB/图谱 freshness | 同步检查不代证文档语义和真实会话接入 |
 
-CI（`.github/workflows/ci.yml`）：Linux `just lint` + `just ci-tests`（分片）；
-macOS `just ci`；ghostty 专项；Windows `just check` + ConPTY 冒烟与打包；
-conventional-commit 检查独立 job。PR 政策门在 `pr-gate.yml`（无测试）。
+## 分类真源与调度
 
-## 纪律要点（规则全文见 `AGENT_RULES/testing.md`）
+`.config/test-suites.toml` 由 `scripts/run_test_catalog.py` 消费，登记扩展项、原因与
+进程隔离项。新 Rust 单测与 `tests/*.rs`、Python `scripts/test_*.py`、对应目录的
+Bun `*.test.ts` 默认纳入；UI 热路径 Python 模块由独立阶段执行一次。
+失效选择器、意外空集合和必要工具缺失必须失败，不缓存测试成功结果。
 
-- 新脚本测试必须加入 justfile `maintenance-test` 的模块清单，否则不会被收集；清单按类
-  拆成子进程并发执行，测试不得写仓库工作树或共用固定的临时路径、端口、管道名。
-- 失败路径优先：超时、断线、取消、旧响应、代际变化、重复操作；拒绝门也要测
-  合法输入（本仓库实践：resolver/hooks/KB 的每个拒绝项都有独立注入测试）。
-- 必要工具链缺失不得整族 skip 后报绿；跑不了就明确 PENDING。
-- fixture 是契约：不为过门修改期望；生成物 freshness 失败先查输入是否有意。
-- 会拉起守护进程的测试必须能在被强杀后自清理：`Drop` 在 SIGKILL/SIGTERM 下
-  不执行。`tests/ssh_e2e.rs` 用独立会话的收割进程接管清理，并在下次启动时清扫
-  陈旧沙箱；排查残留用 `ls -d /tmp/herdr-ssh-e2e-*` 与
-  `pgrep -af herdr-ssh-e2e`，正常应为空，重跑该测试即自愈。
-- `tests/cli` 的临时目录是 `/tmp/hcli-<pid>-<纳秒>`。拉起 server 的用例结尾用
-  `cleanup_spawned_herdr` / `cleanup_test_base` 先收掉 server 再删目录（失败时
-  走不到收尾，目录留作现场）；不拉起 server 的用例用 `harness::TestDirGuard`，
-  离开作用域（含断言失败）即删。要保留后一类的现场，设 `HERDR_TEST_KEEP_DIRS=1`
-  （守卫只在 stderr 报路径、不删）；该开关只对用 `TestDirGuard` 的用例生效。
-  全量跑完应不新增 `/tmp/hcli-*`，有残留先查是哪条用例没收尾。
-- **UI 截图：N/A**——herdr 是 TUI。等效证据 = `herdr-throwaway-repro` 隔离会话
-  中真实操作 + `herdr agent read`/`capture_agent_screen.py` 读回；键盘/终端
-  行为用 `tests/fixtures` 的实测 TSV 语料。
-- 在 herdr 内测 herdr：`env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH
-  cargo run -- <command>`，避免污染安装版会话。
+默认 Rust 使用 Cargo 原生线程单测；进程资源数量和初始全局 ID 断言仍用 nextest
+独立执行。完整集保留 nextest 逐测试隔离。已分类的真实 server/SSH/PTY/安装二进制、
+真实 deadline、大体积响应、发布环境演练和重试定时器场景移入扩展集，断言不变。
+协议、身份/旧响应、持久化失败、配置写入、输入、检测、UI 几何和集成契约仍有默认覆盖。
+
+Python 按类分组、按历史耗时从长到短调度。历史只影响顺序，不决定选中集合。
+五阶段默认并发 `min(3, 5, budget)`，Rust/Python 合并预算默认 `min(8, cpu_count)`；
+worker 与命令行覆盖语义见 `AGENT_RULES/testing.md`。Bun 阶段也有进程/计时器成本，
+合并预算不是整机 CPU 硬限额。完整 nextest 可显式分片，默认线程单测不分片。
+
+Linux/macOS/Windows CI 共用分类。push/PR 使用默认集；现有 CI workflow 手动输入
+`full_tests` 选择完整集。macOS 保留既有 live_handoff 过滤，专项资格可另补跑；
+ghostty、平台编译和 ConPTY 验收保留各自范围。归档 workflow 不执行。
+GX 安装包 workflow 显式设置 `HERDR_TEST_SUITE=full`，发布前不使用精简默认集。
+
+## 证据与 60 秒验收
+
+`target/test-suite-logs/<run-id>/manifest.json` 记录阶段状态、退出码、日志和 worker，
+新增 `suite`、`total_seconds`、`target_seconds`、`target_met`、`extended_tests` 与
+实际执行/跳过计数。未知计数为 null，pending/running/cancelled 均不是通过。
+超出 60 秒继续完成，不截断、不伪报达标；默认通过与完整通过分别输出。
+
+在当前机器、相同 worker 配置和最终代码上预热后连续三次 `just test` 均 ≤60 秒才能
+标记达标；另记录一次真实源码小改后的增量编译运行。计时含发现、增量编译和汇总。
+冷构建及 `just check` 单独记录，旧版本测量不代表当前版本。
+
+## 隔离与专项验证
+
+- 使用 `python -B scripts/setup_env.py --run just test` 隔离用户配置、HOME/AppData/XDG、
+  临时目录和缓存；已有 Python/Rust/Git 可只读复用。测试子进程使用当前解释器，避开安装器别名。
+- 拒绝门须覆盖允许与拒绝。fixture 不为过门修改，freshness 失败先确认输入变化。
+- 守护进程需进程外回收与陈旧沙箱清扫，不能依赖 Drop 在强杀后执行。
+- TUI 需要视觉验收：`just ui-gallery` 的 compose HTML/PNG 必须读回；真实输入、IME、
+  剪贴板和 PTY 另用隔离会话及实机验证。纯编排改动不要求重画 UI。
+- 真实 agent 兼容、安装升级、发布性能和 Windows 输入资格独立运行；缺环境记 PENDING。

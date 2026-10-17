@@ -16,33 +16,38 @@ herdr 的 AI 协作面是「共享真源 + 薄适配器」：规则真源在 `do
 
 ## 验证账（按会话逐项记账，未运行不写 PASS）
 
+2026-10-18 本轮重新运行配置解析、决策矩阵与原样注册命令探针；这些是受控子进程
+证据，不代表已在 ZCode、Claude Code 或 Codex 客户端内开启新会话并验证自动触发。
+
 | 检查 | ZCode | Claude Code | Codex |
 |---|---|---|---|
-| 配置文件可解析 | PASS（JSON 探针加载） | PASS（settings.json JSON 语法） | PASS（2026-09 实测 codex v0.154.0 启动解析；hooks 为数组表语法，`scripts.test_ai_tool_hooks.CodexConfigShapeTests` 锁定形状） |
-| 规则加载（新会话读 AGENTS.md） | PASS（本会话即按其执行） | PENDING | PENDING |
+| 配置文件可解析 | PASS（本轮 JSON 探针加载） | PASS（本轮 settings.json JSON 解析） | PASS（本轮 TOML 与数组表形状探针；2026-09 的 v0.154.0 启动为历史证据） |
+| 规则加载（客户端新会话自动读取） | PENDING（历史会话记录不代证本轮） | PENDING | PENDING |
 | PreToolUse 拒绝（`gh pr merge` 等） | PASS（探针 + bash wrapper 实测） | PASS（同一 wrapper） | PASS（codex 适配器实测） |
 | PreToolUse 放行（常规命令/编辑） | PASS（探针矩阵） | PASS（同上） | PASS |
 | PostToolUse 记录 / Stop 信号 | PASS（临时仓库实测） | PASS（同脚本） | PASS |
-| 真实客户端会话内 hook 触发 | PENDING：下次 ZCode 会话执行 `gh pr merge` 类命令观察拒绝 | PENDING | PENDING：配置解析已实测通过（v0.154.0），TUI 会话内探针命令待跑 |
+| 真实客户端会话内 hook 触发 | PENDING：使用下述隔离探针补验 | PENDING | PENDING：真实会话自动触发待补验 |
 
 PENDING 补验方式：在对应工具的真实会话中尝试探针命令
-（`gh pr merge 1`、编辑 `distribution/latest.json`），确认被拒并显示理由；
+（通过隔离临时仓库与无副作用 hook 输入，不对真实 PR 或渠道文件执行危险动作），确认被拒并显示理由；
 完成后把上行改为 PASS 并注明日期。
 
 ## 测试与性能命令（AI agent）
 
-AI agent 默认通过 `just test` 进入五阶段编排，不要把单个 phase 的绿色当作全量通过。
+AI agent 默认通过 `just test` 进入固定默认五阶段回归；扩展分类见 `.config/test-suites.toml`。
+完整回归使用 `just test-full`，测试框架修改验收使用 `just check-full`。默认目标热缓存 60 秒，
+超过目标仍跑完，不把默认集或单个 phase 通过称为完整通过。
 `HERDR_TEST_BUDGET`/`--test-budget` 控制 combined 默认预算（默认 `min(8, cpu_count)`）；
 `HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs` 控制 phase 并发（默认
-`min(2, 5, budget)`）；`HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs` 控制 maintenance
-（默认 `min(4, budget)`）；`HERDR_NEXTEST_JOBS`/`--nextest-jobs` 控制 nextest（默认
-`max(1, budget-maintenance)`）。命令行优先于环境变量，显式值必须为正整数，编排器会把
+`min(3, 5, budget)`）；`HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs` 控制 maintenance
+（并发默认 `min(4, max(1, budget-1))`，串行默认 `min(4, budget)`）；
+`HERDR_NEXTEST_JOBS`/`--nextest-jobs` 控制 Rust worker（并发为剩余预算，串行用 budget）。命令行优先于环境变量，显式值必须为正整数，编排器会把
 解析后的 maintenance/nextest 值传给 phase 子进程。每个 run 的 `manifest.json` 原子记录
 `run_id`、`status`、`manifest`、`test_budget`、`phase_jobs`、`maintenance_jobs`、
 `nextest_jobs`、`failures`，以及每个 phase 的 `recipe`、`status`、`exit_code`、`seconds`、
 `log`；证据路径是 `target/test-suite-logs/<run-id>/`。
 
-`just nextest-all`、`just test-one`、`just ci-tests` 是直接 nextest 入口，justfile 使用
+`just nextest-all`、`just test-one` 是直接 nextest 入口，justfile 使用
 `HERDR_NEXTEST_JOBS`，未设置时默认 4；直接 `run_parallel_unittest.py` 的 `--jobs` 与
 `HERDR_MAINTENANCE_JOBS` 只影响 maintenance 执行器。`bench-release-smoke` 仅支持
 Linux/macOS，且候选与 baseline 必须在 run 认领的短运行根中隔离 `HOME`、`USERPROFILE`、

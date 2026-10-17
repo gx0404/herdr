@@ -96,7 +96,10 @@ class RepositoryWiringTests(unittest.TestCase):
         justfile = (PROJECT_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("\nlocal-build-config *args:\n", justfile)
         self.assertIn("scripts/local_build_config.py", justfile)
-        self.assertIn("scripts.test_local_build_config", justfile)
+        self.assertIn("scripts/run_test_catalog.py maintenance", justfile)
+        from scripts.run_test_catalog import load_catalog, python_tests
+        selected, _ = python_tests(load_catalog(), "default")
+        self.assertTrue(any(name.startswith(__name__ + ".") for name in selected))
 
 
 if __name__ == "__main__":

@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+### Added
+- This fork now provides a unified Sessions tree and an Inspector preview for agent activity, questions, failure details and session insight. The default Graphite theme uses shared state indicators; saved dock layouts migrate to the new panel model while retaining the terminal layout.
+- The agent overview supports client-local read/unread marks and inline prompts for idle or review sessions when the endpoint advertises `agent.prompt`. Blocked, failed, offline and read-only external sessions remain jump-only or read-only as appropriate; a timeout preserves the draft and does not imply server-side cancellation.
+
+### Removed
+- This fork no longer exposes CLI account usage monitoring, account binding, or the Accounts panel. Host resource monitoring remains available.
+
 ### Changed
+- Agent hooks can attach bounded permission/question and failure details. Shared harness metadata and notification decisions keep lifecycle authority, session identity and late-response handling consistent across the shell. ZCode remains an external read-only source.
 - Codex sessions started or restored inside Herdr now use a pane-local launcher. It adds `--no-daemon` only when the selected executable supports it, removes Herdr's private shim paths without reordering the other `PATH` entries, and on Windows can provide a private native `tar.exe` adapter for Codex's built-in updater without changing the user or system `PATH` or PowerShell execution policy.
 - Configuration updates now use durable temporary files, preserve existing permissions and symlink targets, and synchronize the replacement. Codex integration installation validates its TOML and JSON inputs before writing and changes only Herdr's top-level hook settings.
 - Client view updates are coalesced per endpoint, terminal snapshots format outside the PTY content lock after a stable capture, and Windows process discovery reuses a shared snapshot across panes.
@@ -18,9 +26,6 @@
 ### Performance
 - High-rate terminal view traffic now batches compatible frames, avoids redundant composition, and keeps retained-surface patches narrow. Activity and process-discovery paths use bounded work and shared snapshots instead of repeating full scans.
 
-### Testing
-- Maintenance and full-suite runners now use bounded concurrency, per-run logs and manifests, atomic duration/result writes, and explicit failure handling for missing phases or unavailable logs.
-- Release performance smoke runs record metadata, commands, summaries, and exit codes under `.local/perf-baseline`; each case isolates temporary state and its tmux directory. Regression coverage was added for Codex configuration preservation, Windows launch and handshake behavior, process identity, PTY admission, response limits, retained rendering, and graphics cleanup.
 
 ## [0.9.3] - 2026-09-29
 
@@ -663,11 +668,11 @@ This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes t
 - Added a remote SSH bridge keepalive fallback. `herdr --remote` now generates a temporary SSH config that includes the user's SSH config first, then adds `ServerAliveInterval` and `ServerAliveCountMax` only when the user has not already configured keepalives. Set `[remote].manage_ssh_config = false` to disable this. (#354, #355, thanks @SunskyXH)
 - Added `ui.right_click_passthrough_modifier` so a configured modifier such as `ctrl` can forward right-click hold and drag gestures to mouse-reporting pane apps while normal right-click still opens Herdr's pane menu. (#148)
 - Added Kilo Code CLI automatic detection for idle, working, and blocked terminal states. (#270)
-- Added `herdr integration install copilot` for GitHub Copilot CLI hooks that report native session ids through Herdr's socket API. Copilot state still comes from Herdr's screen detection because Copilot hooks do not provide complete lifecycle coverage. When native agent session restore is enabled, Herdr can resume Copilot panes with `copilot --resume=<id>`. (#232, #386, thanks @LaneBirmingham)
+- Added `herdr integration install copilot` for GitHub Copilot CLI hooks that report prompt, tool, post-approval progress, permission, `ask_user`, `exit_plan_mode`, idle, session-exit state, and session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Copilot panes with `copilot --resume=<id>`. (#232, #386, thanks @LaneBirmingham)
 
 ### Changed
 - Native agent session restore is now enabled by default for supported panes with current official integrations. Set `[session] resume_agents_on_restore = false` to disable it.
-- Claude Code, Codex, GitHub Copilot CLI, Droid, Kimi Code CLI, and Qoder CLI integrations now report session identity only. Native state for those agents comes from Herdr's screen detection, while Pi, OMP, OpenCode, Kilo Code CLI, Hermes Agent, and custom socket integrations can still report state.
+- Claude Code, Codex, and OpenCode integrations now report session identity only. Native state for those agents comes from Herdr's screen detection, while Pi, OMP, GitHub Copilot CLI, Hermes Agent, Qoder CLI, and custom socket integrations can still report state.
 
 ### Fixed
 - Large long-running sessions no longer hit the frame-streaming crash fixed by the vendored libghostty-vt update. (#276)
@@ -1245,7 +1250,7 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 ### Added
 - Added a local Unix socket API for controlling running herdr sessions, including workspace and pane management, pane reads, text/key input, pane splitting, and output waits.
 - Added event subscriptions over the socket API for workspace and pane lifecycle events, pane output matches, and agent state changes.
-- Added CLI wrappers on top of the socket API with `herdr workspace ...`, `herdr pane ...`, and `herdr wait ...`, using compact public ids for scripting and agent orchestration.
+- Added CLI wrappers on top of the socket API with `herdr workspace ...`, `herdr pane ...`, and `herdr wait ...`, using compact public ids like `1` and `1-2` for scripting and agent orchestration.
 - Added a settings popup with mouse support for changing themes, sound alerts, and toast notifications from inside herdr.
 - Added 9 built-in themes: catppuccin, tokyo night, dracula, nord, gruvbox, one dark, solarized, kanagawa, and rosé pine.
 - Added interactive pane scrollbars, manual sidebar resizing, and upstream git ahead/behind indicators in the workspace sidebar.

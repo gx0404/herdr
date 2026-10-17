@@ -308,8 +308,10 @@ id = "testing"
 doc = "docs/AGENT_RULES/testing.md"
 paths = [
   ".config/nextest.toml",
+  ".config/test-suites.toml",
   "scripts/run_nextest.py",
   "scripts/run_parallel_unittest.py",
+  "scripts/run_test_catalog.py",
   "scripts/run_test_suite.py",
   "scripts/smoke_live_handoff_sessions.sh",
   # 所有脚本自测与领域规则取并集：新增 scripts/test_*.py 自动被测试纪律覆盖。

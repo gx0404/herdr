@@ -1,0 +1,173 @@
+# Fixed default regression suite. Unclassified tests are included automatically.
+# Extended entries keep their assertions and run under `just test-full`.
+version = 1
+
+[[python_extended]]
+selector = "scripts.test_release_perf.ReleasePerfEnvironmentContractTests"
+reason = "Real shell orchestration, timeouts and cleanup qualification; static release contracts remain in default."
+
+[[python_extended]]
+selector = "scripts.test_gx_smoke"
+reason = "Installer and upgrade qualification; package and release unit contracts remain in default."
+
+[[python_extended]]
+selector = "scripts.test_setup_env.SetupEnvTests.test_real_bash_nested_python_and_powershell_temporary_files"
+reason = "Nested real tool environment qualification."
+
+[[rust_extended]]
+selector = "binary:api_ping"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:auto_detect"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:broken_pipe"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:cli"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:client_mode"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:codex_launch_windows"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:cross_area"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:detach_reattach"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:host_shutdown"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:live_handoff"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:machine_api"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:machine_import"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:machine_setup"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:multi_client"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:remote_attach"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:server_headless"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:session_delete"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:session_restore"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:ssh_e2e"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "binary:windows_server_security"
+reason = "Real server/process/platform lifecycle qualification; in-process component contracts remain default."
+
+[[rust_extended]]
+selector = "test:server::headless::tests::endpoint_responses::endpoint_response_exact_sixty_four_mib_preserves_utf8_and_escapes"
+reason = "64 MiB payload boundary qualification; bounded cursor and smaller response contracts remain default."
+
+[[rust_extended]]
+selector = "test:server::headless::tests::endpoint_responses::endpoint_response_sixty_four_mib_plus_one_is_only_a_small_error"
+reason = "64 MiB allocation boundary qualification."
+
+[[rust_extended]]
+selector = "test:client::catalog_reload::tests::broadcast_watcher_notifies_on_external_change_only"
+reason = "Real filesystem notification debounce qualification."
+
+[[rust_extended]]
+selector = "test:server::headless::tests::transport_lifecycle::pre_connected_full_channel_does_not_renew_handshake_deadline"
+reason = "Real 4-second handshake deadline; pure admission and generation tests remain default."
+
+[[rust_extended]]
+selector = "test:integration::tests::audit_p0_kimi_snapshot_read_stops_at_deadline_for_persistent_windows_locks"
+platform = "windows"
+reason = "Persistent real Windows lock deadline qualification."
+
+[[rust_extended]]
+selector = "test:server::client_transport::tests::partial_windows_handshake_closes_at_absolute_deadline"
+platform = "windows"
+reason = "Real partial-pipe handshake deadline qualification."
+
+[[rust_extended]]
+selector = "test:server::client_transport::tests::empty_windows_handshake_closes_at_absolute_deadline"
+platform = "windows"
+reason = "Real idle-pipe handshake deadline qualification."
+
+[[rust_extended]]
+selector = "test:server::client_transport::tests::windows_fragmented_handshake_does_not_extend_absolute_deadline"
+platform = "windows"
+reason = "Real fragmented-pipe deadline qualification."
+
+[[rust_extended]]
+selector = "test:platform::windows::tests::windows_shells_round_trip_agent_arguments_through_a_real_command"
+platform = "windows"
+reason = "Real PowerShell/cmd command argument round-trip; encoding contracts remain default."
+
+[[rust_extended]]
+selector = "test:worktree::tests::submodule_worktree_removal_requires_explicit_force"
+reason = "Real submodule checkout/removal qualification; refusal policy remains default."
+
+[[rust_isolated]]
+selector = "server::client_transport::tests::windows_transport_handles_threads_and_idle_cpu_remain_bounded"
+platform = "windows"
+reason = "Process-wide resource counts require an isolated process; still runs in default."
+
+[[rust_isolated]]
+selector = "workspace::tests::generated_workspace_ids_are_short_base32_handles"
+reason = "Initial global ID sequence requires an isolated process; still runs in default."
+
+[[bun_extended]]
+selector = "src/integration/assets/herdr-agent-state.test.ts::Pi resends an undelivered activity snapshot once"
+reason = "Real retry timer and cancellation windows; lifecycle, identity and activity payload tests remain default."
+
+[[bun_extended]]
+selector = "src/integration/assets/herdr-agent-state.test.ts::Pi retries an undelivered activity snapshot at most once"
+reason = "Real retry timer and cancellation windows; lifecycle, identity and activity payload tests remain default."
+
+[[bun_extended]]
+selector = "src/integration/assets/herdr-agent-state.test.ts::Pi skips the activity retry once a newer snapshot supersedes it"
+reason = "Real retry timer and cancellation windows; lifecycle, identity and activity payload tests remain default."
+
+[[bun_extended]]
+selector = "src/integration/assets/herdr-agent-state.test.ts::Pi drops a pending activity retry when the session shuts down"
+reason = "Real retry timer and cancellation windows; lifecycle, identity and activity payload tests remain default."
+
+[[bun_extended]]
+selector = "src/integration/assets/herdr-agent-state.test.ts::Pi never retries a snapshot whose send fails after the session shut down"
+reason = "Real retry timer and cancellation windows; lifecycle, identity and activity payload tests remain default."
+
+[[bun_extended]]
+selector = "src/integration/assets/herdr-agent-state.test.ts::Pi still retries the next session's snapshots after a shutdown"
+reason = "Real retry timer and cancellation windows; lifecycle, identity and activity payload tests remain default."

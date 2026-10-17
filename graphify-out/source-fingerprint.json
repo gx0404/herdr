@@ -2,21 +2,19 @@
   "artifacts": {
     ".graphify_labels.json": "a528cfdc1951c0efddd59642b334011bffcd46d3c70a4e36f635a1d137ee087d",
     ".graphify_labels.json.sig": "f254025e8891eaabc9665e4eb1f2917f3273d94fe8217df9c697b0ecce0bd57b",
-    "GRAPH_REPORT.md": "02bc553d7dc5732252f071bfee8fb7ad6a24139a2a03bc0f7e35595199f49c7e",
-    "graph.json": "a713958a4574be8d832eaf1502ff9934a06ad3b41ffc21771a2b8cc30d116c8e"
+    "GRAPH_REPORT.md": "ce2157ec310b949cfa1f458134e85cc36f61e5d29c1fe04d5623df9cbef3ea43",
+    "graph.json": "29b3cb2e463ce9276e7904dce8e35f653b229abe0b3ab1f29a448e6fcd1dd2b4"
   },
   "index_root": "src",
   "pipeline": {
-    "scripts/graphify.sh": "41bc7db737f1d4f94baabf8847eb88f6c42f766f3a83ddc64c4c38067e59bd70",
-    "scripts/graphify_fingerprint.py": "b846a0849c544b8fa3f166818473535e45740f45962ad9c0692d67f6f9565a51",
-    "src/.graphifyignore": "8c56a5bd3afa7803a398e7b62abe89750a608f7116eddefd6aab1367eeac50a5"
+    "scripts/graphify.sh": "337ecd2b2d2e45ece0c2145153668b896d4593fd23a62ba4f5256e156fdab042",
+    "scripts/graphify_fingerprint.py": "cd7002bf283b28b8c854e785ac4b7b3863ac74566792245960f3d983fe76fa7f",
+    "src/.graphifyignore": "6a948e777ccd5582bfd381f8f13772ee5d8fe4178f9291017b30e683140de055"
   },
   "schema_version": 1,
   "source": {
-    "excluded": [
-      "src/ghostty/bindings.rs"
-    ],
-    "file_count": 548,
-    "sha256": "37c3f95beeb64fda5dd0f1bdbf5f4720a13a97b4a86706fb6e6420a604ea6729"
+    "excluded": [],
+    "file_count": 562,
+    "sha256": "568ab25835b97f13f82a2500d797bce7d91c6c3a41bdfcbd5e1b0daa5491f039"
   }
 }

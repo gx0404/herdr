@@ -351,7 +351,10 @@ describe("fork GX installer release boundaries", () => {
   });
 
   test("repository checks gate parallel builders and both builders use the shared package CLI", () => {
-    expect(runs(gx.jobs.checks)).toContain("just ci\njust docs-contract-test");
+    expect(gx.jobs.checks.env.HERDR_TEST_SUITE).toBe("full");
+    expect(runs(gx.jobs.checks)).toContain("just ci");
+    // ci-tests includes docs-contract now; do not run the same stage twice.
+    expect(runs(gx.jobs.checks)).not.toContain("just docs-contract-test");
     expect(runs(gx.jobs.checks)).toContain("scripts/resolve_agent_rules.py --check");
     expect(runs(gx.jobs.checks)).toContain("python3-tomli");
     for (const platform of ["windows", "linux"]) {

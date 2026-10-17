@@ -3,22 +3,25 @@
 入口统一是 `just`（仓库无 Makefile）。列：用途 / 前置 / 副作用 / 通过条件与证据。
 改动 recipe 时同步本表与 CI 调用面。
 
-`nextest-all`、`test-one` 和 `ci-tests` 使用 `--status-level leak`：运行中显示失败、重试、慢测试及 leaky 用例名称，便于定位测试结束后仍占用输出管道的子进程；测试通过条件与退出码判定不变。
+`nextest-all`、`test-one` 和完整 Rust 阶段 使用 `--status-level leak`：运行中显示失败、重试、慢测试及 leaky 用例名称，便于定位测试结束后仍占用输出管道的子进程；测试通过条件与退出码判定不变。
 
 ## 日常开发
 
 | 命令 | 用途 | 前置 | 副作用 | 证据 |
 |---|---|---|---|---|
-| `just test` | 全量验证：编排器运行 nextest + maintenance + 热路径架构 + 资产 + docs 契约；五个 phase 默认最多同时跑 `min(2, 5, test_budget)` 个，budget=1 默认串行。combined budget 默认 `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET`/`--test-budget`；并发时 maintenance 默认 `min(4, max(1, budget-1))`、nextest 用剩余预算，串行时两者分别默认 `min(4, budget)` 与 `budget`。phase 可用 `HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs`，maintenance 可用 `HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs`，nextest 可用 `HERDR_NEXTEST_JOBS`/`--nextest-jobs` 覆盖 | Rust/Python/Bun/Node 工具链 | 编译产物、临时目录、`target/test-suite-logs/<run-id>/` 逐行刷新的阶段日志与原子 manifest；启动即打印路径，manifest 含 budget、三个 jobs 字段、每 phase 的 pending/running/完成状态与 failures | 退出码 0；阶段汇总各子命令状态；命令行值优先于环境变量，非法/非正值失败，显式值不截断；被强制终止留下的 running 不算通过 |
-| `just nextest-all` | 单独跑全量 nextest（编排器 nextest 阶段的命令真源）；`HERDR_NEXTEST_JOBS` 默认 4，表示合计测试线程；`HERDR_NEXTEST_SHARDS` 默认 1，可显式启用不超过 jobs 的 hash 分片。分片由 `scripts/run_nextest.py` 复用一次构建的 metadata，逐测试进程隔离不变 | Rust、Python | 编译产物；分片运行的独立 metadata、store、日志和原子 manifest 留在 `target/test-suite-logs/` | 选中测试不重不漏、所有分片正常完成且退出码 0；无效预算、不兼容调度配置、启动/输出失败或取消不能假绿 |
+| `just test` | 默认回归（热缓存端到端目标 60 秒）：编排器运行 Rust 分类入口 + maintenance + 热路径架构 + 资产 + docs 契约；五个 phase 默认最多同时跑 `min(3, 5, test_budget)` 个，budget=1 默认串行。combined budget 默认 `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET`/`--test-budget`；并发时 maintenance 默认 `min(4, max(1, budget-1))`、nextest 用剩余预算，串行时两者分别默认 `min(4, budget)` 与 `budget`。phase 可用 `HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs`，maintenance 可用 `HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs`，nextest 可用 `HERDR_NEXTEST_JOBS`/`--nextest-jobs` 覆盖 | Rust/Python/Bun/Node 工具链 | 编译产物、临时目录、`target/test-suite-logs/<run-id>/` 逐行刷新的阶段日志与原子 manifest；启动即打印路径，manifest 含 budget、三个 jobs 字段、每 phase 的 pending/running/完成状态与 failures | 退出码 0；阶段汇总各子命令状态；命令行值优先于环境变量，非法/非正值失败，显式值不截断；被强制终止留下的 running 不算通过 |
+| `just test-full` | 完整自动回归：扩展项恢复，Rust 全部 nextest 隔离 | 同 test | 独立 manifest/log | 完整回归通过；不包含手动/ignored 资格 |
+| `just check-full` | lint、完整回归与平台编译检查 | 同 check | 同 check | 测试框架与广泛变更的完整验收 |
+| `just rust-test` | Rust 分类入口，默认线程单测 + nextest 进程隔离项 | Rust、Python、nextest | 发现/执行分段日志 | 选中测试全部通过；新集成二进制自动纳入 |
+| `just nextest-all` | 单独跑全量 nextest（独立完整 Rust 入口）；`HERDR_NEXTEST_JOBS` 默认 4，表示合计测试线程；`HERDR_NEXTEST_SHARDS` 默认 1，可显式启用不超过 jobs 的 hash 分片。分片由 `scripts/run_nextest.py` 复用一次构建的 metadata，逐测试进程隔离不变 | Rust、Python | 编译产物；分片运行的独立 metadata、store、日志和原子 manifest 留在 `target/test-suite-logs/` | 选中测试不重不漏、所有分片正常完成且退出码 0；无效预算、不兼容调度配置、启动/输出失败或取消不能假绿 |
 | `just test-one <filter>` | 单个 nextest 过滤器；使用同一 `HERDR_NEXTEST_JOBS`/默认 4 | 同上 | 同上 | 退出码 0 |
-| `just maintenance-test` | 维护脚本 unittest 清单（新脚本测试须登记进清单）+ 发布工作流契约（`bun test ./scripts/release-workflows.test.ts`）+ fork 上游同步丢弃路径门禁（`scripts/upstream_sync_drop_check.py`，清单命中的路径重新出现即失败）。清单由 `scripts/run_parallel_unittest.py` 按类拆成子进程，默认以 `min(4, cpu_count)` worker 并发，可用 `HERDR_MAINTENANCE_JOBS`/执行器 `--jobs` 覆盖；`just test` 通过 `--maintenance-jobs` 解析后注入该环境变量。上一轮耗时记在 `target/test-suite-logs/unittest-durations.json`，以原子替换写回，据此把慢类拆块、从长到短派发 | Python ≥3.11（环境入口测试需要）、Bun | 写 `target/test-suite-logs/unittest-durations.json` | 执行器末行 `OK` + bun test OK + 丢弃检查 `OK: … 均无命中`；失败单元回放完整输出 |
+| `just maintenance-test` | 自动发现 scripts/test_*.py，按类并行；按分类清单决定扩展项，另运行顶层 Bun 契约与 fork 丢弃检查 | Python、Bun | 项目日志及耗时表 | 无失效选择器/空集合；全部选中测试退出 0 |
 | `just test-windows-input [args..]` | 仅 Windows：本机交互式 Windows Terminal 输入资格测试（`scripts/test_windows_input.ps1`，注入输入并清空剪贴板；普通 CI 不跑） | Windows、pwsh | 注入键鼠输入、清空剪贴板 | 报告中各输入路径的覆盖结论 |
 | `just ui-hot-path-architecture-test` | UI 热路径架构边界（确定性） | Python3 | 无 | `unittest` OK |
 | `just ui-gallery [--skip-test] [--no-png] [--filter <名>]` | 手动界面画廊：运行忽略测试 `client::shell::tests::gallery::ui_gallery`，把典型场景（多工作区、各状态 agent、浮层、窄屏、经典布局）合成为逐帧 HTML；装有 Chrome/Edge 时再用无头浏览器截成 PNG，供界面改版前后对比审阅（非门禁） | Rust、Python3；PNG 需 Chrome/Edge | 写 `target/ui-gallery/`（HTML/TXT/PNG）与 `target/ui-gallery-browser-profile/` | 打印帧数与 PNG 成功数；测试失败或无帧时非零 |
 | `just lint` | fmt --check + clippy -D warnings | Rust | 无 | 退出码 0 |
 | `just ci [filter]` / `just ci-tests [filter]` | PR CI 等效链（ci 含 lint） | 同上 | 编译产物 | 退出码 0 |
-| `just check` | ci + windows-lint + docs 契约 + 提醒（unix）；Windows 走 `windows_check.ps1 -Mode check` | 同 `just test`（含 Node）+ Windows SDK（交叉） | 编译产物 | 退出码 0 |
+| `just check` | lint、默认回归与平台编译检查；Windows 另构建普通二进制 | 完整开发工具链 | 项目构建/测试产物 | 所有阶段成功；不受 60 秒目标限制 |
 | `just windows-lint` | Windows 目标 clippy（Unix 交叉，`--all-targets` 连测试目标一起查，与 CI `windows_check.ps1 -Mode lint` 同口径；热缓存比只查 bin 多约 20 s） | `just setup-windows-cross` 一次 | 下载 SDK 到仓库内 `.local/windows-cross/`（gitignored；`HERDR_WINDOWS_CROSS_ROOT` 可改） | 退出码 0 |
 | `just setup-env [--check/--force]` | Python 环境入口：默认补齐可移植工具与钉版 Zig；只读检查或显式重装项目管理工具 | Python ≥3.11、已有 Rust/Git/系统 SDK；缺失可移植工具时联网 | 默认写项目 `.local/` 并生成 Bash/PowerShell 激活脚本；`--check` 不创建目录、不安装 | 必需工具实际探针全部成功；缺项非零，不修改全局 PATH |
 | `python -B scripts/setup_env.py --run <command...>` | 在项目内缓存与独立运行沙箱执行命令，例如 `just check`；不隐式安装 | setup 检查通过 | Cargo home、编译缓存留项目内，HOME/AppData/XDG/temp 使用独立运行目录，命令结束清理沙箱；标准测试日志保留 | 透传命令参数与退出码；工作目录固定为仓库 |

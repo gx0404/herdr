@@ -25,7 +25,7 @@
 | `pane/` | `PaneState` 与 pane 级终端宿主逻辑（光标、OSC、键盘协议） |
 | `terminal/` | 终端状态与 runtime 注册；`turn.rs` 记录轮次、注意力和中断，不决定检测状态 |
 | `pty/` | PTY actor 与平台 backend（进程生命周期） |
-| `ghostty/` | vendored libghostty-vt 的绑定层（`bindings.rs` 由 bindgen 生成） |
+| `crates/ghostty-vt/`（workspace 子 crate） | vendored libghostty-vt 的绑定层（`crates/ghostty-vt/src/bindings.rs` 由 bindgen 生成）；不在 `src/` 图谱索引内 |
 | `detect/` | 只读屏幕快照的规则引擎；五家窗格 harness 的捆绑 manifest 与 Codex/Kimi fork 叠加规则，ZCode 为外部来源 |
 | `harness/` | 六家注册表、统一状态桶、工具展示/文本/时间/JSON、有界尾读缓存、子进程与洞察组装 |
 | `api/` | socket API：schema（schemars → `docs/next/api/herdr-api.schema.json`）、订阅、事件 hub |

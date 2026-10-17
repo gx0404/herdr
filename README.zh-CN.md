@@ -1,5 +1,7 @@
 # herdr
 
+> 当前检出是 GX fork。现有实现与开发流程见[仓库文档](docs/README.md)，待发布产品文档见 [docs/next](docs/next/README.md)；历史发布说明按各自版本理解。
+
 
 <p align="center">
   <img src="assets/logo.png" alt="herdr" width="100" />

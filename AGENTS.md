@@ -51,7 +51,7 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 
 ## 项目模型
 
-- 单 crate Rust（`Cargo.toml` 是版本唯一真源）；TUI 客户端、server、CLI 一体；
+- Rust workspace（主 crate + `crates/ghostty-vt`；根 `Cargo.toml` 是产品版本唯一真源）；TUI 客户端、server、CLI 一体；
   终端内核为 vendored libghostty-vt（Zig 0.16.0）。
 - 状态分层：`AppState` 纯数据、`PaneState` 与 `PaneRuntime` 分离、Workspace
   逻辑无 PTY 可测（`app-render.md`、`persistence-session.md`）。
@@ -59,10 +59,13 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   （`protocol-api.md`）。
 - 平台行为隔离在 `src/platform/<os>.rs`（`platform.md`）；Windows 交叉编译与
   ConPTY 打包自成工具链。
-- 工具链：`just` 是命令入口；测试用 cargo nextest + `python3 -m unittest` 脚本
-  清单 + bun 契约测试。`just test` 编排五个阶段，合并 worker budget 默认
+- 工具链：`just` 是命令入口；`.config/test-suites.toml` 是测试分类真源。
+  `just test` 是固定默认回归（Rust 线程单测 + nextest 隔离资格、Python、Bun），
+  `just test-full` 恢复扩展自动测试并对全部 Rust 用 nextest；新测试默认纳入。
+  默认集以热缓存端到端 60 秒为目标，超时仍跑完，不等于完整回归。
+  五个阶段合并 worker budget 默认
   `min(8, cpu_count)`（`HERDR_TEST_BUDGET` / `--test-budget`）；phase 并发默认
-  `min(2, 5, budget)`（`HERDR_TEST_PHASE_JOBS` / `--phase-jobs` / `--jobs`），
+  `min(3, 5, budget)`（`HERDR_TEST_PHASE_JOBS` / `--phase-jobs` / `--jobs`），
   并发 phase 时 maintenance 默认 `min(4, max(1, budget-1))`，为 nextest 留下
   `max(1, budget-maintenance)`；串行 phase 时各自默认 `min(4, budget)` 与 `budget`。
   两者分别由 `HERDR_MAINTENANCE_JOBS` / `--maintenance-jobs`、`HERDR_NEXTEST_JOBS` /
@@ -77,7 +80,8 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 
 | 命令 | 用途 |
 |---|---|
-| `just test` / `just check` | 全量测试 / 格式+测试+Windows lint（提交前） |
+| `just test` / `just check` | 默认回归 / 格式+默认回归+平台 lint |
+| `just test-full` / `just check-full` | 完整自动回归 / 完整开发验收（测试框架变更与发布前） |
 | `just lint` / `just windows-lint` | 本地快速 lint / Windows 目标 lint |
 | `just maintenance-test` | 维护脚本 unittest 清单 |
 | `just docs-contract-test` / `just integration-assets-test` | bun 契约测试 |

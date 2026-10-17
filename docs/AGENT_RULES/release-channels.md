@@ -80,7 +80,7 @@ immutable release 保护已发布二进制。
 ### stable（维护者）
 
 - 在所选已发布 preview tag 的独立检出里开始，而不是当前 master：在那里提交策展
-  过的发布文档，然后 `just check` → `just release 0.x.y preview-<build-id>`。
+  过的发布文档，然后 `just check-full` → `just release 0.x.y preview-<build-id>`。
   `release-prepare` / `release-publish` 同样必须带 preview tag 参数；不得把更新的
   master 提交 merge/rebase 进候选。
 - 发布前对当前已发布 stable tag 跑 pre-release-audit

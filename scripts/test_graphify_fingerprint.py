@@ -62,6 +62,17 @@ class GraphifyFingerprintTests(unittest.TestCase):
         self.assertEqual(self.report.read_bytes(), changed)
         self.assertEqual(self.fingerprint.read_bytes(), fingerprint)
 
+    def test_generated_advice_uses_source_fingerprint_and_fixed_wrapper(self) -> None:
+        text = (b"- Run `git rev-parse HEAD` and compare to check if the graph is stale.\n"
+                b"- Run `graphify update .` after code changes (no API cost).\n")
+        self.report.write_bytes(text)
+        self.mirror.write_bytes(text)
+        graphify_fingerprint.write_fingerprint()
+        self.assertIn(b"just graph-check", self.report.read_bytes())
+        self.assertIn(b"including uncommitted edits", self.report.read_bytes())
+        self.assertNotIn(b"graphify update", self.report.read_bytes())
+        graphify_fingerprint.check_fingerprint()
+
     def test_write_does_not_hide_semantic_mirror_drift(self) -> None:
         self.report.write_bytes(b"# graph\r\n")
         self.mirror.write_bytes(b"# different graph\r\n")
@@ -70,6 +81,21 @@ class GraphifyFingerprintTests(unittest.TestCase):
 
         with self.assertRaisesRegex(graphify_fingerprint.FingerprintError, "与 graphify-out/GRAPH_REPORT.md 不一致"):
             graphify_fingerprint.check_fingerprint()
+
+
+class SourceScopeTests(unittest.TestCase):
+    def test_fingerprint_covers_every_indexed_code_language(self):
+        result = mock.Mock(returncode=0, stdout="\n".join([
+            "src/main.rs", "src/integration/assets/plugin.ts", "src/integration/assets/plugin.js",
+            "src/integration/assets/hook.sh", "src/integration/assets/hook.ps1",
+            "src/detect/manifests/claude.toml", "src/README.md",
+        ]))
+        with mock.patch.object(graphify_fingerprint.subprocess, "run", return_value=result):
+            paths = graphify_fingerprint._graph_sources()
+        self.assertEqual(len(paths), 5)
+        self.assertIn("src/integration/assets/plugin.ts", paths)
+        self.assertIn("src/integration/assets/hook.ps1", paths)
+        self.assertNotIn("src/detect/manifests/claude.toml", paths)
 
 
 if __name__ == "__main__":

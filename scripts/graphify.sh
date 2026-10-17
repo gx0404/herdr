@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# herdr Graphify 固定入口：只索引 src/（Rust AST，无 LLM），全量重建。
+# herdr Graphify 固定入口：只索引 src/（Rust 与宿主集成脚本 AST，无 LLM），全量重建。
 # 子命令：rebuild|check|query|path|explain|diagnose|affected|export|save-result|reflect
 
 set -euo pipefail

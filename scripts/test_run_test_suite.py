@@ -37,17 +37,18 @@ class PhaseDefinitionTests(unittest.TestCase):
         self.assertIn("scripts/run_test_suite.py", justfile)
 
     def test_maintenance_manifest_registers_orchestrator_tests(self) -> None:
-        justfile = JUSTFILE.read_text(encoding="utf-8")
-        self.assertIn("scripts.test_run_test_suite", justfile)
-        self.assertIn("scripts.test_run_nextest", justfile)
+        from scripts.run_test_catalog import load_catalog, python_tests
+        selected, _ = python_tests(load_catalog(), "default")
+        self.assertTrue(any(name.startswith("scripts.test_run_test_suite.") for name in selected))
+        self.assertTrue(any(name.startswith("scripts.test_run_nextest.") for name in selected))
 
     def test_nextest_recipes_have_an_explicit_overridable_thread_limit(self) -> None:
         justfile = JUSTFILE.read_text(encoding="utf-8")
         self.assertIn('env_var_or_default("HERDR_NEXTEST_JOBS", "4")', justfile)
-        self.assertEqual(justfile.count("--test-threads {{nextest_jobs}}"), 3)
+        self.assertEqual(justfile.count("--test-threads {{nextest_jobs}}"), 2)
         self.assertIn("nextest-all:\n    {{python}} scripts/run_nextest.py --test-threads {{nextest_jobs}}", justfile)
         self.assertIn('test-one filter:\n    cargo nextest run --locked --test-threads {{nextest_jobs}} "{{filter}}" --status-level leak --final-status-level fail --failure-output final --success-output never', justfile)
-        self.assertIn('ci-tests filter=\'all()\':\n    cargo nextest run --locked --test-threads {{nextest_jobs}} -E "{{filter}}" --status-level leak --final-status-level slow --failure-output final --success-output never', justfile)
+        self.assertIn('ci-tests filter=\'all()\':\n    {{python}} scripts/run_test_suite.py --filterset "{{filter}}"', justfile)
 
     def test_default_log_root_is_explicit_and_each_run_uses_a_child_directory(self) -> None:
         self.assertEqual(PROJECT_ROOT / "target" / "test-suite-logs", run_test_suite.LOG_DIR)
@@ -121,6 +122,8 @@ class PhaseConfigurationTests(unittest.TestCase):
             log_path: Path,
             *,
             environment: dict[str, str],
+            ownership=None,
+            release_ownership=None,
         ) -> tuple[int, float]:
             seen[name] = environment
             log_path.write_text("ok\n", encoding="utf-8")
@@ -269,7 +272,7 @@ class RunPhaseTests(unittest.TestCase):
                 "nonexistent-recipe-for-probe",
                 log_path,
                 command=[
-                    "python3",
+                    sys.executable,
                     "-c",
                     "import sys; print('suite-probe'); sys.exit(3)",
                 ],
@@ -317,7 +320,7 @@ class BudgetAndProgressTests(unittest.TestCase):
                 nextest = run_test_suite.resolve_nextest_jobs(
                     environ=environment, maintenance_jobs=maintenance
                 )
-                self.assertEqual(phases, min(2, budget))
+                self.assertEqual(phases, min(3, budget))
                 self.assertEqual(maintenance, min(4, max(1, budget - 1)))
                 self.assertEqual(nextest, max(1, budget - maintenance))
                 workers = max(maintenance, nextest) if phases == 1 else maintenance + nextest
@@ -350,7 +353,8 @@ class BudgetAndProgressTests(unittest.TestCase):
                 self.assertEqual(run_test_suite.main(["--test-budget", "1"]), 0)
         self.assertEqual(
             runner.call_args.kwargs,
-            {"phase_jobs": 1, "test_budget": 1, "maintenance_jobs": 1, "nextest_jobs": 1},
+            {"phase_jobs": 1, "test_budget": 1, "maintenance_jobs": 1, "nextest_jobs": 1,
+             "suite": "default", "filterset": "all()"},
         )
 
     def test_running_phase_is_distinct_from_pending_and_finished_phases(self) -> None:

@@ -1,7 +1,7 @@
 //! 六家官方 harness 的声明式注册表（借鉴 Paseo 的 `AGENT_PROVIDER_DEFINITIONS` /
 //! `AGENT_HOOK_PROVIDERS`）：来源标签、钩子权威、配置目录、会话恢复命令与能力位都在
-//! 这一张表里。散落在检测、恢复、活动与声音配置里的名单改为查表，新增或调整一家只改
-//! 这里。
+//! 这一张表里。检测、恢复、活动与声音配置里的共同名单查此表；新增能力还须同步
+//! 对应检测规则、集成资产、活动适配器和契约测试，注册表本身不实现这些能力。
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ pub struct HarnessSpec {
     /// 规范化 agent 名（与检测、活动适配器一致）。
     pub id: &'static str,
     /// 面向用户的名称。
-    #[allow(dead_code)] // 客户端 Inspector / 总览展示 harness 名称时接入（阶段 5）
+    #[allow(dead_code)] // 保留统一展示名称；当前客户端使用快照中的名称，尚未消费此字段。
     pub display_name: &'static str,
     /// 官方集成上报时用的来源标签。
     pub source: &'static str,

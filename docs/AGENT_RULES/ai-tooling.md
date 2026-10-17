@@ -37,6 +37,8 @@
   HTML 视图、缓存在本机重建，`.graphify-memory/` 为个人经验层，不入库不入图。
 - `scripts/graphify_fingerprint.py::write_fingerprint` 在记录摘要前将报告及镜像规范为 LF，
   与 Git 的 `eol=lf` 一致，避免 Windows 重建后检出即失效；check 模式仍只读且拒绝内容漂移。
+- 指纹覆盖固定 src/ 内实际抽取的 Rust、TypeScript、JavaScript、Shell、PowerShell；
+  不能只追踪 Rust 而漏掉宿主集成脚本。生成报告的刷新提示使用项目 wrapper。
 - 源码变动后 `just graph-check` 必须能解释指纹差异；视图导出失败不得报告
   「视图交付完成」。
 

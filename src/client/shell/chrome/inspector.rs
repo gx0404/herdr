@@ -1,3 +1,7 @@
+//! Client-owned insight preview. Target identity fences endpoint, server boot,
+//! pane and launch; read generations additionally fence late activity responses.
+//! Cache mutation and follow scheduling happen before paint, never in rendering.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -22,6 +26,7 @@ const TIMELINE_AGENTS: usize = 128;
 const TIMELINE_ENTRIES: usize = 8;
 const TREE_CACHE: usize = 8;
 const TREE_NODES: usize = 512;
+// Per-target retained node text, not a bound on the complete client allocation.
 const TREE_BYTES: usize = 128 * 1024;
 const FOLLOW: Duration = super::super::agent_activity_overlay::FOLLOW_INTERVAL;
 

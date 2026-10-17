@@ -6,8 +6,8 @@
 - `just`：命令入口（全表见 `MAKE_COMMANDS.md`）。
 - Python ≥3.11：环境入口 `scripts/setup_env.py` 使用标准库 `tomllib`；已有维护脚本中
   对 Python 3.10 的兼容不代表新环境入口也支持该版本。
-- cargo-nextest：标准 Rust 测试运行器；Bun 和 Node 都是 `just check` 的必需项，
-  分别运行资产/文档契约和其中的 Node 子进程，不用 `cargo test` 或 Bun 代替缺失的入口。
+- cargo-nextest：完整 Rust 回归和进程隔离测试运行器；默认集的普通单测使用 Cargo
+  线程运行器。Bun 和 Node 都是必需项，不以减少覆盖替代缺失工具。测试分层见 `TESTING.md`。
 - 环境入口：`bash scripts/setup_env.sh`、`powershell -NoProfile -File scripts/setup_env.ps1`
   或 `just setup-env`。Windows 的 just recipe 使用原生 PowerShell 引导，不通过 WSL Bash；
   两个引导脚本都先避开 WindowsApps 安装管理器别名，只执行已存在的 Python。
@@ -77,11 +77,12 @@ Zig 默认缓存仍在本仓库，显式 Zig 缓存覆盖原样传递；严格�
   遇到 CPU 利用率低而测试缓慢时，分别量测进程创建、启动后执行和 runner 调度耗时；
   仅凭这些现象不能断定是杀毒软件限流。性能对照使用相同二进制、测试集合和总 worker
   预算，避开其它构建负载。仓库脚本不修改杀软排除、系统安全设置或全局工具链配置。
-- `just maintenance-test` 按类并行执行维护脚本测试，并据上一轮耗时把慢类拆块；默认
+- `just maintenance-test` 自动收集并按类并行，历史耗时只决定顺序；扩展项由
+  `.config/test-suites.toml` 标明，`just test-full` 包含所有扩展项。默认
   worker 数为 `min(4, cpu_count)`，可用 `HERDR_MAINTENANCE_JOBS` 或执行器 `--jobs` 覆盖。
   `just test` 由 `scripts/run_test_suite.py` 编排五个 phase，combined `test_budget` 默认
   `min(8, cpu_count)`，可用 `HERDR_TEST_BUDGET`/`--test-budget` 覆盖；phase 默认
-  `min(2, 5, test_budget)`（`HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs`），
+  `min(3, 5, test_budget)`（`HERDR_TEST_PHASE_JOBS`/`--phase-jobs`/`--jobs`），
   并发 phase 时 maintenance 默认 `min(4, max(1, test_budget-1))`，nextest 使用剩余的
   `max(1, test_budget-maintenance_jobs)`；串行 phase 时分别默认 `min(4, test_budget)`
   与 `test_budget`。两者可用 `HERDR_MAINTENANCE_JOBS`/`--maintenance-jobs` 和
@@ -93,13 +94,13 @@ Zig 默认缓存仍在本仓库，显式 Zig 缓存覆盖原样传递；严格�
   `status`、`exit_code`、`seconds`、`log`；阶段状态区分待执行 `pending`、执行中 `running`
   和完成后的通过/失败。外部强制终止后留下的 `running` 不能作为完成或通过证据，`seconds`
   也只代表最近一次 manifest 更新时的已运行时间。日常改动用 `just test-one <filter>`
-  缩小范围，比全量 `just test` 快得多。
-- 若实测瓶颈是单 runner 的进程启动吞吐，可为 `just nextest-all`（以及调用它的
-  `just test` / Windows `just check`）显式设置 `HERDR_NEXTEST_SHARDS`。默认 1 保持单
+  缩小范围；完整自动回归使用 `just test-full`。默认集以热缓存端到端 60 秒为目标，超时仍跑完。
+- 完整 Rust 回归可为 `just nextest-all` 或 `just test-full` 显式设置
+  `HERDR_NEXTEST_SHARDS`；默认线程单测不分片。默认 1 保持单
   runner；例如 nextest jobs=8、shards=4 会分配 4×2 个测试线程，而不是 4×8。先编译一次，
   然后各分片复用同一份 metadata，校验测试集合不重不漏，独立保存日志与 manifest。
   分片数必须为正整数且不超过 jobs；自定义 profile 或测试组等调度约束不兼容时明确失败，
-  可设 shards=1 恢复原路径。`just test-one` / `just ci-tests` 不受分片变量影响。
+  可设 shards=1 恢复原路径。`just test-one` 不受分片变量影响；CI 完整集沿用相同分片入口。
   先用固定集合、相同总预算做重复对照，再用完整标准检查衡量总耗时，不外推小样本倍数。
 - 发布性能 smoke 只在 Linux/macOS 执行；`just bench-release-smoke` 在
   `.local/perf-baseline/run-*/` 保留 run-id、metadata、candidate/baseline 命令、原始

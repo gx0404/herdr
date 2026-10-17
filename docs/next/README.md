@@ -1,5 +1,7 @@
 # herdr
 
+> This is the staged guide for the current GX fork checkout. See the [contributor documentation](../README.md) for architecture, setup and default/full test workflows; upstream stable documentation may describe a different feature set.
+
 
 <p align="center">
   <img src="assets/logo.png" alt="herdr" width="100" />

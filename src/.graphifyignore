@@ -1,3 +1,2 @@
-# Graphify 索引排除（与 .gitignore 合并语义，作用于本目录起）。生成物不进图：
-# bindgen 产物是数千个 extern 声明，只产生噪声节点。
-ghostty/bindings.rs
+# Graphify 固定索引 src/。绑定已移至 crates/ghostty-vt/src/bindings.rs，
+# 位于索引根之外；当前 src/ 没有需要额外排除的生成 Rust 文件。

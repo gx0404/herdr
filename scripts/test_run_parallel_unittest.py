@@ -212,8 +212,10 @@ class RegistrationTests(unittest.TestCase):
     def test_maintenance_recipe_runs_the_manifest_through_the_parallel_runner(self) -> None:
         justfile = JUSTFILE.read_text(encoding="utf-8")
         recipe = justfile.split("\nmaintenance-test:", 1)[1].split("\n\n", 1)[0]
-        self.assertIn("scripts/run_parallel_unittest.py", recipe)
-        self.assertIn("scripts.test_run_parallel_unittest", recipe)
+        self.assertIn("scripts/run_test_catalog.py maintenance", recipe)
+        from scripts.run_test_catalog import load_catalog, python_tests
+        selected, _ = python_tests(load_catalog(), "default")
+        self.assertTrue(any(name.startswith("scripts.test_run_parallel_unittest.") for name in selected))
         self.assertNotIn("-m unittest", recipe)
 
 

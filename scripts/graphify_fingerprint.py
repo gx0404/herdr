@@ -21,8 +21,10 @@ FINGERPRINT_PATH = GRAPH_DIR / "source-fingerprint.json"
 MIRROR_REPORT = REPO_ROOT / "docs" / "graphify" / "GRAPH_REPORT.md"
 SCHEMA_VERSION = 1
 INDEX_ROOT = "src"
+INDEX_SUFFIXES = (".rs", ".ts", ".js", ".sh", ".ps1")
 # 与图谱输入一致：排除项与 src/.graphifyignore 对应。
-EXCLUDED_SOURCES = {"src/ghostty/bindings.rs"}
+# The generated binding crate is outside INDEX_ROOT; src currently has no generated Rust.
+EXCLUDED_SOURCES: set[str] = set()
 PIPELINE_INPUTS = ["scripts/graphify.sh", "scripts/graphify_fingerprint.py", "src/.graphifyignore"]
 TRACKED_ARTIFACTS = ["GRAPH_REPORT.md", ".graphify_labels.json", ".graphify_labels.json.sig"]
 LOCAL_ARTIFACTS = ["graph.json"]
@@ -51,7 +53,7 @@ def _graph_sources() -> list[str]:
         raise FingerprintError("git ls-files 失败")
     files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     return sorted(
-        path for path in files if path.endswith(".rs") and path not in EXCLUDED_SOURCES
+        path for path in files if path.endswith(INDEX_SUFFIXES) and path not in EXCLUDED_SOURCES
     )
 
 
@@ -93,6 +95,16 @@ def write_fingerprint() -> None:
         if report.is_file():
             content = report.read_bytes()
             normalized = content.replace(b"\r\n", b"\n")
+            # Upstream's generic advice bypasses this repository's fixed src-only
+            # wrapper and misses uncommitted edits. Canonicalize only these known
+            # generated lines; do not hide differences in graph/report content.
+            normalized = normalized.replace(
+                b"- Run `git rev-parse HEAD` and compare to check if the graph is stale.",
+                b"- Run `just graph-check` to validate source and pipeline fingerprints, including uncommitted edits.",
+            ).replace(
+                b"- Run `graphify update .` after code changes (no API cost).",
+                b"- Run `just graph` after source changes; the repository indexes src/ and disables incremental update.",
+            )
             if normalized != content:
                 report.write_bytes(normalized)
     payload = _build_payload()

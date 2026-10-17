@@ -4,9 +4,15 @@ set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
 python := if os() == "windows" { "python" } else { "python3" }
 nextest_jobs := env_var_or_default("HERDR_NEXTEST_JOBS", "4")
 
-# Run tests (all phases in parallel via the orchestrator; logs under target/test-suite-logs/)
+# Fixed default regression suite; extended qualification is explicit.
 test:
     {{python}} scripts/run_test_suite.py
+
+test-full:
+    {{python}} scripts/run_test_suite.py --suite full
+
+rust-test:
+    {{python}} scripts/run_test_catalog.py rust
 
 # Full nextest run (optional HERDR_NEXTEST_SHARDS shares the total nextest_jobs budget)
 nextest-all:
@@ -15,9 +21,7 @@ nextest-all:
 # Run repository maintenance contract tests (+ the fork's upstream-sync drop-path gate)
 # The unittest manifest runs in parallel child processes within the configured worker limit.
 maintenance-test:
-    {{python}} scripts/run_parallel_unittest.py scripts.test_agent_detection_manifest_check scripts.test_agent_kb scripts.test_ai_tool_hooks scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_graphify_fingerprint scripts.test_gx_package scripts.test_gx_release scripts.test_gx_smoke scripts.test_local_build_config scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_release_perf scripts.test_resolve_agent_rules scripts.test_run_nextest scripts.test_run_parallel_unittest scripts.test_run_test_suite scripts.test_setup_env scripts.test_setup_zig scripts.test_ui_gallery scripts.test_unix_installer scripts.test_upstream_sync_drop_check scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
-    bun test ./scripts/release-workflows.test.ts
-    {{python}} scripts/upstream_sync_drop_check.py
+    {{python}} scripts/run_test_catalog.py maintenance
 
 # Local interactive Windows Terminal input qualification (never runs in normal CI).
 [windows]
@@ -84,10 +88,7 @@ ci filter='all()': lint
 
 # Keep the test build independently configurable from clippy in CI.
 ci-tests filter='all()':
-    cargo nextest run --locked --test-threads {{nextest_jobs}} -E "{{filter}}" --status-level leak --final-status-level slow --failure-output final --success-output never
-    just maintenance-test
-    just ui-hot-path-architecture-test
-    just integration-assets-test
+    {{python}} scripts/run_test_suite.py --filterset "{{filter}}"
 
 # Download the Windows SDK once (requires xwin; prompts for Microsoft's SDK license)
 [unix]
@@ -120,13 +121,21 @@ windows-lint:
 # Check formatting + run unit tests + Windows target lint + documentation contract tests
 [unix]
 check: ci windows-lint
-    just docs-contract-test
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
+
+[unix]
+check-full: lint windows-lint
+    just test-full
 
 [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 [windows]
 check:
     & .\scripts\windows_check.ps1 -Mode check
+
+[script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
+[windows]
+check-full:
+    & .\scripts\windows_check.ps1 -Mode check-full
 
 # Install repo-local git hooks
 install-hooks:
@@ -184,14 +193,11 @@ bench-release-smoke:
 
 # Test public documentation snapshot and release lifecycle tooling
 docs-contract-test:
-    bun test ./scripts/docs
+    {{python}} scripts/run_test_catalog.py docs-contract
 
 # Test bundled agent integration assets
 integration-assets-test:
-    bun test ./src/integration/assets/herdr-agent-state.test.ts
-    bun test ./src/integration/assets/opencode/herdr-agent-state.test.ts
-    bun test ./src/integration/assets/opencode/herdr-tui-session.test.ts
-    bun test ./src/integration/assets/kimi/herdr-agent-state.test.ts
+    {{python}} scripts/run_test_catalog.py integration-assets
 
 # Regenerate the C API bindings with bindgen-cli 0.72.1
 libghostty-bindings *clang_args:

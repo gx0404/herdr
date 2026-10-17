@@ -1,5 +1,7 @@
 # herdr
 
+> This checkout is the GX fork. Current implementation and developer workflows are documented in [the repository guide](docs/README.md); staged product documentation lives in [docs/next](docs/next/README.md). Historical release notes describe their own versions.
+
 
 <p align="center">
   <img src="assets/logo.png" alt="herdr" width="100" />

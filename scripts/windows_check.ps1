@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("lint", "check")]
+    [ValidateSet("lint", "check", "check-full")]
     [string]$Mode = "check"
 )
 
@@ -28,5 +28,9 @@ if ($Mode -eq "lint") {
     return
 }
 
-Invoke-Checked just @("test")
+if ($Mode -eq "check-full") {
+    Invoke-Checked just @("test-full")
+} else {
+    Invoke-Checked just @("test")
+}
 Invoke-Checked cargo @("build", "--locked")
