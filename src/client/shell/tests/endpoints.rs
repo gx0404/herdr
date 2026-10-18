@@ -3312,3 +3312,27 @@ fn remote_broadcast_failure_rearms_without_changing_the_active_machine() {
     assert!(state.complete_broadcast_send(&remote, "remote-boot", "Build", error()));
     assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
 }
+
+#[test]
+fn reconnecting_machine_selection_requests_recovery_without_reviving_disabled_machine() {
+    let (mut state, id) = state_with_remote();
+    for status in [
+        ClientEndpointStatus::Connecting,
+        ClientEndpointStatus::Reconnecting,
+    ] {
+        state.set_endpoint_status(&id, status);
+        let mut outcome = ClientShellInput::default();
+        assert!(!state.activate_endpoint(id.clone(), &mut outcome));
+        assert!(
+            matches!(outcome.actions.as_slice(), [ClientShellAction::ReconnectEndpoint { endpoint_id }] if endpoint_id == &id)
+        );
+        assert_eq!(
+            state.endpoint_status(&id),
+            Some(ClientEndpointStatus::Connecting)
+        );
+    }
+    state.set_endpoint_status(&id, ClientEndpointStatus::Disabled);
+    let mut outcome = ClientShellInput::default();
+    assert!(!state.activate_endpoint(id, &mut outcome));
+    assert!(outcome.actions.is_empty());
+}

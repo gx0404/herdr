@@ -1465,14 +1465,6 @@ pub const TEXTS: Texts = Texts {
         unknown_terminal_session_option_fmt: "未知的 terminal session {command} 选项：{option}",
         terminal_dimension_range_fmt: "{flag} 必须是 1 到 {max} 之间的整数",
         terminal_dimension_positive_fmt: "{flag} 必须大于 0",
-        terminal_title_set_usage: "用法：herdr terminal title set <title>",
-        terminal_title_clear_usage: "用法：herdr terminal title clear",
-        terminal_title_help_clear_line: "       herdr terminal title clear",
-        invalid_split_direction_fmt: "无效的分割方向：{value}",
-        invalid_read_source_fmt: "无效的读取来源：{value}",
-        invalid_read_format_fmt: "无效的读取格式：{value}",
-        invalid_agent_status_fmt: "无效的 agent 状态：{value}（应为 idle、working、blocked、done 或 unknown）",
-        invalid_pane_agent_state_fmt: "无效的窗格 agent 状态：{value}（应为 idle、working、blocked 或 unknown）",
         server_ping_no_protocol: "server ping 未包含协议版本",
 
         protocol_newer_fmt:
@@ -1580,31 +1572,12 @@ pub const TEXTS: Texts = Texts {
             "用法：herdr api activity-read (--agent <TARGET> | --external-id <ID>) [--node-id <ID>] [--cursor <CURSOR>] [--max-bytes <N>]",
         api_activity_read_no_pane_id: "查找 agent 失败：响应未包含 pane_id",
 
-        agent_list_usage: "用法：herdr agent list",
-        agent_get_usage: "用法：herdr agent get <target>",
-        agent_focus_usage: "用法：herdr agent focus <target>",
-        agent_attach_usage: "用法：herdr agent attach <target> [--takeover]",
-        agent_wait_usage: "用法：herdr agent wait <target> [--until STATUS]... [--timeout MS]",
-        agent_rename_usage: "用法：herdr agent rename <target> <name>|--clear",
-        agent_prompt_usage:
-            "用法：herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]",
-        agent_send_keys_usage: "用法：herdr agent send-keys <target> <key> [key ...]",
-        agent_read_usage:
-            "用法：herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]",
-        agent_start_usage:
-            "用法：herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]",
-        agent_explain_usage: "用法：herdr agent explain <target> [--json|--verbose]",
         agent_explain_target_usage: "用法：herdr agent explain <target> [--json]",
-        agent_explain_file_usage:
-            "用法：herdr agent explain --file PATH --agent LABEL [--json|--verbose]",
         agent_explain_file_json_usage:
             "用法：herdr agent explain --file PATH --agent LABEL [--json]",
         agent_explain_file_requires_agent: "herdr agent explain --file 需要 --agent LABEL",
         agent_explain_file_read_failed_fmt: "读取 agent explain 文件 {path} 失败：{error}",
         agent_only_with_file: "--agent 仅在与 --file 一起使用时有效",
-        format_invalid_fmt: "无效的 --format：{value}（应为 text 或 json）",
-        kind_required: "缺少必需的 --kind",
-        pane_flag_required: "缺少必需的 --pane",
         agent_kind_unsupported_fmt: "不支持的交互式 agent 类型：{kind}",
         agent_start_no_terminal_id: "agent start 响应未包含 terminal_id",
         agent_attach_no_terminal_id: "agent attach 失败：响应未包含 terminal_id",
@@ -1613,67 +1586,8 @@ pub const TEXTS: Texts = Texts {
         agent_exited_before_interactive: "agent 进程在可交互之前已退出",
         agent_name_lost_fmt: "名为 {name} 的 agent 已不再持有目标终端",
         agent_start_timeout: "等待 agent 启动超时",
-        until_requires_status: "--until 至少需要一个状态值",
-        until_requires_wait: "--until 需要配合 --wait 使用",
-        timeout_requires_wait: "--timeout 需要配合 --wait 使用",
-        agent_prompt_requires_text: "agent prompt 需要 text 参数",
 
-        pane_get_usage: "用法：herdr pane get <pane_id>",
-        pane_neighbor_usage:
-            "用法：herdr pane neighbor --direction left|right|up|down [--pane ID|--current]",
-        pane_focus_direction_usage:
-            "用法：herdr pane focus --direction left|right|up|down [--pane ID|--current]",
-        pane_resize_usage:
-            "用法：herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]",
-        pane_rename_usage: "用法：herdr pane rename <pane_id> <label>|--clear",
-        pane_read_usage:
-            "用法：herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]",
-        pane_input_usage:
-            "用法：herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane",
-        pane_split_usage:
-            "用法：herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--right-click herdr|pane] [--focus] [--no-focus]",
-        pane_move_usage:
-            "用法：herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]",
-        pane_swap_usage:
-            "用法：herdr pane swap --direction left|right|up|down [--pane ID|--current]\n       herdr pane swap --source-pane ID --target-pane ID",
-        pane_close_usage: "用法：herdr pane close <pane_id>",
-        pane_send_text_usage: "用法：herdr pane send-text <pane_id> <text>",
-        pane_send_keys_usage: "用法：herdr pane send-keys <pane_id> <key> [key ...]",
-        pane_run_usage: "用法：herdr pane run <pane_id> <command>",
-        pane_wait_output_usage:
-            "用法：herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]",
-        pane_report_agent_usage:
-            "用法：herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]",
-        pane_report_agent_session_usage:
-            "用法：herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE] [-- <恢复命令...>]",
-        pane_report_agent_attention_usage:
-            "用法：herdr pane report-agent-attention [<pane_id>] --source ID --agent LABEL --kind needs_input|failed|clear [--title TEXT] [--detail TEXT] [--option TEXT]... [--seq N]（省略 pane 时取 $HERDR_PANE_ID）",
-        pane_report_agent_activity_usage:
-            "用法：herdr pane report-agent-activity [<pane_id>] --source ID --agent LABEL [--hint TEXT] [--node-id ID] [--seq N]（省略 pane 时取 $HERDR_PANE_ID）",
-        pane_release_agent_usage:
-            "用法：herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]",
-        pane_report_metadata_usage:
-            "用法：herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]",
-        invalid_amount_fmt: "无效的 amount：{value}",
-        invalid_ratio_fmt: "无效的 ratio：{value}",
-        zoom_mode_conflict: "--toggle、--on、--off 只能提供一个",
-        pane_selector_conflict: "只能提供一个窗格选择器",
-        current_requires_env_pane: "--current 需要环境变量 HERDR_PANE_ID",
-        invalid_right_click_target_fmt: "无效的右键目标：{value}",
-        invalid_split_direction_expected_fmt: "无效的分割方向：{value}（应为 right 或 down）",
-        invalid_pane_direction_fmt: "无效的窗格方向：{value}（应为 left、right、up 或 down）",
-        match_regex_exclusive: "--match 与 --regex 互斥",
-        match_or_regex_required: "缺少必需的 --match 或 --regex",
-        source_required: "缺少必需的 --source",
-        agent_flag_required: "缺少必需的 --agent",
-        state_required: "缺少必需的 --state",
-        invalid_attention_kind_fmt: "无效的待处理种类：{value}（应为 needs_input、failed 或 clear）",
-        state_label_format: "应为 --state-label STATUS=TEXT",
-        unknown_state_label_fmt: "未知的状态标签：{status}",
-        metadata_set_clear_conflict: "不能同时设置和清除同一个元数据字段",
-        metadata_field_required: "缺少要设置或清除的元数据字段",
 
-        plugin_link_usage: "用法：herdr plugin link <path> [--disabled]",
         plugin_install_usage:
             "用法：herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]",
         plugin_install_v1_shorthand_only:
@@ -1682,16 +1596,7 @@ pub const TEXTS: Texts = Texts {
         plugin_install_cancelled: "已取消插件安装",
         plugin_config_dir_usage: "用法：herdr plugin config-dir <plugin_id>",
         plugin_uninstall_usage: "用法：herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>",
-        plugin_unlink_usage: "用法：herdr plugin unlink <plugin_id>",
-        plugin_set_enabled_usage_fmt: "用法：herdr plugin {action} <plugin_id>",
         plugin_not_installed_fmt: "插件未安装：{target}",
-        plugin_limit_invalid_fmt: "无效的 --limit 值：{value}",
-        plugin_action_invoke_usage: "用法：herdr plugin action invoke <action_id> [--plugin ID]",
-        plugin_required: "缺少必需的 --plugin",
-        entrypoint_required: "缺少必需的 --entrypoint",
-        plugin_pane_focus_usage: "用法：herdr plugin pane focus <pane_id>",
-        plugin_pane_close_usage: "用法：herdr plugin pane close <pane_id>",
-        plugin_pane_placement_invalid_fmt: "无效的窗格摆放方式：{value}",
         plugin_remote_path_absolute: "远程插件路径必须是绝对路径",
         plugin_already_linked_local_fmt:
             "插件 {plugin} 已从本地路径链接；从 GitHub 安装前请先卸载/取消链接",
@@ -1733,41 +1638,15 @@ pub const TEXTS: Texts = Texts {
         server_agent_manifests_usage: "用法：herdr server agent-manifests [--json]",
         server_reload_agent_manifests_usage: "用法：herdr server reload-agent-manifests",
         server_update_agent_manifests_usage: "用法：herdr server update-agent-manifests [--json]",
-        server_live_handoff_usage:
-            "用法：herdr server live-handoff [--import-exe <path>] [--expected-protocol <n>] [--expected-version <version>]",
         manifests_update_failed_fmt: "更新 agent 检测 manifest 失败：{error}",
 
         unknown_shell_fmt: "未知 shell：{shell}",
         completion_usage_fmt: "用法：herdr completion <{shells}>",
 
-        worktree_list_usage:
-            "用法：herdr worktree list [--workspace ID | --cwd PATH] [--trust-repository]",
-        worktree_create_usage:
-            "用法：herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--trust-repository]",
-        worktree_open_usage:
-            "用法：herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]",
-        worktree_remove_usage:
-            "用法：herdr worktree remove --workspace ID [--force] [--trust-repository]",
         remote_worktree_path_absolute: "远程工作树路径必须是绝对路径或以 ~/ 开头",
 
-        workspace_list_usage: "用法：herdr workspace list",
-        workspace_get_usage: "用法：herdr workspace get <workspace_id>",
-        workspace_focus_usage: "用法：herdr workspace focus <workspace_id>",
-        workspace_rename_usage: "用法：herdr workspace rename <workspace_id> <label>",
-        workspace_report_metadata_usage:
-            "用法：herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]",
-        workspace_close_usage: "用法：herdr workspace close <workspace_id> [--group]",
-        workspace_token_required: "缺少要设置或清除的 token",
 
-        tab_get_usage: "用法：herdr tab get <tab_id>",
-        tab_focus_usage: "用法：herdr tab focus <tab_id>",
-        tab_rename_usage: "用法：herdr tab rename <tab_id> <label>",
-        tab_close_usage: "用法：herdr tab close <tab_id>",
 
-        notification_show_usage:
-            "用法：herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]",
-        invalid_position_fmt: "无效的位置：{value}（应为 top-left、top-right、bottom-left 或 bottom-right）",
-        invalid_sound_fmt: "无效的声音：{value}（应为 none、done 或 request）",
 
         integration_status_usage: "用法：herdr integration status [--outdated-only]",
         integration_target_usage_fmt:

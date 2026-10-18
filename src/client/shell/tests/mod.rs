@@ -302,6 +302,7 @@ mod agent_tree_seam;
 mod agents_worktrees_notifications;
 mod broadcast;
 mod chrome_context;
+mod close_pane;
 mod close_tab;
 mod copy;
 mod endpoint_requests;

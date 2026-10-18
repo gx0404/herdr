@@ -226,9 +226,21 @@ class ReleasePerfEnvironmentContractTests(unittest.TestCase):
             }
             process_tmp = root / "process tmp"
             process_tmp.mkdir()
+            bootstrap_tmp = process_tmp
+            if os.name == "nt":
+                # Concurrent MSYS processes share the first process's /tmp mount.
+                # A per-fixture mount disappears when that fixture exits, even if
+                # another fixture is still running. Inherit setup's longer-lived,
+                # project-local root; BASH_ENV restores each fixture's private TMP.
+                inherited_tmp = Path(os.environ.get("TMP", "")).resolve()
+                if os.environ.get("TMP") and inherited_tmp.is_relative_to(ROOT) and inherited_tmp.is_dir():
+                    bootstrap_tmp = inherited_tmp
+                else:
+                    bootstrap_tmp = ROOT / "target/tmp"
+                    bootstrap_tmp.mkdir(parents=True, exist_ok=True)
             environment.update(
                 HOME=str(root / "inherited"), USERPROFILE=str(root / "inherited"),
-                TMP=process_tmp.as_posix(), TEMP=process_tmp.as_posix(),
+                TMP=bootstrap_tmp.as_posix(), TEMP=bootstrap_tmp.as_posix(),
                 TMPDIR=process_tmp.as_posix(),
             )
             for key in self.ISOLATED_DIRS:

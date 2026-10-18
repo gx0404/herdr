@@ -234,26 +234,28 @@ pub(super) fn events_contain_interrupt(events: &[ClientPaneInputEvent]) -> bool 
 pub(crate) fn test_apply_client_pane_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     apply_client_pane_input_events(runtime, events)
 }
 
 pub(super) fn apply_client_pane_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
-) -> Result<(), String> {
-    apply_client_pane_input_events_counted(runtime, events)
-        .map(|_| ())
-        .map_err(|(_, message)| message)
+) -> Result<bool, String> {
+    let mut keyboard_forwarded = false;
+    apply_client_terminal_input_events(runtime, events, true, &mut keyboard_forwarded)
+        .map_err(|(_, message)| message)?;
+    Ok(keyboard_forwarded)
 }
 
 pub(super) fn apply_client_popup_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
-) -> Result<(), String> {
-    apply_client_popup_input_events_counted(runtime, events)
-        .map(|_| ())
-        .map_err(|(_, message)| message)
+) -> Result<bool, String> {
+    let mut keyboard_forwarded = false;
+    apply_client_terminal_input_events(runtime, events, false, &mut keyboard_forwarded)
+        .map_err(|(_, message)| message)?;
+    Ok(keyboard_forwarded)
 }
 
 /// HSR-08：逐事件投递并回报真正送达 PTY 的事件数。批次中途失败（PTY 队列满、
@@ -263,24 +265,25 @@ pub(super) fn apply_client_pane_input_events_counted(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
 ) -> Result<usize, (usize, String)> {
-    apply_client_terminal_input_events(runtime, events, true)
+    apply_client_terminal_input_events(runtime, events, true, &mut false)
 }
 
 pub(super) fn apply_client_popup_input_events_counted(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
 ) -> Result<usize, (usize, String)> {
-    apply_client_terminal_input_events(runtime, events, false)
+    apply_client_terminal_input_events(runtime, events, false, &mut false)
 }
 
-fn apply_client_terminal_input_events(
+pub(super) fn apply_client_terminal_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
     host_page_keys: bool,
+    keyboard_forwarded: &mut bool,
 ) -> Result<usize, (usize, String)> {
     let mut applied = 0;
     for event in events {
-        apply_client_terminal_input_event(runtime, event, host_page_keys)
+        apply_client_terminal_input_event(runtime, event, host_page_keys, keyboard_forwarded)
             .map_err(|message| (applied, message))?;
         applied += 1;
     }
@@ -291,6 +294,7 @@ fn apply_client_terminal_input_event(
     runtime: &crate::terminal::TerminalRuntime,
     event: &ClientPaneInputEvent,
     host_page_keys: bool,
+    keyboard_forwarded: &mut bool,
 ) -> Result<(), String> {
     if let ClientPaneInputEvent::Mouse {
         kind,
@@ -386,6 +390,7 @@ fn apply_client_terminal_input_event(
                 runtime
                     .try_send_bytes(Bytes::from(bytes))
                     .map_err(|err| format!("targeted pane key input failed: {err}"))?;
+                *keyboard_forwarded |= key_event.kind != KeyEventKind::Release;
             }
             Ok(())
         }
@@ -393,7 +398,9 @@ fn apply_client_terminal_input_event(
             runtime.scroll_reset();
             runtime
                 .try_send_bytes(Bytes::copy_from_slice(text.as_str().as_bytes()))
-                .map_err(|err| format!("targeted pane text input failed: {err}"))
+                .map_err(|err| format!("targeted pane text input failed: {err}"))?;
+            *keyboard_forwarded |= !text.as_str().is_empty();
+            Ok(())
         }
         crate::raw_input::RawInputEvent::Paste(text) => {
             runtime.scroll_reset();
@@ -444,11 +451,25 @@ mod tests {
             key('c', crate::protocol::ClientKeyKind::Press),
         ];
 
-        let Err((applied, message)) = apply_client_pane_input_events_counted(&runtime, &batch)
+        let mut keyboard_forwarded = false;
+        let Err((applied, message)) =
+            apply_client_terminal_input_events(&runtime, &batch, true, &mut keyboard_forwarded)
         else {
             panic!("a full input queue must fail the batch");
         };
         assert_eq!(applied, 1, "only the first event reaches the PTY");
+        assert!(
+            keyboard_forwarded,
+            "the accepted prefix opens the echo window"
+        );
+        let mut rejected_keyboard = false;
+        let rejected =
+            apply_client_terminal_input_events(&runtime, &batch, true, &mut rejected_keyboard);
+        assert!(matches!(rejected, Err((0, _))));
+        assert!(
+            !rejected_keyboard,
+            "rejected input does not open the echo window"
+        );
         assert!(message.contains("targeted pane key input failed"));
     }
 

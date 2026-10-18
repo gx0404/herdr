@@ -769,6 +769,64 @@ mod tests {
         assert!(history.contains("split-secret"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn failed_replacement_preserves_saved_files_and_retries() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (session_path, history_path) = temp_session_paths("failed-replacement");
+        save_to_path(&session_path, &empty_snapshot()).unwrap();
+        save_history_to_path(&history_path, Some(&history_snapshot("old history"))).unwrap();
+
+        for path in [session_path.as_ref(), history_path.as_path()] {
+            let original = std::fs::read(path).unwrap();
+            let locked = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+                .open(path)
+                .unwrap();
+            let mut changed = empty_snapshot();
+            changed.selected = 7;
+            let save = || {
+                if path == session_path.as_ref() {
+                    save_to_path(path, &changed).map_err(std::io::Error::other)
+                } else {
+                    save_history_to_path(path, Some(&history_snapshot("new history")))
+                }
+            };
+            assert!(save().is_err());
+            assert_eq!(std::fs::read(path).unwrap(), original);
+            assert!(std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".herdr-persist-")));
+
+            drop(locked);
+            save().unwrap();
+            assert!(std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".herdr-persist-")));
+        }
+
+        assert_eq!(
+            parse_snapshot(&std::fs::read_to_string(&session_path).unwrap())
+                .unwrap()
+                .selected,
+            7
+        );
+        let history = std::fs::read_to_string(&history_path).unwrap();
+        assert!(history.contains("new history"));
+        assert!(!history.contains("old history"));
+        std::fs::remove_dir_all(session_path.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn save_to_paths_removes_stale_history_when_history_is_disabled() {
         let (session_path, history_path) = temp_session_paths("clear-history");

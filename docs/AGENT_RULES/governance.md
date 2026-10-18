@@ -66,3 +66,7 @@ GitHub Discussions 或既有 issue。这些规则对非核实维护者是终局�
 - `.githooks/`（`just install-hooks` 安装）与 `scripts/conventional_commits.py`
   强制 lowercase conventional commits；格式要求见根 AGENTS.md「提交规范」。
 - CI 的 conventional-commits job 用同一脚本校验 PR 标题与范围。
+- 2026-10-18 fork 同步经用户批准保留历史提交
+  `5382ba3a18de6a6f21cdbdcf50016ae958528771`（subject 必须恰为 `ignore`）。
+  `scripts/conventional_commits.py` 仅在 Git 范围校验中豁免这对完整 SHA/subject；
+  新提交、消息文件、其他 SHA 或其他非法文案仍拒绝，不跳过 merge 或旁支历史。

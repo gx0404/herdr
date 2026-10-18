@@ -112,7 +112,17 @@ impl ClientShellState {
     /// so any plain text is a commit (kitty sends those as text too). A legacy
     /// host sends both as plain text; non-ASCII text has no key in the
     /// keyboard model, so only that is treated as a commit there.
+    /// Only text bound for the focused pane is a commit. In prefix, navigate
+    /// and other Herdr-owned input, plain text is still a key that may run a
+    /// binding (#5255).
     fn host_text_commit(&self, key: &crate::input::TerminalKey) -> Option<String> {
+        if self.mode != ClientShellMode::Terminal || self.overlay.is_some() {
+            return None;
+        }
+        self.host_plain_text_commit(key)
+    }
+
+    fn host_plain_text_commit(&self, key: &crate::input::TerminalKey) -> Option<String> {
         if !self.host_reports_all_keys || key.kind != KeyEventKind::Press {
             return None;
         }
@@ -433,6 +443,17 @@ impl ClientShellState {
         if self.copy_operation_in_flight {
             self.copy_input_queue.push_back(key);
             return;
+        }
+        // Plain text on a report-all host is a text commit, even while editing
+        // client-owned overlays. It has no physical key release to lease.
+        // Non-editing overlays still route it as a key for their shortcuts.
+        if self.overlay.is_some() {
+            if let Some(text) = self.host_plain_text_commit(&key) {
+                if self.insert_overlay_text(&text) {
+                    outcome.repaint = true;
+                    return;
+                }
+            }
         }
         let key = if self.host_reports_key_releases && key.generated_text.is_some() {
             key.with_physical_identity_hint(true)

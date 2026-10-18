@@ -3,6 +3,7 @@ mod agent_transport;
 mod agent_wait;
 mod agents;
 mod codex_launch;
+mod contracts;
 mod harness;
 mod hooks;
 mod panes;

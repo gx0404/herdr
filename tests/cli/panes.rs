@@ -817,7 +817,7 @@ fn pane_read_rejects_invalid_value_with_usage_error() {
     );
     assert_eq!(read.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&read.stderr);
-    assert!(stderr.contains("invalid read source: bogus"));
+    assert!(stderr.contains("invalid value 'bogus' for '--source <SOURCE>'"));
     assert!(!stderr.contains("Error: Custom"));
 }
 

@@ -64,6 +64,7 @@ pub(crate) struct EncodedBlit {
     next_last_cursor_shape: u8,
     /// 本帧写完后宿主光标是否可能可见（见 `BlitEncoder::cursor_may_be_visible`）。
     next_cursor_may_be_visible: bool,
+    suppress_visible_cursor: bool,
 }
 
 /// Stateful encoder that diffs semantic frames into terminal ANSI bytes.
@@ -74,6 +75,7 @@ pub(crate) struct BlitEncoder {
     /// 宿主光标是否可能仍可见。块内前导 `?25l` 只在它可能可见时写：上一帧已经
     /// 留下隐藏光标时再写一次只会重置宿主的 blink 相位（模块文档第 4 条）。
     /// 初值取 `true`（未知即按可见处理，先隐藏再画）。
+    suppress_visible_cursor: bool,
     cursor_may_be_visible: bool,
     /// 同步块结束后是否补发最终光标锚点（模块文档第 6 条）。显式字段而非进程级
     /// 全局：客户端按 `ui.repeat_ime_cursor_anchor` 注入，其它构造点用平台默认。
@@ -99,6 +101,7 @@ impl BlitEncoder {
             last_frame: None,
             last_visible_cursor: None,
             last_cursor_shape: 0,
+            suppress_visible_cursor: false,
             cursor_may_be_visible: true,
             repeat_ime_anchor,
         }
@@ -170,6 +173,7 @@ impl BlitEncoder {
             next_last_visible_cursor,
             next_last_cursor_shape,
             next_cursor_may_be_visible,
+            suppress_visible_cursor,
         }
     }
 
@@ -177,6 +181,7 @@ impl BlitEncoder {
         self.last_visible_cursor = encoded.next_last_visible_cursor;
         self.last_cursor_shape = encoded.next_last_cursor_shape;
         self.cursor_may_be_visible = encoded.next_cursor_may_be_visible;
+        self.suppress_visible_cursor = encoded.suppress_visible_cursor;
         self.last_frame = Some(frame);
     }
 
@@ -194,11 +199,10 @@ impl BlitEncoder {
         if rows.iter().any(|row| !patch_row_fits(frame, row)) || patch_rows_overlap(rows) {
             return None;
         }
-        // Metadata revisions need no terminal output. Keep visible cursors on
-        // the normal path because their suppression policy can change.
+        // Metadata revisions need no output unless the cursor's display policy changed.
         if rows.is_empty()
             && cursor == frame.cursor
-            && cursor.as_ref().is_none_or(|cursor| !cursor.visible)
+            && self.suppress_visible_cursor == suppress_visible_cursor
         {
             return Some(EncodedBlit {
                 bytes: Vec::new(),
@@ -206,6 +210,7 @@ impl BlitEncoder {
                 next_last_visible_cursor: self.last_visible_cursor,
                 next_last_cursor_shape: self.last_cursor_shape,
                 next_cursor_may_be_visible: self.cursor_may_be_visible,
+                suppress_visible_cursor,
             });
         }
         let mut bytes = Vec::new();
@@ -229,6 +234,7 @@ impl BlitEncoder {
             next_last_visible_cursor,
             next_last_cursor_shape,
             next_cursor_may_be_visible,
+            suppress_visible_cursor,
         })
     }
 
@@ -295,6 +301,7 @@ impl BlitEncoder {
         frame.cursor = cursor;
         self.last_visible_cursor = encoded.next_last_visible_cursor;
         self.last_cursor_shape = encoded.next_last_cursor_shape;
+        self.suppress_visible_cursor = encoded.suppress_visible_cursor;
         true
     }
 }
@@ -2250,6 +2257,12 @@ mod tests {
                 visible: false,
                 shape: 2,
             }),
+            Some(CursorState {
+                x: 0,
+                y: 0,
+                visible: true,
+                shape: 2,
+            }),
         ] {
             frame.cursor = cursor.clone();
             let initial = encoder.encode(&frame, false);
@@ -2288,6 +2301,21 @@ mod tests {
             )
             .unwrap();
         assert!(String::from_utf8_lossy(&encoded.bytes).contains("\x1b[?25l"));
+        let cursor = encoder.last_frame.as_ref().unwrap().cursor.clone();
+        assert!(encoder.commit_patch(&[], cursor.clone(), encoded));
+        assert!(encoder
+            .encode_patch(&[], cursor.clone(), true)
+            .unwrap()
+            .bytes
+            .is_empty());
+        let encoded = encoder.encode_patch(&[], cursor.clone(), false).unwrap();
+        assert!(String::from_utf8_lossy(&encoded.bytes).contains("\x1b[?25h"));
+        assert!(encoder.commit_patch(&[], cursor.clone(), encoded));
+        assert!(encoder
+            .encode_patch(&[], cursor, false)
+            .unwrap()
+            .bytes
+            .is_empty());
     }
 
     #[test]

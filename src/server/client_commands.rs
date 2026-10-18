@@ -271,67 +271,8 @@ pub(crate) fn response_text(
     }
 }
 
-const CLIENT_SHELL_METHODS: &[&str] = &[
-    "agent.activity.read",
-    "agent.external.list",
-    "agent.prompt",
-    "client.views.set",
-    "client_shell.surface.set",
-    "command.invoke",
-    "integration.install",
-    "integration.list",
-    "layout.set_split_ratio",
-    "pane.clear",
-    "pane.close",
-    "pane.copy_motion",
-    "pane.copy_search",
-    "pane.edit_scrollback",
-    "pane.focus",
-    "pane.focus_direction",
-    "pane.input.set",
-    "pane.link.activate",
-    "pane.link.resolve",
-    "pane.move",
-    "pane.rename",
-    "pane.resize",
-    "pane.scroll",
-    "pane.selection.read",
-    "pane.split",
-    "pane.swap",
-    "pane.text_snapshot.capture",
-    "pane.text_snapshot.read",
-    "pane.text_snapshot.release",
-    "pane.text_snapshot.retain",
-    "pane.text_snapshot.selection",
-    "pane.zoom",
-    "product_announcement.dismiss",
-    "release_notes.dismiss",
-    "server.reload_config",
-    "system.metrics.get",
-    "system.metrics.subscribe",
-    "system.metrics.unsubscribe",
-    "system.process.get",
-    "system.process.list",
-    "system.process.terminate",
-    "tab.close",
-    "tab.create",
-    "tab.focus",
-    "tab.move",
-    "tab.rename",
-    "workspace.close",
-    "workspace.create",
-    "workspace.focus",
-    "workspace.move",
-    "workspace.move_block",
-    "workspace.rename",
-    "worktree.create",
-    "worktree.list",
-    "worktree.open",
-    "worktree.remove",
-];
-
 pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
-    CLIENT_SHELL_METHODS
+    crate::api::schema::operations::client_shell_method_names()
 }
 
 /// HSR-17：白名单查询是每请求路径，改哈希表（原先线性比较 ~70 条）。
@@ -339,7 +280,12 @@ pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
 fn client_shell_method_set() -> &'static std::collections::HashSet<&'static str> {
     static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
         std::sync::OnceLock::new();
-    SET.get_or_init(|| CLIENT_SHELL_METHODS.iter().copied().collect())
+    SET.get_or_init(|| {
+        supported_client_shell_method_names()
+            .iter()
+            .copied()
+            .collect()
+    })
 }
 
 pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
@@ -469,7 +415,7 @@ mod tests {
     }
 
     fn endpoint_method_shape_digests() -> BTreeMap<String, String> {
-        method_shape_digests(CLIENT_SHELL_METHODS)
+        method_shape_digests(supported_client_shell_method_names())
     }
 
     fn method_shape_digests(methods: &[&str]) -> BTreeMap<String, String> {
@@ -664,7 +610,7 @@ mod tests {
 
     #[test]
     fn advertised_client_shell_methods_are_sorted_unique_and_in_schema() {
-        assert!(CLIENT_SHELL_METHODS
+        assert!(supported_client_shell_method_names()
             .windows(2)
             .all(|pair| pair[0] < pair[1]));
 
@@ -695,7 +641,7 @@ mod tests {
             .expect("request schema");
         let mut schema_methods = Vec::new();
         collect_method_constants(&schema, &mut schema_methods);
-        for method in CLIENT_SHELL_METHODS {
+        for method in supported_client_shell_method_names() {
             assert!(
                 schema_methods.iter().any(|candidate| candidate == method),
                 "advertised endpoint method {method:?} is absent from the request schema"

@@ -50,7 +50,12 @@ class KbCorpusTests(unittest.TestCase):
         # 图谱报告是机器生成物，不进检索语料；生成代码不进代码结构层。
         for doc in docs:
             self.assertFalse(doc.startswith("graphify-out"), doc)
-            self.assertFalse(doc.endswith("/bindings.rs"), doc)
+            if doc.endswith(".rs"):
+                self.assertTrue(doc.startswith("src/"), doc)
+        self.assertNotIn("crates/ghostty-vt/src/bindings.rs", docs)
+        # CLI bindings are handwritten command contracts, not generated FFI.
+        self.assertIn("src/cli/plugin/bindings.rs", docs)
+        self.assertIn("src/cli/pane/bindings.rs", docs)
         # 核心语料必须在库：领域规则全集 + 框架文档 + manifest 摘要 + 代码结构。
         rules_dir = PROJECT_ROOT / "docs" / "AGENT_RULES"
         for rule_doc in rules_dir.glob("*.md"):

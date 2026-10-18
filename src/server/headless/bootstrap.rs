@@ -19,11 +19,15 @@ fn drain_pane_shutdowns_before_exit() {
 
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
+    let launcher_warning = crate::platform::leave_launcher_job();
     crate::platform::ignore_server_hangup();
     let args: Vec<String> = std::env::args().collect();
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
     let process_context = crate::platform::prepare_server_process(handoff_import);
     init_logging();
+    if let Some(warning) = launcher_warning {
+        warn!("{warning}");
+    }
     match process_context {
         Ok(true) => info!("server using persistent user service context"),
         Ok(false) => {}
@@ -219,6 +223,10 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.
         server.api_window_title = received.manifest.api_window_title.take();
+        // A restart announced before the handoff still commits after it.
+        server
+            .host_shutdown_intent
+            .set(received.manifest.host_shutdown_intent);
         crate::server::handoff::report_ready(&mut received.stream)?;
         crate::server::handoff::wait_committed(&mut received.stream)?;
         server.app.assume_handoff_ownership();

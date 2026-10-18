@@ -1791,14 +1791,6 @@ pub struct CliErrorTexts {
     pub unknown_terminal_session_option_fmt: &'static str, // args: command, option
     pub terminal_dimension_range_fmt: &'static str,        // args: flag, max
     pub terminal_dimension_positive_fmt: &'static str,     // args: flag
-    pub terminal_title_set_usage: &'static str,
-    pub terminal_title_clear_usage: &'static str,
-    pub terminal_title_help_clear_line: &'static str,
-    pub invalid_split_direction_fmt: &'static str, // args: value
-    pub invalid_read_source_fmt: &'static str,     // args: value
-    pub invalid_read_format_fmt: &'static str,     // args: value
-    pub invalid_agent_status_fmt: &'static str,    // args: value
-    pub invalid_pane_agent_state_fmt: &'static str, // args: value
     pub server_ping_no_protocol: &'static str,
 
     // src/cli/protocol_guard.rs
@@ -1906,26 +1898,11 @@ pub struct CliErrorTexts {
     pub api_activity_read_no_pane_id: &'static str,
 
     // src/cli/agent.rs
-    pub agent_list_usage: &'static str,
-    pub agent_get_usage: &'static str,
-    pub agent_focus_usage: &'static str,
-    pub agent_attach_usage: &'static str,
-    pub agent_wait_usage: &'static str,
-    pub agent_rename_usage: &'static str,
-    pub agent_prompt_usage: &'static str,
-    pub agent_send_keys_usage: &'static str,
-    pub agent_read_usage: &'static str,
-    pub agent_start_usage: &'static str,
-    pub agent_explain_usage: &'static str,
     pub agent_explain_target_usage: &'static str,
-    pub agent_explain_file_usage: &'static str,
     pub agent_explain_file_json_usage: &'static str,
     pub agent_explain_file_requires_agent: &'static str,
     pub agent_explain_file_read_failed_fmt: &'static str, // args: path, error
     pub agent_only_with_file: &'static str,
-    pub format_invalid_fmt: &'static str, // args: value
-    pub kind_required: &'static str,
-    pub pane_flag_required: &'static str,
     pub agent_kind_unsupported_fmt: &'static str, // args: kind
     pub agent_start_no_terminal_id: &'static str,
     pub agent_attach_no_terminal_id: &'static str,
@@ -1934,70 +1911,17 @@ pub struct CliErrorTexts {
     pub agent_exited_before_interactive: &'static str,
     pub agent_name_lost_fmt: &'static str, // args: name
     pub agent_start_timeout: &'static str,
-    pub until_requires_status: &'static str,
-    pub until_requires_wait: &'static str,
-    pub timeout_requires_wait: &'static str,
-    pub agent_prompt_requires_text: &'static str,
 
     // src/cli/pane.rs
-    pub pane_get_usage: &'static str,
-    pub pane_neighbor_usage: &'static str,
-    pub pane_focus_direction_usage: &'static str,
-    pub pane_resize_usage: &'static str,
-    pub pane_rename_usage: &'static str,
-    pub pane_read_usage: &'static str,
-    pub pane_input_usage: &'static str,
-    pub pane_split_usage: &'static str,
-    pub pane_move_usage: &'static str,
-    pub pane_swap_usage: &'static str,
-    pub pane_close_usage: &'static str,
-    pub pane_send_text_usage: &'static str,
-    pub pane_send_keys_usage: &'static str,
-    pub pane_run_usage: &'static str,
-    pub pane_wait_output_usage: &'static str,
-    pub pane_report_agent_usage: &'static str,
-    pub pane_report_agent_session_usage: &'static str,
-    pub pane_report_agent_attention_usage: &'static str,
-    pub pane_report_agent_activity_usage: &'static str,
-    pub pane_release_agent_usage: &'static str,
-    pub pane_report_metadata_usage: &'static str,
-    pub invalid_amount_fmt: &'static str, // args: value
-    pub invalid_ratio_fmt: &'static str,  // args: value
-    pub zoom_mode_conflict: &'static str,
-    pub pane_selector_conflict: &'static str,
-    pub current_requires_env_pane: &'static str,
-    pub invalid_right_click_target_fmt: &'static str, // args: value
-    pub invalid_split_direction_expected_fmt: &'static str, // args: value
-    pub invalid_pane_direction_fmt: &'static str,     // args: value
-    pub match_regex_exclusive: &'static str,
-    pub match_or_regex_required: &'static str,
-    pub source_required: &'static str,
-    pub agent_flag_required: &'static str,
-    pub state_required: &'static str,
-    pub invalid_attention_kind_fmt: &'static str, // args: value
-    pub state_label_format: &'static str,
-    pub unknown_state_label_fmt: &'static str, // args: status
-    pub metadata_set_clear_conflict: &'static str,
-    pub metadata_field_required: &'static str,
 
     // src/cli/plugin.rs
-    pub plugin_link_usage: &'static str,
     pub plugin_install_usage: &'static str,
     pub plugin_install_v1_shorthand_only: &'static str,
     pub plugin_install_requires_yes: &'static str,
     pub plugin_install_cancelled: &'static str,
     pub plugin_config_dir_usage: &'static str,
     pub plugin_uninstall_usage: &'static str,
-    pub plugin_unlink_usage: &'static str,
-    pub plugin_set_enabled_usage_fmt: &'static str, // args: action
-    pub plugin_not_installed_fmt: &'static str,     // args: target
-    pub plugin_limit_invalid_fmt: &'static str,     // args: value
-    pub plugin_action_invoke_usage: &'static str,
-    pub plugin_required: &'static str,
-    pub entrypoint_required: &'static str,
-    pub plugin_pane_focus_usage: &'static str,
-    pub plugin_pane_close_usage: &'static str,
-    pub plugin_pane_placement_invalid_fmt: &'static str, // args: value
+    pub plugin_not_installed_fmt: &'static str, // args: target
     pub plugin_remote_path_absolute: &'static str,
     pub plugin_already_linked_local_fmt: &'static str, // args: plugin
     pub github_segment_empty_fmt: &'static str,        // args: label
@@ -2039,7 +1963,6 @@ pub struct CliErrorTexts {
     pub server_agent_manifests_usage: &'static str,
     pub server_reload_agent_manifests_usage: &'static str,
     pub server_update_agent_manifests_usage: &'static str,
-    pub server_live_handoff_usage: &'static str,
     pub manifests_update_failed_fmt: &'static str, // args: error
 
     // src/cli/completion.rs
@@ -2047,31 +1970,13 @@ pub struct CliErrorTexts {
     pub completion_usage_fmt: &'static str, // args: shells
 
     // src/cli/worktree.rs
-    pub worktree_list_usage: &'static str,
-    pub worktree_create_usage: &'static str,
-    pub worktree_open_usage: &'static str,
-    pub worktree_remove_usage: &'static str,
     pub remote_worktree_path_absolute: &'static str,
 
     // src/cli/workspace.rs
-    pub workspace_list_usage: &'static str,
-    pub workspace_get_usage: &'static str,
-    pub workspace_focus_usage: &'static str,
-    pub workspace_rename_usage: &'static str,
-    pub workspace_report_metadata_usage: &'static str,
-    pub workspace_close_usage: &'static str,
-    pub workspace_token_required: &'static str,
 
     // src/cli/tab.rs
-    pub tab_get_usage: &'static str,
-    pub tab_focus_usage: &'static str,
-    pub tab_rename_usage: &'static str,
-    pub tab_close_usage: &'static str,
 
     // src/cli/notification.rs
-    pub notification_show_usage: &'static str,
-    pub invalid_position_fmt: &'static str, // args: value
-    pub invalid_sound_fmt: &'static str,    // args: value
 
     // src/cli/integration.rs
     pub integration_status_usage: &'static str,

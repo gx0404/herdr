@@ -87,6 +87,20 @@ fn refresh_host_mouse_capture(enabled: bool, sgr_pixels: bool) {
     }
 }
 
+fn refresh_host_keyboard_protocol(
+    terminal_guard: &TerminalGuard,
+    report_all_keys: bool,
+    focus_reporting: bool,
+) {
+    if let Err(err) = terminal_guard.refresh_host_keyboard_protocol(
+        &mut io::stdout(),
+        report_all_keys,
+        focus_reporting,
+    ) {
+        warn!(err = %err, "failed to re-assert host keyboard protocol");
+    }
+}
+
 #[cfg(windows)]
 use terminal_setup::is_ssh_session;
 #[cfg(test)]
@@ -116,7 +130,10 @@ use frame_output::{
     write_encoded_frame_with_graphics, write_standalone_graphics, write_synchronized_graphics,
 };
 pub(crate) use handshake::probe_endpoint_negotiation;
-use handshake::{client_shell_keybinding_source, do_handshake, is_remote_client_process};
+use handshake::{
+    client_shell_keybinding_source, do_handshake, is_remote_client_process,
+    HandshakePixelCapabilities,
+};
 #[cfg(test)]
 use handshake::{
     direct_graphics_profile_values, handshake_read_timeout, REMOTE_HANDSHAKE_READ_TIMEOUT,
@@ -250,9 +267,24 @@ fn run_client_with_mode(
         }
     };
 
-    // Get the terminal geometry before handshake (before raw mode).
+    // Get one coherent geometry snapshot before raw mode changes the terminal.
     let (cols, rows, cell_width_px, cell_height_px, exact_cell_size) =
         initial_terminal_geometry(pixel_geometry_enabled, kitty_graphics_enabled)?;
+
+    let direct_attach = attach_escape.is_some();
+    let mut terminal_guard = if direct_attach {
+        setup_direct_attach_terminal(mouse_capture)
+    } else {
+        setup_terminal(mouse_capture)
+    }
+    .map_err(|err| {
+        eprintln!("herdr: failed to set up terminal: {err}");
+        err
+    })?;
+    loop_config.host_escape_disambiguation_active =
+        terminal_guard.host_escape_disambiguation_active();
+    loop_config.host_sgr_pixel_mouse = terminal_guard.host_sgr_pixel_mouse();
+    loop_config.initial_host_input = terminal_guard.take_buffered_host_input();
 
     let shell_surface_size = loop_config
         .shell_config
@@ -267,7 +299,10 @@ fn run_client_with_mode(
                 rows,
                 cell_width_px,
                 cell_height_px,
-                exact_cell_size,
+                HandshakePixelCapabilities {
+                    exact_geometry: exact_cell_size,
+                    sgr_mouse: loop_config.host_sgr_pixel_mouse == Some(true),
+                },
                 shell_surface_size,
                 endpoint_keybindings,
                 loop_config.mouse_capture_active,
@@ -308,22 +343,6 @@ fn run_client_with_mode(
         }
         Err(error) => return Err(error),
     };
-
-    // The federated shell can show connection notices without any server snapshot.
-    let direct_attach = attach_escape.is_some();
-    let mut terminal_guard = if direct_attach {
-        setup_direct_attach_terminal(mouse_capture)
-    } else {
-        setup_terminal(mouse_capture)
-    }
-    .map_err(|err| {
-        eprintln!("herdr: failed to set up terminal: {err}");
-        err
-    })?;
-    loop_config.host_escape_disambiguation_active =
-        terminal_guard.host_escape_disambiguation_active();
-    loop_config.host_sgr_pixel_mouse = terminal_guard.host_sgr_pixel_mouse();
-    loop_config.initial_host_input = terminal_guard.take_buffered_host_input();
 
     // Install a panic hook so the foreground client always restores its terminal.
     let panic_restore = terminal_guard.panic_restore();
@@ -683,6 +702,9 @@ async fn run_client_loop(
     // Main event loop.
     let mut client_timer = timer::ClientLoopTimer::new();
     let mut deferred_event: Option<ClientLoopEvent> = None;
+    let mut power_monitor = crate::platform::HostPowerMonitor::start(
+        state.shell.is_some() && !is_remote_client && state.attach_escape.is_none(),
+    );
     #[cfg(windows)]
     let mut stdin_open = true;
     while !should_quit.load(Ordering::Acquire) {
@@ -756,6 +778,7 @@ async fn run_client_loop(
                                 present_handoff_unavailable(
                                     &mut state,
                                     crate::i18n::texts().endpoint.local_unavailable.into(),
+                                    None,
                                 );
                             }
                         }
@@ -789,6 +812,13 @@ async fn run_client_loop(
                 }
             }
         }
+        let now = std::time::Instant::now();
+        while let Some(event) = power_monitor.try_recv() {
+            if supervisors.host_power_event(event, now) {
+                write_stream.resume_health(now);
+            }
+        }
+        let pixel_mouse = state.pixel_mouse_available();
         if let Some(shell) = state.shell.as_mut() {
             let options = endpoint::EndpointConnectOptions {
                 cols: state.reported_size.0,
@@ -796,6 +826,7 @@ async fn run_client_loop(
                 cell_width_px: state.reported_cell_size.0,
                 cell_height_px: state.reported_cell_size.1,
                 pixel_geometry_exact: state.pixel_geometry_exact,
+                pixel_mouse,
                 surface_size: shell.surface_size(state.reported_size.0, state.reported_size.1),
                 endpoint_keybindings: config.endpoint_keybindings,
                 mouse_capture: state.shell_mouse_capture_preference,
@@ -818,6 +849,7 @@ async fn run_client_loop(
             event
         } else {
             tokio::select! {
+                ev = power_monitor.recv() => ClientLoopEvent::HostPower(ev),
                 _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
                 ev = stdin_rx.recv(), if stdin_open => match ev {
                     Some(event) => event,
@@ -838,6 +870,7 @@ async fn run_client_loop(
         } else {
             tokio::select! {
                 biased;
+                ev = power_monitor.recv() => ClientLoopEvent::HostPower(ev),
                 _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
                 ev = supervisor_rx.recv() => ev.map(ClientLoopEvent::EndpointSupervisor).unwrap_or(ClientLoopEvent::Timer),
                 ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
@@ -889,6 +922,11 @@ async fn run_client_loop(
         }
 
         match event {
+            ClientLoopEvent::HostPower(event) => {
+                if supervisors.host_power_event(event, now) {
+                    write_stream.resume_health(now);
+                }
+            }
             ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
             ClientLoopEvent::BroadcastSetChanged => {
                 let mirror_changed = state
@@ -950,10 +988,26 @@ async fn run_client_loop(
                         }
                     }
                     let events = crate::raw_input::parse_framed_input(&data);
+                    if events.iter().any(|event| {
+                        matches!(
+                            event,
+                            crate::raw_input::RawInputEvent::Key(_)
+                                | crate::raw_input::RawInputEvent::Text(_)
+                                | crate::raw_input::RawInputEvent::Paste(_)
+                                | crate::raw_input::RawInputEvent::Mouse(_)
+                        )
+                    }) {
+                        supervisors.user_activity(now);
+                    }
                     if crate::raw_input::events_require_host_mode_refresh(&events) {
                         refresh_host_mouse_capture(
                             state.mouse_capture_active,
                             host_sgr_pixels_active.load(Ordering::Acquire),
+                        );
+                        refresh_host_keyboard_protocol(
+                            _terminal_guard,
+                            state.keyboard_report_all_active,
+                            false,
                         );
                     }
                     let (outcome, frame) = {
@@ -1149,6 +1203,7 @@ async fn run_client_loop(
             #[cfg(unix)]
             ClientLoopEvent::PixelMouse(data, geometry) => {
                 if state.shell.is_some() {
+                    supervisors.user_activity(now);
                     let (outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let outcome = shell.handle_pixel_mouse(&data, geometry);
@@ -1217,6 +1272,11 @@ async fn run_client_loop(
                         refresh_host_mouse_capture(
                             state.mouse_capture_active,
                             host_sgr_pixels_active.load(Ordering::Acquire),
+                        );
+                        refresh_host_keyboard_protocol(
+                            _terminal_guard,
+                            state.keyboard_report_all_active,
+                            false,
                         );
                     }
                     let image_target = state
@@ -1326,7 +1386,9 @@ async fn run_client_loop(
                     host_theme_query_pending.fetch_add(1, Ordering::AcqRel);
                     query_host_terminal_theme();
                 }
-                if !pixel_geometry_exact && host_sgr_pixels_active.load(Ordering::Acquire) {
+                let pixel_mouse_available =
+                    pixel_geometry_exact && state.host_sgr_pixel_mouse == Some(true);
+                if !pixel_mouse_available && host_sgr_pixels_active.load(Ordering::Acquire) {
                     set_mouse_capture(state.mouse_capture_active, false)
                         .map_err(ClientError::ConnectionFailed)?;
                     host_sgr_pixels_active.store(false, Ordering::Release);
@@ -1336,6 +1398,11 @@ async fn run_client_loop(
                         host_sgr_pixels_active.load(Ordering::Acquire),
                     );
                 }
+                refresh_host_keyboard_protocol(
+                    _terminal_guard,
+                    state.keyboard_report_all_active,
+                    true,
+                );
                 state.apply_terminal_resize(
                     new_cols,
                     new_rows,
@@ -1350,7 +1417,7 @@ async fn run_client_loop(
                         new_rows,
                         cell_width_px,
                         cell_height_px,
-                        pixel_geometry_exact,
+                        pixel_mouse_available,
                     )
                 } else {
                     ClientMessage::Resize {
@@ -1358,7 +1425,7 @@ async fn run_client_loop(
                         rows: new_rows,
                         cell_width_px,
                         cell_height_px,
-                        pixel_mouse: pixel_geometry_exact,
+                        pixel_mouse: pixel_mouse_available,
                     }
                 };
                 if let Some(activation) = pending_activation.as_mut() {
@@ -1395,6 +1462,13 @@ async fn run_client_loop(
                     if status == endpoint::ClientEndpointStatus::Attention {
                         warn!(endpoint = %endpoint_id.storage_key(), generation, error = %message, "endpoint needs attention");
                     }
+                    let active_failure = state
+                        .shell
+                        .as_ref()
+                        .is_some_and(|shell| shell.endpoint_is_active(&endpoint_id));
+                    if active_failure {
+                        state.freeze_presentation();
+                    }
                     let error_kind = supervisors.connection_error_kind(&endpoint_id);
                     // Forwards die with the link and are rebuilt on the next
                     // connect; until then the mirror shows nothing live.
@@ -1425,11 +1499,15 @@ async fn run_client_loop(
                         .then(|| format!("{}: {message}", shell.endpoint_label(&endpoint_id)))
                     });
                     if let Some(message) = unavailable {
-                        present_handoff_unavailable(&mut state, message);
+                        present_handoff_unavailable(&mut state, message, Some(&endpoint_id));
                     } else if let Some(frame) = state.shell.as_mut().and_then(|shell| {
                         shell.compose(state.reported_size.0, state.reported_size.1)
                     }) {
-                        state.present_frame(frame);
+                        if active_failure {
+                            state.present_frozen_chrome(frame);
+                        } else {
+                            state.present_frame(frame);
+                        }
                     }
                 }
                 endpoint::EndpointSupervisorEvent::Connected {
@@ -1726,6 +1804,7 @@ async fn run_client_loop(
                     continue;
                 }
                 write_stream.received(&endpoint_id, generation, now);
+                supervisors.received(&endpoint_id, generation);
                 // Retirements belong to the exact live connection, even after deactivation.
                 // They must not be dropped with frozen/inactive presentation effects.
                 if matches!(
@@ -2349,8 +2428,7 @@ async fn run_client_loop(
                         let next_sgr_pixels = effective_sgr_pixel_mouse(
                             enabled,
                             sgr_pixels,
-                            state.pixel_geometry_exact,
-                            state.host_sgr_pixel_mouse,
+                            state.pixel_mouse_available(),
                         );
                         let mouse_mode_changed = enabled != state.mouse_capture_active
                             || next_sgr_pixels != host_sgr_pixels_active.load(Ordering::Acquire);
@@ -2526,6 +2604,7 @@ async fn run_client_loop(
                             }
                         }
                         write_stream.mark_ready(&endpoint_id, generation);
+                        supervisors.mark_ready(&endpoint_id, generation, now);
                         if endpoint_id.is_local() {
                             if let Some(event) =
                                 take_ready_local_activation(&mut state, &write_stream)

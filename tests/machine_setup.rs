@@ -15,11 +15,21 @@ for arg do
     last=$arg
     if [ "$arg" = 'StrictHostKeyChecking=yes' ]; then strict_host_key_check=yes; fi
 done
+case "$*" in
+    *powershell.exe*) echo windows >>"$FAKE_ROOT/command-order" ;;
+    *'/bin/sh -s'*) echo posix-probe >>"$FAKE_ROOT/command-order" ;;
+esac
 if [ "$FAKE_STRICT_HOST_KEY_FAILURE" = yes ] && [ "$strict_host_key_check" = yes ]; then
     echo 'No RSA host key is known for fake-host and you have requested strict checking.' >&2
     echo 'Host key verification failed.' >&2
     exit 255
 fi
+case "$*" in
+    *powershell.exe*)
+        if [ "$FAKE_WINDOWS_TRANSPORT_FAILURE" = yes ]; then echo 'ssh: connect to host fake-host port 22: Connection refused' >&2; exit 255; fi
+        if [ "$FAKE_WINDOWS" = yes ]; then printf '\n%s\n%s\n' 'herdr-remote-output-ready:1' 'herdr-windows:AMD64'; exit 0; fi
+        exit 1 ;;
+esac
 if [ "$last" = 'command -v herdr' ]; then
     echo /home/remote/.local/bin/herdr
     exit 0
@@ -64,6 +74,13 @@ struct SetupResult {
     actions: String,
     prompts: usize,
     success: bool,
+    command_order: String,
+}
+
+#[derive(Default)]
+struct SetupOptions {
+    windows: bool,
+    windows_transport_failure: bool,
 }
 
 fn setup(installed: &str, answer: &str, handoff: bool) -> SetupResult {
@@ -76,13 +93,33 @@ fn setup_with_strict_host_key_failure(
     handoff: bool,
     strict_host_key_failure: bool,
 ) -> SetupResult {
+    setup_options(
+        installed,
+        answer,
+        handoff,
+        strict_host_key_failure,
+        SetupOptions::default(),
+    )
+}
+
+fn setup_options(
+    installed: &str,
+    answer: &str,
+    handoff: bool,
+    strict_host_key_failure: bool,
+    options: SetupOptions,
+) -> SetupResult {
     let root = std::env::temp_dir().join(format!(
-        "herdr-machine-setup-{}-{}-{}-{}-{}",
+        "herdr-machine-setup-{}-{}-{}-{}-{}-{}",
         std::process::id(),
         installed,
         answer.trim().is_empty(),
         handoff,
-        strict_host_key_failure
+        strict_host_key_failure,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let app = if cfg!(debug_assertions) {
         "herdr-dev"
@@ -126,6 +163,15 @@ fn setup_with_strict_host_key_failure(
     command.env("HERDR_LANG", "en");
     command.env("FAKE_ROOT", &root);
     command.env("FAKE_INSTALLED", installed);
+    command.env("FAKE_WINDOWS", if options.windows { "yes" } else { "no" });
+    command.env(
+        "FAKE_WINDOWS_TRANSPORT_FAILURE",
+        if options.windows_transport_failure {
+            "yes"
+        } else {
+            "no"
+        },
+    );
     command.env(
         "FAKE_STRICT_HOST_KEY_FAILURE",
         if strict_host_key_failure { "yes" } else { "no" },
@@ -190,6 +236,7 @@ fn setup_with_strict_host_key_failure(
     drop(pair.master);
     reading.join().unwrap();
     let actions = fs::read_to_string(root.join("actions")).unwrap_or_default();
+    let command_order = fs::read_to_string(root.join("command-order")).unwrap_or_default();
     // Every scenario either cancels or reaches the intentionally failed startup.
     let saved = root
         .join("state")
@@ -207,6 +254,7 @@ fn setup_with_strict_host_key_failure(
         actions,
         prompts,
         success: status.success(),
+        command_order,
     }
 }
 
@@ -347,6 +395,53 @@ fn machine_setup_explicit_remote_handoff_remains_available_but_restart_fallback_
         result
             .output
             .contains("This stops active remote pane processes"),
+        "{}",
+        result.output
+    );
+}
+
+#[test]
+fn machine_setup_accepts_a_native_windows_probe_without_a_posix_probe() {
+    // A successful Windows probe must short-circuit so a native Windows host
+    // never falls through to the POSIX `/bin/sh` probe.
+    let result = setup_options(
+        "new",
+        "n\n",
+        false,
+        false,
+        SetupOptions {
+            windows: true,
+            ..Default::default()
+        },
+    );
+    let order: Vec<&str> = result.command_order.lines().collect();
+    assert_eq!(order.first().copied(), Some("windows"), "{}", result.output);
+    assert!(!order.contains(&"posix-probe"), "{}", result.output);
+    assert!(
+        result.output.contains("installation cancelled"),
+        "{}",
+        result.output
+    );
+}
+
+#[test]
+fn machine_setup_windows_transport_failure_is_not_retried() {
+    let result = setup_options(
+        "new",
+        "",
+        false,
+        false,
+        SetupOptions {
+            windows_transport_failure: true,
+            ..Default::default()
+        },
+    );
+    assert!(!result.success, "{}", result.output);
+    assert_eq!(result.prompts, 0, "{}", result.output);
+    assert!(result.actions.is_empty(), "{}", result.output);
+    assert_eq!(result.command_order, "windows\n", "{}", result.output);
+    assert!(
+        result.output.contains("Connection refused"),
         "{}",
         result.output
     );

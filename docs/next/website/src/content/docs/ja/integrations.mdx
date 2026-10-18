@@ -149,7 +149,7 @@ Codex フックをインストールします:
 herdr integration install codex
 ```
 
-Codex フックは、他のインテグレーションと同じローカルソケット API を通じてセッション識別を報告します。Codex の状態は Herdr のスクリーンマニフェスト検出から得られます。
+Codex を `--no-daemon` で実行すると、フックは Herdr のローカル socket API を通じてセッション識別とターンの開始・終了状態を報告します。画面検出は表示中のブロッカーとフックが使えない場合の状態を補います。共有 Codex daemon はフックを別のペインへ送る場合があるため、確実な報告には `--no-daemon` を使ってください。自動起動を無効にするだけでは既存の daemon は停止しません。この fork はターン状態フックを維持します。
 
 Codex インテグレーション v9 は `SubagentStart` と `SubagentStop` も購読します。これらのフックは、Codex のサブエージェントスレッドが開始または終了したことをローカルの Herdr ソケットに通知するだけで、エージェントの状態は報告しません。Herdr はアクティビティツリーを Codex 自身のセッションファイルから再構築します。Codex 0.157 ではフックが既定で有効です。Herdr は旧バージョンとの互換性のため `[features] hooks = true` を明示的に書き込みます。明示的に false を指定するとフックは無効になります。v10 からはアクティビティフックが Windows にもインストールされ、PowerShell フックが `herdr pane report-agent-activity` で送ります。アップグレード後に Codex インテグレーションを再インストールして追加してください。
 

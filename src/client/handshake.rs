@@ -127,7 +127,10 @@ pub(crate) fn probe_endpoint_negotiation(
         24,
         0,
         0,
-        false,
+        HandshakePixelCapabilities {
+            exact_geometry: false,
+            sgr_mouse: false,
+        },
         Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
         false,
         false,
@@ -140,6 +143,11 @@ pub(crate) fn probe_endpoint_negotiation(
         handshake.endpoint_methods.unwrap_or_default(),
         handshake.endpoint_capabilities.unwrap_or_default(),
     ))
+}
+
+pub(super) struct HandshakePixelCapabilities {
+    pub(super) exact_geometry: bool,
+    pub(super) sgr_mouse: bool,
 }
 
 /// Performs the client→server handshake.
@@ -157,7 +165,7 @@ pub(super) fn do_handshake(
     rows: u16,
     cell_width_px: u32,
     cell_height_px: u32,
-    exact_cell_size: bool,
+    pixel_capabilities: HandshakePixelCapabilities,
     shell_surface_size: Option<crate::protocol::ClientSurfaceSize>,
     endpoint_keybindings: bool,
     mouse_capture: bool,
@@ -176,10 +184,10 @@ pub(super) fn do_handshake(
             cell_width_px,
             cell_height_px,
             surface_size,
-            pixel_mouse: exact_cell_size && cfg!(unix),
+            pixel_mouse: pixel_capabilities.exact_geometry && pixel_capabilities.sgr_mouse,
             direct_graphics: direct_graphics_capability(
                 local_transport,
-                exact_cell_size,
+                pixel_capabilities.exact_geometry,
                 (cell_width_px, cell_height_px),
                 direct_graphics_profile_allowed(),
             ),
@@ -208,7 +216,7 @@ pub(super) fn do_handshake(
             rows,
             cell_width_px,
             cell_height_px,
-            pixel_mouse: exact_cell_size && cfg!(unix),
+            pixel_mouse: pixel_capabilities.exact_geometry && pixel_capabilities.sgr_mouse,
         }
     };
     protocol::write_message(stream, &hello)
@@ -458,6 +466,161 @@ mod tests {
         ));
         drop((client, responder.join().unwrap()));
         let _ = std::fs::remove_file(path);
+    }
+
+    fn stream_pair() -> (LocalStream, LocalStream) {
+        use interprocess::local_socket::traits::Listener as _;
+        let path = std::env::temp_dir().join(format!(
+            "hhs-{}-{:x}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = crate::ipc::bind_private_local_listener(&path).unwrap();
+        let client = crate::ipc::connect_local_stream(&path).unwrap();
+        let server = listener.accept().unwrap();
+        std::fs::remove_file(path).unwrap();
+        (client, server)
+    }
+
+    #[test]
+    fn handshake_response_deadline_bounds_silent_and_partial_replies() {
+        use std::io::Write as _;
+        use std::time::Instant;
+        let mut outcomes = Vec::new();
+        for (prefix, drip) in [
+            (vec![], false),
+            (vec![100, 0], false),
+            (vec![100, 0, 0, 0, 1, 2], false),
+            (vec![100, 0, 0, 0], true),
+        ] {
+            let (mut client, mut server) = stream_pair();
+            let (release, held) = std::sync::mpsc::channel();
+            let peer = std::thread::spawn(move || {
+                server.write_all(&prefix).unwrap();
+                if drip {
+                    // Each fragment arrives sooner than the read budget; the total must stay bounded.
+                    for _ in 0..12 {
+                        if held.recv_timeout(Duration::from_millis(40)).is_ok() {
+                            return;
+                        }
+                        if server.write_all(&[1]).is_err() {
+                            return;
+                        }
+                    }
+                } else {
+                    // Bound the reproduction even when the reader ignores its deadline.
+                    let _ = held.recv_timeout(Duration::from_millis(500));
+                }
+            });
+            let start = Instant::now();
+            let result = read_handshake_welcome(&mut client, Duration::from_millis(100), None);
+            let elapsed = start.elapsed();
+            let _ = release.send(());
+            peer.join().unwrap();
+            outcomes.push((elapsed, result));
+        }
+        for (elapsed, result) in outcomes {
+            assert!(
+                matches!(result, Err(ClientError::ConnectionLost(ref error)) if error.kind() == io::ErrorKind::TimedOut),
+                "{elapsed:?}: {result:?}"
+            );
+            assert!(elapsed < Duration::from_millis(400), "{elapsed:?}");
+        }
+    }
+
+    #[test]
+    fn handshake_preserves_welcome_rejection_close_and_frame_limit() {
+        use std::io::Write as _;
+        for endpoint_shell in [false, true] {
+            for outcome in ["welcome", "rejected", "closed", "oversized"] {
+                let (mut client, mut server) = stream_pair();
+                let peer = std::thread::spawn(move || {
+                    let hello: ClientMessage =
+                        protocol::read_message(&mut server, MAX_FRAME_SIZE).unwrap();
+                    assert!(
+                        matches!(hello, ClientMessage::EndpointControl { .. }) == endpoint_shell
+                    );
+                    match outcome {
+                        "closed" => (),
+                        "oversized" => server
+                            .write_all(&((MAX_FRAME_SIZE + 1) as u32).to_le_bytes())
+                            .unwrap(),
+                        _ => {
+                            let welcome = if endpoint_shell {
+                                let welcome = if outcome == "rejected" {
+                                    EndpointServerWelcome::incompatible(
+                                        "denied",
+                                        "permission denied",
+                                    )
+                                } else {
+                                    EndpointServerWelcome::compatible(vec!["pane.close".into()])
+                                };
+                                ServerMessage::EndpointControl {
+                                    kind: ENDPOINT_WELCOME_KIND.into(),
+                                    data: serde_json::to_string(&welcome).unwrap(),
+                                }
+                            } else {
+                                ServerMessage::Welcome {
+                                    version: PROTOCOL_VERSION,
+                                    encoding: RenderEncoding::TerminalAnsi,
+                                    error: (outcome == "rejected")
+                                        .then(|| "permission denied".into()),
+                                }
+                            };
+                            protocol::write_message(&mut server, &welcome).unwrap();
+                        }
+                    }
+                });
+                let response = do_handshake(
+                    &mut client,
+                    80,
+                    24,
+                    0,
+                    0,
+                    HandshakePixelCapabilities {
+                        exact_geometry: false,
+                        sgr_mouse: false,
+                    },
+                    endpoint_shell
+                        .then_some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
+                    false,
+                    false,
+                    true,
+                    true,
+                    None,
+                );
+                peer.join().unwrap();
+                match outcome {
+                    "welcome" => {
+                        let response = response.unwrap();
+                        assert_eq!(
+                            response.encoding,
+                            if endpoint_shell {
+                                RenderEncoding::SemanticFrame
+                            } else {
+                                RenderEncoding::TerminalAnsi
+                            }
+                        );
+                        if endpoint_shell {
+                            assert_eq!(response.endpoint_methods, Some(vec!["pane.close".into()]));
+                        }
+                    }
+                    "rejected" => assert!(
+                        matches!(response, Err(ClientError::HandshakeRejected { error, .. }) if error == "permission denied")
+                    ),
+                    "closed" => assert!(
+                        matches!(response, Err(ClientError::ConnectionLost(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof)
+                    ),
+                    "oversized" => assert!(
+                        matches!(response, Err(ClientError::Protocol(protocol::FramingError::Oversized { claimed, max })) if claimed == MAX_FRAME_SIZE + 1 && max == MAX_FRAME_SIZE)
+                    ),
+                    _ => unreachable!(),
+                }
+            }
+        }
     }
 
     #[test]

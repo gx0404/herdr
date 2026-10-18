@@ -74,6 +74,7 @@ pub(super) enum ClientLoopEvent {
     MachineAuthCancel {
         ticket: u64,
     },
+    HostPower(crate::platform::HostPowerEvent),
     ActivateEndpoint {
         endpoint_id: endpoint::ClientEndpointId,
         target: Option<shell::ClientEndpointFocusTarget>,

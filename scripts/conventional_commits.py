@@ -18,13 +18,27 @@ ALLOWED_TYPES = {
     "release",
 }
 SUBJECT_RE = re.compile(r"^(?P<kind>[a-z]+)(?:\([^)]+\))?!?:\s+\S")
+# Approved for the 2026-10-18 fork sync: retain this existing master commit
+# without rewriting history. Only Git range inspection can use this exact pair;
+# new subjects and commit-message files still have to satisfy valid_subject().
+HISTORICAL_SUBJECT_EXCEPTIONS = {
+    "5382ba3a18de6a6f21cdbdcf50016ae958528771": "ignore",
+}
 
 
 def git_subjects(rev_range: str) -> list[str]:
     output = subprocess.check_output(
-        ["git", "log", "--pretty=format:%s", rev_range], text=True
-    ).strip()
-    return [line.strip() for line in output.splitlines() if line.strip()]
+        ["git", "log", "--encoding=UTF-8", "--pretty=format:%H%x00%s", rev_range],
+        text=True,
+        encoding="utf-8",
+    )
+    subjects = []
+    for line in output.splitlines():
+        commit, subject = line.split("\0", 1)
+        if HISTORICAL_SUBJECT_EXCEPTIONS.get(commit) == subject:
+            continue
+        subjects.append(subject)
+    return subjects
 
 
 def valid_subject(subject: str) -> bool:

@@ -65,7 +65,12 @@ impl ClientShellState {
         };
         let endpoint_id = hit.endpoint_id.clone();
         let collapse_toggle = super::contains(hit.collapse_toggle, point);
-        if collapse_toggle || endpoint_id == self.active_endpoint_id {
+        if collapse_toggle
+            || (endpoint_id == self.active_endpoint_id
+                && (endpoint_id.is_local()
+                    || self.endpoint_is_online(&endpoint_id)
+                    || self.endpoint_status(&endpoint_id) == Some(ClientEndpointStatus::Disabled)))
+        {
             if !self.collapsed_endpoints.remove(&endpoint_id) {
                 self.collapsed_endpoints.insert(endpoint_id.clone());
             }
@@ -91,12 +96,7 @@ impl ClientShellState {
             }
             outcome.repaint = true;
         } else {
-            let label = self.endpoint_label(&endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(crate::i18n::fill(
-                crate::i18n::texts().mobile.not_ready_fmt,
-                &[("label", &label)],
-            ));
-            outcome.repaint = true;
+            self.select_unready_machine(&endpoint_id, outcome);
         }
         true
     }
@@ -260,6 +260,47 @@ impl ClientShellState {
         false
     }
 
+    /// Selecting a machine that is waiting to reconnect asks for an attempt now.
+    fn select_unready_machine(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        outcome: &mut ClientShellInput,
+    ) {
+        if matches!(
+            self.endpoint_status(endpoint_id),
+            Some(ClientEndpointStatus::Connecting | ClientEndpointStatus::Reconnecting)
+        ) {
+            outcome.actions.push(ClientShellAction::ReconnectEndpoint {
+                endpoint_id: endpoint_id.clone(),
+            });
+            self.set_endpoint_status(endpoint_id, ClientEndpointStatus::Connecting);
+        } else if self.endpoint_status(endpoint_id) == Some(ClientEndpointStatus::Attention) {
+            if let ClientEndpointId::Ssh(profile_id) = endpoint_id {
+                self.open_machines_overlay_for(&profile_id.clone());
+            }
+        } else {
+            let label = self.endpoint_label(endpoint_id).to_owned();
+            self.receive_endpoint_unavailable(crate::i18n::fill(
+                crate::i18n::texts().mobile.not_ready_fmt,
+                &[("label", &label)],
+            ));
+        }
+        outcome.repaint = true;
+    }
+
+    pub(crate) fn receive_machine_unavailable(
+        &mut self,
+        id: &ClientEndpointId,
+        message: String,
+    ) -> bool {
+        self.push_endpoint_notice(
+            ClientEndpointNoticeKind::Unavailable,
+            format!("machine-unavailable:{}:{message}", id.storage_key()),
+            "Endpoint unavailable",
+            message,
+        )
+    }
+
     pub(super) fn activate_endpoint(
         &mut self,
         endpoint_id: ClientEndpointId,
@@ -270,12 +311,7 @@ impl ClientShellState {
         self.reveal_session_target = None;
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
-            let label = self.endpoint_label(&endpoint_id).to_owned();
-            self.receive_endpoint_unavailable(crate::i18n::fill(
-                crate::i18n::texts().mobile.not_ready_fmt,
-                &[("label", &label)],
-            ));
-            outcome.repaint = true;
+            self.select_unready_machine(&endpoint_id, outcome);
             return false;
         }
         if (endpoint_id.is_local() && (self.multi_endpoint_active() || !online))
@@ -304,6 +340,8 @@ impl ClientShellState {
         self.reveal_session_target = None;
         let online = self.endpoint_is_online(&endpoint_id);
         if !online && !endpoint_id.is_local() {
+            // Cached workspace/pane rows remain unavailable; only selecting the
+            // machine itself may bring its reconnect forward.
             let label = self.endpoint_label(&endpoint_id).to_owned();
             self.receive_endpoint_unavailable(crate::i18n::fill(
                 crate::i18n::texts().mobile.not_ready_fmt,

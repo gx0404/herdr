@@ -1,7 +1,10 @@
+import contextlib
+import io
 import json
 import os
 import subprocess
 import tempfile
+import sys
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -169,6 +172,67 @@ class ConventionalCommitTests(unittest.TestCase):
                 conventional_commits.commit_message_subject(path),
                 "fix(update): switch channel",
             )
+
+    def run_validator(self, *args, git_output=""):
+        with (
+            mock.patch.object(sys, "argv", ["conventional_commits.py", *args]),
+            mock.patch.object(conventional_commits.subprocess, "check_output", return_value=git_output),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            return conventional_commits.main()
+
+    def test_range_allows_only_the_approved_historical_commit_and_subject(self):
+        historical = "5382ba3a18de6a6f21cdbdcf50016ae958528771"
+        self.assertEqual(
+            self.run_validator("--range", "base..HEAD", git_output=f"{historical}\0ignore\n{'a' * 40}\0fix: 合并兼容\n"),
+            0,
+        )
+        for commit, subject in [
+            ("b" * 40, "ignore"),
+            (historical[:8], "ignore"),
+            (historical, "Ignore"),
+            (historical, "ignore "),
+            (historical, "other invalid message"),
+        ]:
+            with self.subTest(commit=commit, subject=subject):
+                self.assertEqual(
+                    self.run_validator("--range", "base..HEAD", git_output=f"{commit}\0{subject}\n"),
+                    1,
+                )
+
+    def test_historical_exception_does_not_hide_other_invalid_commits(self):
+        self.assertEqual(
+            self.run_validator(
+                "--range", "base..HEAD",
+                git_output="5382ba3a18de6a6f21cdbdcf50016ae958528771\0ignore\n"
+                + "c" * 40 + "\0Merge branch 'topic'\n",
+            ),
+            1,
+        )
+
+    def test_new_ignore_subject_and_message_file_remain_invalid(self):
+        self.assertFalse(conventional_commits.valid_subject("ignore"))
+        self.assertEqual(self.run_validator("ignore"), 1)
+        self.assertEqual(
+            self.run_validator(
+                "ignore", "--range", "base..HEAD",
+                git_output="5382ba3a18de6a6f21cdbdcf50016ae958528771\0ignore\n",
+            ),
+            1,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "COMMIT_EDITMSG"
+            path.write_text("ignore\n", encoding="utf-8")
+            self.assertEqual(self.run_validator("--message-file", str(path)), 1)
+
+    def test_range_reads_full_commit_ids_without_filtering_merge_history(self):
+        with mock.patch.object(conventional_commits.subprocess, "check_output", return_value="") as git:
+            self.assertEqual(conventional_commits.git_subjects("base..HEAD"), [])
+        git.assert_called_once_with(
+            ["git", "log", "--encoding=UTF-8", "--pretty=format:%H%x00%s", "base..HEAD"],
+            text=True,
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

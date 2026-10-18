@@ -883,6 +883,8 @@ fn direct_mark_unread_action_reports_missing_target_instead_of_silent_success() 
 #[test]
 fn settings_boundary_search_enter_reveals_the_original_offscreen_action() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    // This test exercises palette reveal, independently of last-pane confirmation.
+    state.config.confirm_close = false;
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     state.open_command_search();

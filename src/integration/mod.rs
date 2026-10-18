@@ -24,7 +24,7 @@ pub(crate) use env::{
 };
 #[cfg(test)]
 pub(crate) use env::{claude_dir, codex_dir, kimi_dir};
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) use registry::integration_target_available;
 pub(crate) use registry::{
     command_path_candidates, executable_file_exists, installed_integration_statuses,

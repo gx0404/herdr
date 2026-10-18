@@ -1735,3 +1735,9 @@ fn protocol_schema_registers_observation_events() {
         .collect::<Vec<_>>();
     assert_eq!(names, tags);
 }
+
+#[test]
+fn read_choices_cover_every_api_value() {
+    crate::cli::projection::assert_choices_cover_api_enum(READ_SOURCES);
+    crate::cli::projection::assert_choices_cover_api_enum(READ_FORMATS);
+}

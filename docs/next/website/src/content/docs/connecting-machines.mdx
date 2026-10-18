@@ -11,6 +11,14 @@ Herdr requests SSH compression to reduce screen-update traffic on limited connec
 
 A disconnect cancels pending actions only for that machine; actions still running on other machines can complete. Timeout and broadcast-failure notices are deduplicated per machine and server run. A successful request re-enables the matching notice if a later request fails.
 
+### Recovering SSH authentication
+
+On Linux and macOS, managed SSH connections can share an approved OpenSSH connection. `herdr machine status [<label-or-id>] --json` checks current reachability; it does not describe every open TUI's connection. `herdr machine reconnect <label-or-id>` authenticates and verifies the saved machine without installing or updating Herdr. The shared connection's `ControlPersist 600` is a ten-minute idle timeout, not an MFA validity period.
+
+This fork retains its machine detail card, host-key review and explicitly approved interactive authentication. Attention pauses automatic retries; after completing external authentication, use the detail card's reconnect action. Selecting a connecting or reconnecting machine requests an immediate retry. After a detected system wake, eligible disconnected machines get a short recovery window with retries every two seconds for up to thirty seconds. Unknown or changed host keys still require review.
+
+Saved TUI connections check whether an existing shared SSH connection can open a new channel. CLI status and API commands check only after an initial read-only connection failure. If reuse fails while a fresh connection to the same host succeeds, Herdr retires the old connection from reuse and reconnects. Existing channels stay open. A fresh connection that needs authentication or rejects the host key does not trigger this recovery. API commands retry connection setup at most once and never repeat a request that may already have changed remote state.
+
 ## Before you connect
 
 You need normal SSH access to the remote machine. Verify it first:

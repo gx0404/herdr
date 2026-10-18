@@ -235,6 +235,7 @@ fn server_command() -> Command {
     let t = &crate::i18n::texts().cli_help;
     let command = Command::new("server")
         .about(t.server_about)
+        .subcommand(super::server::live_handoff_command())
         .subcommand(Command::new("stop").about(t.server_stop_about))
         .subcommand(Command::new("reload-config").about(t.server_reload_config_about))
         .subcommand(
@@ -284,538 +285,27 @@ fn api_command() -> Command {
 }
 
 fn workspace_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("workspace")
-        .about(t.workspace_about)
-        .subcommand(Command::new("list").about(t.workspace_list_about))
-        .subcommand(
-            Command::new("create")
-                .about(t.workspace_create_about)
-                .arg(path_option("cwd", "PATH"))
-                .arg(option("label", "TEXT"))
-                .arg(env_option())
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
-        )
-        .subcommand(id_command("get", "workspace_id", t.workspace_get_about))
-        .subcommand(id_command("focus", "workspace_id", t.workspace_focus_about))
-        .subcommand(
-            Command::new("rename")
-                .about(t.workspace_rename_about)
-                .arg(required("workspace_id", "WORKSPACE_ID"))
-                .arg(required("label", "LABEL").num_args(1..)),
-        )
-        .subcommand(
-            Command::new("report-metadata")
-                .about(t.workspace_report_metadata_about)
-                .arg(required("workspace_id", "WORKSPACE_ID"))
-                .arg(option("source", "ID").required(true))
-                .arg(repeatable_option("token", "NAME=VALUE"))
-                .arg(repeatable_option("clear-token", "NAME"))
-                .arg(option("seq", "N"))
-                .arg(option("ttl-ms", "N")),
-        )
-        .subcommand(id_command("close", "workspace_id", t.workspace_close_about))
+    super::workspace_bindings::command()
 }
 
 fn worktree_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("worktree")
-        .about(t.worktree_about)
-        .subcommand(
-            Command::new("list")
-                .about(t.worktree_list_about)
-                .arg(option("workspace", "ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(flag("trust-repository")),
-        )
-        .subcommand(
-            Command::new("create")
-                .about(t.worktree_create_about)
-                .arg(option("workspace", "ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(option("branch", "NAME"))
-                .arg(option("base", "REF"))
-                .arg(path_option("path", "PATH"))
-                .arg(option("label", "TEXT"))
-                .arg(flag("focus"))
-                .arg(flag("no-focus"))
-                .arg(flag("trust-repository")),
-        )
-        .subcommand(
-            Command::new("open")
-                .about(t.worktree_open_about)
-                .arg(option("workspace", "ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(path_option("path", "PATH"))
-                .arg(option("branch", "NAME"))
-                .arg(option("label", "TEXT"))
-                .arg(flag("focus"))
-                .arg(flag("no-focus"))
-                .arg(flag("trust-repository")),
-        )
-        .subcommand(
-            Command::new("remove")
-                .about(t.worktree_remove_about)
-                .arg(option("workspace", "ID"))
-                .arg(flag("force"))
-                .arg(flag("trust-repository")),
-        )
+    super::worktree::command()
 }
 
 fn tab_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("tab")
-        .about(t.tab_about)
-        .subcommand(
-            Command::new("list")
-                .about(t.tab_list_about)
-                .arg(option("workspace", "WORKSPACE_ID")),
-        )
-        .subcommand(
-            Command::new("create")
-                .about(t.tab_create_about)
-                .arg(option("workspace", "WORKSPACE_ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(option("label", "TEXT"))
-                .arg(env_option())
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
-        )
-        .subcommand(id_command("get", "tab_id", t.tab_get_about))
-        .subcommand(id_command("focus", "tab_id", t.tab_focus_about))
-        .subcommand(
-            Command::new("rename")
-                .about(t.tab_rename_about)
-                .arg(required("tab_id", "TAB_ID"))
-                .arg(required("label", "LABEL").num_args(1..)),
-        )
-        .subcommand(id_command("close", "tab_id", t.tab_close_about))
+    super::tab::command()
 }
 
 fn notification_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("notification")
-        .about(t.notification_about)
-        .subcommand(
-            Command::new("show")
-                .about(t.notification_show_about)
-                .arg(required("title", "TITLE"))
-                .arg(option("body", "TEXT"))
-                .arg(option("position", "POSITION").value_parser([
-                    "top-left",
-                    "top-right",
-                    "bottom-left",
-                    "bottom-right",
-                ]))
-                .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
-        )
+    super::notification::command()
 }
 
 fn agent_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("agent")
-        .about(t.agent_about)
-        .subcommand(Command::new("list").about(t.agent_list_about))
-        .subcommand(id_command("get", "target", t.agent_get_about))
-        .subcommand(
-            Command::new("read")
-                .about(t.agent_read_about)
-                .override_usage("herdr agent read <TARGET> [OPTIONS]")
-                .arg(required("target", "TARGET"))
-                .arg(read_source_option(true))
-                .arg(option("lines", "N"))
-                .arg(text_ansi_format_option())
-                .arg(flag("ansi")),
-        )
-        .subcommand(
-            Command::new("send-keys")
-                .about(t.agent_send_keys_about)
-                .arg(required("target", "TARGET"))
-                .arg(required("key", "KEY").num_args(1..))
-                .after_help(t.send_keys_after_help),
-        )
-        .subcommand(
-            Command::new("prompt")
-                .about(t.agent_prompt_about)
-                .override_usage("herdr agent prompt <TARGET> <TEXT> [OPTIONS]")
-                .arg(required("target", "TARGET"))
-                .arg(required("text", "TEXT"))
-                .arg(flag("wait").help(t.agent_prompt_wait_help))
-                .arg(
-                    option("until", "STATUS")
-                        .action(ArgAction::Append)
-                        .requires("wait")
-                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
-                        .help(t.agent_prompt_until_help),
-                )
-                .arg(
-                    option("timeout", "MS")
-                        .requires("wait")
-                        .help(t.timeout_ms_help),
-                )
-                .after_help(t.agent_prompt_after_help),
-        )
-        .subcommand(
-            Command::new("rename")
-                .about(t.agent_rename_about)
-                .override_usage("herdr agent rename <TARGET> <NAME>|--clear")
-                .arg(required("target", "TARGET"))
-                .arg(Arg::new("name").value_name("NAME"))
-                .arg(flag("clear"))
-                .group(
-                    ArgGroup::new("rename")
-                        .args(["name", "clear"])
-                        .required(true),
-                ),
-        )
-        .subcommand(id_command("focus", "target", t.agent_focus_about))
-        .subcommand(
-            Command::new("wait")
-                .about(t.agent_wait_about)
-                .override_usage("herdr agent wait <TARGET> [OPTIONS]")
-                .arg(required("target", "TARGET"))
-                .arg(
-                    option("until", "STATUS")
-                        .action(ArgAction::Append)
-                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
-                        .help(t.agent_wait_until_help),
-                )
-                .arg(option("timeout", "MS").help(t.timeout_ms_help))
-                .after_help(t.agent_wait_after_help),
-        )
-        .subcommand(
-            Command::new("attach")
-                .about(t.agent_attach_about)
-                .override_usage("herdr agent attach <TARGET> [OPTIONS]")
-                .arg(required("target", "TARGET"))
-                .arg(flag("takeover")),
-        )
-        .subcommand(
-            Command::new("start")
-                .about(t.agent_start_about)
-                .override_usage(
-                    "herdr agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]",
-                )
-                .arg(required("name", "NAME"))
-                .arg(
-                    option("kind", "KIND")
-                        .required(true)
-                        .value_parser(agent_kind_values())
-                        .help(t.agent_start_kind_help),
-                )
-                .arg(
-                    option("pane", "ID")
-                        .required(true)
-                        .help(t.agent_start_pane_help),
-                )
-                .arg(option("timeout", "MS").help(t.agent_start_timeout_help))
-                .arg(
-                    Arg::new("agent_args")
-                        .value_name("AGENT_ARG")
-                        .num_args(0..)
-                        .last(true),
-                )
-                .after_help(t.agent_start_after_help),
-        )
-        .subcommand(
-            Command::new("explain")
-                .about(t.agent_explain_about)
-                .arg(Arg::new("target").value_name("TARGET"))
-                .arg(path_option("file", "PATH"))
-                .arg(option("agent", "LABEL"))
-                .arg(json_flag())
-                .arg(text_json_format_option())
-                .arg(
-                    Arg::new("verbose")
-                        .short('v')
-                        .long("verbose")
-                        .action(ArgAction::SetTrue),
-                ),
-        )
-}
-
-pub(super) fn agent_kind_values() -> Vec<&'static str> {
-    crate::detect::Agent::ALL
-        .into_iter()
-        .map(crate::detect::agent_label)
-        .collect()
+    super::agent::command()
 }
 
 fn pane_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("pane")
-        .about(t.pane_about)
-        .subcommand(
-            Command::new("list")
-                .about(t.pane_list_about)
-                .arg(option("workspace", "WORKSPACE_ID")),
-        )
-        .subcommand(
-            Command::new("current")
-                .about(t.pane_current_about)
-                .args(current_pane_args()),
-        )
-        .subcommand(id_command("get", "pane_id", t.pane_get_about))
-        .subcommand(
-            Command::new("layout")
-                .about(t.pane_layout_about)
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("process-info")
-                .about(t.pane_process_info_about)
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("neighbor")
-                .about(t.pane_neighbor_about)
-                .arg(required_direction_option())
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("edges")
-                .about(t.pane_edges_about)
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("focus")
-                .about(t.pane_focus_about)
-                .arg(required_direction_option())
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("resize")
-                .about(t.pane_resize_about)
-                .arg(required_direction_option())
-                .arg(option("amount", "FLOAT"))
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("zoom")
-                .about(t.pane_zoom_about)
-                .arg(Arg::new("pane_id").value_name("PANE_ID"))
-                .args(current_pane_args())
-                .arg(flag("toggle"))
-                .arg(flag("on"))
-                .arg(flag("off")),
-        )
-        .subcommand(
-            Command::new("read")
-                .about(t.pane_read_about)
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(read_source_option(true))
-                .arg(option("lines", "N"))
-                .arg(text_ansi_format_option())
-                .arg(flag("ansi"))
-                .arg(flag("raw")),
-        )
-        .subcommand(
-            Command::new("rename")
-                .about(t.pane_rename_about)
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(Arg::new("label").value_name("LABEL").num_args(1..))
-                .arg(flag("clear")),
-        )
-        .subcommand(
-            Command::new("input")
-                .about(t.pane_input_about)
-                .arg(Arg::new("pane_id").value_name("PANE_ID"))
-                .args(current_pane_args())
-                .arg(
-                    option("right-click", "TARGET")
-                        .value_parser(["herdr", "pane"])
-                        .required(true),
-                ),
-        )
-        .subcommand(
-            Command::new("split")
-                .about(t.pane_split_about)
-                .arg(Arg::new("pane_id").value_name("PANE_ID"))
-                .args(current_pane_args())
-                .arg(split_direction_option())
-                .arg(option("ratio", "FLOAT"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(env_option())
-                .arg(option("right-click", "TARGET").value_parser(["herdr", "pane"]))
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
-        )
-        .subcommand(
-            Command::new("swap")
-                .about(t.pane_swap_about)
-                .arg(direction_option())
-                .args(current_pane_args())
-                .arg(option("source-pane", "ID"))
-                .arg(option("target-pane", "ID")),
-        )
-        .subcommand(
-            Command::new("move")
-                .about(t.pane_move_about)
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(option("tab", "TAB_ID"))
-                .arg(option("split", "DIRECTION").value_parser(["right", "down"]))
-                .arg(option("target-pane", "ID"))
-                .arg(option("ratio", "FLOAT"))
-                .arg(flag("new-tab"))
-                .arg(option("workspace", "ID"))
-                .arg(flag("new-workspace"))
-                .arg(option("label", "TEXT"))
-                .arg(option("tab-label", "TEXT"))
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
-        )
-        .subcommand(id_command("close", "pane_id", t.pane_close_about))
-        .subcommand(
-            Command::new("send-text")
-                .about(t.pane_send_text_about)
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(required("text", "TEXT"))
-                .after_help(t.pane_send_text_after_help),
-        )
-        .subcommand(
-            Command::new("send-keys")
-                .about(t.pane_send_keys_about)
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(required("key", "KEY").num_args(1..))
-                .after_help(t.send_keys_after_help),
-        )
-        .subcommand(
-            Command::new("wait-output")
-                .about(t.pane_wait_output_about)
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(
-                    option("match", "TEXT")
-                        .conflicts_with("regex")
-                        .required_unless_present("regex")
-                        .help(t.pane_wait_output_match_help),
-                )
-                .arg(
-                    option("regex", "PATTERN")
-                        .conflicts_with("match")
-                        .required_unless_present("match")
-                        .help(t.pane_wait_output_regex_help),
-                )
-                .arg(read_source_option(false))
-                .arg(option("lines", "N").help(t.pane_wait_output_lines_help))
-                .arg(option("timeout", "MS").help(t.timeout_ms_help))
-                .arg(flag("raw").help(t.pane_wait_output_raw_help))
-                .group(
-                    ArgGroup::new("matcher")
-                        .args(["match", "regex"])
-                        .required(true),
-                )
-                .after_help(t.pane_wait_output_after_help),
-        )
-        .subcommand(
-            Command::new("run")
-                .about(t.pane_run_about)
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(required("command", "COMMAND").num_args(1..)),
-        )
-        .subcommand(report_agent_command())
-        .subcommand(report_agent_session_command())
-        .subcommand(report_agent_attention_command())
-        .subcommand(report_agent_activity_command())
-        .subcommand(release_agent_command())
-        .subcommand(report_metadata_command())
-}
-
-fn report_agent_attention_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("report-agent-attention")
-        .about(t.pane_report_agent_attention_about)
-        .arg(Arg::new("pane_id").value_name("PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(
-            option("kind", "KIND")
-                .required(true)
-                .value_parser(["needs_input", "failed", "clear"]),
-        )
-        .arg(option("title", "TEXT"))
-        .arg(option("detail", "TEXT"))
-        .arg(repeatable_option("option", "TEXT"))
-        .arg(option("seq", "N"))
-}
-
-fn report_agent_activity_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("report-agent-activity")
-        .about(t.pane_report_agent_activity_about)
-        .arg(Arg::new("pane_id").value_name("PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(option("hint", "TEXT"))
-        .arg(option("node-id", "ID"))
-        .arg(option("seq", "N"))
-}
-
-fn report_agent_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("report-agent")
-        .about(t.pane_report_agent_about)
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(pane_agent_state_option("state"))
-        .arg(option("message", "TEXT"))
-        .arg(option("seq", "N"))
-        .arg(option("agent-session-id", "ID"))
-        .arg(path_option("agent-session-path", "PATH"))
-        .arg(resume_argv_arg())
-}
-
-fn report_agent_session_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("report-agent-session")
-        .about(t.pane_report_agent_session_about)
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(option("seq", "N"))
-        .arg(option("agent-session-id", "ID"))
-        .arg(path_option("agent-session-path", "PATH"))
-        .arg(option("session-start-source", "SOURCE"))
-        .arg(resume_argv_arg())
-}
-
-fn resume_argv_arg() -> Arg {
-    Arg::new("resume_argv")
-        .value_name("RESUME_ARG")
-        .num_args(0..)
-        .last(true)
-        .help("Command that resumes this session after a Herdr restart; starts with a plain command name")
-}
-
-fn release_agent_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("release-agent")
-        .about(t.pane_release_agent_about)
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(option("seq", "N"))
-}
-
-fn report_metadata_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("report-metadata")
-        .about(t.pane_report_metadata_about)
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL"))
-        .arg(option("applies-to-source", "ID"))
-        .arg(option("title", "TEXT"))
-        .arg(flag("clear-title"))
-        .arg(option("display-agent", "TEXT"))
-        .arg(flag("clear-display-agent"))
-        .arg(option("state-label", "STATUS=TEXT"))
-        .arg(flag("clear-state-labels"))
-        .arg(repeatable_option("token", "NAME=VALUE"))
-        .arg(repeatable_option("clear-token", "NAME"))
-        .arg(option("seq", "N"))
-        .arg(option("ttl-ms", "N"))
+    super::pane::command()
 }
 
 fn terminal_command() -> Command {
@@ -847,16 +337,7 @@ fn terminal_command() -> Command {
                         .arg(option("rows", "N")),
                 ),
         )
-        .subcommand(
-            Command::new("title")
-                .about(t.terminal_title_about)
-                .subcommand(
-                    Command::new("set")
-                        .about(t.terminal_title_set_about)
-                        .arg(required("title", "TITLE")),
-                )
-                .subcommand(Command::new("clear").about(t.terminal_title_clear_about)),
-        )
+        .subcommand(super::title::command())
 }
 
 fn session_command() -> Command {
@@ -909,131 +390,7 @@ fn integration_command() -> Command {
 }
 
 fn plugin_command() -> Command {
-    let t = &crate::i18n::texts().cli_help;
-    Command::new("plugin")
-        .about(t.plugin_about)
-        .subcommand(
-            Command::new("install")
-                .about(t.plugin_install_about)
-                .arg(required("source", "OWNER/REPO[/SUBDIR]"))
-                .arg(option("ref", "REF"))
-                .arg(
-                    Arg::new("yes")
-                        .short('y')
-                        .long("yes")
-                        .action(ArgAction::SetTrue),
-                ),
-        )
-        .subcommand(
-            Command::new("uninstall")
-                .about(t.plugin_uninstall_about)
-                .arg(required("plugin", "PLUGIN")),
-        )
-        .subcommand(
-            Command::new("update")
-                .about(t.plugin_update_about)
-                .arg(Arg::new("plugins").value_name("PLUGIN").num_args(0..))
-                .arg(
-                    Arg::new("yes")
-                        .short('y')
-                        .long("yes")
-                        .action(ArgAction::SetTrue),
-                ),
-        )
-        .subcommand(
-            Command::new("link")
-                .about(t.plugin_link_about)
-                .arg(path_arg("path", "PATH"))
-                .arg(flag("disabled"))
-                .arg(flag("enabled")),
-        )
-        .subcommand(
-            Command::new("unlink")
-                .about(t.plugin_unlink_about)
-                .arg(required("plugin_id", "PLUGIN_ID")),
-        )
-        .subcommand(
-            Command::new("enable")
-                .about(t.plugin_enable_about)
-                .arg(required("plugin_id", "PLUGIN_ID")),
-        )
-        .subcommand(
-            Command::new("disable")
-                .about(t.plugin_disable_about)
-                .arg(required("plugin_id", "PLUGIN_ID")),
-        )
-        .subcommand(
-            Command::new("list")
-                .about(t.plugin_list_about)
-                .arg(option("plugin", "ID"))
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("config-dir")
-                .about(t.plugin_config_dir_about)
-                .arg(required("plugin_id", "PLUGIN_ID")),
-        )
-        .subcommand(
-            Command::new("action")
-                .about(t.plugin_action_about)
-                .subcommand(
-                    Command::new("list")
-                        .about(t.plugin_action_list_about)
-                        .arg(option("plugin", "ID")),
-                )
-                .subcommand(
-                    Command::new("invoke")
-                        .about(t.plugin_action_invoke_about)
-                        .arg(required("action_id", "ACTION_ID"))
-                        .arg(option("plugin", "ID")),
-                ),
-        )
-        .subcommand(
-            Command::new("log")
-                .about(t.plugin_log_about)
-                .visible_alias("logs")
-                .subcommand(
-                    Command::new("list")
-                        .about(t.plugin_log_list_about)
-                        .arg(option("plugin", "ID"))
-                        .arg(option("limit", "N")),
-                ),
-        )
-        .subcommand(
-            Command::new("pane")
-                .about(t.plugin_pane_about)
-                .subcommand(
-                    Command::new("open")
-                        .about(t.plugin_pane_open_about)
-                        .arg(option("plugin", "ID"))
-                        .arg(option("entrypoint", "ID"))
-                        .arg(
-                            option("placement", "PLACEMENT")
-                                .value_parser(["overlay", "split", "tab", "zoomed"]),
-                        )
-                        .arg(option("workspace", "ID"))
-                        .arg(option("target-pane", "PANE"))
-                        .arg(split_direction_option())
-                        .arg(path_option("cwd", "PATH"))
-                        .arg(env_option())
-                        .arg(flag("focus"))
-                        .arg(flag("no-focus")),
-                )
-                .subcommand(
-                    Command::new("focus")
-                        .about(t.plugin_pane_focus_about)
-                        .arg(required("pane_id", "PANE_ID")),
-                )
-                .subcommand(
-                    Command::new("close")
-                        .about(t.plugin_pane_close_about)
-                        .arg(required("pane_id", "PANE_ID")),
-                ),
-        )
-}
-
-fn current_pane_args() -> [Arg; 2] {
-    [option("pane", "ID"), flag("current")]
+    super::plugin::command()
 }
 
 fn integration_target_arg() -> Arg {
@@ -1050,47 +407,6 @@ fn integration_target_values() -> Vec<&'static str> {
         .collect()
 }
 
-fn id_command(name: &'static str, id: &'static str, about: &'static str) -> Command {
-    Command::new(name).about(about).arg(required(id, id))
-}
-
-fn direction_option() -> Arg {
-    option("direction", "DIRECTION").value_parser(["left", "right", "up", "down"])
-}
-
-fn required_direction_option() -> Arg {
-    direction_option().required(true)
-}
-
-fn split_direction_option() -> Arg {
-    option("direction", "DIRECTION").value_parser(["right", "down"])
-}
-
-fn pane_agent_state_option(name: &'static str) -> Arg {
-    option(name, "STATUS")
-        .required(true)
-        .value_parser(["idle", "working", "blocked", "unknown"])
-}
-
-fn read_source_option(include_detection: bool) -> Arg {
-    let values = if include_detection {
-        vec!["visible", "recent", "recent-unwrapped", "detection"]
-    } else {
-        vec!["visible", "recent", "recent-unwrapped"]
-    };
-    option("source", "SOURCE")
-        .value_parser(values)
-        .help(crate::i18n::texts().cli_help.source_help)
-}
-
-fn text_ansi_format_option() -> Arg {
-    option("format", "FORMAT").value_parser(["text", "ansi"])
-}
-
-fn text_json_format_option() -> Arg {
-    option("format", "FORMAT").value_parser(["text", "json"])
-}
-
 fn json_flag() -> Arg {
     flag("json")
 }
@@ -1101,12 +417,6 @@ fn help_flag() -> Arg {
         .long("help")
         .action(ArgAction::SetTrue)
         .help(crate::i18n::texts().cli_help.help_flag_help)
-}
-
-fn env_option() -> Arg {
-    option("env", "KEY=VALUE")
-        .action(ArgAction::Append)
-        .help(crate::i18n::texts().cli_help.env_help)
 }
 
 fn flag(name: &'static str) -> Arg {
@@ -1132,13 +442,53 @@ fn required(name: &'static str, value_name: &'static str) -> Arg {
     Arg::new(name).value_name(value_name).required(true)
 }
 
-fn path_arg(name: &'static str, value_name: &'static str) -> Arg {
-    required(name, value_name).value_hint(ValueHint::AnyPath)
-}
-
 #[cfg(test)]
 mod tests {
     use clap::{Arg, Command};
+
+    #[test]
+    fn shared_command_help_uses_the_selected_language() {
+        for lang in [crate::i18n::Lang::ZhCn, crate::i18n::Lang::En] {
+            let _guard = crate::i18n::lang_guard(lang);
+            let command = super::command();
+            let texts = &crate::i18n::texts().cli_help;
+            for (path, expected) in [
+                (&["workspace"][..], texts.workspace_about),
+                (&["tab"][..], texts.tab_about),
+                (&["worktree"][..], texts.worktree_about),
+                (&["notification"][..], texts.notification_about),
+                (&["agent", "prompt"][..], texts.agent_prompt_about),
+                (
+                    &["pane", "report-agent-attention"][..],
+                    texts.pane_report_agent_attention_about,
+                ),
+                (
+                    &["pane", "report-agent-activity"][..],
+                    texts.pane_report_agent_activity_about,
+                ),
+                (&["plugin", "action"][..], texts.plugin_action_about),
+                (&["terminal", "title"][..], texts.terminal_title_about),
+            ] {
+                assert_eq!(
+                    command_path(&command, path)
+                        .get_about()
+                        .unwrap()
+                        .to_string(),
+                    expected,
+                    "{path:?}"
+                );
+            }
+            let prompt = command_path(&command, &["agent", "prompt"]);
+            let until = prompt
+                .get_arguments()
+                .find(|arg| arg.get_id() == "until")
+                .unwrap();
+            assert_eq!(
+                until.get_help().unwrap().to_string(),
+                texts.agent_prompt_until_help
+            );
+        }
+    }
 
     fn command_path<'a>(cmd: &'a Command, path: &[&str]) -> &'a Command {
         let mut current = cmd;
@@ -1599,12 +949,17 @@ mod tests {
     }
 
     #[test]
-    fn worktree_json_compatibility_flag_stays_out_of_public_spec() {
+    fn worktree_json_compatibility_flag_stays_out_of_public_help() {
         let cmd = super::command();
         for subcommand in ["list", "create", "open", "remove"] {
             let worktree_command = command_path(&cmd, &["worktree", subcommand]);
+            assert!(option_arg(worktree_command, "json").is_hide_set());
             assert!(
-                !has_option(worktree_command, "json"),
+                !worktree_command
+                    .clone()
+                    .render_long_help()
+                    .to_string()
+                    .contains("--json"),
                 "herdr worktree {subcommand} should not advertise --json"
             );
         }

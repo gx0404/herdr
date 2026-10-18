@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cli::pane::bindings as binding;
+use crate::cli::projection::{Field, Input};
+
 use super::agents::AgentSessionInfo;
 use super::common::{AgentStatus, PaneAgentState, ReadFormat, ReadSource, SplitDirection};
 
@@ -15,29 +18,33 @@ pub enum PaneRightClickTarget {
     Pane,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneSplitParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_pane_id: Option<String>,
-    pub direction: SplitDirection,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ratio: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub focus: bool,
-    #[serde(default)]
-    pub right_click: PaneRightClickTarget,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub env: HashMap<String, String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneSplitParams => PaneSplitProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub workspace_id: Option<String> => Field::new(None::<String>),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub target_pane_id: Option<String> => binding::target(true),
+        pub direction: SplitDirection => Field::new(SplitDirection::Right).input(binding::split_direction()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ratio: Option<f32> => Field::new(None).input(binding::finite("ratio")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cwd: Option<String> => Field::new(None).input(binding::optional_text("cwd", "PATH").path()),
+        #[serde(default)]
+        pub focus: bool => Field::new(false).input(binding::boolean("focus", true)).input(binding::boolean("no-focus", false)),
+        #[serde(default)]
+        pub right_click: PaneRightClickTarget => Field::new(PaneRightClickTarget::Herdr).input(binding::right_click()),
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        pub env: HashMap<String, String> => Field::new(HashMap::new()).input(binding::environment()),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneInputSetParams {
-    pub pane_id: String,
-    pub right_click: PaneRightClickTarget,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneInputSetParams => PaneInputProjection {
+        pub pane_id: String => binding::input_target(),
+        pub right_click: PaneRightClickTarget => Field::new(PaneRightClickTarget::Herdr).input(binding::right_click().required()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -60,24 +67,28 @@ pub enum PaneDirection {
     Down,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct PaneSwapParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direction: Option<PaneDirection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_pane_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_pane_id: Option<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+    pub struct PaneSwapParams => PaneSwapProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(false),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub direction: Option<PaneDirection> => Field::new(None).input(binding::optional_direction().configure(|arg| arg.conflicts_with_all(["source-pane", "target-pane"]))),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub source_pane_id: Option<String> => Field::new(None).input(binding::optional_text("source-pane", "ID").configure(|arg| arg.requires("target-pane"))),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub target_pane_id: Option<String> => Field::new(None).input(binding::optional_text("target-pane", "ID").configure(|arg| arg.requires("source-pane"))),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneMoveParams {
-    pub pane_id: String,
-    pub destination: PaneMoveDestination,
-    #[serde(default)]
-    pub focus: bool,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneMoveParams => PaneMoveProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub destination: PaneMoveDestination => binding::destination(),
+        #[serde(default)]
+        pub focus: bool => Field::new(true).input(binding::boolean("focus", true)).input(binding::boolean("no-focus", false)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -105,12 +116,17 @@ pub enum PaneMoveDestination {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct PaneZoomParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
-    #[serde(default)]
-    pub mode: PaneZoomMode,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+    pub struct PaneZoomParams => PaneZoomProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(true),
+        #[serde(default)]
+        pub mode: PaneZoomMode => Field::new(PaneZoomMode::Toggle)
+            .input(Input::flag("toggle", |slot, _| { *slot = PaneZoomMode::Toggle; Ok(()) }).configure(|arg| arg.conflicts_with_all(["on", "off"])))
+            .input(Input::flag("on", |slot, _| { *slot = PaneZoomMode::On; Ok(()) }).configure(|arg| arg.conflicts_with("off")))
+            .input(Input::flag("off", |slot, _| { *slot = PaneZoomMode::Off; Ok(()) })),
+    }
 }
 
 #[derive(
@@ -124,16 +140,20 @@ pub enum PaneZoomMode {
     Off,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct PaneLayoutParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+    pub struct PaneLayoutParams => PaneLayoutProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(false),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct PaneProcessInfoParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+    pub struct PaneProcessInfoParams => PaneProcessInfoProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(false),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
@@ -205,33 +225,41 @@ pub struct LayoutPane {
     pub env: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneNeighborParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
-    pub direction: PaneDirection,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneNeighborParams => PaneNeighborProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(false),
+        pub direction: PaneDirection => Field::new(PaneDirection::Left).input(binding::direction()),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct PaneEdgesParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+    pub struct PaneEdgesParams => PaneEdgesProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(false),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneFocusDirectionParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
-    pub direction: PaneDirection,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneFocusDirectionParams => PaneFocusProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(false),
+        pub direction: PaneDirection => Field::new(PaneDirection::Left).input(binding::direction()),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneResizeParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
-    pub direction: PaneDirection,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amount: Option<f32>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneResizeParams => PaneResizeProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pane_id: Option<String> => binding::target(false),
+        pub direction: PaneDirection => Field::new(PaneDirection::Left).input(binding::direction()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub amount: Option<f32> => Field::new(None).input(binding::finite("amount")),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -303,119 +331,139 @@ pub struct PaneCopySearchParams {
     pub previous: Option<PaneTextRange>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct PaneListParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+    pub struct PaneListParams => PaneListProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub workspace_id: Option<String> => Field::new(None).input(Input::value("workspace", "WORKSPACE_ID", |slot, value| { *slot = Some(crate::cli::normalize_workspace_id(value)); Ok(()) })),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
-pub struct PaneCurrentParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caller_pane_id: Option<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+    pub struct PaneCurrentParams => PaneCurrentProjection {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub caller_pane_id: Option<String> => binding::target(false),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneRenameParams {
-    pub pane_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneRenameParams => PaneRenameProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub label: Option<String> => binding::label(),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneSendTextParams {
-    pub pane_id: String,
-    pub text: String,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneSendTextParams => PaneSendTextProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub text: String => Field::new(String::new()).input(binding::joined("text", "TEXT")),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneSendKeysParams {
-    pub pane_id: String,
-    pub keys: Vec<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneSendKeysParams => PaneSendKeysProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub keys: Vec<String> => Field::new(Vec::new()).input(binding::keys()),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneSendInputParams {
-    pub pane_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keys: Vec<String>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneSendInputParams => PaneRunProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub text: String => Field::new(String::new()).input(binding::joined("command", "COMMAND")),
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub keys: Vec<String> => Field::new(vec![String::from("Enter")]),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneReadParams {
-    pub pane_id: String,
-    pub source: ReadSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lines: Option<u32>,
-    #[serde(default)]
-    pub format: ReadFormat,
-    #[serde(default = "super::default_true")]
-    pub strip_ansi: bool,
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub(crate) intent: super::common::ReadIntent,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneReadParams => PaneReadProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub source: ReadSource => Field::new(ReadSource::Recent).input(binding::read_source(true)),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub lines: Option<u32> => Field::new(None).input(binding::lines()),
+        #[serde(default)]
+        pub format: ReadFormat => binding::read_format(),
+        #[serde(default = "super::default_true")]
+        pub strip_ansi: bool => Field::new(true).input(binding::boolean("raw", false)),
+        #[serde(skip)]
+        #[schemars(skip)]
+        pub(crate) intent: super::common::ReadIntent => Field::new(super::common::ReadIntent::Interactive),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneReportAgentParams {
-    pub pane_id: String,
-    pub source: String,
-    pub agent: String,
-    pub state: PaneAgentState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session_path: Option<String>,
-    /// Command that resumes this agent's session after a Herdr restart. The
-    /// first element must be a plain command name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume_argv: Option<Vec<String>>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneReportAgentParams => PaneReportAgentProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub source: String => Field::new(String::new()).input(binding::source()),
+        pub agent: String => Field::new(String::new()).input(binding::text("agent", "LABEL").required()),
+        pub state: PaneAgentState => Field::new(PaneAgentState::Unknown).input(binding::state()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub message: Option<String> => Field::new(None).input(binding::optional_text("message", "TEXT")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub seq: Option<u64> => Field::new(None).input(binding::number("seq", "N")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent_session_id: Option<String> => Field::new(None).input(binding::optional_text("agent-session-id", "ID")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent_session_path: Option<String> => Field::new(None).input(binding::optional_text("agent-session-path", "PATH").path()),
+        /// Command that resumes this agent's session after a Herdr restart. The
+        /// first element must be a plain command name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resume_argv: Option<Vec<String>> => Field::new(None).input(binding::resume()),
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneReportAgentSessionParams {
-    pub pane_id: String,
-    pub source: String,
-    pub agent: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_start_source: Option<String>,
-    /// Command that resumes this agent's session after a Herdr restart. The
-    /// first element must be a plain command name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume_argv: Option<Vec<String>>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneReportAgentSessionParams => PaneReportSessionProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub source: String => Field::new(String::new()).input(binding::source()),
+        pub agent: String => Field::new(String::new()).input(binding::text("agent", "LABEL").required()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub seq: Option<u64> => Field::new(None).input(binding::number("seq", "N")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent_session_id: Option<String> => Field::new(None).input(binding::optional_text("agent-session-id", "ID")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent_session_path: Option<String> => Field::new(None).input(binding::optional_text("agent-session-path", "PATH").path()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub session_start_source: Option<String> => Field::new(None).input(binding::optional_text("session-start-source", "SOURCE")),
+        /// Command that resumes this agent's session after a Herdr restart. The
+        /// first element must be a plain command name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resume_argv: Option<Vec<String>> => Field::new(None).input(binding::resume()),
+    }
 }
 
+crate::cli::projection::cli_params! {
 /// 钩子上报「该 pane 的 agent 活动可能变了」的提示：server 据此刷新活动树（收到
 /// 后立即刷，同一 pane 至少隔 1 s）。响应里不带树。多数 agent 的树由 server 的来源
 /// 适配器从该 agent 自己的本地状态读取，请求只作信号；读不到本地状态的 agent（pi）
 /// 由 herdr 扩展把整棵树写成结构化快照放进 `hint`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneReportAgentActivityParams {
-    pub pane_id: String,
-    pub source: String,
-    pub agent: String,
+pub struct PaneReportAgentActivityParams => PaneActivityProjection {
+    pub pane_id: String => Field::new(String::new()).input(binding::report_pane_id()),
+    pub source: String => Field::new(String::new()).input(binding::source()),
+    pub agent: String => Field::new(String::new()).input(binding::text("agent", "LABEL").required()),
     /// 触发提示的钩子事件名等自由文本，或该 agent 的来源适配器能理解的结构化快照
     /// （pi 扩展把整棵活动树写成 `herdr.activity.snapshot` v1 JSON 放在这里）。server
     /// 只缓存每个 pane 最近到达的一份（上限 1 MiB，超限的不缓存、保留上一份），下一次
     /// 刷新时交给来源适配器；不带 `hint` 的上报只作信号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
+    pub hint: Option<String> => Field::new(None).input(binding::optional_text("hint", "TEXT")),
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
+    pub node_id: Option<String> => Field::new(None).input(binding::optional_text("node-id", "ID")),
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
+    pub seq: Option<u64> => Field::new(None).input(binding::number("seq", "N")),
+}
 }
 
 /// `pane.report_agent_attention` 上报的种类。
@@ -430,55 +478,59 @@ pub enum PaneAgentAttentionKind {
     Clear,
 }
 
+crate::cli::projection::cli_params! {
 /// 集成上报「agent 需要用户处理的事」。只更新 `AgentInfo.attention`，不改 agent 状态。
 /// `herdr:<agent>` 来源只能由对应的官方集成使用；带 `seq` 时按来源单调递增取舍，与
 /// `pane.report_agent` 同口径。`title` 最多 200 个字符、`detail` 最多 2000 个字符、
 /// `options` 最多 8 个且每个最多 120 个字符，超出即 `invalid_attention`；`options` 只对
 /// `needs_input` 有效。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneReportAgentAttentionParams {
-    pub pane_id: String,
-    pub source: String,
-    pub agent: String,
-    pub kind: PaneAgentAttentionKind,
+pub struct PaneReportAgentAttentionParams => PaneAttentionProjection {
+    pub pane_id: String => Field::new(String::new()).input(binding::report_pane_id()),
+    pub source: String => Field::new(String::new()).input(binding::source()),
+    pub agent: String => Field::new(String::new()).input(binding::text("agent", "LABEL").required()),
+    pub kind: PaneAgentAttentionKind => Field::new(PaneAgentAttentionKind::Clear).input(binding::attention_kind()),
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<String> => Field::new(None).input(binding::optional_text("title", "TEXT")),
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
+    pub detail: Option<String> => Field::new(None).input(binding::optional_text("detail", "TEXT")),
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<String>,
+    pub options: Vec<String> => Field::new(Vec::new()).input(binding::attention_option()),
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
+    pub seq: Option<u64> => Field::new(None).input(binding::number("seq", "N")),
+}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneReportMetadataParams {
-    pub pane_id: String,
-    pub source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applies_to_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub state_labels: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[schemars(schema_with = "super::common::metadata_token_patch_schema")]
-    pub tokens: HashMap<String, Option<String>>,
-    #[serde(default)]
-    pub clear_title: bool,
-    #[serde(default)]
-    pub clear_display_agent: bool,
-    #[serde(default)]
-    pub clear_state_labels: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 86_400_000))]
-    pub ttl_ms: Option<u64>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneReportMetadataParams => PaneMetadataProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub source: String => Field::new(String::new()).input(binding::source()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent: Option<String> => Field::new(None).input(binding::optional_text("agent", "LABEL")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub applies_to_source: Option<String> => Field::new(None).input(binding::optional_text("applies-to-source", "ID")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub title: Option<String> => Field::new(None).input(binding::optional_text("title", "TEXT").configure(|arg| arg.conflicts_with("clear-title"))),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub display_agent: Option<String> => Field::new(None).input(binding::optional_text("display-agent", "TEXT").configure(|arg| arg.conflicts_with("clear-display-agent"))),
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        pub state_labels: HashMap<String, String> => Field::new(HashMap::new()).input(binding::state_label().configure(|arg| arg.conflicts_with("clear-state-labels"))),
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        #[schemars(schema_with = "super::common::metadata_token_patch_schema")]
+        pub tokens: HashMap<String, Option<String>> => Field::new(HashMap::new()).input(binding::token()).input(binding::clear_token()),
+        #[serde(default)]
+        pub clear_title: bool => Field::new(false).input(binding::boolean("clear-title", true)),
+        #[serde(default)]
+        pub clear_display_agent: bool => Field::new(false).input(binding::boolean("clear-display-agent", true)),
+        #[serde(default)]
+        pub clear_state_labels: bool => Field::new(false).input(binding::boolean("clear-state-labels", true)),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub seq: Option<u64> => Field::new(None).input(binding::number("seq", "N")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(range(min = 1, max = 86_400_000))]
+        pub ttl_ms: Option<u64> => Field::new(None).input(binding::number("ttl-ms", "N")),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -490,13 +542,15 @@ pub struct PaneClearAgentAuthorityParams {
     pub seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PaneReleaseAgentParams {
-    pub pane_id: String,
-    pub source: String,
-    pub agent: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneReleaseAgentParams => PaneReleaseProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub source: String => Field::new(String::new()).input(binding::source()),
+        pub agent: String => Field::new(String::new()).input(binding::text("agent", "LABEL").required()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub seq: Option<u64> => Field::new(None).input(binding::number("seq", "N")),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

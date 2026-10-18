@@ -6,7 +6,8 @@
    docs/next/website 英文 mdx、根 CHANGELOG.md 近端；
 2. 配置契约：src/detect/manifests/*.toml 摘要、config-reference.json 与
    API schema 的顶层结构摘要；
-3. 代码结构：src/**/*.rs（排除生成物 bindings.rs）的模块文档与公开项签名。
+3. 代码结构：src/**/*.rs 的模块文档与公开项签名（包括手写 CLI bindings）；
+   生成的 FFI 绑定 crates/ghostty-vt/src/bindings.rs 位于索引根外。
 
 默认 check 模式：内存重建并与现有产物 diff，不一致退出 1；--confirm 才写入。
 语料闭集 = Git 跟踪文件与未忽略的新文件；新文件同时须落入下列受控语料范围，无需暂存。

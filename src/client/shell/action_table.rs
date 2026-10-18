@@ -1709,7 +1709,7 @@ impl ClientShellState {
                 let ActionTarget::Pane { pane_id, .. } = target else {
                     return;
                 };
-                self.push_endpoint_method(Method::PaneClose(PaneTarget { pane_id }), outcome);
+                self.request_pane_close(pane_id, outcome);
             }
             ActionId::MachineSwitch => {
                 if let ActionTarget::Machine(endpoint_id) = target {

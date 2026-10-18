@@ -1473,16 +1473,6 @@ pub const TEXTS: Texts = Texts {
             "unknown terminal session {command} option: {option}",
         terminal_dimension_range_fmt: "{flag} must be an integer between 1 and {max}",
         terminal_dimension_positive_fmt: "{flag} must be greater than 0",
-        terminal_title_set_usage: "usage: herdr terminal title set <title>",
-        terminal_title_clear_usage: "usage: herdr terminal title clear",
-        terminal_title_help_clear_line: "       herdr terminal title clear",
-        invalid_split_direction_fmt: "invalid split direction: {value}",
-        invalid_read_source_fmt: "invalid read source: {value}",
-        invalid_read_format_fmt: "invalid read format: {value}",
-        invalid_agent_status_fmt:
-            "invalid agent status: {value} (expected idle, working, blocked, done, or unknown)",
-        invalid_pane_agent_state_fmt:
-            "invalid pane agent state: {value} (expected idle, working, blocked, or unknown)",
         server_ping_no_protocol: "server ping did not include a protocol version",
 
         protocol_newer_fmt:
@@ -1599,32 +1589,13 @@ pub const TEXTS: Texts = Texts {
             "usage: herdr api activity-read (--agent <TARGET> | --external-id <ID>) [--node-id <ID>] [--cursor <CURSOR>] [--max-bytes <N>]",
         api_activity_read_no_pane_id: "agent lookup failed: response did not include pane_id",
 
-        agent_list_usage: "usage: herdr agent list",
-        agent_get_usage: "usage: herdr agent get <target>",
-        agent_focus_usage: "usage: herdr agent focus <target>",
-        agent_attach_usage: "usage: herdr agent attach <target> [--takeover]",
-        agent_wait_usage: "usage: herdr agent wait <target> [--until STATUS]... [--timeout MS]",
-        agent_rename_usage: "usage: herdr agent rename <target> <name>|--clear",
-        agent_prompt_usage:
-            "usage: herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]",
-        agent_send_keys_usage: "usage: herdr agent send-keys <target> <key> [key ...]",
-        agent_read_usage:
-            "usage: herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]",
-        agent_start_usage:
-            "usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]",
-        agent_explain_usage: "usage: herdr agent explain <target> [--json|--verbose]",
         agent_explain_target_usage: "usage: herdr agent explain <target> [--json]",
-        agent_explain_file_usage:
-            "usage: herdr agent explain --file PATH --agent LABEL [--json|--verbose]",
         agent_explain_file_json_usage:
             "usage: herdr agent explain --file PATH --agent LABEL [--json]",
         agent_explain_file_requires_agent: "herdr agent explain --file requires --agent LABEL",
         agent_explain_file_read_failed_fmt:
             "failed to read agent explain file {path}: {error}",
         agent_only_with_file: "--agent is only valid with --file",
-        format_invalid_fmt: "invalid --format: {value} (expected text or json)",
-        kind_required: "missing required --kind",
-        pane_flag_required: "missing required --pane",
         agent_kind_unsupported_fmt: "unsupported interactive agent kind: {kind}",
         agent_start_no_terminal_id: "agent start response did not include terminal_id",
         agent_attach_no_terminal_id: "agent attach failed: response did not include terminal_id",
@@ -1634,70 +1605,8 @@ pub const TEXTS: Texts = Texts {
         agent_exited_before_interactive: "agent process exited before becoming interactive",
         agent_name_lost_fmt: "named agent {name} no longer owns the target terminal",
         agent_start_timeout: "timed out waiting for agent startup",
-        until_requires_status: "--until requires at least one status",
-        until_requires_wait: "--until requires --wait",
-        timeout_requires_wait: "--timeout requires --wait",
-        agent_prompt_requires_text: "agent prompt requires text",
 
-        pane_get_usage: "usage: herdr pane get <pane_id>",
-        pane_neighbor_usage:
-            "usage: herdr pane neighbor --direction left|right|up|down [--pane ID|--current]",
-        pane_focus_direction_usage:
-            "usage: herdr pane focus --direction left|right|up|down [--pane ID|--current]",
-        pane_resize_usage:
-            "usage: herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]",
-        pane_rename_usage: "usage: herdr pane rename <pane_id> <label>|--clear",
-        pane_read_usage:
-            "usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]",
-        pane_input_usage:
-            "usage: herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane",
-        pane_split_usage:
-            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--right-click herdr|pane] [--focus] [--no-focus]",
-        pane_move_usage:
-            "usage: herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]\n       herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]",
-        pane_swap_usage:
-            "usage: herdr pane swap --direction left|right|up|down [--pane ID|--current]\n       herdr pane swap --source-pane ID --target-pane ID",
-        pane_close_usage: "usage: herdr pane close <pane_id>",
-        pane_send_text_usage: "usage: herdr pane send-text <pane_id> <text>",
-        pane_send_keys_usage: "usage: herdr pane send-keys <pane_id> <key> [key ...]",
-        pane_run_usage: "usage: herdr pane run <pane_id> <command>",
-        pane_wait_output_usage:
-            "usage: herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]",
-        pane_report_agent_usage:
-            "usage: herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [-- <resume-command...>]",
-        pane_report_agent_session_usage:
-            "usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE] [-- <resume-command...>]",
-        pane_report_agent_attention_usage:
-            "usage: herdr pane report-agent-attention [<pane_id>] --source ID --agent LABEL --kind needs_input|failed|clear [--title TEXT] [--detail TEXT] [--option TEXT]... [--seq N] (pane defaults to $HERDR_PANE_ID)",
-        pane_report_agent_activity_usage:
-            "usage: herdr pane report-agent-activity [<pane_id>] --source ID --agent LABEL [--hint TEXT] [--node-id ID] [--seq N] (pane defaults to $HERDR_PANE_ID)",
-        pane_release_agent_usage:
-            "usage: herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]",
-        pane_report_metadata_usage:
-            "usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]",
-        invalid_amount_fmt: "invalid amount: {value}",
-        invalid_ratio_fmt: "invalid ratio: {value}",
-        zoom_mode_conflict: "provide only one of --toggle, --on, or --off",
-        pane_selector_conflict: "provide only one pane selector",
-        current_requires_env_pane: "--current requires HERDR_PANE_ID",
-        invalid_right_click_target_fmt: "invalid right-click target: {value}",
-        invalid_split_direction_expected_fmt:
-            "invalid split direction: {value} (expected right or down)",
-        invalid_pane_direction_fmt:
-            "invalid pane direction: {value} (expected left, right, up, or down)",
-        match_regex_exclusive: "--match and --regex are mutually exclusive",
-        match_or_regex_required: "missing required --match or --regex",
-        source_required: "missing required --source",
-        agent_flag_required: "missing required --agent",
-        state_required: "missing required --state",
-        invalid_attention_kind_fmt:
-            "invalid attention kind: {value} (expected needs_input, failed, or clear)",
-        state_label_format: "expected --state-label STATUS=TEXT",
-        unknown_state_label_fmt: "unknown state label: {status}",
-        metadata_set_clear_conflict: "cannot set and clear the same metadata field",
-        metadata_field_required: "missing metadata field to set or clear",
 
-        plugin_link_usage: "usage: herdr plugin link <path> [--disabled]",
         plugin_install_usage:
             "usage: herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]",
         plugin_install_v1_shorthand_only:
@@ -1707,17 +1616,7 @@ pub const TEXTS: Texts = Texts {
         plugin_install_cancelled: "plugin install cancelled",
         plugin_config_dir_usage: "usage: herdr plugin config-dir <plugin_id>",
         plugin_uninstall_usage: "usage: herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>",
-        plugin_unlink_usage: "usage: herdr plugin unlink <plugin_id>",
-        plugin_set_enabled_usage_fmt: "usage: herdr plugin {action} <plugin_id>",
         plugin_not_installed_fmt: "plugin not installed: {target}",
-        plugin_limit_invalid_fmt: "invalid --limit value: {value}",
-        plugin_action_invoke_usage:
-            "usage: herdr plugin action invoke <action_id> [--plugin ID]",
-        plugin_required: "missing required --plugin",
-        entrypoint_required: "missing required --entrypoint",
-        plugin_pane_focus_usage: "usage: herdr plugin pane focus <pane_id>",
-        plugin_pane_close_usage: "usage: herdr plugin pane close <pane_id>",
-        plugin_pane_placement_invalid_fmt: "invalid pane placement: {value}",
         plugin_remote_path_absolute: "remote plugin paths must be absolute",
         plugin_already_linked_local_fmt:
             "plugin {plugin} is already linked from a local path; uninstall/unlink it before installing from GitHub",
@@ -1765,41 +1664,15 @@ pub const TEXTS: Texts = Texts {
         server_agent_manifests_usage: "usage: herdr server agent-manifests [--json]",
         server_reload_agent_manifests_usage: "usage: herdr server reload-agent-manifests",
         server_update_agent_manifests_usage: "usage: herdr server update-agent-manifests [--json]",
-        server_live_handoff_usage:
-            "usage: herdr server live-handoff [--import-exe <path>] [--expected-protocol <n>] [--expected-version <version>]",
         manifests_update_failed_fmt: "failed to update agent detection manifests: {error}",
 
         unknown_shell_fmt: "unknown shell: {shell}",
         completion_usage_fmt: "usage: herdr completion <{shells}>",
 
-        worktree_list_usage: "usage: herdr worktree list [--workspace ID | --cwd PATH] [--trust-repository]",
-        worktree_create_usage:
-            "usage: herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--trust-repository]",
-        worktree_open_usage:
-            "usage: herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--trust-repository]",
-        worktree_remove_usage:
-            "usage: herdr worktree remove --workspace ID [--force] [--trust-repository]",
         remote_worktree_path_absolute: "remote worktree paths must be absolute or start with ~/",
 
-        workspace_list_usage: "usage: herdr workspace list",
-        workspace_get_usage: "usage: herdr workspace get <workspace_id>",
-        workspace_focus_usage: "usage: herdr workspace focus <workspace_id>",
-        workspace_rename_usage: "usage: herdr workspace rename <workspace_id> <label>",
-        workspace_report_metadata_usage:
-            "usage: herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]",
-        workspace_close_usage: "usage: herdr workspace close <workspace_id> [--group]",
-        workspace_token_required: "missing token to set or clear",
 
-        tab_get_usage: "usage: herdr tab get <tab_id>",
-        tab_focus_usage: "usage: herdr tab focus <tab_id>",
-        tab_rename_usage: "usage: herdr tab rename <tab_id> <label>",
-        tab_close_usage: "usage: herdr tab close <tab_id>",
 
-        notification_show_usage:
-            "usage: herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]",
-        invalid_position_fmt:
-            "invalid position: {value} (expected top-left, top-right, bottom-left, or bottom-right)",
-        invalid_sound_fmt: "invalid sound: {value} (expected none, done, or request)",
 
         integration_status_usage: "usage: herdr integration status [--outdated-only]",
         integration_target_usage_fmt:

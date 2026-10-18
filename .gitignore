@@ -56,3 +56,5 @@ __pycache__/
 /.wrangler/
 **/.wrangler/
 /.claude/worktrees/
+
+/graphify-out*

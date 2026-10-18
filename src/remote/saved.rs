@@ -1,5 +1,6 @@
 use std::io;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use super::askpass::{AskpassEnvironment, SshAskpassChannel, SshAskpassPrompts, SshAuthApproval};
 use super::attach::{find_installed_remote_herdr, RemoteSsh, SshStdioBridge};
@@ -97,6 +98,9 @@ fn connect_saved_ssh_with(
             super::attach::prepare_approved_saved_ssh(&ssh, &profile.session, progress)?;
         }
         super::process::check_cancelled()?;
+        if askpass.is_none() {
+            ssh.prepare_shared_transport()?;
+        }
         let remote_herdr = find_installed_remote_herdr(&ssh)?;
         let metadata = remote_herdr.machine_metadata();
         let path = saved_bridge_path(profile.id.as_str());
@@ -109,7 +113,11 @@ fn connect_saved_ssh_with(
             true,
             askpass.as_ref().map(|channel| channel.environment()),
         )?;
-        let stream = crate::ipc::connect_local_stream(&path)?;
+        let stream = crate::ipc::connect_local_stream_cancellable(
+            &path,
+            &ssh.cancelled,
+            Instant::now() + Duration::from_secs(5),
+        )?;
         // 连上即说明远端 herdr 位置有效：写入元数据缓存，之后 `--machine` 形态的
         // CLI 可跳过远端发现（`SavedSshApiBridge::start_with_metadata`）。
         if let Some(metadata) = metadata {
@@ -135,6 +143,8 @@ pub(crate) struct SavedSshApiBridge {
     path: PathBuf,
     bridge: SshStdioBridge,
     metadata_cache: crate::client::endpoint::SshMetadataCache,
+    ssh: RemoteSsh,
+    pub(crate) can_retry: bool,
     pub(crate) used_cached_metadata: bool,
 }
 
@@ -142,7 +152,7 @@ impl SavedSshApiBridge {
     /// Starts an API bridge after a fresh remote discovery; the discovered
     /// location refreshes the metadata cache.
     pub(crate) fn start(profile: &SavedSshEndpoint) -> io::Result<Self> {
-        Self::start_with_metadata(profile, false)
+        Self::start_with_metadata(profile, false, true)
     }
 
     /// `use_cached_metadata` skips remote discovery when the cache holds the
@@ -152,9 +162,12 @@ impl SavedSshApiBridge {
     pub(crate) fn start_with_metadata(
         profile: &SavedSshEndpoint,
         use_cached_metadata: bool,
+        allow_retry: bool,
     ) -> io::Result<Self> {
         let result = (|| {
-            let ssh = validated_saved_ssh(profile, None)?;
+            let mut ssh = validated_saved_ssh(profile, None)?;
+            ssh.use_shared_channel(profile)?;
+            let mut can_retry = allow_retry;
             let profile_id = profile.id.as_str();
             let metadata_cache = crate::client::endpoint::SshMetadataCache::new(
                 profile_id,
@@ -166,8 +179,15 @@ impl SavedSshApiBridge {
             let metadata = match cached {
                 Some(metadata) => metadata,
                 None => {
-                    let metadata =
-                        super::attach::discover_remote_api_metadata(&ssh, &profile.session)?;
+                    let discover =
+                        || super::attach::discover_remote_api_metadata(&ssh, &profile.session);
+                    let metadata = match discover() {
+                        Err(_) if can_retry && ssh.prepare_shared_transport().unwrap_or(false) => {
+                            can_retry = false;
+                            discover()?
+                        }
+                        result => result?,
+                    };
                     metadata_cache.store(&metadata);
                     metadata
                 }
@@ -186,6 +206,8 @@ impl SavedSshApiBridge {
                 path,
                 bridge,
                 metadata_cache,
+                ssh,
+                can_retry,
                 used_cached_metadata,
             })
         })();
@@ -202,6 +224,10 @@ impl SavedSshApiBridge {
 
     pub(crate) fn invalidate_metadata(&self) {
         self.metadata_cache.invalidate();
+    }
+
+    pub(crate) fn recover_transport(&self) -> bool {
+        self.can_retry && self.ssh.prepare_shared_transport().unwrap_or(false)
     }
 
     pub(crate) fn stale_metadata_failure(error: &io::Error) -> bool {
