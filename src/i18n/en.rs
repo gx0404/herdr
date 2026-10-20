@@ -1058,6 +1058,8 @@ pub const TEXTS: Texts = Texts {
         process_name_missing: "The process name is missing",
         gpu_utilization_unexposed:
             "The driver exposes no whole-GPU utilization; the available sensors still show",
+        gpu_runtime_suspended: "Asleep to save power; not woken for metrics",
+        gpu_nvidia_tools_missing: "NVML could not be loaded and nvidia-smi is unavailable",
         environment_wsl: "WSL (current Linux environment)",
         environment_container: "Container (visible resources)",
         environment_linux: "Linux host",

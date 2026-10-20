@@ -1063,6 +1063,8 @@ pub const TEXTS: Texts = Texts {
         process_start_invalid: "进程启动标识无效",
         process_name_missing: "进程名称缺失",
         gpu_utilization_unexposed: "驱动未公开可读取的全卡利用率；可用传感器仍正常显示",
+        gpu_runtime_suspended: "显卡已休眠省电，未唤醒采样",
+        gpu_nvidia_tools_missing: "无法加载 NVML，且找不到可用的 nvidia-smi",
         environment_wsl: "WSL（当前 Linux 环境）",
         environment_container: "容器（当前可见资源）",
         environment_linux: "Linux 主机",

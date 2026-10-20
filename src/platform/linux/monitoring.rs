@@ -2,84 +2,13 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
-use crate::api::schema::{GpuMetric, ObservationStatus};
+#[path = "gpu.rs"]
+mod gpu;
+pub(crate) use gpu::NativeGpuCollector;
 
 /// 本平台会进入 API 应答与监控快照的文案，按 server 的界面语言给出（文档终审 D7）。
 fn texts() -> &'static crate::i18n::PlatformMessageTexts {
     &crate::i18n::texts().platform
-}
-
-#[derive(Default)]
-pub(crate) struct NativeGpuCollector;
-
-fn number(path: &Path) -> Option<u64> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-impl NativeGpuCollector {
-    pub(crate) fn sample(&mut self, nvidia: Vec<GpuMetric>) -> Vec<GpuMetric> {
-        let mut result = nvidia;
-        let Ok(cards) = std::fs::read_dir("/sys/class/drm") else {
-            return result;
-        };
-        for card in cards.flatten() {
-            let name = card.file_name().to_string_lossy().into_owned();
-            if !name
-                .strip_prefix("card")
-                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-            {
-                continue;
-            }
-            let device = card.path().join("device");
-            let vendor = std::fs::read_to_string(device.join("vendor")).unwrap_or_default();
-            let vendor = match vendor.trim() {
-                "0x10de" => "NVIDIA",
-                "0x1002" => "AMD",
-                "0x8086" => "Intel",
-                _ => "GPU",
-            };
-            let pci = std::fs::canonicalize(&device)
-                .ok()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| name.clone());
-            if result.iter().any(|gpu| gpu.id.ends_with(&pci)) {
-                continue;
-            }
-            let usage = number(&device.join("gpu_busy_percent")).map(|value| value.min(100) as f32);
-            let mut gpu = GpuMetric {
-                id: pci.clone(),
-                name: format!("{vendor} {name} ({pci})"),
-                vendor: vendor.into(),
-                source: "DRM/sysfs".into(),
-                usage_percent: usage,
-                memory_used_bytes: number(&device.join("mem_info_vram_used")),
-                memory_total_bytes: number(&device.join("mem_info_vram_total")),
-                status: if usage.is_some() {
-                    ObservationStatus::Ready
-                } else {
-                    ObservationStatus::Unsupported
-                },
-                ..Default::default()
-            };
-            if let Ok(monitors) = std::fs::read_dir(device.join("hwmon")) {
-                for monitor in monitors.flatten() {
-                    gpu.temperature_celsius =
-                        number(&monitor.path().join("temp1_input")).map(|v| v as f32 / 1000.0);
-                    gpu.power_watts = number(&monitor.path().join("power1_average"))
-                        .or_else(|| number(&monitor.path().join("power1_input")))
-                        .map(|v| v as f32 / 1_000_000.0);
-                    if gpu.temperature_celsius.is_some() || gpu.power_watts.is_some() {
-                        break;
-                    }
-                }
-            }
-            if gpu.usage_percent.is_none() {
-                gpu.message = Some(texts().gpu_utilization_unexposed.into());
-            }
-            result.push(gpu);
-        }
-        result
-    }
 }
 
 pub(crate) fn monitor_environment() -> String {
