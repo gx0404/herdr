@@ -153,8 +153,8 @@ refs #82
 ```
 
 `.githooks`（`just install-hooks`）与 CI 用 `scripts/conventional_commits.py`
-强制（格式校验对中文描述兼容）。提交前先提出 commit message 并对齐；未经对齐
-不 commit/push。
+强制（格式校验对中文描述兼容）。执行计划（plan）时可直接按本规范提交 commit，
+无需先对齐 message；push 前必须先与用户对齐，未经对齐不 push。
 
 ## 领域规则索引
 

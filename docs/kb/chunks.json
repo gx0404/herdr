@@ -33,8 +33,8 @@
       "anchor": "herdr > 提交规范",
       "doc": "AGENTS.md",
       "id": "agents-md-herdr-提交规范",
-      "source_sha256": "12a1c053f3a7a1e9ec0de31124b1e442d617b64c1b9ab5ef410cb25bd99848a0",
-      "text": "## 提交规范\n\nconventional commit 格式：小写英文 type 前缀（可带 scope），冒号后的描述用中文；\n无 emoji，无 AI co-author 行；subject 有描述性（进入 preview 发布说明）。与\nGitHub issue 相关的正常 feature/fix commit 在 body 加 `refs #<编号>`，不用\n`fixes/closes/resolves`（release CI 在发布后关闭 issue）：\n\n```text\nfix: 修复窗格焦点丢失\n\nrefs #82\n```\n\n`.githooks`（`just install-hooks`）与 CI 用 `scripts/conventional_commits.py`\n强制（格式校验对中文描述兼容）。提交前先提出 commit message 并对齐；未经对齐\n不 commit/push。"
+      "source_sha256": "bbef090df26b29b7ff647f0a737a33dcac7e55147771bf4c7e9fc14210b60bd7",
+      "text": "## 提交规范\n\nconventional commit 格式：小写英文 type 前缀（可带 scope），冒号后的描述用中文；\n无 emoji，无 AI co-author 行；subject 有描述性（进入 preview 发布说明）。与\nGitHub issue 相关的正常 feature/fix commit 在 body 加 `refs #<编号>`，不用\n`fixes/closes/resolves`（release CI 在发布后关闭 issue）：\n\n```text\nfix: 修复窗格焦点丢失\n\nrefs #82\n```\n\n`.githooks`（`just install-hooks`）与 CI 用 `scripts/conventional_commits.py`\n强制（格式校验对中文描述兼容）。执行计划（plan）时可直接按本规范提交 commit，\n无需先对齐 message；push 前必须先与用户对齐，未经对齐不 push。"
     },
     {
       "anchor": "herdr > 规则加载协议",
@@ -1118,8 +1118,8 @@
       "anchor": "herdr 开发闭环 > 每个任务的闭环",
       "doc": "docs/DEVELOPMENT.md",
       "id": "docs-development-md-herdr-开发闭环-每个任务的闭环",
-      "source_sha256": "c5df14434a0208c836e6c3ef2e5207a98100499047afe69cd5ad0d67849f78e0",
-      "text": "## 每个任务的闭环\n\n1. **定 scope**：列出本轮会读/改/审的路径；运行\n   `python3 scripts/resolve_agent_rules.py <paths...>` 并读完输出文档；scope\n   扩大后用完整集合重跑。\n2. **实现**：遵守 `AGENT_RULES/` 领域不变量（渲染纯函数、平台隔离、端点冻结、\n   性能乘法路径等）。\n3. **针对性检查**：`just test-one <filter>` / `just maintenance-test` /\n   `just docs-contract-test` 按影响面选；提交前 `just check`。\n4. **用户可见行为**：同步 `docs/next` 文档与翻译（发布纪律见\n   `AGENT_RULES/docs-pipeline.md`；CHANGELOG 不在日常范围）。测试编排/性能结果等开发者\n   行为同步 `AGENT_RULES/testing.md`、`release-channels.md` 和 `MAKE_COMMANDS.md`。\n5. **生成物**：命中 `docs/README.md` 生成物登记的输入时，先跑 check 确认差异、\n   有意才重建并审 diff。\n6. **验证证据**：运行期行为用 `herdr-throwaway-repro` skill 建隔离会话复现\n   （在既有 herdr 会话内测试新构建用\n   `env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run -- ...`）。Windows\n   handshake、PTY admission、Codex native-tools 边界必须记为目标平台证据；未在 Windows\n   实机或对应 CI 运行的结果保持 PENDING。\n7. **复审**：修复杂度高的改动走独立只读复审（`--task review` 规则）；输出\n   严重/中/轻/结论。\n8. **提交**：conventional commit + `refs #<issue>`；提交前提出 message 对齐；\n   只精确暂存相关文件。"
+      "source_sha256": "1ab4e0fe6b42e81673defae4938c7e931234120eed0058f3ec00b73b2a02bc48",
+      "text": "## 每个任务的闭环\n\n1. **定 scope**：列出本轮会读/改/审的路径；运行\n   `python3 scripts/resolve_agent_rules.py <paths...>` 并读完输出文档；scope\n   扩大后用完整集合重跑。\n2. **实现**：遵守 `AGENT_RULES/` 领域不变量（渲染纯函数、平台隔离、端点冻结、\n   性能乘法路径等）。\n3. **针对性检查**：`just test-one <filter>` / `just maintenance-test` /\n   `just docs-contract-test` 按影响面选；提交前 `just check`。\n4. **用户可见行为**：同步 `docs/next` 文档与翻译（发布纪律见\n   `AGENT_RULES/docs-pipeline.md`；CHANGELOG 不在日常范围）。测试编排/性能结果等开发者\n   行为同步 `AGENT_RULES/testing.md`、`release-channels.md` 和 `MAKE_COMMANDS.md`。\n5. **生成物**：命中 `docs/README.md` 生成物登记的输入时，先跑 check 确认差异、\n   有意才重建并审 diff。\n6. **验证证据**：运行期行为用 `herdr-throwaway-repro` skill 建隔离会话复现\n   （在既有 herdr 会话内测试新构建用\n   `env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run -- ...`）。Windows\n   handshake、PTY admission、Codex native-tools 边界必须记为目标平台证据；未在 Windows\n   实机或对应 CI 运行的结果保持 PENDING。\n7. **复审**：修复杂度高的改动走独立只读复审（`--task review` 规则）；输出\n   严重/中/轻/结论。\n8. **提交**：conventional commit + `refs #<issue>`；执行计划时可直接提交，\n   push 前必须先对齐；只精确暂存相关文件。"
     },
     {
       "anchor": "herdr 开发闭环 > 环境准备",

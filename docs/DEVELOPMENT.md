@@ -161,8 +161,8 @@ SHA256，不替换基线。缺工具只允许在 GitHub-hosted runner 通过 apt
    实机或对应 CI 运行的结果保持 PENDING。
 7. **复审**：修复杂度高的改动走独立只读复审（`--task review` 规则）；输出
    严重/中/轻/结论。
-8. **提交**：conventional commit + `refs #<issue>`；提交前提出 message 对齐；
-   只精确暂存相关文件。
+8. **提交**：conventional commit + `refs #<issue>`；执行计划时可直接提交，
+   push 前必须先对齐；只精确暂存相关文件。
 
 ## Windows 隔离 smoke
 
