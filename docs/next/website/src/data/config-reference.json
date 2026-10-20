@@ -978,7 +978,7 @@
           "key": "keys.toggle_inspector",
           "type": "keybinding",
           "default": "\"prefix+i\"",
-          "description": "Toggle the Inspector in the docked layout. Visibility is saved per endpoint."
+          "description": "Toggle the Inspector in the docked layout. Hidden by default; visibility is saved per endpoint."
         },
         {
           "key": "keys.indexed.tabs",

@@ -10,7 +10,7 @@ Herdr works without a config file. Add one when you want custom keys, themes, si
 
 The [Config reference](/docs/config-reference/) lists every setting and keybinding, with types, defaults, and allowed values. This page covers setup, common recipes, and configuration structures that need more explanation than a reference row.
 
-Inspector visibility is a client preference saved per endpoint, not a server setting. Its default is automatic (hidden below 140 columns). Set `keys.toggle_inspector = "prefix+i"` to customize the toggle shortcut; the effective binding also appears in which-key, help, and command search.
+Inspector visibility is a client preference (`inspector_visibility`) saved per endpoint, not a server setting. It is hidden by default; existing per-endpoint choices stay in effect, and a manually saved `auto` value still shows it at 140 columns or wider. `prefix+i` switches between shown and hidden and saves that choice. Set `keys.toggle_inspector = "prefix+i"` to customize the toggle shortcut; the effective binding also appears in which-key, help, and command search.
 
 Manual agent read/unread overrides are lenient client-shell preferences (`agent_marks`), keyed by endpoint and fenced by boot/pane/launch/turn sequence, with 256 marks across endpoints. They are not TOML lifecycle settings. The command palette includes **Mark agent unread**, **Mark all agents read**, and **Agent overview**. Older clients ignore unknown preference fields.
 

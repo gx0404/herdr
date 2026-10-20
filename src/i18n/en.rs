@@ -925,6 +925,7 @@ pub const TEXTS: Texts = Texts {
         loading: "Loading…",
         read_failed_fmt: "Read failed: {error}",
         unsupported: "This server does not provide agent activity",
+        not_reported: "This agent does not report an activity tree",
         external_read_only: "External source, read-only",
         truncated: "Showing the latest part",
         follow_on: "following",

@@ -1162,6 +1162,8 @@ pub struct AgentActivityTexts {
     pub loading: &'static str,
     pub read_failed_fmt: &'static str, // args: error
     pub unsupported: &'static str,
+    /// Inspector：服务端没有该 Agent 的活动来源（`not_implemented`）时的中性说明。
+    pub not_reported: &'static str,
     pub external_read_only: &'static str,
     pub truncated: &'static str,
     pub follow_on: &'static str,

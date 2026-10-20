@@ -394,8 +394,8 @@ mod tests {
 
     #[test]
     fn inspector_preferences_are_lenient_endpoint_scoped_and_accept_v1_layouts() {
-        let preferences: ClientChromePreferences = serde_json::from_str(r#"{"inspector_visibility":{"local":"shown","ssh:dev":"hidden","future":"unknown","bad":42},"sidebar_width":31}"#).expect("lenient preferences");
-        assert_eq!(preferences.inspector_visibility.len(), 2);
+        let preferences: ClientChromePreferences = serde_json::from_str(r#"{"inspector_visibility":{"local":"shown","ssh:dev":"hidden","ssh:auto":"auto","future":"unknown","bad":42},"sidebar_width":31}"#).expect("lenient preferences");
+        assert_eq!(preferences.inspector_visibility.len(), 3);
         assert_eq!(
             preferences.inspector_visibility["local"],
             super::super::dock::InspectorVisibility::Shown
@@ -403,6 +403,10 @@ mod tests {
         assert_eq!(
             preferences.inspector_visibility["ssh:dev"],
             super::super::dock::InspectorVisibility::Hidden
+        );
+        assert_eq!(
+            preferences.inspector_visibility["ssh:auto"],
+            super::super::dock::InspectorVisibility::Auto
         );
         assert_eq!(preferences.sidebar_width, Some(31));
         let layout = super::super::dock::DockLayout {

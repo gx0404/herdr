@@ -934,6 +934,7 @@ pub const TEXTS: Texts = Texts {
         loading: "加载中…",
         read_failed_fmt: "读取失败：{error}",
         unsupported: "此 server 不提供 Agent 活动",
+        not_reported: "此 Agent 不提供活动树",
         external_read_only: "外部来源，只读",
         truncated: "仅显示最新部分",
         follow_on: "跟随中",

@@ -2440,6 +2440,10 @@ fn empty_agent_panel_draws_the_no_agents_empty_state() {
         let cols = if workbench { 160 } else { 106 };
         let mut plain = classic_state_with(AgentPanelSortConfig::Spaces, snapshot());
         if workbench {
+            plain.workbench.inspector_visibility.insert(
+                "local".into(),
+                crate::client::shell::dock::InspectorVisibility::Shown,
+            );
             enable_workbench(&mut plain);
         }
         plain.compose(cols, 32).expect("plain terminal session");

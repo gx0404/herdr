@@ -87,6 +87,7 @@ struct Tree {
     loaded: bool,
     truncated: bool,
     unsupported: bool,
+    not_reported: bool,
     error: Option<String>,
     collapsed: HashSet<String>,
     next_read: Option<Instant>,
@@ -563,9 +564,18 @@ impl ClientShellState {
                     tree.next_read = Some(Instant::now() + FOLLOW);
                     return false;
                 }
-                tree.unsupported = super::super::agent_activity_overlay::method_unsupported(&error);
-                tree.error = Some(bounded(&error.message, 1024));
-                tree.next_read = Some(Instant::now() + Duration::from_secs(5));
+                if error.code.as_deref() == Some("not_implemented") {
+                    tree.not_reported = true;
+                    tree.unsupported = true;
+                    tree.loaded = true;
+                    tree.error = None;
+                    tree.next_read = None;
+                } else {
+                    tree.unsupported =
+                        super::super::agent_activity_overlay::method_unsupported(&error);
+                    tree.error = Some(bounded(&error.message, 1024));
+                    tree.next_read = Some(Instant::now() + Duration::from_secs(5));
+                }
                 self.inspector.version = self.inspector.version.saturating_add(1);
             }
             _ => return false,
@@ -796,7 +806,14 @@ impl ClientShellState {
         }
         section(rows, tr("Activity tree", "活动树"), width);
         if let Some(tree) = self.inspector.trees.get(target) {
-            if tree.unsupported {
+            if tree.not_reported {
+                add(
+                    rows,
+                    crate::i18n::texts().agent_activity.not_reported,
+                    Tone::Meta,
+                    width,
+                );
+            } else if tree.unsupported {
                 add(
                     rows,
                     crate::i18n::texts().agent_activity.unsupported,

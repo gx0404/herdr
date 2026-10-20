@@ -32,7 +32,16 @@ fn snapshot() -> ClientShellSnapshot {
 }
 
 fn ready(cols: u16) -> ClientShellState {
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config
+        .preferences
+        .inspector_visibility
+        .insert("local".into(), InspectorVisibility::Auto);
+    ready_with_config(cols, config)
+}
+
+fn ready_with_config(cols: u16, config: ClientShellConfig) -> ClientShellState {
+    let mut state = ClientShellState::new(config);
     state.set_snapshot(Box::new(snapshot()));
     state.set_endpoint_methods(Some(vec![
         "client.views.set".into(),
@@ -74,6 +83,111 @@ fn response() -> ResponseResult {
         }],
         content: None,
     }
+}
+
+#[test]
+fn inspector_defaults_to_hidden_without_persisting_a_preference_or_reading_activity() {
+    let mut state = ready_with_config(200, ClientShellConfig::from_config(&Config::default()));
+    state.compose(200, 50).expect("default wide workbench");
+    assert!(!state
+        .workbench
+        .geometry
+        .panels
+        .iter()
+        .any(|(id, _)| *id == PanelId::Agents));
+    assert!(state.hits.inspector_body.is_empty());
+    let mut outcome = ClientShellInput::default();
+    state.tick_inspector(Instant::now(), &mut outcome);
+    assert!(outcome.actions.is_empty());
+    assert!(state.inspector.target.is_none());
+    assert!(state.workbench.inspector_visibility.is_empty());
+    let preferences = preferences::ClientChromePreferences {
+        inspector_visibility: state.workbench.inspector_visibility.clone(),
+        ..Default::default()
+    };
+    let saved = serde_json::to_value(preferences).expect("serialize preferences");
+    assert!(saved.get("inspector_visibility").is_none());
+
+    state.compose(200, 6).expect("compact default workbench");
+    assert!(state.workbench.geometry.compact);
+    assert!(state.workbench.hits.iter().all(|(_, action)| !matches!(
+        action,
+        workbench::interaction::Action::Switch(PanelId::Agents)
+    )));
+}
+
+#[test]
+fn prefix_i_shows_and_hides_the_default_inspector_with_an_endpoint_preference() {
+    let mut state = ready_with_config(200, ClientShellConfig::from_config(&Config::default()));
+    assert!(state.handle_input_bytes(b"\x02i").resize);
+    state.compose(200, 50).expect("manually shown inspector");
+    assert!(state
+        .workbench
+        .geometry
+        .panels
+        .iter()
+        .any(|(id, _)| *id == PanelId::Agents));
+    assert!(!state.hits.inspector_body.is_empty());
+    assert_eq!(
+        state.workbench.inspector_visibility["local"],
+        InspectorVisibility::Shown
+    );
+
+    assert!(state.handle_input_bytes(b"\x02i").resize);
+    state.compose(200, 50).expect("manually hidden inspector");
+    assert!(!state
+        .workbench
+        .geometry
+        .panels
+        .iter()
+        .any(|(id, _)| *id == PanelId::Agents));
+    assert_eq!(
+        state.workbench.inspector_visibility["local"],
+        InspectorVisibility::Hidden
+    );
+}
+
+#[test]
+fn not_implemented_activity_is_a_neutral_terminal_state_without_follow_or_refresh() {
+    let mut state = ready(200);
+    let (boot, request) = read(&mut state);
+    let error_message = "agent activity is not implemented by this server";
+    assert!(
+        state
+            .handle_endpoint_result(
+                &boot,
+                &request,
+                Err(ClientShellEndpointError {
+                    code: Some("not_implemented".into()),
+                    message: error_message.into(),
+                })
+            )
+            .0
+    );
+    state.compose(200, 50).expect("activity not reported");
+    let texts = crate::i18n::texts();
+    let rows = state
+        .inspector
+        .rows
+        .iter()
+        .map(|row| row.text.as_str())
+        .collect::<String>();
+    assert!(rows.contains(texts.agent_activity.not_reported), "{rows}");
+    assert!(!rows.contains(error_message));
+    assert!(!rows.contains(texts.agent_activity.loading));
+    assert!(!state
+        .inspector
+        .rows
+        .iter()
+        .any(|row| matches!(row.tone, Tone::Failed)));
+    let tree = &state.inspector.trees[state.inspector.target.as_ref().expect("target")];
+    assert!(tree.not_reported && tree.unsupported && tree.loaded);
+    assert!(tree.error.is_none());
+    let mut outcome = ClientShellInput::default();
+    state.tick_inspector(Instant::now() + Duration::from_secs(120), &mut outcome);
+    state.activate_inspector(Action::Refresh, &mut outcome);
+    assert!(outcome.actions.is_empty());
+    assert!(state.inspector.in_flight.is_none());
 }
 
 #[test]

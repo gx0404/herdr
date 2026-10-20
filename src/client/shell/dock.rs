@@ -305,9 +305,9 @@ impl DockNode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum InspectorVisibility {
-    #[default]
     Auto,
     Shown,
+    #[default]
     Hidden,
 }
 

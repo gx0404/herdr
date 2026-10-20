@@ -1050,9 +1050,10 @@ fn ui_gallery() {
             GENERATION,
             Box::new(next),
         );
-        if size.0 < 140 {
-            state.handle_input_bytes(b"\x02i");
-        }
+        state.workbench.inspector_visibility.insert(
+            "local".into(),
+            crate::client::shell::dock::InspectorVisibility::Shown,
+        );
         let frame = shoot_workbench(&mut state, size.0, size.1, &mut step);
         shots.push(Shot {
             title: format!("{name} {}x{}", size.0, size.1),
@@ -1094,6 +1095,42 @@ fn ui_gallery() {
             ));
         }
     }
+    let mut not_reported = workbench_state(config());
+    let _ = shoot_workbench(&mut not_reported, 200, 50, &mut step);
+    let opened = not_reported.handle_input_bytes(b"\x02i");
+    let (boot_id, request_id) = opened
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientShellAction::EndpointRequest {
+                boot_id, request, ..
+            } if matches!(
+                request.method,
+                crate::api::schema::Method::AgentActivityRead(_)
+            ) =>
+            {
+                Some((boot_id, &request.id))
+            }
+            _ => None,
+        })
+        .expect("explicit Inspector activity read");
+    assert!(
+        not_reported
+            .handle_endpoint_result(
+                boot_id,
+                request_id,
+                Err(ClientShellEndpointError {
+                    code: Some("not_implemented".into()),
+                    message: "agent activity is not implemented by this server".into(),
+                }),
+            )
+            .0
+    );
+    shots.push(Shot::dark(
+        "inspector not-reported 200x50".into(),
+        shoot_workbench(&mut not_reported, 200, 50, &mut step),
+    ));
+
     let mut migrated_config = config();
     let mut legacy = crate::client::shell::dock::DockLayout::default();
     legacy.dock(
@@ -1106,6 +1143,10 @@ fn ui_gallery() {
         .preferences
         .layouts
         .insert("local".into(), legacy);
+    migrated_config.preferences.inspector_visibility.insert(
+        "local".into(),
+        crate::client::shell::dock::InspectorVisibility::Shown,
+    );
     let mut migrated = workbench_state(migrated_config);
     let frame = shoot_workbench(&mut migrated, 200, 50, &mut step);
     shots.push(Shot::dark("inspector v1 migration 200x50".into(), frame));
