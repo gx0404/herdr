@@ -3877,6 +3877,14 @@ fn process_exit_code_is_still_active(pid: u32) -> bool {
 
 static LAST_CLIPBOARD_WRITE_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
+pub fn native_clipboard_available() -> bool {
+    true
+}
+
+pub fn host_terminal_toasts_clipboard_writes(_term_program: Option<&str>) -> bool {
+    false
+}
+
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;

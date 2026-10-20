@@ -1382,7 +1382,7 @@
           "key": "ui.toast.clipboard.enabled",
           "type": "boolean",
           "default": "true",
-          "description": "Show the copied-to-clipboard popup after a mouse copy."
+          "description": "Show Herdr's copied-to-clipboard popup after a mouse copy. Suppressed on Linux when Ghostty handles an OSC 52 clipboard write. Set false to disable Herdr's popup in all cases."
         },
         {
           "key": "ui.toast.clipboard.position",

@@ -1655,6 +1655,7 @@ pub(crate) struct ClientShellState {
     pub(super) pane_scroll_in_flight: HashMap<String, u64>,
     pub(super) pane_scroll_queued: HashMap<String, usize>,
     pub(super) pane_scroll_targets: HashMap<String, usize>,
+    pub(super) host_announces_clipboard_writes: bool,
     pub(super) copy_feedback: Option<crate::app::state::CopyFeedback>,
     pub(super) copy_feedback_deadline: Option<std::time::Instant>,
     pub(super) host_mouse_pixels: Option<crate::input::mouse::HostPixels>,
@@ -1894,6 +1895,7 @@ impl ClientShellState {
             pane_scroll_in_flight: HashMap::new(),
             pane_scroll_queued: HashMap::new(),
             pane_scroll_targets: HashMap::new(),
+            host_announces_clipboard_writes: false,
             copy_feedback: None,
             copy_feedback_deadline: None,
             host_mouse_pixels: None,
@@ -2695,8 +2697,12 @@ impl ClientShellState {
         }
     }
 
+    pub(crate) fn set_host_announces_clipboard_writes(&mut self, value: bool) {
+        self.host_announces_clipboard_writes = value;
+    }
+
     pub(crate) fn show_copy_feedback(&mut self, now: std::time::Instant) -> bool {
-        if !self.config.clipboard_toast_enabled {
+        if !self.config.clipboard_toast_enabled || self.host_announces_clipboard_writes {
             return false;
         }
         let message = crate::i18n::texts().chrome.copied.to_owned();

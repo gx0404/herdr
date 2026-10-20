@@ -680,6 +680,14 @@ fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
     }
 }
 
+pub fn native_clipboard_available() -> bool {
+    true
+}
+
+pub fn host_terminal_toasts_clipboard_writes(_term_program: Option<&str>) -> bool {
+    false
+}
+
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     run_clipboard_command(
         &ClipboardCommand {

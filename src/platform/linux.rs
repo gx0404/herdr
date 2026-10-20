@@ -929,6 +929,22 @@ fn process_state_has_exited(state: char) -> bool {
     matches!(state, 'Z' | 'X' | 'x')
 }
 
+pub fn native_clipboard_available() -> bool {
+    native_clipboard_available_for_env(
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("DISPLAY").is_some(),
+    )
+}
+
+fn native_clipboard_available_for_env(wayland: bool, display: bool) -> bool {
+    let installed = |program| crate::platform::command_installed(program, |path| path.is_file());
+    (wayland && installed("wl-copy")) || (display && (installed("xclip") || installed("xsel")))
+}
+
+pub fn host_terminal_toasts_clipboard_writes(term_program: Option<&str>) -> bool {
+    term_program == Some("ghostty")
+}
+
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     for command in clipboard_commands() {
         if run_clipboard_command(&command, bytes) {
@@ -1891,6 +1907,46 @@ mod tests {
         }
         for state in ['R', 'S', 'I', 'T', 't'] {
             assert!(process_state_allows_remote_memory_read(state));
+        }
+    }
+
+    #[test]
+    fn only_ghostty_announces_clipboard_writes() {
+        assert!(host_terminal_toasts_clipboard_writes(Some("ghostty")));
+        for terminal in [None, Some("herdr"), Some("WezTerm")] {
+            assert!(!host_terminal_toasts_clipboard_writes(terminal));
+        }
+    }
+
+    #[test]
+    fn native_clipboard_availability_requires_a_session_backend_on_the_search_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let empty = crate::config::test_dirs::TempDir::new("clipboard-empty");
+        {
+            let _search = crate::config::test_dirs::override_search_path(empty.path());
+            assert!(!native_clipboard_available_for_env(false, false));
+            assert!(!native_clipboard_available_for_env(true, false));
+            assert!(!native_clipboard_available_for_env(false, true));
+            assert!(!native_clipboard_available_for_env(true, true));
+        }
+        for program in ["wl-copy", "xclip", "xsel"] {
+            let directory = crate::config::test_dirs::TempDir::new("clipboard-backend");
+            let executable = directory.join(program);
+            std::fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write clipboard backend");
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+                .expect("make clipboard backend executable");
+            let _search = crate::config::test_dirs::override_search_path(directory.path());
+            assert!(!native_clipboard_available_for_env(false, false));
+            assert_eq!(
+                native_clipboard_available_for_env(true, false),
+                program == "wl-copy"
+            );
+            assert_eq!(
+                native_clipboard_available_for_env(false, true),
+                program != "wl-copy"
+            );
+            assert!(native_clipboard_available_for_env(true, true));
         }
     }
 

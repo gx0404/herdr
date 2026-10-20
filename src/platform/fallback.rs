@@ -307,6 +307,14 @@ pub fn process_alive_excluding_zombies(_pid: u32) -> bool {
 }
 
 /// Unsupported platform stub.
+pub fn native_clipboard_available() -> bool {
+    false
+}
+
+pub fn host_terminal_toasts_clipboard_writes(term_program: Option<&str>) -> bool {
+    term_program == Some("ghostty")
+}
+
 pub fn write_clipboard(_bytes: &[u8]) -> bool {
     false
 }

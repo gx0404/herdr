@@ -247,6 +247,22 @@ fn clipboard_feedback_is_client_local_and_respects_config() {
 }
 
 #[test]
+fn clipboard_feedback_yields_to_the_host_without_recording_a_notification() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let now = std::time::Instant::now();
+    state.set_host_announces_clipboard_writes(true);
+    assert!(!state.show_copy_feedback(now));
+    assert!(state.copy_feedback.is_none());
+    assert!(state.copy_feedback_deadline.is_none());
+    assert!(state.notification_history.is_empty());
+
+    state.set_host_announces_clipboard_writes(false);
+    assert!(state.show_copy_feedback(now));
+    assert!(state.copy_feedback.is_some());
+    assert_eq!(state.notification_history.len(), 1);
+}
+
+#[test]
 fn retained_mouse_selection_survives_output_and_copies_without_terminal_input() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.config.copy_on_select = false;

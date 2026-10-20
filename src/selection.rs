@@ -371,6 +371,16 @@ fn should_prefer_osc52() -> bool {
     )
 }
 
+pub(crate) fn clipboard_write_uses_host_terminal() -> bool {
+    should_prefer_osc52() || !crate::platform::native_clipboard_available()
+}
+
+pub(crate) fn host_terminal_announces_clipboard_writes() -> bool {
+    crate::platform::host_terminal_toasts_clipboard_writes(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+    ) && clipboard_write_uses_host_terminal()
+}
+
 /// Write clipboard bytes to the system clipboard via native platform tools or OSC 52.
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
