@@ -1,5 +1,5 @@
 //! 颜色换算与对比度：把 ratatui 的 `Color` 换成 sRGB，按 WCAG 相对亮度算对比度，
-//! 再据此给「叠在某个底色上的前景」挑颜色。纯函数，不分配。
+//! 再据此给「叠在某个底色上的前景」挑颜色，或把两色按比例混合。纯函数，不分配。
 
 use ratatui::style::Color;
 
@@ -85,6 +85,29 @@ fn indexed_to_rgb(index: u8) -> Rgb {
     }
 }
 
+/// 两色按 `toward_b`（0.0 = `a`，1.0 = `b`）在 sRGB 各通道上线性插值并四舍五入；
+/// 任一颜色取不到 sRGB（`Reset`）时无从混合，返回 `a`。`toward_b` 钳到 0..=1，
+/// NaN 视为 0。
+pub(crate) fn mix(a: Color, b: Color, toward_b: f32) -> Color {
+    let (Some(from), Some(to)) = (color_to_rgb(a), color_to_rgb(b)) else {
+        return a;
+    };
+    let t = if toward_b.is_nan() {
+        0.0
+    } else {
+        toward_b.clamp(0.0, 1.0)
+    };
+    let channel = |from: u8, to: u8| {
+        let value = f32::from(from) + (f32::from(to) - f32::from(from)) * t;
+        value.round().clamp(0.0, 255.0) as u8
+    };
+    Color::Rgb(
+        channel(from.0, to.0),
+        channel(from.1, to.1),
+        channel(from.2, to.2),
+    )
+}
+
 /// WCAG 对比度（1.0 – 21.0）；任一颜色取不到 sRGB（`Reset`）时为 `None`。
 pub(crate) fn contrast_ratio(a: Color, b: Color) -> Option<f32> {
     let a = relative_luminance(color_to_rgb(a)?);
@@ -140,6 +163,26 @@ mod tests {
         let same = contrast_ratio(Color::Rgb(40, 40, 40), Color::Rgb(40, 40, 40)).expect("同色");
         assert!((same - 1.0).abs() < 0.001, "{same}");
         assert_eq!(contrast_ratio(Color::Reset, Color::White), None);
+    }
+
+    #[test]
+    fn mix_interpolates_srgb_channels_and_falls_back_on_reset() {
+        let a = Color::Rgb(0, 100, 200);
+        let b = Color::Rgb(200, 0, 100);
+        assert_eq!(mix(a, b, 0.0), a);
+        assert_eq!(mix(a, b, 1.0), b);
+        assert_eq!(mix(a, b, 0.5), Color::Rgb(100, 50, 150));
+        assert_eq!(mix(a, b, 0.55), Color::Rgb(110, 45, 145), "四舍五入");
+        assert_eq!(mix(a, b, 2.0), b, "比例钳到 1");
+        assert_eq!(mix(a, b, f32::NAN), a);
+        // ANSI 色按 xterm 近似值参与混合。
+        assert_eq!(
+            mix(Color::Black, Color::White, 0.5),
+            Color::Rgb(128, 128, 128)
+        );
+        // 取不到 sRGB：原样返回 `a`。
+        assert_eq!(mix(a, Color::Reset, 0.5), a);
+        assert_eq!(mix(Color::Reset, b, 0.5), Color::Reset);
     }
 
     /// 回归：`panel_bg` 与 `accent` 亮度接近（或降到 16 色后量化成同色）时，旧实现

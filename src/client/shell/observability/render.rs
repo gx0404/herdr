@@ -10,6 +10,7 @@ use super::super::feedback::ChromeContext;
 
 mod settings;
 mod system;
+mod tone;
 
 use settings::*;
 use system::*;

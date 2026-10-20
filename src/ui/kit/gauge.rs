@@ -1,7 +1,8 @@
 //! 占用比例条：阈值色、溢出态、时间窗口进度刻度、分段填充与 ascii 降级。
 //! 只画 `area` 的第一行；数字由调用方另画（见 `meter_row`），条本身不带文字。
 //!
-//! Graphite 外观：已用段是粗线 `━`，常态用中性的 accent，只有越过阈值才转黄 / 红；
+//! Graphite 外观：已用段是粗线 `━`，常态用调用方给的分类色（`GaugeSpec::normal`，
+//! 表达数据类型；未给时是中性的 accent），越过阈值才转黄 / 红（表达严重程度）；
 //! 空槽是同一高度的细线 `─`，按底色挑一档刚好看得见的灰。
 
 use ratatui::{
@@ -13,7 +14,8 @@ use ratatui::{
 use super::fill_row;
 use crate::app::state::Palette;
 
-/// 阈值：`ratio >= warn` 黄，`>= crit` 红，其余中性 accent。默认 0.75 / 0.90。
+/// 阈值：`ratio >= warn` 黄，`>= crit` 红，其余常态色（见 `GaugeSpec::normal`）。
+/// 默认 0.75 / 0.90。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GaugeThresholds {
     pub warn: f32,
@@ -38,6 +40,9 @@ impl Default for GaugeThresholds {
 /// - `segments`：按顺序铺的分段 `(share, color)`（如内存 used / cache），存在时
 ///   填充完全由分段决定，`ratio` 只用于溢出判断。
 /// - `ascii`：字形降级，宿主字体缺方块 / 线段字形时用。
+/// - `normal`：常态（[`Severity::Normal`]）的填充色，用来区分数据类型；`None` 时是
+///   accent。只作用于按 `ratio` 填充的条，警告 / 严重仍转黄 / 红，分段条按各段自带
+///   的颜色画。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct GaugeSpec<'a> {
     pub ratio: Option<f32>,
@@ -45,6 +50,7 @@ pub(crate) struct GaugeSpec<'a> {
     pub thresholds: GaugeThresholds,
     pub segments: Option<&'a [(f32, Color)]>,
     pub ascii: bool,
+    pub normal: Option<Color>,
 }
 
 struct Glyphs {
@@ -68,7 +74,7 @@ const ASCII: Glyphs = Glyphs {
     overflow: ">",
 };
 
-/// 用量的严重程度：常态 / 警告（黄）/ 严重（红）。颜色只用来表达它。
+/// 用量的严重程度：常态 / 警告（黄）/ 严重（红）。黄与红只用来表达它。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Severity {
     Normal,
@@ -97,7 +103,7 @@ impl Severity {
         }
     }
 
-    /// 非常态时的语义色（黄 / 红）；常态为 `None`，由调用方用自己的中性色。
+    /// 非常态时的语义色（黄 / 红）；常态为 `None`，由调用方用自己的常态色。
     pub(crate) fn color(self, palette: &Palette) -> Option<Color> {
         match self {
             Self::Normal => None,
@@ -107,15 +113,18 @@ impl Severity {
     }
 }
 
-/// 用量比例的语义色：常态是中性的 accent，越过阈值转黄 / 红（见 [`Severity::of`]）。
+/// 用量比例的颜色：常态是 `normal`（分类色；`None` 时中性的 accent），越过阈值
+/// 转黄 / 红（见 [`Severity::of`]）。
 pub(crate) fn gauge_color(
     ratio: f32,
     window_progress: Option<f32>,
     thresholds: GaugeThresholds,
+    normal: Option<Color>,
     palette: &Palette,
 ) -> Color {
     Severity::of(ratio, window_progress, thresholds)
         .color(palette)
+        .or(normal)
         .unwrap_or(palette.accent)
 }
 
@@ -203,7 +212,13 @@ pub(crate) fn render_gauge(
         }
         None => {
             if let Some(ratio) = spec.ratio {
-                let color = gauge_color(ratio, spec.window_progress, spec.thresholds, palette);
+                let color = gauge_color(
+                    ratio,
+                    spec.window_progress,
+                    spec.thresholds,
+                    spec.normal,
+                    palette,
+                );
                 fill_row(
                     buffer,
                     area.x,
@@ -279,6 +294,50 @@ mod tests {
             },
         );
         assert_eq!(buffer[(0, 0)].style().fg, Some(palette.red));
+    }
+
+    /// 常态填充用调用方给的分类色；越过阈值仍转黄 / 红，溢出标记仍是红。
+    #[test]
+    fn normal_color_tints_the_fill_until_a_threshold_is_crossed() {
+        let tone = Color::Rgb(96, 165, 250);
+        for (ratio, expected) in [(0.5, None), (0.8, Some(true)), (0.95, Some(false))] {
+            let (buffer, palette) = render(
+                10,
+                GaugeSpec {
+                    ratio: Some(ratio),
+                    normal: Some(tone),
+                    ..GaugeSpec::default()
+                },
+            );
+            let want = match expected {
+                None => tone,
+                Some(true) => palette.yellow,
+                Some(false) => palette.red,
+            };
+            assert_eq!(buffer[(0, 0)].style().fg, Some(want), "ratio {ratio}");
+        }
+        let (buffer, palette) = render(
+            8,
+            GaugeSpec {
+                ratio: Some(1.3),
+                normal: Some(tone),
+                ..GaugeSpec::default()
+            },
+        );
+        assert_eq!(buffer[(0, 0)].style().fg, Some(palette.red));
+        assert_eq!(buffer[(7, 0)].style().fg, Some(palette.red));
+        // 分段条按各段自带的颜色画，`normal` 不覆盖。
+        let segments = [(0.5, palette.overlay0)];
+        let (buffer, palette) = render(
+            10,
+            GaugeSpec {
+                ratio: Some(0.5),
+                segments: Some(&segments),
+                normal: Some(tone),
+                ..GaugeSpec::default()
+            },
+        );
+        assert_eq!(buffer[(0, 0)].style().fg, Some(palette.overlay0));
     }
 
     #[test]
@@ -357,19 +416,19 @@ mod tests {
         // 用量跑在时间前面：0.5 已用 vs 窗口才过 0.2 → 超前 30 个百分点 → 红。
         let thresholds = GaugeThresholds::default();
         assert_eq!(
-            gauge_color(0.5, Some(0.2), thresholds, &palette),
+            gauge_color(0.5, Some(0.2), thresholds, None, &palette),
             palette.red
         );
         assert_eq!(
-            gauge_color(0.35, Some(0.2), thresholds, &palette),
+            gauge_color(0.35, Some(0.2), thresholds, None, &palette),
             palette.yellow
         );
         assert_eq!(
-            gauge_color(0.25, Some(0.2), thresholds, &palette),
+            gauge_color(0.25, Some(0.2), thresholds, None, &palette),
             palette.accent
         );
         assert_eq!(
-            gauge_color(f32::NAN, None, thresholds, &palette),
+            gauge_color(f32::NAN, None, thresholds, None, &palette),
             palette.accent
         );
         // 进度 1.0 的刻度钉在末格，不越界。

@@ -7,11 +7,16 @@
 //!
 //! Graphite 外观：圆角卡片（字形随 `ui.border_style`）、`surface1` 细边框、说明色的
 //! 卡片标题；卡片的主读数（CPU / 内存 / GPU / 磁盘占用、最高温度、进程数）粗体压在
-//! 上边框右侧。颜色只表达严重程度：常态是中性的 accent 与灰阶，越过告警规则的
-//! 警告线转黄、越过规则阈值转红（`thresholds`）。
+//! 上边框右侧。颜色分三层含义：分类色表达数据类型（CPU 蓝、内存紫、GPU 绿、磁盘
+//! 青绿、网络收 / 发青 / 品红、温度天蓝，见 `tone`），染卡片标题、常态条形、曲线与
+//! 主读数；越过告警规则的警告线转黄、越过规则阈值转红（`thresholds`）；过期数据
+//! （整份样本或该卡分组过期，GPU 另按设备）的曲线、速率、主读数与条形退回中性
+//! 灰阶（`Tone::data`），卡片标题作为数据类型标识仍保留分类色。卡片边框、主机
+//! 摘要条与进程卡保持中性色阶。
 
 use std::borrow::Cow;
 
+use super::tone::{Neutral, Tone};
 use super::*;
 use crate::ui::kit::braille_chart::{render_area_chart, render_shaded_sparkline, ChartGlyphs};
 use crate::ui::kit::card::{render_card, CardSpec};
@@ -113,12 +118,15 @@ fn resample_buckets(buckets: &[f32], slots: usize, out: &mut [f32; HISTORY_SLOTS
 }
 
 /// 在 `area` 画一条 0..=100 定标的历史迷你图：读每份样本算好的预分桶，按图宽合并；
-/// 预分桶与历史对不上时（测试直接改了历史）退回现算。
+/// 预分桶与历史对不上时（测试直接改了历史）退回现算。描边用 `tone` 的主色，曲线
+/// 下方的填充用它的柔和色；`stale`（数据过期）时两者退回中性灰阶。
 fn history_chart(
     buffer: &mut Buffer,
     area: Rect,
     state: &State,
     series: HistorySeries,
+    tone: Tone,
+    stale: bool,
     palette: &Palette,
 ) {
     if area.is_empty() {
@@ -144,8 +152,8 @@ fn history_chart(
         &samples[..slots],
         Some(100.0),
         glyphs,
-        Style::default().fg(chart_color(palette)),
-        Style::default().fg(palette.overlay0),
+        Style::default().fg(tone.data(stale, Neutral::Line, palette)),
+        Style::default().fg(tone.data_soft(stale, Neutral::Fill, palette)),
     );
 }
 
@@ -170,6 +178,57 @@ fn label_value_row(
         value,
         value_style,
     );
+    let label_width = value_x.saturating_sub(rect.x).saturating_sub(1);
+    if label_width > 0 {
+        text(
+            buffer,
+            Rect::new(rect.x, rect.y, label_width, 1),
+            0,
+            label,
+            label_style,
+        );
+    }
+}
+
+/// 同 `label_value_row`，但右侧的值分两段各自着色（网络卡的 `↓收 ↑发`）：两段之间
+/// 隔一格，整体靠右且优先保留；放不下时先截后一段、再截前一段，标签按剩余宽度
+/// 截断。只读，不拼接两段文本。
+fn label_pair_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    label: &str,
+    label_style: Style,
+    values: [(&str, Style); 2],
+) {
+    if rect.is_empty() {
+        return;
+    }
+    let [(first, first_style), (second, second_style)] = values;
+    let first_width = crate::ui::display_width_u16(first);
+    let second_width = crate::ui::display_width_u16(second);
+    let value_width = first_width
+        .saturating_add(1)
+        .saturating_add(second_width)
+        .min(rect.width);
+    let value_x = rect.right() - value_width;
+    let first_shown = first_width.min(value_width);
+    text(
+        buffer,
+        Rect::new(value_x, rect.y, first_shown, 1),
+        0,
+        first,
+        first_style,
+    );
+    let second_x = (value_x + first_shown).saturating_add(1);
+    if second_x < rect.right() {
+        text(
+            buffer,
+            Rect::new(second_x, rect.y, rect.right() - second_x, 1),
+            0,
+            second,
+            second_style,
+        );
+    }
     let label_width = value_x.saturating_sub(rect.x).saturating_sub(1);
     if label_width > 0 {
         text(
@@ -211,15 +270,9 @@ fn thresholds(state: &State, metric: &str) -> GaugeThresholds {
         })
 }
 
-/// 比例的语义色：警告黄、严重红，常态 `None`（调用方用自己的中性色）。
+/// 比例的语义色：警告黄、严重红，常态 `None`（调用方用该卡的分类色）。
 fn severity_color(ratio: f32, thresholds: GaugeThresholds, palette: &Palette) -> Option<Color> {
     Severity::of(ratio, None, thresholds).color(palette)
-}
-
-/// 历史曲线（轮廓）与网络曲线的中性色：说明色一档，比条形的 accent 安静；曲线
-/// 下方的填充再低一档（`overlay0`）。
-fn chart_color(palette: &Palette) -> Color {
-    palette.subtext0
 }
 
 /// 主机摘要条：粗体主机名，其后是说明色的 `系统 · 已运行 · 更新时间 · 采样间隔`，
@@ -487,34 +540,58 @@ fn copy_cells(from: &Buffer, to: &mut Buffer, area: Rect) {
 }
 
 /// 卡片的主读数（压在上边框右侧的粗体徽标）与它的颜色：CPU / 内存 / GPU / 磁盘
-/// 的占用、最高温度、进程数。越过阈值时转黄 / 红，常态正文色。
+/// 的占用、最高温度、进程数。越过阈值时转黄 / 红，常态是该卡的分类色（进程数是
+/// 说明色）；`stale`（卡片数据过期，GPU 另看读数所属设备）时与过期条形同灰，不画
+/// 分类色也不画黄 / 红。
 fn headline(
     id: &str,
     state: &State,
     sample: &SystemMetricsSnapshot,
+    stale: bool,
     palette: &Palette,
 ) -> Option<(String, Color)> {
-    let ratio_badge = |ratio: Option<f32>, metric: &str| {
+    let reading_color = |ratio: f32, thresholds: GaugeThresholds, tone: Tone, stale: bool| {
+        severity_color(ratio, thresholds, palette)
+            .filter(|_| !stale)
+            .unwrap_or_else(|| tone.data(stale, Neutral::Reading, palette))
+    };
+    let ratio_badge = |ratio: Option<f32>, metric: &str, tone: Tone, stale: bool| {
         let ratio = ratio.filter(|ratio| ratio.is_finite())?;
-        let color =
-            severity_color(ratio, thresholds(state, metric), palette).unwrap_or(palette.text);
+        let color = reading_color(ratio, thresholds(state, metric), tone, stale);
         Some((format!("{:.1}%", ratio * 100.0), color))
     };
     match id {
-        "cpu" => ratio_badge(sample.cpu_percent.map(|value| value / 100.0), "cpu"),
+        "cpu" => ratio_badge(
+            sample.cpu_percent.map(|value| value / 100.0),
+            "cpu",
+            Tone::Cpu,
+            stale,
+        ),
         "memory" => ratio_badge(
             (sample.memory.total_bytes > 0)
                 .then(|| sample.memory.used_bytes as f32 / sample.memory.total_bytes as f32),
             "memory",
+            Tone::Memory,
+            stale,
         ),
-        "gpu" => ratio_badge(
-            listed_gpus(state, sample)
+        "gpu" => {
+            // 主读数是最忙的那块 GPU，过期与否也看它自己的状态。
+            let gpus = listed_gpus(state, sample);
+            let busiest = gpus
                 .iter()
-                .filter_map(|gpu| gpu.usage_percent)
-                .reduce(f32::max)
-                .map(|value| value / 100.0),
-            "gpu",
-        ),
+                .filter(|gpu| gpu.usage_percent.is_some_and(f32::is_finite))
+                .max_by(|a, b| {
+                    a.usage_percent
+                        .unwrap_or(0.0)
+                        .total_cmp(&b.usage_percent.unwrap_or(0.0))
+                })?;
+            ratio_badge(
+                busiest.usage_percent.map(|value| value / 100.0),
+                "gpu",
+                Tone::Gpu,
+                stale || busiest.status == ObservationStatus::Stale,
+            )
+        }
         "disks" => ratio_badge(
             listed_disks(state, sample)
                 .iter()
@@ -524,6 +601,8 @@ fn headline(
                 })
                 .reduce(f32::max),
             "disk",
+            Tone::Disk,
+            stale,
         ),
         "sensors" => {
             let chips = sensor_chips(state, sample);
@@ -532,12 +611,31 @@ fn headline(
                 .filter(|chip| chip.count > 0)
                 .max_by(|a, b| a.max.total_cmp(&b.max))?;
             let ratio = hottest.max / hottest.critical.unwrap_or(100.0);
-            let color =
-                severity_color(ratio, GaugeThresholds::default(), palette).unwrap_or(palette.text);
+            let color = reading_color(ratio, GaugeThresholds::default(), Tone::Temperature, stale);
             Some((format!("{:.0}°C", hottest.max), color))
         }
         "processes" => (!sample.processes.is_empty())
             .then(|| (sample.processes.len().to_string(), palette.subtext0)),
+        _ => None,
+    }
+}
+
+/// 卡片的数据是否过期：整份样本过期，或该卡的分组过期。过期时数据元素退回中性
+/// 灰阶（`Tone::data`），标题仍保留分类色。
+fn card_stale(id: &str, sample: &SystemMetricsSnapshot) -> bool {
+    sample.status == ObservationStatus::Stale
+        || sample.group_status.get(id) == Some(&ObservationStatus::Stale)
+}
+
+/// 卡片标题的分类色：逐核卡随 CPU、网络卡取收方向的颜色，进程卡保持中性。
+fn card_tone(id: &str) -> Option<Tone> {
+    match id {
+        "cpu" | "cores" => Some(Tone::Cpu),
+        "memory" => Some(Tone::Memory),
+        "gpu" => Some(Tone::Gpu),
+        "disks" => Some(Tone::Disk),
+        "network" => Some(Tone::NetRx),
+        "sensors" => Some(Tone::Temperature),
         _ => None,
     }
 }
@@ -563,7 +661,8 @@ fn system_card(
         .unwrap_or(ObservationStatus::Ready);
     // 顶边右侧：非 Ready 的分组挂状态徽标，否则是卡片的主读数；编辑布局时那里放
     // ↑↓，两者都不挂。
-    let reading = headline(id, state, sample, palette);
+    let stale = card_stale(id, sample);
+    let reading = headline(id, state, sample, stale, palette);
     let badge = if state.layout_editing {
         None
     } else if group_status != ObservationStatus::Ready {
@@ -579,6 +678,7 @@ fn system_card(
         focused: selected,
         hovered: false,
         dimmed: state.layout_editing && state.selected_card.is_some() && !selected,
+        tone: card_tone(id).map(|tone| tone.color(palette)),
     };
     let inner = render_card(buffer, rect, &spec, cx.glyphs, palette);
     hits.push((rect, Action::Card(id.to_owned())));
@@ -606,18 +706,18 @@ fn system_card(
     let offset = state.card_scroll.get(id).copied().unwrap_or(0);
     let max = match id {
         "cpu" => {
-            cpu_card(buffer, inner, state, sample, palette);
+            cpu_card(buffer, inner, state, sample, stale, palette);
             return;
         }
         "memory" => {
-            memory_card(buffer, inner, state, sample, palette);
+            memory_card(buffer, inner, state, sample, stale, palette);
             return;
         }
-        "cores" => cores_card(buffer, inner, state, sample, palette, offset, hits),
-        "gpu" => gpu_card(buffer, inner, state, sample, palette, offset),
-        "disks" => disks_card(buffer, inner, state, sample, palette, offset),
-        "network" => network_card(buffer, inner, state, sample, palette, offset),
-        "sensors" => sensors_card(buffer, inner, state, sample, palette, offset),
+        "cores" => cores_card(buffer, inner, state, sample, stale, palette, offset, hits),
+        "gpu" => gpu_card(buffer, inner, state, sample, stale, palette, offset),
+        "disks" => disks_card(buffer, inner, state, sample, stale, palette, offset),
+        "network" => network_card(buffer, inner, state, sample, stale, palette, offset),
+        "sensors" => sensors_card(buffer, inner, state, sample, stale, palette, offset),
         _ => processes_card(buffer, inner, state, sample, palette, offset, hits),
     };
     limits.set(id, max);
@@ -672,6 +772,7 @@ fn cpu_card(
     inner: Rect,
     state: &State,
     sample: &SystemMetricsSnapshot,
+    stale: bool,
     palette: &Palette,
 ) {
     let texts = &crate::i18n::texts().monitor;
@@ -682,9 +783,10 @@ fn cpu_card(
             ratio: sample.cpu_percent.map(|value| value / 100.0),
             thresholds: thresholds(state, "cpu"),
             ascii: state.chart_glyphs.ascii(),
+            normal: Some(Tone::Cpu.color(palette)),
             ..GaugeSpec::default()
         },
-        sample.status == ObservationStatus::Stale,
+        stale,
         palette,
     );
     let cores = crate::i18n::fill(
@@ -719,6 +821,8 @@ fn cpu_card(
         chart_area(inner, 2),
         state,
         HistorySeries::Cpu,
+        Tone::Cpu,
+        stale,
         palette,
     );
 }
@@ -731,6 +835,7 @@ fn cores_card(
     inner: Rect,
     state: &State,
     sample: &SystemMetricsSnapshot,
+    stale: bool,
     palette: &Palette,
     offset: usize,
     hits: &mut Vec<(Rect, Action)>,
@@ -748,6 +853,7 @@ fn cores_card(
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
     let cpu_thresholds = thresholds(state, "cpu");
+    let cpu_color = Tone::Cpu.color(palette);
     // 全卡统一标签和数字列宽；同一列的条形等长且起点对齐，滚动换屏时也不跳。
     let columns = MeterColumns {
         label: decimal_width(sample.cores.iter().map(|core| core.id).max().unwrap_or(0)),
@@ -785,9 +891,10 @@ fn cores_card(
                     ratio: core.usage_percent.map(|value| value / 100.0),
                     thresholds: cpu_thresholds,
                     ascii,
+                    normal: Some(cpu_color),
                     ..GaugeSpec::default()
                 },
-                stale: false,
+                stale,
             },
             columns,
             palette,
@@ -812,12 +919,12 @@ fn memory_card(
     inner: Rect,
     state: &State,
     sample: &SystemMetricsSnapshot,
+    stale: bool,
     palette: &Palette,
 ) {
     let texts = &crate::i18n::texts().monitor;
     let memory = &sample.memory;
     let ascii = state.chart_glyphs.ascii();
-    let stale = sample.status == ObservationStatus::Stale;
     let total = memory.total_bytes;
     let used_ratio = (total > 0).then(|| memory.used_bytes as f32 / total as f32);
     // 缓存 / 缓冲：总量里既不算已用也不可用的部分（平台不区分时为 0）。
@@ -826,12 +933,14 @@ fn memory_card(
         .saturating_sub(memory.available_bytes);
     let cache_ratio = (total > 0).then(|| cache as f32 / total as f32);
     let memory_thresholds = thresholds(state, "memory");
+    let memory_color = Tone::Memory.color(palette);
     let used_color = severity_color(used_ratio.unwrap_or(0.0), memory_thresholds, palette)
-        .unwrap_or(palette.accent);
-    // 已用段跟随严重程度（常态 accent），缓存段是低一档的中性灰。
+        .unwrap_or(memory_color);
+    // 已用段跟随严重程度（常态是内存的分类色），缓存段是同色系更淡的一档；过期时
+    // `full_gauge` 整条换成灰色单段。
     let segments = [
         (used_ratio.unwrap_or(0.0), used_color),
-        (cache_ratio.unwrap_or(0.0), palette.overlay1),
+        (cache_ratio.unwrap_or(0.0), Tone::Memory.faint(palette)),
     ];
     full_gauge(
         buffer,
@@ -884,6 +993,7 @@ fn memory_card(
                         .then(|| memory.swap_used_bytes as f32 / memory.swap_total_bytes as f32),
                     thresholds: memory_thresholds,
                     ascii,
+                    normal: Some(memory_color),
                     ..GaugeSpec::default()
                 },
                 stale,
@@ -896,6 +1006,8 @@ fn memory_card(
         chart_area(inner, 3),
         state,
         HistorySeries::Memory,
+        Tone::Memory,
+        stale,
         palette,
     );
 }
@@ -916,6 +1028,7 @@ fn gpu_card(
     inner: Rect,
     state: &State,
     sample: &SystemMetricsSnapshot,
+    stale: bool,
     palette: &Palette,
     offset: usize,
 ) -> usize {
@@ -939,6 +1052,9 @@ fn gpu_card(
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
     let gpu_thresholds = thresholds(state, "gpu");
+    // 利用率是 GPU 的分类色，显存与内存同一类数据、用内存的分类色。
+    let gpu_color = Tone::Gpu.color(palette);
+    let vram_color = Tone::Memory.color(palette);
     // 利用率与显存两种行、所有 GPU 共用列宽：条形起止对齐，滚动换设备时也不跳。
     let vram_text = |gpu: &GpuMetric| match (gpu.memory_used_bytes, gpu.memory_total_bytes) {
         (Some(used), Some(total)) if total > 0 => {
@@ -960,7 +1076,7 @@ fn gpu_card(
         .enumerate()
     {
         let row = index as u16 * 3;
-        let stale = gpu.status == ObservationStatus::Stale;
+        let stale = stale || gpu.status == ObservationStatus::Stale;
         let temperature = gpu
             .temperature_celsius
             .map_or_else(|| "—".to_owned(), |value| format!("{value:.0}°C"));
@@ -985,6 +1101,7 @@ fn gpu_card(
                         ratio: gpu.usage_percent.map(|value| value / 100.0),
                         thresholds: gpu_thresholds,
                         ascii,
+                        normal: Some(gpu_color),
                         ..GaugeSpec::default()
                     },
                     stale,
@@ -1008,6 +1125,7 @@ fn gpu_card(
                                 ratio: Some(used as f32 / total as f32),
                                 thresholds: gpu_thresholds,
                                 ascii,
+                                normal: Some(vram_color),
                                 ..GaugeSpec::default()
                             },
                             stale,
@@ -1056,6 +1174,7 @@ fn disks_card(
     inner: Rect,
     state: &State,
     sample: &SystemMetricsSnapshot,
+    stale: bool,
     palette: &Palette,
     offset: usize,
 ) -> usize {
@@ -1138,7 +1257,12 @@ fn disks_card(
                 3 => TableCell::quantity(bytes(disk.total_bytes)),
                 _ => TableCell {
                     text: Cow::Owned(format!("{:.0}%", ratio * 100.0)),
-                    fg: severity_color(ratio, disk_thresholds, palette),
+                    // 过期时与主读数同灰，不画分类色也不画黄 / 红。
+                    fg: Some(
+                        severity_color(ratio, disk_thresholds, palette)
+                            .filter(|_| !stale)
+                            .unwrap_or_else(|| Tone::Disk.data(stale, Neutral::Reading, palette)),
+                    ),
                     dim_tail: 0,
                 },
             }
@@ -1172,15 +1296,14 @@ fn net_idle(state: &State, net: &NetworkMetric) -> bool {
             .is_none_or(|samples| samples.iter().all(|sample| quiet(*sample)))
 }
 
-/// 速率文本 `↓1.2 MiB/s ↑24.0 KiB/s`。
-fn net_rates_text(net: &NetworkMetric) -> String {
+/// 收 / 发两段速率文本 `(↓1.2 MiB/s, ↑24.0 KiB/s)`，各自着色（见 `label_pair_row`）。
+fn net_rates_text(net: &NetworkMetric) -> (String, String) {
     let rate = |value: Option<f64>| {
         value.map_or_else(|| "—".to_owned(), |value| bytes(value.max(0.0) as u64))
     };
-    format!(
-        "↓{}/s ↑{}/s",
-        rate(net.received_bytes_per_second),
-        rate(net.transmitted_bytes_per_second)
+    (
+        format!("↓{}/s", rate(net.received_bytes_per_second)),
+        format!("↑{}/s", rate(net.transmitted_bytes_per_second)),
     )
 }
 
@@ -1212,6 +1335,7 @@ fn network_card(
     inner: Rect,
     state: &State,
     sample: &SystemMetricsSnapshot,
+    stale: bool,
     palette: &Palette,
     offset: usize,
 ) -> usize {
@@ -1224,18 +1348,29 @@ fn network_card(
     let max = active.len().saturating_sub(capacity);
     let offset = offset.min(max);
     let glyphs = state.chart_glyphs.chart();
+    // 收 / 发各一种分类色：速率文字与堆叠迷你图同色，方向一眼可辨；过期时文字回到
+    // 正文色、曲线回到两档中性灰。
+    let rx_text_color = Tone::NetRx.data(stale, Neutral::Text, palette);
+    let tx_text_color = Tone::NetTx.data(stale, Neutral::Text, palette);
+    let chart_colors = [
+        Tone::NetRx.data(stale, Neutral::Line, palette),
+        Tone::NetTx.data(stale, Neutral::Fill, palette),
+    ];
     let mut y = inner.y;
     for net in active.iter().skip(offset) {
         if y >= bottom {
             break;
         }
-        label_value_row(
+        let (rx_text, tx_text) = net_rates_text(net);
+        label_pair_row(
             buffer,
             Rect::new(inner.x, y, inner.width, 1),
             &net.id,
             crate::ui::design::muted(palette),
-            &net_rates_text(net),
-            crate::ui::design::body(palette),
+            [
+                (&rx_text, Style::default().fg(rx_text_color)),
+                (&tx_text, Style::default().fg(tx_text_color)),
+            ],
         );
         y += 1;
         if y < bottom {
@@ -1255,8 +1390,7 @@ fn network_card(
                     &[&rx[start..], &tx[start..]],
                     None,
                     glyphs,
-                    // 收 / 发两档中性灰：颜色只表达状态，方向靠速率文字的 ↓↑。
-                    &[chart_color(palette), palette.overlay0],
+                    &chart_colors,
                 );
             }
             y += 1;
@@ -1338,6 +1472,7 @@ fn sensors_card(
     inner: Rect,
     state: &State,
     sample: &SystemMetricsSnapshot,
+    stale: bool,
     palette: &Palette,
     offset: usize,
 ) -> usize {
@@ -1361,6 +1496,7 @@ fn sensors_card(
     let max = chips.len().saturating_sub(usize::from(inner.height));
     let offset = offset.min(max);
     let ascii = state.chart_glyphs.ascii();
+    let temperature_color = Tone::Temperature.color(palette);
     // 数字是芯片里最热的传感器（条形也按它定标），多个传感器时平均温度作说明，
     // 窄时说明先让位、条形与数字保住。全部芯片（含滚出视口的）先格式化并量出
     // 统一列宽：各行条形起止对齐，滚动时也不跳。芯片数很少，这里分配不在 pane
@@ -1404,9 +1540,10 @@ fn sensors_card(
                 gauge: GaugeSpec {
                     ratio: (chip.count > 0).then(|| chip.max / limit),
                     ascii,
+                    normal: Some(temperature_color),
                     ..GaugeSpec::default()
                 },
-                stale: false,
+                stale,
             },
             columns,
             palette,
@@ -1438,6 +1575,8 @@ fn sensors_card(
             ),
             state,
             HistorySeries::Temperature,
+            Tone::Temperature,
+            stale,
             palette,
         );
     }
@@ -2050,6 +2189,7 @@ mod tests {
                     inner,
                     &state,
                     &sample,
+                    false,
                     &config.palette,
                     0,
                     &mut hits,
@@ -2253,11 +2393,11 @@ mod tests {
             .expect("已用段");
         assert_eq!(
             buffer[(used, row)].style().fg,
-            Some(palette.accent),
-            "常态用量是中性的 accent"
+            Some(Tone::Memory.color(&palette)),
+            "常态用量是内存的分类色"
         );
         let cache = (used..memory.right())
-            .find(|x| buffer[(*x, row)].style().fg == Some(palette.overlay1))
+            .find(|x| buffer[(*x, row)].style().fg == Some(Tone::Memory.faint(&palette)))
             .expect("缓存段");
         assert_eq!(buffer[(cache, row)].symbol(), "━");
         assert!(row_has(&buffer, memory.y, "37.5%"), "内存占用压在上边框");
@@ -2748,14 +2888,15 @@ mod tests {
         assert_eq!(output.page_scroll_limits.get(Page::Monitor), None);
     }
 
-    /// 颜色只表达严重程度，阈值与告警规则同一条线：GPU 规则是 95 %，所以 85 %
-    /// 只到警告（黄），96 % 才严重（红）；CPU 规则 90 %，42 % 保持中性。
+    /// 黄 / 红只表达严重程度，阈值与告警规则同一条线：GPU 规则是 95 %，所以 85 %
+    /// 只到警告（黄），96 % 才严重（红），常态是 GPU 的分类色；CPU 规则 90 %，42 %
+    /// 保持 CPU 的分类色。
     #[test]
     fn severity_colors_follow_the_alert_rule_thresholds() {
         let _guard = lang_guard(Lang::ZhCn);
         let palette = config().palette;
         for (usage, expected) in [
-            (60.0, palette.text),
+            (60.0, Tone::Gpu.color(&palette)),
             (85.0, palette.yellow),
             (96.0, palette.red),
         ] {
@@ -2788,7 +2929,148 @@ mod tests {
         assert_eq!(color_at(&buffer, cpu.y, "42.0%"), Some(palette.red));
         let (buffer, output) = paint_page(&monitored(), Page::Monitor, 120, 100);
         let cpu = card_rect(&output, "cpu");
-        assert_eq!(color_at(&buffer, cpu.y, "42.0%"), Some(palette.text));
+        assert_eq!(
+            color_at(&buffer, cpu.y, "42.0%"),
+            Some(Tone::Cpu.color(&palette))
+        );
+    }
+
+    /// 分类色表达数据类型：CPU 卡的标题与常态条形是 CPU 色，网络卡的 ↓ / ↑ 速率
+    /// 分别是收 / 发色；越过阈值的 GPU 主读数与条形仍是黄 / 红；进程卡标题保持中性。
+    #[test]
+    fn category_tones_mark_titles_bars_and_network_directions() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let palette = config().palette;
+        let mut state = monitored();
+        state.net_history.insert(
+            "eth0".into(),
+            std::iter::repeat_n((1000.0, 500.0), 8).collect(),
+        );
+        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
+        let first_in = |rect: Rect, y: u16, symbol: &str| {
+            (rect.x..rect.right())
+                .find(|x| buffer[(*x, y)].symbol() == symbol)
+                .map(|x| buffer[(x, y)].style())
+        };
+        let cpu = card_rect(&output, "cpu");
+        let cpu_color = Tone::Cpu.color(&palette);
+        let title = first_in(cpu, cpu.y, "C").expect("CPU 标题");
+        assert_eq!(title.fg, Some(cpu_color), "{}", row_text(&buffer, cpu.y));
+        assert!(!title.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            first_in(cpu, cpu.y + 1, "━").expect("CPU 条形").fg,
+            Some(cpu_color)
+        );
+        let cores = card_rect(&output, "cores");
+        assert_eq!(
+            first_in(cores, cores.y + 1, "━").expect("逐核条形").fg,
+            Some(cpu_color)
+        );
+        let network = card_rect(&output, "network");
+        assert_eq!(
+            first_in(network, network.y + 1, "↓").expect("收速率").fg,
+            Some(Tone::NetRx.color(&palette))
+        );
+        assert_eq!(
+            first_in(network, network.y + 1, "↑").expect("发速率").fg,
+            Some(Tone::NetTx.color(&palette))
+        );
+        let processes = card_rect(&output, "processes");
+        let title = first_in(processes, processes.y, "进").expect("进程标题");
+        assert_eq!(title.fg, Some(palette.subtext0), "进程卡保持中性");
+
+        for (usage, expected) in [(85.0, palette.yellow), (96.0, palette.red)] {
+            let mut state = monitored();
+            if let Some(sample) = state.metrics.as_mut() {
+                sample.gpus[0].usage_percent = Some(usage);
+            }
+            let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
+            let gpu = card_rect(&output, "gpu");
+            assert_eq!(
+                color_at(&buffer, gpu.y, &format!("{usage:.1}%")),
+                Some(expected),
+                "GPU {usage}% 主读数"
+            );
+            let bar = (gpu.x..gpu.right())
+                .find(|x| buffer[(*x, gpu.y + 2)].symbol() == "━")
+                .expect("利用率条形");
+            assert_eq!(buffer[(bar, gpu.y + 2)].style().fg, Some(expected));
+        }
+    }
+
+    /// 过期数据退回中性灰阶：整份样本 Stale 时，CPU 历史曲线回到说明色 / overlay0、
+    /// 网络 ↓ / ↑ 速率回到正文色、主读数与过期条形同灰（越过阈值也不画黄 / 红）；
+    /// 卡片标题作为数据类型标识仍是分类色。
+    #[test]
+    fn stale_samples_drop_the_category_colors_but_keep_the_titles() {
+        let _guard = lang_guard(Lang::ZhCn);
+        let palette = config().palette;
+        let mut state = monitored();
+        state.history = (0..30)
+            .map(|index| HistoryPoint {
+                at: 5_000 + index * 200,
+                cpu: Some(50.0 + index as f32),
+                memory: Some(40.0),
+                cores: Vec::new(),
+                temperature: None,
+            })
+            .collect();
+        state.net_history.insert(
+            "eth0".into(),
+            std::iter::repeat_n((1000.0, 500.0), 8).collect(),
+        );
+        if let Some(sample) = state.metrics.as_mut() {
+            sample.status = ObservationStatus::Stale;
+            // 越过 GPU 规则阈值：过期时主读数也不转红。
+            sample.gpus[0].usage_percent = Some(97.0);
+        }
+        let (buffer, output) = paint_page(&state, Page::Monitor, 120, 100);
+        let first_in = |rect: Rect, y: u16, symbol: &str| {
+            (rect.x..rect.right())
+                .find(|x| buffer[(*x, y)].symbol() == symbol)
+                .map(|x| buffer[(x, y)].style())
+        };
+        let cpu = card_rect(&output, "cpu");
+        let cpu_tone = [Tone::Cpu.color(&palette), Tone::Cpu.soft(&palette)];
+        assert_eq!(
+            first_in(cpu, cpu.y, "C").expect("CPU 标题").fg,
+            Some(Tone::Cpu.color(&palette)),
+            "标题保留分类色"
+        );
+        assert_eq!(color_at(&buffer, cpu.y, "42.0%"), Some(palette.overlay0));
+        let chart = (cpu.y + 2..cpu.bottom() - 1)
+            .flat_map(|y| (cpu.x + 1..cpu.right() - 1).map(move |x| (x, y)))
+            .filter(|(x, y)| buffer[(*x, *y)].symbol().chars().any(is_braille))
+            .filter_map(|(x, y)| buffer[(x, y)].style().fg)
+            .collect::<Vec<_>>();
+        assert!(!chart.is_empty(), "画出了历史曲线");
+        assert!(
+            chart
+                .iter()
+                .all(|fg| [palette.subtext0, palette.overlay0].contains(fg)),
+            "过期曲线只用中性灰阶：{chart:?}"
+        );
+        assert!(chart.iter().all(|fg| !cpu_tone.contains(fg)));
+        let network = card_rect(&output, "network");
+        for arrow in ["↓", "↑"] {
+            assert_eq!(
+                first_in(network, network.y + 1, arrow).expect("速率").fg,
+                Some(palette.text),
+                "{arrow} 速率回到正文色"
+            );
+        }
+        let gpu = card_rect(&output, "gpu");
+        assert_eq!(color_at(&buffer, gpu.y, "97.0%"), Some(palette.overlay0));
+        assert_eq!(
+            first_in(gpu, gpu.y, "G").expect("GPU 标题").fg,
+            Some(Tone::Gpu.color(&palette))
+        );
+        let cores = card_rect(&output, "cores");
+        assert_eq!(
+            first_in(cores, cores.y + 1, "━").expect("逐核条形").fg,
+            Some(palette.overlay0),
+            "逐核条形同样退灰"
+        );
     }
 
     /// 热路径：进程表的行序与历史曲线的桶在每份样本时算好，渲染只读。生产路径

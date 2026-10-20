@@ -1,8 +1,9 @@
 //! 卡片：带标题与徽标的边框容器，是监控系统页 / 设置页的分区单元。
 //! 边框字形来自调用方的 `BorderGlyphs`（随 `ui.border_style` 解析一次）。
 //!
-//! Graphite 外观：常态边框 `surface1`、标题是说明色小字（不加粗），徽标（卡片的
-//! 主读数或状态）粗体靠右压在上边框上；返回的内容区在边框内再留左右各 1 列内边距。
+//! Graphite 外观：常态边框 `surface1`、标题是小字（不加粗；默认说明色，调用方可给
+//! 一个分类色 `tone` 标出卡片的数据类型），徽标（卡片的主读数或状态）粗体靠右压在
+//! 上边框上；返回的内容区在边框内再留左右各 1 列内边距。边框始终是中性色阶。
 
 use ratatui::{
     buffer::Buffer,
@@ -16,6 +17,8 @@ use crate::ui::BorderGlyphs;
 
 /// 卡片外观。`focused` 边框取 accent，`hovered` 取 overlay1，常态取 surface1；
 /// `dimmed` 整体转灰并加 DIM（编辑布局模式下未选中的卡、失效数据的卡）。
+/// `tone` 是标题的分类色：常态标题用它（`None` 时说明色），选中时用它加粗
+/// （`None` 时正文色加粗），`dimmed` 时仍转灰；不影响边框。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct CardSpec<'a> {
     pub title: &'a str,
@@ -23,6 +26,7 @@ pub(crate) struct CardSpec<'a> {
     pub focused: bool,
     pub hovered: bool,
     pub dimmed: bool,
+    pub tone: Option<Color>,
 }
 
 fn border_color(spec: &CardSpec<'_>, palette: &Palette) -> Color {
@@ -88,14 +92,16 @@ pub(crate) fn render_card(
         }
     }
     if !spec.title.is_empty() {
-        // 标题是说明层级的小字：常态说明色、不加粗；选中的卡片标题换正文色加粗，
-        // 与 accent 边框一起标出焦点。
+        // 标题是说明层级的小字：常态用分类色（未给时说明色）、不加粗；选中的卡片
+        // 标题加粗（未给分类色时换正文色），与 accent 边框一起标出焦点。
         let style = if spec.dimmed {
             background.fg(palette.overlay0)
         } else if spec.focused {
-            background.fg(palette.text).add_modifier(Modifier::BOLD)
+            background
+                .fg(spec.tone.unwrap_or(palette.text))
+                .add_modifier(Modifier::BOLD)
         } else {
-            background.fg(palette.subtext0)
+            background.fg(spec.tone.unwrap_or(palette.subtext0))
         };
         let used = framed_label_width(spec.title, title_budget);
         if used > 0 {
@@ -222,6 +228,39 @@ mod tests {
             Some(palette.overlay0),
             "徽标也转灰"
         );
+    }
+
+    /// 分类色只染标题：常态不加粗、选中加粗、dimmed 仍转灰；边框保持中性。
+    #[test]
+    fn tone_colors_the_title_but_never_the_border() {
+        let tone = Color::Rgb(167, 139, 250);
+        for (focused, dimmed) in [(false, false), (true, false), (true, true)] {
+            let (buffer, _, palette) = render(
+                Rect::new(0, 0, 12, 3),
+                CardSpec {
+                    title: "MEM",
+                    focused,
+                    dimmed,
+                    tone: Some(tone),
+                    ..CardSpec::default()
+                },
+                BorderGlyphs::SINGLE,
+            );
+            let title = buffer[(2, 0)].style();
+            let border = buffer[(0, 0)].style();
+            if dimmed {
+                assert_eq!(title.fg, Some(palette.overlay0));
+                assert_eq!(border.fg, Some(palette.overlay0));
+            } else if focused {
+                assert_eq!(title.fg, Some(tone));
+                assert!(title.add_modifier.contains(Modifier::BOLD));
+                assert_eq!(border.fg, Some(palette.accent), "焦点边框不变");
+            } else {
+                assert_eq!(title.fg, Some(tone));
+                assert!(!title.add_modifier.contains(Modifier::BOLD));
+                assert_eq!(border.fg, Some(palette.surface1), "常态边框不变");
+            }
+        }
     }
 
     #[test]
