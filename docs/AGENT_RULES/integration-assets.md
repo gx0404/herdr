@@ -52,6 +52,13 @@
   `PermissionRequest` 2.0.45、`TaskCompleted` 2.1.33；未装的 `StopFailure` 2.1.78、
   `TaskCreated` 2.1.84）；Kimi Code CLI 最低 0.14.0（`mod.rs::KIMI_MIN_VERSION`，约束写在
   `KIMI_HOOK_EVENTS` 上，bun 测试守门）。
+- Codex 最低 `0.150.0`（`mod.rs::CODEX_MIN_VERSION`），安装以 `codex --version`
+  校验：过旧拒绝，无法判断只警告。规范钩子以 `targets.rs::codex_managed_hooks` 为准：
+  `SessionStart→session`、`UserPromptSubmit→working`、`Stop→idle` 同步 10 秒，
+  `Interrupt→idle` 同步 3 秒；`PermissionRequest→attention`、
+  `SubagentStart/SubagentStop→activity` 均 10 秒且 `async: true`，各平台一致。
+  重装原位升级已有条目、追加缺项；信任哈希包含 timeout/async，升级后须在 Codex
+  下次启动的「Hooks need review」重新信任，信任检查不得漏掉 Interrupt。
 - 资产内容（`src/integration/assets/**`，含 TS 与 JSON）是受控生成/冻结输入：
   修改后必须跑 `just integration-assets-test`（bun），语义变化同步
   `docs/next` 用户文档（见 `docs-pipeline.md`）。

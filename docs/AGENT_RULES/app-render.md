@@ -47,6 +47,8 @@ ui-hot-path-architecture-test`）是热路径边界的确定性守门，新增�
   `src/ui/design.rs`。需要输入 = `◆` / `status_input`，失败 = `✕` / `status_failed`，
   运行中 = 同相位盲文转圈 / `status_running`，待查看 = `●` / `status_review`，
   已查看空闲 = `○` / `status_idle`；未知不等于空闲、不参与汇总。
+- 子智能体活动状态统一经 `design::activity_bucket`（`src/ui/design.rs`）映射到状态桶，再取
+  共用字形与颜色；子智能体页面、Inspector 与会话树不得另建映射。
 - 工作区/标签的汇总顺序为需要输入、失败、运行中、待查看、空闲；按状态列表把待查看
   放在运行中之前。不得在不同页面另建颜色或优先级映射。
 - 转圈共用客户端时钟，关闭动画/转圈或离线缓存时保持静态；server 窗格标题使用静态

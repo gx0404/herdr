@@ -12,6 +12,9 @@
   alternate screen 行为相关时加 `--format ansi`。区分哪些可见控件是不变量、
   哪些是备选项，编码为显式 AND/OR 门；不匹配整 pane 偶发文本；用户可滚动的
   可见 viewport 不作为 agent 状态来源。
+- fork 引擎扩展 `osc_program_status` 区域读取被动采集的 OSC 7501 正文，只供
+  fork 叠加规则使用；不抬 `MANIFEST_ENGINE_VERSION`，不把该区域写入上游捆绑或
+  远端发布 manifest，同步上游时保留此扩展。
 
 ## Manifest 更新流程（上游全文语义）
 

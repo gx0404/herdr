@@ -60,9 +60,9 @@ Herdr 对 Linux/macOS 上的集成配置和所有平台的新文件使用原子�
 | 集成类型 | 智能体 | 效果 |
 | --- | --- | --- |
 | 生命周期权威 | Pi、Kimi Code CLI、OpenCode | 已安装且在为该窗格主动上报时,由钩子或插件事件决定 `idle`、`working` 和 `blocked`。对同一个生命周期权威,Herdr 不再使用屏幕清单兜底。 |
-| 会话身份 | Claude Code、Codex | 集成上报用于恢复的原生会话引用。状态仍来自 Herdr 的屏幕清单检测。在使用 `--no-daemon` 运行时，Codex 也会上报回合状态，屏幕检测仍负责处理可见的阻塞提示。 |
+| 会话身份 | Claude Code、Codex | 集成上报用于恢复的原生会话引用。Claude Code 使用屏幕清单检测；Codex 结合轮次钩子（`--no-daemon`）、从 0.163 起提供的 OSC 7501，以及兜底可见阻塞的屏幕规则。 |
 
-集成还会上报智能体需要你处理的事项的详情（`pane.report_agent_attention`）：等你时的问题或权限请求，以及回合失败的原因。详情从不改变由哪一方决定状态。问题只在窗格处于 `blocked` 时显示，而 Claude Code 和 Codex 仍经屏幕检测进入 `blocked`；失败会一直保留，直到你查看该窗格或智能体重新开始工作。Herdr 如何显示它们见[智能体](/zh-cn/docs/agents/)。Claude Code（集成版本 `12`）上报权限请求、提问和 MCP 输入表单；Codex（`10`）上报审批请求；Kimi Code CLI（`9`）、OpenCode（`14`）和 Pi（`11`）上报失败的回合。从这些版本起，Claude Code、Codex 和 Kimi Code CLI 的 Windows 钩子也会经 `herdr pane report-agent-activity` 发送 macOS 和 Linux 钩子发送的活动信号。
+集成还会上报智能体需要你处理的事项的详情（`pane.report_agent_attention`）：等你时的问题或权限请求，以及回合失败的原因。详情从不改变由哪一方决定状态。问题只在窗格处于 `blocked` 时显示；Claude Code 经屏幕检测进入该状态，Codex 还会使用可用的 OSC 7501 信号。失败会一直保留，直到你查看该窗格或智能体重新开始工作。Herdr 如何显示它们见[智能体](/zh-cn/docs/agents/)。Claude Code（集成版本 `12`）上报权限请求、提问和 MCP 输入表单；Codex（`10`）上报审批请求；Kimi Code CLI（`9`）、OpenCode（`14`）和 Pi（`11`）上报失败的回合。从这些版本起，Claude Code、Codex 和 Kimi Code CLI 的 Windows 钩子也会经 `herdr pane report-agent-activity` 发送 macOS 和 Linux 钩子发送的活动信号。
 
 原生会话恢复需要最新的 Herdr 集成: Pi 集成版本 `2`、OMP 版本 `3`、Claude Code 版本 `6`、Codex 版本 `5`、GitHub Copilot CLI 版本 `2`、Devin CLI 版本 `2`、Droid 版本 `2`、Kimi Code CLI 版本 `3`、Qoder CLI 版本 `2`、Qwen Code 版本 `1`、Letta Code 版本 `1`、Cursor Agent CLI 版本 `1`、Grok CLI 版本 `2`、OpenCode 版本 `5`、Kilo Code CLI 版本 `1`、Hermes Agent 版本 `5`、MastraCode 版本 `1`、Antigravity CLI 版本 `1`。用 `herdr integration status` 查看已安装版本。
 
@@ -113,7 +113,7 @@ Herdr 把内置扩展写入:
 
 如果设置了 `PI_CODING_AGENT_DIR`,Herdr 会改为写入 `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`。如果 Pi agent 目录已经存在,Herdr 会创建 extensions 目录。卸载只删除那个扩展文件。
 
-从集成版本 `10` 起,扩展还会在交互式(TUI)会话里上报供 Agent 活动窗口使用的活动树。Pi 本身没有内置的子 agent、待办或后台任务,这些都由扩展提供。每次调用不属于 Pi 内置工具的工具都会成为一个活动项,内容是该工具的流式输出;官方 `subagent` 扩展还会为每个被委派的 agent 加一个子项。这棵树最多保留八个工具调用项(有新项时先丢已结束的)、每项之下最多八个子项,每项的输出只保留最后 2,000 个字符。Pi 不在磁盘上保留这些记录,所以扩展把整棵树发给 Herdr。升级后请重新安装 Pi 集成以启用它。
+从集成版本 `10` 起,扩展还会在交互式(TUI)会话里上报供 子智能体页面使用的活动树。Pi 本身没有内置的子 agent、待办或后台任务,这些都由扩展提供。每次调用不属于 Pi 内置工具的工具都会成为一个活动项,内容是该工具的流式输出;官方 `subagent` 扩展还会为每个被委派的 agent 加一个子项。这棵树最多保留八个工具调用项(有新项时先丢已结束的)、每项之下最多八个子项,每项的输出只保留最后 2,000 个字符。Pi 不在磁盘上保留这些记录,所以扩展把整棵树发给 Herdr。升级后请重新安装 Pi 集成以启用它。
 
 从集成版本 `11` 起,一次运行结束且其最后一个回合以错误告终时,扩展会在上报 `idle` 之前先上报失败及 Pi 的错误信息,因此 Herdr 把它作为一次失败的运行而不是完成来通知。你用 Escape 停下的运行,或经重试恢复的运行,都不算失败。
 
@@ -137,41 +137,61 @@ Claude Code 后台会话(用 `claude --bg` 启动或由 Claude Code daemon 托�
 
 Herdr 从 Claude Code 自己的会话文件构建它的活动树。Claude Code 在后台运行的子 agent,在 Claude Code 为派生它的 agent 记下结束通知后显示为完成或失败;被停掉的子 agent 显示为失败,摘要开头注明 `stopped`;已结束的子 agent 被重新唤起后重新算作运行中。Claude Code 的 workflow 运行的子 agent 归在该 workflow 及其阶段之下,状态改看 workflow 的 journal:记有结果的显示为完成,记有失败的显示为失败;只记了开始的算运行中,直到其转录 30 分钟没有变化才显示为未知。workflow 本身结束后,其下仍在运行或未知的子 agent 随 workflow 的终态落定。其余没有这类记录的子 agent,转录在最近两分钟内有变化时算运行中,之后显示为未知。会话很长时 Herdr 只在主转录较新的部分里查找结束通知,更早的后台子 agent 可能显示为未知。
 
-在 Agent 活动窗口里,Claude Code 子 agent 的输出为每个工具调用附上主要参数,例如 Bash 命令、文件路径或搜索词;每个工具结果显示输出的前五行,其余只标出剩余行数。失败的工具结果标为 `[tool error]`。
+在 子智能体页面里,Claude Code 子 agent 的输出为每个工具调用附上主要参数,例如 Bash 命令、文件路径或搜索词;每个工具结果显示输出的前五行,其余只标出剩余行数。失败的工具结果标为 `[tool error]`。
 
 Herdr 默认使用 `~/.claude`,设置了 `CLAUDE_CONFIG_DIR` 时使用后者。Claude 配置目录必须已经存在。安装会写入 `hooks/herdr-agent-state.sh`(Windows 上为 `hooks/herdr-agent-state.ps1`),并向 `settings.json` 添加 Herdr 钩子条目。卸载会移除匹配的钩子条目并删除钩子脚本。
 
 ## Codex
 
-安装 Codex 钩子:
+安装 Codex 钩子（要求 Codex `0.150.0` 或更新版本）：
 
 ```bash
 herdr integration install codex
 ```
 
-Codex 以 `--no-daemon` 运行时，钩子通过 Herdr 的本地 socket API 上报会话身份以及回合开始、结束状态；屏幕检测继续识别可见阻塞，并在钩子不可用时补充状态。共享 Codex daemon 可能把钩子路由到错误窗格，因此可靠上报需要 `--no-daemon`；仅关闭 daemon 自动启动不会停止已运行的 daemon。本 fork 保留这一回合状态策略。
+安装时会检查 `codex --version`：版本过旧则拒绝安装；无法判断版本时给出警告并继续。
 
-Codex 集成 v9 还会订阅 `SubagentStart` 和 `SubagentStop`。这些钩子只向本地 Herdr socket 通知 Codex 的子 agent 线程启动或结束,不上报 agent 状态;Herdr 会从 Codex 自己的会话文件重建活动树。Codex 0.157 默认启用钩子。Herdr 仍会显式写入 `[features] hooks = true` 以兼容旧版本；显式设为 false 会禁用钩子。从 v10 起 Windows 上也安装这些活动钩子,由 PowerShell 钩子经 `herdr pane report-agent-activity` 发送。升级后请重新安装 Codex 集成以添加它们。
+Codex 以 `--no-daemon` 运行时，钩子通过 Herdr 的本地 socket API 上报会话身份以及回合开始、结束状态；屏幕规则继续兜底可见阻塞及其他信号的缺口。共享 Codex daemon 可能把钩子路由到错误窗格，因此可靠上报需要 `--no-daemon`；仅关闭 daemon 自动启动不会停止已运行的 daemon。
 
-Codex 集成 v10 还会订阅 `PermissionRequest`。Codex 请求审批时,钩子上报工具和一行摘要,例如 `Bash: cargo test` 或某次 `apply_patch` 涉及的文件,Codex 给出理由时一并上报。它从不替你回答审批:Codex 的状态仍来自屏幕检测和回合钩子,详情只在窗格处于 `blocked` 时显示。Codex 会等待它的钩子,所以在 Windows 上每次审批提示以及每次子 agent 启动或结束,都要多等 PowerShell 启动钩子的时间,约半秒。
+从 Codex 0.163 起，Herdr 还会采集程序状态信号 `ESC ] 7501 ; state=…:app=codex ST` 作为检测输入：`blocked` 表示需要输入，`working` 表示工作中，`idle`/`done`/`error` 提供空闲证据。`state=clear` 清除保留的信号。三条 fork 规则都要求正文含 `app=codex`；旧版 Codex 回退到标题与屏幕规则。Windows 系统 ConPTY 与 Herdr 自带的 ConPTY 1.24 均原样透传此信号。
 
-Codex 子 agent 以「昵称 · 任务名」标注,任务名取 agent 路径的最后一段,例如 `Boyle · herdr_probe`;摘要显示完整的 agent 路径,子 agent 失败或被中断时改为显示原因。没有昵称的子 agent 只显示任务名。
+Codex 集成 v9 还会订阅 `SubagentStart` 和 `SubagentStop`。这些钩子只向本地 Herdr socket 通知 Codex 的子 agent 线程启动或结束，不上报 agent 状态；Herdr 会从 Codex 自己的会话文件重建活动树。Codex 0.163 默认启用钩子。Herdr 仍会显式写入 `[features] hooks = true` 以兼容旧版本；显式设为 false 会禁用钩子。从 v10 起 Windows 上也安装这些活动钩子，由 PowerShell 钩子经 `herdr pane report-agent-activity` 发送。升级后请重新安装 Codex 集成以添加它们。
 
-在 Agent 活动窗口里,Codex 子 agent 的输出是它自己线程的可读转写:来自父 agent 的消息、`user:` 与助手消息、`(thinking)` 标记、带主要参数的工具调用及其输出的前五行、计划,以及带该回合最后一条消息的 `[task complete]`。开发者指令、子 agent 从父 agent 继承的历史、token 计数、额度限制等簿记记录不显示;Herdr 认不出的记录只在方括号里显示其类型。给其它 agent 发消息或管理 agent 的工具调用(`send_message`、`followup_task`、`send_input`、`interrupt_agent`、`close_agent`、`resume_agent`、`wait_agent`)在 `→` 后显示目标 agent,再接消息正文;Codex 加密保存的消息显示为 `(encrypted)`。
+Herdr 在各平台安装相同的钩子条目：
 
-Codex 只运行你信任过的钩子。安装集成后,或更新改动了钩子后,Codex 下次启动会显示「Hooks need review」。请选「Trust all and continue」,或进入「Review hooks」信任 Herdr 的钩子。如果选「Continue without trusting」,Herdr 的钩子不会运行,Herdr 也拿不到 Codex 的会话身份和活动信号。Codex 还没信任当前的 Herdr 钩子时,`herdr integration install codex` 会输出这条提醒,`herdr integration status` 也会在 Codex 那一行下面附一条提示;你在 Codex 里用 `/hooks` 停用了 Herdr 的钩子时,这两条命令同样会提示。
+| 事件 | 动作 | 超时（秒） | 后台运行（`"async": true`） |
+| --- | --- | --- | --- |
+| `SessionStart` | `session` | 10 | 否 |
+| `UserPromptSubmit` | `working` | 10 | 否 |
+| `Stop` | `idle` | 10 | 否 |
+| `Interrupt` | `idle` | 3 | 否 |
+| `PermissionRequest` | `attention` | 10 | 是 |
+| `SubagentStart` | `activity` | 10 | 是 |
+| `SubagentStop` | `activity` | 10 | 是 |
+
+重装或升级时，匹配的已有条目原位更新、保留位置，缺失的条目追加到末尾。
+
+Codex 集成 v10 还会订阅 `PermissionRequest`。Codex 请求审批时，钩子上报工具和一行摘要，例如 `Bash: cargo test` 或某次 `apply_patch` 涉及的文件，Codex 给出理由时一并上报。它从不替你回答审批，也不决定窗格状态；详情只在窗格处于 `blocked` 时显示。审批详情与子 agent 活动钩子在后台运行，Codex 不等待它们执行完毕。
+
+Codex 子 agent 以「昵称 · 任务名」标注，任务名取 agent 路径的最后一段，例如 `Boyle · herdr_probe`。摘要在运行中显示最后一次工具调用，完成后显示最后回复的首行，失败或中断时显示原因；没有这些摘要时回退到完整 agent 路径。没有昵称的子 agent 只显示任务名。
+
+在子智能体页面里，Codex 子 agent 的输出是它自己线程的可读转写：`user:` 与助手消息、`(thinking)` 标记、带主要参数的工具调用及其输出的前五行、计划，以及带该回合最后一条消息的 `[task complete]`。工具名保留命名空间：MCP 使用 `mcp__server__tool`，其他命名空间使用 `ns.name`，`multi_agent_v1` 和 `collaboration` 使用裸名。智能体间消息显示为 `[message from A → B]` 后接正文，加密内容显示为 `(encrypted)`。开发者指令、继承的父 agent 历史、token 计数、额度限制及 `security_risk_score`、`retained_context`、`additional_tools` 等簿记类型不显示；不认识的记录只在方括号里显示其类型。
+
+给其他 agent 发消息或管理 agent 的工具调用（`send_message`、`followup_task`、`send_input`、`interrupt_agent`、`close_agent`、`resume_agent`、`wait_agent`）在 `→` 后显示目标，再接可用的消息正文。`spawn_agent` 摘要优先取 `task_name`，否则取 `message` 首行或 `items` 的首个文本块，并在有值时追加 ` · agent_type` 和 ` · model`。
+
+Codex 只运行你信任过的钩子。信任哈希包含 `timeout` 与 `async`，因此升级上述钩子条目后，必须在 Codex 下次启动的「Hooks need review」里重新信任；首次安装也需要审阅。请选「Trust all and continue」，或进入「Review hooks」信任 Herdr 的钩子。如果选「Continue without trusting」，Herdr 的钩子不会运行，也拿不到 Codex 的会话身份和钩子活动信号。Codex 还没信任当前的 Herdr 钩子时，`herdr integration install codex` 会输出这条提醒，`herdr integration status` 也会在 Codex 那一行下面附一条提示；你在 Codex 里用 `/hooks` 停用了 Herdr 的钩子时，这两条命令同样会提示。信任检查也覆盖 `Interrupt`。
 
 Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配置目录必须已经存在。安装会写入 `herdr-agent-state.sh`(Windows 上为 `herdr-agent-state.ps1`)、更新 `hooks.json`,并确保 `config.toml` 中有 `[features] hooks = true`。如果存在已弃用的顶层 `codex_hooks` 标志,它也会一并移除。卸载会从 `hooks.json` 中移除 Herdr 条目并删除钩子脚本,但不改动 `config.toml`。
 
 会话钩子会随会话 ID 转发 Codex 的转录路径,上报后活动发现即可跟随仅在该窗格设置的 `CODEX_HOME`。请在同一配置目录安装集成,并重启 Codex 加载更新后的钩子。恢复仍使用会话 ID。归档布局与有界压缩转录支持见[智能体活动](/zh-cn/socket-api/#智能体活动)。
 
-Herdr 通过窗格内的启动器执行受管 Codex 启动和会话恢复。对交互启动、`resume` 和 `fork`，启动器根据窗格当前 `PATH` 选择可执行文件，通过 `--help` 确认完整的 `--no-daemon` 参数后才添加它。Codex 0.157 默认共享 daemon；前台模式让钩子保持在当前窗格的进程树中，避免复用另一窗格的环境。保存的恢复命令仍是原始 `codex resume <id>`。Herdr 不修改 Codex 配置，也不停止已有 daemon。
+Herdr 通过窗格内的启动器执行受管 Codex 启动和会话恢复。对交互启动、`resume` 和 `fork`，启动器根据窗格当前 `PATH` 选择可执行文件，通过 `--help` 确认完整的 `--no-daemon` 参数后才添加它。Codex 0.163 默认共享 daemon；前台模式让钩子保持在当前窗格的进程树中，避免复用另一窗格的环境。保存的恢复命令仍是原始 `codex resume <id>`。Herdr 不修改 Codex 配置，也不停止已有 daemon。
 
 新窗格还会在 `PATH` 最前面加入私有的原生 `codex` shim；通过该路径找到的普通 `codex` 命令使用同一启动器。登录脚本、nvm/mise 初始化、alias、shell 函数、绝对可执行路径以及外部包装器可能绕过它；这些场景请对支持该参数的 Codex 显式使用 `--no-daemon`。Herdr 不编辑 shell 启动文件。为避免包装器递归，启动器会从实际启动进程的 `PATH` 中移除自己的 shim 目录；其他原始路径条目的相对顺序保持不变。
 
 在 Windows 上，启动器随后只为真实 Codex 进程前置一个私有的 tar 专用适配目录。Codex 的 PowerShell 更新器因此使用 Windows 原生 `tar.exe`，而不是可能误解析盘符和反斜杠路径的 Git/MSYS tar。通过启动器运行 Codex 时，其内置更新提示也获得此修复。它不会前置整个 System32，不修改用户或系统 `PATH`，也不改变 PowerShell 执行策略；Bash/Zsh 仍使用原有的 GNU `tar`、`find` 和 `sort`。绕过启动器直接运行 Codex 不在修复范围内，已经运行的 Codex 进程需要重新启动。如果 Windows tar 或私有适配器不可用，Herdr 会明确警告内置更新仍可能失败，并在不做该环境调整的情况下启动。批处理适配器面向安装器使用的文件路径，不是任意命令语法的透明代理；不支持文件路径中的字面量 `%NAME%` 序列。
 
-非交互子命令（包括 `exec`、`review`、`app-server`、`mcp-server`、`login`、`agents`、`queue`）、显式 `--remote` 和已有的 `--no-daemon` 都原样传递。未知选项也保守地原样传递。子命令清单以 Codex 0.157 为准，包含隐藏命令和别名。未来新增的裸命令名可能无法与单词提示词区分；Herdr 尚未适配该命令时，请通过真实 Codex 可执行文件路径调用。不支持该参数的旧版程序保持原样。能力探测最多两秒，标准输出与错误输出合计上限 64 KiB；探测失败时，Herdr 提示前台隔离能力未知，并且只启动一次原始命令。Codex 启动失败后不会自动重试。在 Herdr 窗格外不会添加参数。此启动器不会为脱离窗格或远端 Codex 的钩子赋予可信的窗格归属。
+非交互子命令（包括 `exec`、`review`、`app-server`、`mcp-server`、`login`、`agents`、`queue`）、显式 `--remote` 和已有的 `--no-daemon` 都原样传递。未知选项也保守地原样传递。子命令清单以 Codex 0.163 为准，包含隐藏命令和别名。未来新增的裸命令名可能无法与单词提示词区分；Herdr 尚未适配该命令时，请通过真实 Codex 可执行文件路径调用。不支持该参数的旧版程序保持原样。能力探测最多两秒，标准输出与错误输出合计上限 64 KiB；探测失败时，Herdr 提示前台隔离能力未知，并且只启动一次原始命令。Codex 启动失败后不会自动重试。在 Herdr 窗格外不会添加参数。此启动器不会为脱离窗格或远端 Codex 的钩子赋予可信的窗格归属。
 
 ## Kimi Code CLI
 
