@@ -1,5 +1,16 @@
 use super::*;
 
+fn settings_state(config: ClientShellConfig) -> ClientShellState {
+    let mut state = workbench_state(config);
+    state.set_endpoint_methods(Some(vec![
+        "client.views.set".into(),
+        "tab.focus".into(),
+        "agent.activity.read".into(),
+        "integration.list".into(),
+    ]));
+    state
+}
+
 #[test]
 #[ignore = "manual visual gallery; run `just ui-gallery`"]
 fn ui_gallery_settings() {
@@ -16,10 +27,14 @@ fn ui_gallery_settings() {
         };
         for (cols, rows) in [(80, 24), (160, 45)] {
             for section in ClientSettingsSection::ALL {
-                let mut state = workbench_state(ClientShellConfig::from_config(&config));
+                let mut state = settings_state(ClientShellConfig::from_config(&config));
                 let _ = shoot_workbench(&mut state, cols, rows, &mut step);
                 state.open_settings_overlay();
                 state.select_settings_section(*section, &mut ClientShellInput::default());
+                assert!(
+                    state.visible_endpoint_notice.is_none(),
+                    "settings fixture must not report unsupported methods"
+                );
                 if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
                     settings.focus = crate::client::shell::page::PageFocus::Content;
                     settings.loading_integrations = false;
@@ -54,6 +69,10 @@ fn ui_gallery_settings() {
                     host,
                 });
                 if *section == ClientSettingsSection::Theme {
+                    assert!(
+                        state.visible_endpoint_notice.is_none(),
+                        "settings fixture must not report unsupported methods"
+                    );
                     if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
                         settings.selected = crate::config::THEME_NAMES.len() / 2;
                         settings.scroll = 6;
@@ -72,12 +91,16 @@ fn ui_gallery_settings() {
             }
         }
         for loading in [true, false] {
-            let mut state = workbench_state(ClientShellConfig::from_config(&config));
+            let mut state = settings_state(ClientShellConfig::from_config(&config));
             let _ = shoot_workbench(&mut state, 80, 24, &mut step);
             state.open_settings_overlay();
             state.select_settings_section(
                 ClientSettingsSection::Integrations,
                 &mut ClientShellInput::default(),
+            );
+            assert!(
+                state.visible_endpoint_notice.is_none(),
+                "settings fixture must not report unsupported methods"
             );
             if let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() {
                 settings.loading_integrations = loading;
@@ -89,7 +112,7 @@ fn ui_gallery_settings() {
             });
         }
         for (cols, rows) in [(80, 24), (160, 45)] {
-            let mut state = workbench_state(ClientShellConfig::from_config(&config));
+            let mut state = settings_state(ClientShellConfig::from_config(&config));
             let _ = shoot_workbench(&mut state, cols, rows, &mut step);
             state.open_navigator_overlay();
             if let Some(ClientShellOverlay::Navigator(nav)) = state.overlay.as_mut() {
