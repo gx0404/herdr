@@ -1572,7 +1572,12 @@ fn locked_layout_stops_advertising_drag_affordances() {
     let compact = |text: &str| text.split_whitespace().collect::<String>();
     let mut state = ready();
     let rows = frame_rows(&state.compose(133, 32).expect("未锁定"));
-    assert!(rows[1].contains('⠿'), "未锁定：面板标题带拖动把手");
+    assert!(!rows[1].contains('⠿'), "未锁定：把手平时隐藏：{}", rows[1]);
+    state.hover = Some(super::super::feedback::ChromeHover::PanelHeader(
+        PanelId::Workspaces,
+    ));
+    let rows = frame_rows(&state.compose(133, 32).expect("未锁定 + 悬浮"));
+    assert!(rows[1].contains('⠿'), "未锁定：悬浮时面板标题带拖动把手");
     let footer = compact(&rows[31]);
     assert!(
         footer.contains("ctrl+b") && !footer.contains("已锁定"),
@@ -1726,7 +1731,10 @@ fn arrange_mode_pane_handle_leaves_the_first_terminal_row_intact() {
     let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
     let cell = &buffer[(handle.x, handle.y)];
     assert_eq!(cell.symbol(), "⠿");
-    assert_eq!(cell.fg, state.config.palette.accent);
+    assert_eq!(
+        cell.fg, state.config.palette.subtext0,
+        "把手是中性控件色，不用 accent"
+    );
 }
 
 /// 冒烟 L2（续）：上下堆叠的无边框窗格。有 1 行空隙时下方窗格的把手落在空隙
@@ -2442,12 +2450,16 @@ fn maximized_panel_title_only_focuses_and_never_starts_a_dock_drag() {
         let toggle = title_x(&state, "◫");
         sgr_click(&mut state, toggle, 1);
         assert_eq!(state.workbench.dock.maximized, None, "{size}：点 ◫ 还原");
+        state.hover = Some(super::super::feedback::ChromeHover::PanelHeader(
+            PanelId::Agents,
+        ));
         let screen = frame_rows(&state.compose(cols, rows).expect("还原后"));
         assert!(
             screen[1].contains('⠿'),
-            "{size}：还原后标题带回拖动把手：{}",
+            "{size}：还原后悬浮的标题带回拖动把手：{}",
             screen[1]
         );
+        state.hover = None;
         let footer = squash(&screen[usize::from(rows) - 1]);
         assert!(
             footer.contains("ctrl+b") && !footer.contains("已最大化"),
@@ -2619,14 +2631,26 @@ fn without_mouse_capture_the_footer_teaches_layout_keys_instead_of_drags() {
             "{size}：用例前提：不是紧凑视图"
         );
         assert!(
-            screen[1].contains('⠿'),
-            "{size}：接鼠标：面板标题带拖动把手"
+            !screen[1].contains('⠿') && pane_handles(&state).is_empty(),
+            "{size}：接鼠标：把手平时隐藏"
         );
+        state.hover = Some(super::super::feedback::ChromeHover::PanelHeader(
+            PanelId::Terminal(1),
+        ));
+        let screen = frame_rows(&state.compose(cols, rows).expect("接鼠标 + 悬浮面板头"));
+        assert!(
+            screen[1].contains('⠿'),
+            "{size}：接鼠标：悬浮的面板标题带拖动把手"
+        );
+        let pane = state.hits.panes[0].pane_id.clone();
+        state.hover = Some(super::super::feedback::ChromeHover::PaneHeader(pane));
+        let screen = frame_rows(&state.compose(cols, rows).expect("接鼠标 + 悬浮窗格边框"));
         assert_eq!(
             pane_handles(&state).len(),
             1,
-            "{size}：接鼠标：带边框的窗格画拖动把手"
+            "{size}：接鼠标：悬浮的带边框窗格画拖动把手"
         );
+        state.hover = None;
         let footer = squash(&screen[last]);
         assert!(
             footer.starts_with("终端ctrl+b前缀"),
@@ -3001,4 +3025,128 @@ fn workspace_and_agents_panels_share_the_same_edges_and_background() {
             check(&state, panel, &format!("紧凑 {cols} 列"));
         }
     }
+}
+
+/// 拖动把手平时隐藏（Graphite 精修）：指针移到面板头或带边框窗格的上边框才画。窗格的
+/// 悬浮感应区是整条上边框、与把手显不显示无关，所以隐藏后指针移回来照样能让它出现；
+/// 出现后按住它照常开始拖窗格；指针离开后再隐藏。调整布局时全部常驻。
+#[test]
+fn drag_handles_appear_on_hover_and_still_start_a_pane_drag() {
+    use super::super::feedback::ChromeHover;
+    let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = ready_with_bordered_pane();
+    state.workbench.arranging = false;
+    state.config.mouse_capture = true;
+    let rows = frame_rows(&state.compose(133, 32).expect("默认帧"));
+    assert!(
+        rows.iter().all(|row| !row.contains('⠿')),
+        "默认不画任何把手：{rows:#?}"
+    );
+    assert!(pane_handles(&state).is_empty());
+
+    // 面板头：真实的鼠标移动解析出面板头悬浮，标题前的槽位画出把手，标题不跳动。
+    let header = state
+        .hits
+        .panel_headers
+        .iter()
+        .find(|(_, panel)| matches!(panel, PanelId::Terminal(_)))
+        .map(|(rect, _)| *rect)
+        .expect("终端组面板头");
+    let title_before = rows[usize::from(header.y)].clone();
+    state.handle_input_bytes(&sgr_move(header.x, header.y));
+    assert!(matches!(state.hover, Some(ChromeHover::PanelHeader(_))));
+    let rows = frame_rows(&state.compose(133, 32).expect("面板头悬浮"));
+    let title_after = &rows[usize::from(header.y)];
+    assert!(
+        title_after.contains('⠿'),
+        "悬浮的面板头画把手：{title_after}"
+    );
+    assert_eq!(
+        title_before.replace('⠿', " ").chars().count(),
+        title_after.replace('⠿', " ").chars().count()
+    );
+    assert_eq!(
+        title_before.split_whitespace().collect::<Vec<_>>(),
+        title_after
+            .replace('⠿', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        "隐藏时留空位：显隐不挪动标题与按钮"
+    );
+
+    // 窗格上边框：悬浮出现把手，移到把手上仍是同一个悬浮目标。
+    let pane = state.hits.panes[0].rect;
+    state.handle_input_bytes(&sgr_move(pane.x + pane.width / 2, pane.y));
+    assert!(
+        matches!(&state.hover, Some(ChromeHover::PaneHeader(id)) if *id == state.hits.panes[0].pane_id),
+        "上边框是窗格的悬浮感应区：{:?}",
+        state.hover
+    );
+    state.compose(133, 32).expect("窗格边框悬浮");
+    let handles = pane_handles(&state);
+    let [(id, handle)] = handles.as_slice() else {
+        panic!("悬浮的窗格画一个把手：{handles:?}");
+    };
+    assert_eq!(handle.y, pane.y, "把手压在上边框行");
+    state.handle_input_bytes(&sgr_move(handle.x, handle.y));
+    state.compose(133, 32).expect("指针在把手上");
+    assert_eq!(pane_handles(&state).len(), 1, "移到把手上不闪");
+    state.handle_input_bytes(format!("\x1b[<0;{};{}M", handle.x + 1, handle.y + 1).as_bytes());
+    assert_eq!(
+        state.workbench.dragging_pane(),
+        Some(id.as_str()),
+        "悬浮出现的把手照常开始拖窗格"
+    );
+    state.handle_input_bytes(format!("\x1b[<0;{};{}m", handle.x + 1, handle.y + 1).as_bytes());
+
+    // 指针离开：把手再隐藏。
+    state.handle_input_bytes(&sgr_move(pane.x + 3, pane.y + 3));
+    state.compose(133, 32).expect("离开");
+    assert!(pane_handles(&state).is_empty(), "离开后隐藏");
+
+    // 调整布局：面板头与窗格的把手全部常驻。
+    state.workbench.arranging = true;
+    let rows = frame_rows(&state.compose(133, 32).expect("调整布局"));
+    assert!(rows[usize::from(header.y)].contains('⠿'));
+    assert_eq!(pane_handles(&state).len(), 1);
+
+    // 关了悬浮反馈就没有悬浮可言：退回常驻，不让把手永远找不到。
+    state.workbench.arranging = false;
+    state.config.feedback.hover_effects = false;
+    let rows = frame_rows(&state.compose(133, 32).expect("无悬浮反馈"));
+    assert!(rows[usize::from(header.y)].contains('⠿'));
+    assert_eq!(pane_handles(&state).len(), 1);
+}
+
+/// 终端组的面板标题取组里当前（活动）标签所属的工作区，与标题栏面包屑同一口径；组里
+/// 混着别的工作区的标签时不取第一个。另一个工作区与它同名时按身份带上编号。
+#[test]
+fn terminal_panel_title_follows_the_active_tab_of_the_group() {
+    use crate::client::shell::chrome::panel_header::panel_title;
+    let state = ready();
+    let mut snapshot = snapshot();
+    let mut second = snapshot.workspaces[0].clone();
+    second.workspace_id = "ws_2".into();
+    second.number = 2;
+    second.label = "web".into();
+    second.focused = false;
+    snapshot.workspaces.push(second);
+    let mut tab = snapshot.tabs[0].clone();
+    tab.tab_id = "tab_2".into();
+    tab.workspace_id = "ws_2".into();
+    tab.focused = false;
+    snapshot.tabs.push(tab);
+    let mut dock = state.workbench.dock.clone();
+    let group = dock.groups.first_mut().expect("终端组");
+    let id = group.id;
+    group.tabs = vec!["tab_1".into(), "tab_2".into()];
+    group.active = Some("tab_2".into());
+    assert_eq!(panel_title(&dock, &snapshot, &PanelId::Terminal(id)), "web");
+    // 同名的另一个工作区：按身份判重，带编号。
+    snapshot.workspaces[1].label = snapshot.workspaces[0].label.clone();
+    let expected = format!("{} #2", snapshot.workspaces[0].label);
+    assert_eq!(
+        panel_title(&dock, &snapshot, &PanelId::Terminal(id)),
+        expected
+    );
 }

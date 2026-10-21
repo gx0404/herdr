@@ -311,14 +311,28 @@ impl ClientShellState {
             }
         }
         // 窗格的 `⠿` 把手只在拖得动时画：锁定布局拒绝拖动（冒烟 L1），不接鼠标时
-        // 工作台不收鼠标事件（N20），都不画、也不登记点不到的命中区。
+        // 工作台不收鼠标事件（N20），都不画、也不登记点不到的命中区。拖得动时也只在
+        // 调整布局、或指针悬浮在该窗格上边框（感应区见 `feedback::pane_header_sense`）
+        // 时画；关了悬浮反馈就退回有边框的窗格常驻。
         let drag_handles = !self.workbench.dock.locked && self.config.mouse_capture;
+        let arranging = self.workbench.arranging;
+        let always = !self.config.feedback.hover_effects;
+        let hovered_pane = match self.hover.as_ref() {
+            Some(super::super::feedback::ChromeHover::PaneHeader(id)) => Some(id.as_str()),
+            _ => None,
+        };
+        let shows_handle = |hit: &PaneHit| {
+            drag_handles
+                && hit.rect.width > 4
+                && (arranging
+                    || (super::super::feedback::pane_header_sense(hit).is_some()
+                        && (always || hovered_pane == Some(hit.pane_id.as_str()))))
+        };
         // C-12 (b)：把手/预览/占位的合并往返只在确有内容可画时才做；守卫谓词与
-        // 下方各绘制分支完全一致（端点错误画在状态栏里，不再在这里补画）。
-        let has_handles = drag_handles
-            && self.hits.panes.iter().any(|hit| {
-                hit.rect.width > 4 && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
-            });
+        // 下方各绘制分支完全一致（端点错误画在状态栏里，不再在这里补画）。默认（不悬浮、
+        // 不调整布局）一个把手都不画，这一步整段跳过。
+        let has_handles = (arranging || always || hovered_pane.is_some())
+            && self.hits.panes.iter().any(&shows_handle);
         let drop_preview = self
             .workbench
             .drag
@@ -336,10 +350,7 @@ impl ClientShellState {
                     );
                 }
                 for hit in &self.hits.panes {
-                    if hit.rect.width > 4
-                        && drag_handles
-                        && (hit.inner_rect.y > hit.rect.y || self.workbench.arranging)
-                    {
+                    if has_handles && shows_handle(hit) {
                         // 有上边框：把手压在边框行上。无边框（只在调整布局模式画）：
                         // 首行是终端内容，把手挪到正上方那一行的空位（冒烟 L2）；
                         // 上方没有 chrome 行可用（无空隙堆叠在另一个窗格下面、或
@@ -356,7 +367,13 @@ impl ClientShellState {
                             )
                             .unwrap_or(on_border)
                         };
-                        put(composed, handle, "⠿", Style::default().fg(palette.accent));
+                        // 把手是中性控件色：悬浮时正文色，调整布局时说明色（颜色只留给状态）。
+                        let color = if hovered_pane == Some(hit.pane_id.as_str()) {
+                            palette.text
+                        } else {
+                            palette.subtext0
+                        };
+                        put(composed, handle, "⠿", Style::default().fg(color));
                         self.workbench
                             .hits
                             .push((handle, Action::Pane(hit.pane_id.clone())));

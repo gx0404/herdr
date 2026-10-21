@@ -223,6 +223,15 @@ impl State {
         }
     }
 
+    /// 正在拖动的窗格（测试断言用）。
+    #[cfg(test)]
+    pub(super) fn dragging_pane(&self) -> Option<&str> {
+        match self.drag.as_ref() {
+            Some(interaction::Drag::Pane { pane, .. }) => Some(pane.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn saved_layouts(&self) -> HashMap<String, DockLayout> {
         let mut saved = self.saved.clone();
         if !self.source.is_empty() && self.dock.valid() {

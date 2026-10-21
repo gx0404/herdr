@@ -2,8 +2,9 @@
 //! 终端组、Inspector 与监控用面板底色——不再是一条 surface0 色条。
 //!
 //! 聚焦面板的标题加粗 `text`，其余 `subtext0`（对底色不足 4.5:1 时换更强的色）。
-//! `⠿` 拖动把手、`□` / `◫` 最大化与监控面板的 `×` 关闭平时是 `overlay0`，指针悬浮在
-//! 头上、调整布局模式或面板聚焦时才亮起来。终端组把标签条并进同一行：
+//! `⠿` 拖动把手只在指针悬浮在面板头上或调整布局时画（隐藏时留空位，标题与按钮不
+//! 跳动）；`□` / `◫` 最大化与监控面板的 `×` 关闭平时是 `overlay0`，指针悬浮在头上、
+//! 调整布局模式或面板聚焦时才亮起来。终端组把标签条并进同一行：
 //! `⠿ 工作区  标签…  +  …  □`——[`PanelHeaderHits::tabs`] 是留给标签条的区域。
 
 use ratatui::buffer::Buffer;
@@ -32,8 +33,10 @@ pub(in crate::client::shell) enum HeaderHover {
 pub(in crate::client::shell) struct PanelHeaderView<'a> {
     pub(in crate::client::shell) title: &'a str,
     pub(in crate::client::shell) focused: bool,
-    /// 画不画 `⠿`（锁定、紧凑、最大化、不接鼠标时不画）。
+    /// 给 `⠿` 留不留槽位（拖得动：锁定、紧凑、最大化、不接鼠标时不留）。
     pub(in crate::client::shell) handle: bool,
+    /// 槽位里这一帧画不画 `⠿`（悬浮 / 调整布局 / 关了悬浮反馈时）；不画时留空格。
+    pub(in crate::client::shell) handle_visible: bool,
     /// 最大化中：按钮画 `◫`（还原），否则 `□`。
     pub(in crate::client::shell) maximized: bool,
     pub(in crate::client::shell) closable: bool,
@@ -187,7 +190,10 @@ pub(in crate::client::shell) fn paint(
             x,
             row.y,
             content_right,
-            &[Span::new(HANDLE, Style::default().fg(control))],
+            &[Span::new(
+                if view.handle_visible { HANDLE } else { " " },
+                Style::default().fg(control),
+            )],
         );
         x = x.saturating_add(1);
     }
@@ -282,8 +288,9 @@ use super::super::{ClientShellConfig, ShellHitMap, StatusGlyphs};
 use crate::protocol::ClientShellSnapshot;
 use std::collections::HashMap;
 
-/// 面板标题文字（不含拖动把手）。终端组按它当前那一栏标签所属的工作区命名，同名
-/// 工作区带上编号。
+/// 面板标题文字（不含拖动把手）。终端组按它当前（活动）标签所属的工作区命名——与
+/// 标题栏面包屑同一口径；一个组里可以混着别的工作区的标签，所以不取第一个标签。
+/// 另一个工作区与它同名（按身份比，不按字符串）时带上编号。
 pub(in crate::client::shell) fn panel_title(
     dock: &DockLayout,
     snapshot: &ClientShellSnapshot,
@@ -300,7 +307,7 @@ pub(in crate::client::shell) fn panel_title(
                 .groups
                 .iter()
                 .find(|group| group.id == *id)
-                .and_then(|group| group.tabs.first())
+                .and_then(|group| group.active.as_ref().or(group.tabs.first()))
                 .and_then(|tab| snapshot.tabs.iter().find(|entry| &entry.tab_id == tab))
                 .and_then(|tab| {
                     snapshot
@@ -310,12 +317,9 @@ pub(in crate::client::shell) fn panel_title(
                 });
             match workspace {
                 Some(ws) => {
-                    let duplicated = snapshot
-                        .workspaces
-                        .iter()
-                        .filter(|other| other.label == ws.label)
-                        .count()
-                        > 1;
+                    let duplicated = snapshot.workspaces.iter().any(|other| {
+                        other.workspace_id != ws.workspace_id && other.label == ws.label
+                    });
                     if duplicated {
                         format!("{} #{}", ws.label, ws.number)
                     } else {
@@ -455,6 +459,11 @@ pub(in crate::client::shell) fn paint_workbench_headers(
                 || frame.geometry.compact
                 || dock.maximized.is_some()
                 || !config.mouse_capture),
+            // 把手平时隐藏：指针在这个面板头上（含其中的按钮与标签）、调整布局时才画；
+            // 关了悬浮反馈就没有悬浮可言，退回常驻。
+            handle_visible: header_hover(frame, panel).is_some()
+                || frame.arranging
+                || !config.feedback.hover_effects,
             maximized: dock.maximized.is_some(),
             closable,
             hovered: header_hover(frame, panel),
@@ -594,6 +603,7 @@ mod tests {
             title,
             focused: false,
             handle: true,
+            handle_visible: true,
             maximized: false,
             closable: false,
             hovered: None,

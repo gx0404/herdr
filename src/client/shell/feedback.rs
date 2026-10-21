@@ -185,6 +185,8 @@ pub(super) enum ChromeHover {
     TitleArrange,
     /// 停靠面板的面板头：悬浮时把手与按钮亮起来。
     PanelHeader(super::dock::PanelId),
+    /// 窗格的上边框（标题行）：悬浮时画 `⠿` 拖动把手。按窗格 id 认身份。
+    PaneHeader(String),
     /// 面板头右侧的按钮。
     PanelButton(
         super::dock::PanelId,
@@ -782,6 +784,9 @@ impl ClientShellState {
                         .iter()
                         .any(|(rect, id)| id == panel && super::contains(*rect, point))
             }
+            ChromeHover::PaneHeader(pane_id) => self
+                .pane_header_at(point)
+                .is_some_and(|hovered| hovered == pane_id),
             ChromeHover::PanelButton(panel, button) => {
                 hits.panel_buttons.iter().any(|(rect, id, candidate)| {
                     id == panel && candidate == button && super::contains(*rect, point)
@@ -981,7 +986,7 @@ impl ClientShellState {
         // chrome 悬浮，不再走下面整份线性扫描（HERDR-PERF-008）。面板头散落在各个
         // 面板顶端，并进分组会把包围盒撑成整屏，单独按面板数（个位数）查一遍。
         if !hits.chrome_bounds.contains(point) {
-            return panel_header_hover(hits, point);
+            return panel_header_hover(hits, point).or_else(|| self.pane_header_hover(point));
         }
         if let Some((rect, _)) = hits
             .inspector_actions
@@ -1155,8 +1160,42 @@ impl ClientShellState {
         if super::contains(hits.sidebar_divider, point) {
             return Some(ChromeHover::SidebarDivider);
         }
-        panel_header_hover(hits, point)
+        panel_header_hover(hits, point).or_else(|| self.pane_header_hover(point))
     }
+
+    fn pane_header_hover(&self, point: (u16, u16)) -> Option<ChromeHover> {
+        self.pane_header_at(point)
+            .map(|pane_id| ChromeHover::PaneHeader(pane_id.to_owned()))
+    }
+
+    /// 指针落在哪个窗格的上边框感应区里（只在工作台拖得动窗格时有）。感应区由上一帧
+    /// 的窗格命中区推出（[`pane_header_sense`]），与把手显没显示无关——把手隐藏后
+    /// 指针移回边框照样能让它重新出现。窗格数是个位到两位数，线性查即可。
+    fn pane_header_at(&self, point: (u16, u16)) -> Option<&str> {
+        if !self.workbench.enabled || self.workbench.dock.locked || !self.config.mouse_capture {
+            return None;
+        }
+        if self
+            .hits
+            .popup
+            .as_ref()
+            .is_some_and(|popup| super::contains(popup.rect, point))
+        {
+            return None;
+        }
+        self.hits
+            .panes
+            .iter()
+            .find(|hit| pane_header_sense(hit).is_some_and(|rect| super::contains(rect, point)))
+            .map(|hit| hit.pane_id.as_str())
+    }
+}
+
+/// 窗格上边框的悬浮感应区：带上边框、宽度够画把手（> 4 列）的窗格的整条上边框行。
+/// 无边框窗格的把手只在调整布局时画，不需要悬浮感应。绘制与悬浮解析共用这一个判据。
+pub(super) fn pane_header_sense(hit: &super::PaneHit) -> Option<Rect> {
+    (hit.rect.width > 4 && hit.inner_rect.y > hit.rect.y)
+        .then(|| Rect::new(hit.rect.x, hit.rect.y, hit.rect.width, 1))
 }
 
 /// 指针是否落在某个树节点折叠开关上。开关矩形在行矩形之内，行类悬浮目标的
