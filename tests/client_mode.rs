@@ -1272,9 +1272,19 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         input
             .write_all(&sidebar_row_click(&screen_text(), "local-returned"))
             .unwrap();
+        // First selection resizes the pane. A wrapped macOS shell prompt may
+        // redraw over earlier output; request a fresh marker while the bridge is stopped.
         assert!(
-            wait_until(Duration::from_secs(3), Duration::from_millis(20), || {
-                screen_text().contains("LOCAL_WHILE_REMOTE_STALLED")
+            wait_until(Duration::from_secs(3), Duration::from_millis(250), || {
+                if screen_text().contains("LOCAL_WHILE_REMOTE_STALLED") {
+                    return true;
+                }
+                send_pane_shell_command(
+                    &api_socket,
+                    local_pane,
+                    "printf 'LOCAL_%s\\n' WHILE_REMOTE_STALLED",
+                );
+                false
             }),
             "one Local selection must not wait for the remote bridge: {}",
             screen_text()
@@ -1364,9 +1374,18 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     input
         .write_all(&sidebar_row_click(&screen_text(), "local-returned"))
         .unwrap();
+    // As with REMOTE_RESELECTED, require fresh output after the pane geometry settles.
     assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
-            screen_text().contains("LOCAL_RECOVERED_SURFACE")
+        wait_until(Duration::from_secs(10), Duration::from_millis(250), || {
+            if screen_text().contains("LOCAL_RECOVERED_SURFACE") {
+                return true;
+            }
+            send_pane_shell_command(
+                &api_socket,
+                local_pane,
+                "printf 'LOCAL_%s\\n' RECOVERED_SURFACE",
+            );
+            false
         }),
         "recovered Local must be selectable: {}",
         screen_text()

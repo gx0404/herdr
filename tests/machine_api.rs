@@ -594,13 +594,25 @@ fn machine_api_bad_or_unwritable_metadata_does_not_block_commands() {
     fs::write(&path, "broken metadata").unwrap();
     let before = harness.ssh_calls();
     harness.warm_metadata();
-    assert_eq!(harness.ssh_calls() - before, 3);
+    assert_eq!(
+        harness.ssh_calls() - before,
+        3,
+        "phase=corrupt_metadata; ssh_calls_before={before}; fixture SSH argv:\n{}",
+        fs::read_to_string(harness.root.join("ssh-args"))
+            .expect("read fixture SSH argv after corrupt-metadata failure"),
+    );
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
     for _ in 0..2 {
         let before = harness.ssh_calls();
         harness.warm_metadata();
-        assert_eq!(harness.ssh_calls() - before, 3);
+        assert_eq!(
+            harness.ssh_calls() - before,
+            3,
+            "phase=metadata_path_is_directory; ssh_calls_before={before}; fixture SSH argv:\n{}",
+            fs::read_to_string(harness.root.join("ssh-args"))
+                .expect("read fixture SSH argv after unwritable-metadata failure"),
+        );
     }
     harness.assert_local_untouched();
 }

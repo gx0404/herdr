@@ -216,7 +216,7 @@ class SetupEnvTests(unittest.TestCase):
             "    Path(sys.argv[1]).write_text(json.dumps(result),encoding='utf-8')\n", encoding="utf-8")
         shell_probe = self.root / "temp probe.sh"
         shell_probe.write_text(
-            'set -eu\nfile="$(mktemp)"\nexport TEST_MKTEMP="$file"\n'
+            'set -eu\nfile="$(mktemp "$TMPDIR/herdr-probe.XXXXXXXXXX")"\nexport TEST_MKTEMP="$file"\n'
             'python -B "$TEST_PROBE" "$1"\nrm -- "$file"\n', encoding="utf-8")
         env = {**self.env, "BASH_ENV": caller.as_posix(), "PSModuleAnalysisCachePath": str(self.root / "caller-cache"),
                "TEST_MARKER": marker.as_posix(), "TEST_PYTHON": Path(sys.executable).as_posix(),
