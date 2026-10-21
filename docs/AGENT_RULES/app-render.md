@@ -55,6 +55,17 @@ ui-hot-path-architecture-test`）是热路径边界的确定性守门，新增�
   字形，不能为转圈推动 pane 重渲染。相对分钟标签不逐秒请求重绘。
 - 标题/正文/说明/元信息分别使用粗体 `text`、`text`、`subtext0`、`overlay1`；
   键帽显示实际配置的按键。截断/折行按显示宽度处理，不能拆开 CJK 或组合字符。
+- 浮层边框统一 `design::frame` 的中性色；危险语义放标题和操作按钮。选中行用
+  `design::selected_row_text` 加首列 `kit::paint_selection_mark`（`▌`），悬浮只换底色。
+  `overlay0` 留给结构线、禁用和未知占位，不承担可读说明正文。
+- 键帽绘制与量宽共用 `ui::kit::key_cap`，说明用 `design::key_label`；显示转换经
+  `ui::key_labels`，不改配置序列化。页脚提示间距为 2 格、状态栏为 4 格。相对时间与
+  运行时长分别复用 `design::ago_label`、`design::duration_label`。
+- 短暂操作结果走客户端通知；`ClientToastLevel::Warning` 表达需要处理的琥珀告警，
+  拒绝/失败用 Error。吐司避开标题栏、状态栏与机器页脚，并保持独立焦点和遮挡登记。
+- 监控图表允许分类色：仅曲线/条形使用 `mauve`、`teal`、`peach` 或中性色，
+  不使用蓝/绿/黄/红状态色；标题和正常读数保持中性，阈值告警仍用黄/红。
+  主题若将分类色映射到状态色或对比不足，`observability::render::tone` 回退中性色。
 - 新 fork 外壳视觉集中于 `src/client/shell/chrome/`，已有渲染文件只保留薄调用。
   行模型与滚动/reveal 在计算阶段更新，渲染只读；同一投影几何必须同时用于绘制和
   `client.views.set` 请求，窄屏/显隐不得另算终端尺寸。
