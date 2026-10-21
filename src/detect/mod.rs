@@ -188,15 +188,21 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
 /// Detect state and whether a visible blocker is present on the current screen.
 #[allow(dead_code)] // shim for existing callers; detect_agent_with_osc is the real path
 pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetection {
-    detect_agent_with_osc(agent, screen_content, "", "")
+    detect_agent_with_osc(
+        agent,
+        manifest::DetectionInput {
+            screen: screen_content,
+            osc_title: "",
+            osc_progress: "",
+            osc_program_status: "",
+        },
+    )
 }
 
-/// Detect state using screen content plus OSC title/progress strings.
+/// 使用屏幕快照与 OSC 标题、进度、程序状态检测 agent 状态。
 pub fn detect_agent_with_osc(
     agent: Option<Agent>,
-    screen_content: &str,
-    osc_title: &str,
-    osc_progress: &str,
+    input: manifest::DetectionInput<'_>,
 ) -> AgentDetection {
     let Some(agent) = agent else {
         return AgentDetection {
@@ -207,14 +213,7 @@ pub fn detect_agent_with_osc(
             visible_working: false,
         };
     };
-    manifest::detect_with_osc(
-        agent,
-        manifest::DetectionInput {
-            screen: screen_content,
-            osc_title,
-            osc_progress,
-        },
-    )
+    manifest::detect_with_osc(agent, input)
 }
 
 /// 名单真源是 `harness::registry::HARNESSES`；保留上游函数名，调用点不变。

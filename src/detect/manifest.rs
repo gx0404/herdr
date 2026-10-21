@@ -13,15 +13,14 @@ use super::{
 
 pub const DEFAULT_KNOWN_AGENT_IDLE_FALLBACK: &str = "default_known_agent_idle_fallback";
 
-/// Input to the detection engine, carrying the screen snapshot plus any
-/// OSC-derived strings captured from the terminal title / progress sequences.
-/// Pass empty strings for `osc_title` and `osc_progress` when the data is not
-/// available — behavior is identical to the pre-OSC engine in that case.
+/// 检测引擎输入：屏幕快照与被动采集的 OSC 标题、进度、程序状态。
+/// 不可用的 OSC 字段传空串，沿用原有屏幕检测行为。
 #[derive(Debug, Clone, Copy)]
 pub struct DetectionInput<'a> {
     pub screen: &'a str,
     pub osc_title: &'a str,
     pub osc_progress: &'a str,
+    pub osc_program_status: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -487,6 +486,7 @@ pub fn detect(agent: Agent, screen_content: &str) -> AgentDetection {
             screen: screen_content,
             osc_title: "",
             osc_progress: "",
+            osc_program_status: "",
         },
     )
 }
@@ -505,6 +505,7 @@ pub fn explain(agent: Agent, screen_content: &str) -> DetectionExplain {
             screen: screen_content,
             osc_title: "",
             osc_progress: "",
+            osc_program_status: "",
         },
     )
 }
@@ -1230,7 +1231,8 @@ fn validate_region_name(spec: &str) -> Result<(), String> {
         | "last_non_empty_above_prompt_box"
         | "after_last_horizontal_rule"
         | "osc_title"
-        | "osc_progress" => Ok(()),
+        | "osc_progress"
+        | "osc_program_status" => Ok(()),
         _ if region_count(trimmed, "bottom_lines").is_some()
             || region_count(trimmed, "bottom_non_empty_lines").is_some()
             || top_region_count(trimmed).is_some() =>
@@ -1409,6 +1411,7 @@ fn region<'a>(input: DetectionInput<'a>, spec: &str) -> &'a str {
     match trimmed {
         "osc_title" => return input.osc_title,
         "osc_progress" => return input.osc_progress,
+        "osc_program_status" => return input.osc_program_status,
         _ => {}
     }
     // All other regions operate on the screen content as before.

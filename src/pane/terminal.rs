@@ -55,6 +55,14 @@ const MODE_MOUSE_PRESS_RELEASE: u16 = 1000;
 const MODE_MOUSE_BUTTON_MOTION: u16 = 1002;
 const MODE_MOUSE_ANY_MOTION: u16 = 1003;
 
+/// 检测使用的 OSC 证据；一次持有 core 锁读取三项，避免混用不同更新的值。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AgentOscSnapshot {
+    pub title: String,
+    pub progress: String,
+    pub program_status: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollMetrics {
     pub offset_from_bottom: usize,
@@ -1018,15 +1026,11 @@ impl PaneTerminal {
         self.ghostty.terminal_title()
     }
 
-    pub fn agent_osc_title(&self) -> String {
-        self.ghostty.agent_osc_title()
+    pub(crate) fn agent_osc_snapshot(&self) -> AgentOscSnapshot {
+        self.ghostty.agent_osc_snapshot()
     }
 
-    pub fn agent_osc_progress(&self) -> String {
-        self.ghostty.agent_osc_progress()
-    }
-
-    /// Clears retained OSC title/progress evidence on foreground agent change.
+    /// 前台 agent 变化时清空保留的 OSC 证据。
     pub fn clear_agent_osc_state(&self) {
         self.ghostty.clear_agent_osc_state()
     }
@@ -1798,26 +1802,19 @@ impl GhosttyPaneTerminal {
         }
     }
 
-    /// Returns the latest OSC 0/2 title retained for agent detection, or `""`
-    /// if no title has been seen or the last update was an empty clear.
-    pub fn agent_osc_title(&self) -> String {
+    /// 一次持锁取出检测所需的 OSC 证据；缺失或清空的字段为空串。
+    pub(crate) fn agent_osc_snapshot(&self) -> AgentOscSnapshot {
         self.core
             .lock()
-            .map(|core| core.agent_osc_state.latest_title().to_owned())
+            .map(|core| AgentOscSnapshot {
+                title: core.agent_osc_state.latest_title().to_owned(),
+                progress: core.agent_osc_state.latest_progress().to_owned(),
+                program_status: core.agent_osc_state.latest_program_status().to_owned(),
+            })
             .unwrap_or_default()
     }
 
-    /// Returns the latest OSC 9 progress payload retained for agent detection,
-    /// or `""` if none has been seen.
-    pub fn agent_osc_progress(&self) -> String {
-        self.core
-            .lock()
-            .map(|core| core.agent_osc_state.latest_progress().to_owned())
-            .unwrap_or_default()
-    }
-
-    /// Clears retained OSC title/progress evidence when the pane's foreground
-    /// agent changes, so a new agent process starts from a blank OSC slate.
+    /// 前台 agent 变化时清空全部检测 OSC 证据，避免新进程继承旧值。
     pub fn clear_agent_osc_state(&self) {
         if let Ok(mut core) = self.core.lock() {
             core.agent_osc_state.clear_retained();

@@ -537,33 +537,28 @@ impl OscStreamCollector {
     }
 }
 
-/// Maximum retained string length for agent OSC title and progress payloads.
-/// Title text is untrusted model output; cap it to bound memory and log size.
+/// agent OSC 证据的保留字符上限；终端正文不可信，限制内存与日志大小。
 const AGENT_OSC_MAX_CHARS: usize = 256;
 
-/// Always-on tracker that retains the latest OSC 0/2 title and OSC 9 progress
-/// payload emitted by the child process. Nothing here affects rendering; this
-/// is pure passive capture for the detection engine (Stage C / Stage D).
-///
-/// - `latest_title` — last OSC 0 or OSC 2 payload, sanitized. An empty
-///   payload (e.g. `\x1b]0;\x07`) clears the stored value.
-/// - `latest_progress` — last OSC 9 payload (the part after `9;`), stored
-///   as-is after sanitization. E.g. `"4;3;"` or `"4;0;"`.
+/// 被动保留子进程最近的 OSC 0/2 标题、OSC 9 进度与 OSC 7501 程序状态，
+/// 只供检测引擎读取，不影响渲染。清洗仅在序列结束时执行。
 #[derive(Debug, Default)]
 pub(super) struct AgentOscStateTracker {
     collector: OscStreamCollector,
     latest_title: Option<String>,
     terminal_title: Option<String>,
     latest_progress: Option<String>,
+    latest_program_status: Option<String>,
 }
 
 impl AgentOscStateTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
-        let (collector, latest_title, terminal_title, latest_progress) = (
+        let (collector, latest_title, terminal_title, latest_progress, latest_program_status) = (
             &mut self.collector,
             &mut self.latest_title,
             &mut self.terminal_title,
             &mut self.latest_progress,
+            &mut self.latest_program_status,
         );
         let mut terminal_title_changed = false;
         collector.observe(bytes, |body| {
@@ -581,6 +576,17 @@ impl AgentOscStateTracker {
                 b"9" => {
                     *latest_progress =
                         Some(sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS));
+                }
+                b"7501" => {
+                    let status = sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS);
+                    *latest_program_status = if status.is_empty()
+                        || status == "state=clear"
+                        || status.starts_with("state=clear:")
+                    {
+                        None
+                    } else {
+                        Some(status)
+                    };
                 }
                 _ => {}
             }
@@ -610,13 +616,17 @@ impl AgentOscStateTracker {
         self.latest_progress.as_deref().unwrap_or("")
     }
 
-    /// Drops the retained title and progress so a new foreground agent cannot
-    /// inherit OSC evidence emitted by a previous process. The in-flight parse
-    /// state is kept: a sequence spanning the agent change finalizes normally
-    /// and is attributed to the new agent.
+    /// 最近保留的 OSC 7501 正文；未收到或已清空时返回空串。
+    pub(super) fn latest_program_status(&self) -> &str {
+        self.latest_program_status.as_deref().unwrap_or("")
+    }
+
+    /// 清空全部 agent OSC 证据，避免新前台进程继承旧值；终端标题与进行中的
+    /// 解析状态保留，跨进程切换的序列结束后仍归属新 agent。
     pub(super) fn clear_retained(&mut self) {
         self.latest_title = None;
         self.latest_progress = None;
+        self.latest_program_status = None;
     }
 }
 
@@ -699,7 +709,7 @@ fn parse_osc_debug_event(body: &[u8]) -> Option<OscDebugEvent> {
     let separator = body.iter().position(|byte| *byte == b';')?;
     let command = &body[..separator];
     let payload = &body[separator + 1..];
-    if !matches!(command, b"0" | b"2" | b"9" | b"21337") {
+    if !matches!(command, b"0" | b"2" | b"9" | b"7501" | b"21337") {
         return None;
     }
     Some(OscDebugEvent {
@@ -1243,10 +1253,13 @@ mod tests {
     fn clearing_agent_evidence_preserves_the_terminal_title() {
         let mut tracker = AgentOscStateTracker::default();
         tracker.observe("\x1b]2;✳ 修复🙂标题\x1b\\".as_bytes());
+        tracker.observe(b"\x1b]9;4;1;\x07\x1b]7501;state=working:app=codex\x1b\\");
 
         tracker.clear_retained();
 
         assert_eq!(tracker.latest_title(), "");
+        assert_eq!(tracker.latest_progress(), "");
+        assert_eq!(tracker.latest_program_status(), "");
         assert_eq!(tracker.terminal_title(), Some("✳ 修复🙂标题"));
     }
 
@@ -1358,6 +1371,107 @@ mod tests {
         let t = AgentOscStateTracker::default();
         assert_eq!(t.latest_title(), "");
         assert_eq!(t.latest_progress(), "");
+        assert_eq!(t.latest_program_status(), "");
+    }
+
+    #[test]
+    fn agent_osc_program_status_accepts_bel_and_st() {
+        for terminator in ["\x07", "\x1b\\"] {
+            let mut tracker = AgentOscStateTracker::default();
+            let sequence = format!("\x1b]7501;state=blocked:app=codex:kind=question{terminator}");
+
+            assert!(!tracker.observe(sequence.as_bytes()));
+            assert_eq!(
+                tracker.latest_program_status(),
+                "state=blocked:app=codex:kind=question"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_osc_program_status_waits_for_terminator_across_chunks() {
+        for terminator in ["\x07", "\x1b\\"] {
+            let sequence = format!("\x1b]7501;state=working:app=codex{terminator}");
+            for split in 1..sequence.len() {
+                let mut tracker = AgentOscStateTracker::default();
+                tracker.observe(b"\x1b]7501;state=idle:app=codex\x07");
+
+                tracker.observe(&sequence.as_bytes()[..split]);
+                assert_eq!(tracker.latest_program_status(), "state=idle:app=codex");
+                tracker.observe(&sequence.as_bytes()[split..]);
+                assert_eq!(tracker.latest_program_status(), "state=working:app=codex");
+            }
+        }
+    }
+
+    #[test]
+    fn agent_osc_program_status_clears_on_empty_or_exact_clear_state() {
+        for payload in ["state=clear", "state=clear:app=codex", "", "\x01"] {
+            let mut tracker = AgentOscStateTracker::default();
+            tracker.observe(b"\x1b]7501;state=working:app=codex\x07");
+            tracker.observe(format!("\x1b]7501;{payload}\x1b\\").as_bytes());
+            assert_eq!(tracker.latest_program_status(), "", "payload={payload:?}");
+        }
+
+        for payload in [
+            "state=cleared:app=codex",
+            "state=clearer",
+            "state=clear;app=codex",
+            "app=codex:state=clear",
+        ] {
+            let mut tracker = AgentOscStateTracker::default();
+            tracker.observe(format!("\x1b]7501;{payload}\x07").as_bytes());
+            assert_eq!(tracker.latest_program_status(), payload);
+        }
+    }
+
+    #[test]
+    fn agent_osc_program_status_discards_oversized_payload_and_recovers() {
+        for terminator in ["\x07", "\x1b\\"] {
+            let mut tracker = AgentOscStateTracker::default();
+            tracker.observe(b"\x1b]7501;state=working:app=codex\x07");
+            let oversized = format!("\x1b]7501;{}{terminator}", "x".repeat(4097));
+
+            tracker.observe(oversized.as_bytes());
+            assert_eq!(tracker.latest_program_status(), "state=working:app=codex");
+            tracker.observe(b"\x1b]7501;state=idle:app=codex\x07");
+            assert_eq!(tracker.latest_program_status(), "state=idle:app=codex");
+        }
+    }
+
+    #[test]
+    fn agent_osc_program_status_sanitizes_and_caps_characters() {
+        let mut tracker = AgentOscStateTracker::default();
+        let payload = format!("state=\x01working:app=codex:{}", "界".repeat(300));
+        tracker.observe(format!("\x1b]7501;{payload}\x07").as_bytes());
+
+        let expected: String = format!("state=working:app=codex:{}", "界".repeat(300))
+            .chars()
+            .take(AGENT_OSC_MAX_CHARS)
+            .collect();
+        assert_eq!(tracker.latest_program_status(), expected);
+        assert_eq!(
+            tracker.latest_program_status().chars().count(),
+            AGENT_OSC_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn agent_osc_program_status_is_independent_of_title_and_progress() {
+        let mut tracker = AgentOscStateTracker::default();
+        tracker.observe(b"\x1b]0;title\x07\x1b]9;4;1;\x07");
+        tracker.observe(b"\x1b]7501;state=working:app=codex\x07");
+        assert_eq!(tracker.latest_title(), "title");
+        assert_eq!(tracker.terminal_title(), Some("title"));
+        assert_eq!(tracker.latest_progress(), "4;1;");
+
+        tracker.observe(b"\x1b]2;new title\x07\x1b]9;4;0;\x07");
+        assert_eq!(tracker.latest_program_status(), "state=working:app=codex");
+        tracker.observe(b"\x1b]7501;state=clear\x07");
+        assert_eq!(tracker.latest_title(), "new title");
+        assert_eq!(tracker.terminal_title(), Some("new title"));
+        assert_eq!(tracker.latest_progress(), "4;0;");
+        assert_eq!(tracker.latest_program_status(), "");
     }
 
     // -----------------------------------------------------------------------
@@ -1414,6 +1528,20 @@ mod tests {
                     payload: "status=working".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn osc_debug_tracker_accepts_program_status() {
+        let mut tracker = enabled_osc_debug_tracker();
+        tracker.observe(b"\x1b]7501;state=working:app=codex\x1b\\");
+
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![OscDebugEvent {
+                command: "7501".to_string(),
+                payload: "state=working:app=codex".to_string(),
+            }]
         );
     }
 

@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, Notify};
 use tracing::debug;
 use tracing::{error, info, warn};
 
-use crate::detect::{Agent, AgentState};
+use crate::detect::{manifest::DetectionInput, Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
@@ -49,12 +49,12 @@ use self::background_agent::{AgentJobStatus, AgentJobTracker};
 pub(crate) use self::terminal::test_encode_key_for_app;
 #[cfg(unix)]
 pub use self::terminal::InputState;
-use self::terminal::{GhosttyPaneTerminal, PaneTerminal, SynchronizedOutputBackstop};
 pub(crate) use self::terminal::{
-    PanePresentationMetadata, TerminalCompressionStep, TerminalDirtyPatch,
+    AgentOscSnapshot, PanePresentationMetadata, TerminalCompressionStep, TerminalDirtyPatch,
     TerminalDirtyPatchOutcome, TerminalReadSnapshot, TerminalSearchDirection, TerminalSearchWindow,
     TerminalTextPoint, TerminalWordMotion,
 };
+use self::terminal::{GhosttyPaneTerminal, PaneTerminal, SynchronizedOutputBackstop};
 pub use self::{
     state::PaneState,
     terminal::{ScrollMetrics, TerminalCursorState},
@@ -1470,15 +1470,17 @@ fn spawn_basic_detection_task(
                 .refresh(agent, &content_seq, || terminal.detection_text_for_cache());
             let content = &last_detection_text.text;
             last_screen_scan_detection_content_seq = current_detection_content_seq;
-            let osc_title = terminal.agent_osc_title();
-            let osc_progress = terminal.agent_osc_progress();
+            let osc = terminal.agent_osc_snapshot();
             // skip_state_update 与状态判定共用同一次 manifest 评估
             // （DET-03：去掉独立预检后每个 tick 只评估一次）。
             let screen_detection = detection_update_for_publish_with_osc(
                 agent,
-                content,
-                &osc_title,
-                &osc_progress,
+                DetectionInput {
+                    screen: content,
+                    osc_title: &osc.title,
+                    osc_progress: &osc.progress,
+                    osc_program_status: &osc.program_status,
+                },
                 process_exited,
             );
             publish_codex_prompt_observation(
@@ -3501,15 +3503,17 @@ impl PaneRuntime {
                         });
                     let content = &last_detection_text.text;
                     last_screen_scan_detection_content_seq = current_detection_content_seq;
-                    let osc_title = terminal.agent_osc_title();
-                    let osc_progress = terminal.agent_osc_progress();
+                    let osc = terminal.agent_osc_snapshot();
                     // skip_state_update 与状态判定共用同一次 manifest 评估
                     // （DET-03：去掉独立预检后每个 tick 只评估一次）。
                     let screen_detection = detection_update_for_publish_with_osc(
                         agent,
-                        content,
-                        &osc_title,
-                        &osc_progress,
+                        DetectionInput {
+                            screen: content,
+                            osc_title: &osc.title,
+                            osc_progress: &osc.progress,
+                            osc_program_status: &osc.program_status,
+                        },
                         process_exited,
                     );
                     publish_codex_prompt_observation(
@@ -3882,12 +3886,8 @@ impl PaneRuntime {
         self.terminal.terminal_title()
     }
 
-    pub fn agent_osc_title(&self) -> String {
-        self.terminal.agent_osc_title()
-    }
-
-    pub fn agent_osc_progress(&self) -> String {
-        self.terminal.agent_osc_progress()
+    pub(crate) fn agent_osc_snapshot(&self) -> AgentOscSnapshot {
+        self.terminal.agent_osc_snapshot()
     }
 
     pub(crate) fn recent_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
@@ -6206,7 +6206,7 @@ mod tests {
 
         runtime.test_process_pty_bytes("\x1b]2;✳ 修复🙂标题\x1b\\".as_bytes());
         runtime.terminal.clear_agent_osc_state();
-        assert_eq!(runtime.agent_osc_title(), "");
+        assert_eq!(runtime.agent_osc_snapshot(), AgentOscSnapshot::default());
         let pane = runtime.handoff_runtime_state(12);
 
         assert_eq!(pane.keyboard_protocol_flags, 5);
@@ -6792,15 +6792,22 @@ mod tests {
     #[tokio::test]
     async fn first_agent_acquisition_keeps_osc_evidence_replacement_clears_it() {
         let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
-        runtime.test_process_pty_bytes(b"\x1b]2;startup title\x1b\\\x1b]9;4;1;\x1b\\");
+        runtime.test_process_pty_bytes(
+            b"\x1b]2;startup title\x1b\\\x1b]9;4;1;\x1b\\\x1b]7501;state=working:app=codex\x1b\\",
+        );
 
         clear_osc_evidence_for_agent_transition(&runtime.terminal, None);
-        assert_eq!(runtime.agent_osc_title(), "startup title");
-        assert_eq!(runtime.agent_osc_progress(), "4;1;");
+        assert_eq!(
+            runtime.agent_osc_snapshot(),
+            AgentOscSnapshot {
+                title: "startup title".into(),
+                progress: "4;1;".into(),
+                program_status: "state=working:app=codex".into(),
+            }
+        );
 
         clear_osc_evidence_for_agent_transition(&runtime.terminal, Some(Agent::Claude));
-        assert_eq!(runtime.agent_osc_title(), "");
-        assert_eq!(runtime.agent_osc_progress(), "");
+        assert_eq!(runtime.agent_osc_snapshot(), AgentOscSnapshot::default());
     }
 
     #[test]

@@ -393,12 +393,8 @@ impl TerminalRuntime {
         self.0.terminal_title()
     }
 
-    pub fn agent_osc_title(&self) -> String {
-        self.0.agent_osc_title()
-    }
-
-    pub fn agent_osc_progress(&self) -> String {
-        self.0.agent_osc_progress()
+    pub(crate) fn agent_osc_snapshot(&self) -> crate::pane::AgentOscSnapshot {
+        self.0.agent_osc_snapshot()
     }
 
     pub(crate) fn recent_text_snapshot(&self, lines: usize) -> crate::pane::TerminalReadSnapshot {
@@ -736,5 +732,39 @@ impl TerminalRuntime {
             channel_capacity,
         );
         (Self(runtime), rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pane::AgentOscSnapshot;
+
+    #[tokio::test]
+    async fn agent_osc_snapshot_captures_three_payloads_from_pty_bytes() {
+        let runtime = TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        assert_eq!(runtime.agent_osc_snapshot(), AgentOscSnapshot::default());
+
+        runtime.test_process_pty_bytes(
+            b"\x1b]2;runtime title\x07\x1b]9;4;1;\x1b\\\x1b]7501;state=working:app=codex\x1b\\",
+        );
+        let snapshot = runtime.agent_osc_snapshot();
+        assert_eq!(
+            snapshot,
+            AgentOscSnapshot {
+                title: "runtime title".into(),
+                progress: "4;1;".into(),
+                program_status: "state=working:app=codex".into(),
+            }
+        );
+
+        runtime.test_process_pty_bytes(b"\x1b]7501;state=clear\x1b\\");
+        assert_eq!(
+            runtime.agent_osc_snapshot(),
+            AgentOscSnapshot {
+                program_status: String::new(),
+                ..snapshot
+            }
+        );
     }
 }

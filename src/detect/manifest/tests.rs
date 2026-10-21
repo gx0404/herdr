@@ -567,6 +567,7 @@ regex = ['^progress-marker$']
                 screen,
                 osc_title: title,
                 osc_progress: progress,
+                osc_program_status: "",
             };
             let result = explain_with_input(Agent::Codex, input);
             assert_eq!(result.state, state);
@@ -577,8 +578,7 @@ regex = ['^progress-marker$']
                     .map(|matched| matched.id.as_str()),
                 Some(rule)
             );
-            let detection =
-                crate::detect::detect_agent_with_osc(Some(Agent::Codex), screen, title, progress);
+            let detection = crate::detect::detect_agent_with_osc(Some(Agent::Codex), input);
             assert_eq!(detection.state, state);
             assert_eq!(detection.visible_idle, state == AgentState::Idle);
             assert_eq!(detection.visible_working, state == AgentState::Working);
@@ -590,9 +590,73 @@ regex = ['^progress-marker$']
                 screen: "",
                 osc_title: "progress-marker",
                 osc_progress: "title-marker",
+                osc_program_status: "",
             },
         );
         assert!(swapped.matched_rule.is_none());
+    });
+}
+
+#[test]
+fn osc_program_status_region_uses_its_own_input_and_explains_the_source() {
+    assert!(validate_region_name("osc_program_status").is_ok());
+    with_manifest_dirs("osc-program-status-region", || {
+        write_local_codex(&rules_manifest(
+            r#"
+[[rules]]
+id = "program"
+state = "working"
+region = "osc_program_status"
+visible_working = true
+regex = ['\Aprogram-marker\z']
+"#,
+        ));
+
+        for (screen, title, progress, program_status, matched) in [
+            ("", "", "", "program-marker", true),
+            (
+                "program-marker",
+                "program-marker",
+                "program-marker",
+                "",
+                false,
+            ),
+            (
+                "program-marker",
+                "program-marker",
+                "program-marker",
+                "other-marker",
+                false,
+            ),
+        ] {
+            let input = DetectionInput {
+                screen,
+                osc_title: title,
+                osc_progress: progress,
+                osc_program_status: program_status,
+            };
+            let result = explain_with_input(Agent::Codex, input);
+            let detection = crate::detect::detect_agent_with_osc(Some(Agent::Codex), input);
+            assert_eq!(result.matched_rule.is_some(), matched);
+            assert_eq!(detection.state, result.state);
+            assert_eq!(detection.visible_working, matched);
+            assert_eq!(result.evaluated_rules.len(), 1);
+            let rule = &result.evaluated_rules[0];
+            assert_eq!(rule.region, "osc_program_status");
+            assert_eq!(rule.evidence.region_preview, program_status);
+            let json = explain_to_json_value(&result);
+            assert_eq!(json["evaluated_rules"][0]["region"], "osc_program_status");
+            if matched {
+                assert_eq!(result.state, AgentState::Working);
+                assert_eq!(json["matched_rule"]["region"], "osc_program_status");
+            } else {
+                assert_eq!(result.state, AgentState::Idle);
+                assert_eq!(
+                    result.fallback_reason.as_deref(),
+                    Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
+                );
+            }
+        }
     });
 }
 
@@ -692,7 +756,8 @@ fn screen_regions_extract_structure_without_classifying_agent_state() {
                 DetectionInput {
                     screen,
                     osc_title: "",
-                    osc_progress: ""
+                    osc_progress: "",
+                    osc_program_status: "",
                 },
                 spec
             ),
@@ -880,7 +945,8 @@ fn bottom_non_empty_lines_uses_bottom_occurrence_for_repeated_text() {
             DetectionInput {
                 screen: content,
                 osc_title: "",
-                osc_progress: ""
+                osc_progress: "",
+                osc_program_status: "",
             },
             "bottom_non_empty_lines(2)"
         ),
@@ -896,7 +962,8 @@ fn top_non_empty_lines_uses_top_occurrence_for_repeated_text() {
             DetectionInput {
                 screen: content,
                 osc_title: "",
-                osc_progress: ""
+                osc_progress: "",
+                osc_program_status: "",
             },
             "top_non_empty_lines(2)"
         ),
@@ -950,6 +1017,7 @@ fn osc_explain(
             screen,
             osc_title,
             osc_progress,
+            osc_program_status: "",
         },
     )
 }
@@ -1330,6 +1398,7 @@ fn detect_and_explain_agree_on_detection_fields() {
                     screen,
                     osc_title,
                     osc_progress,
+                    osc_program_status: "",
                 };
                 let detection = detect_with_osc(agent, input);
                 let explain = explain_with_input(agent, input);

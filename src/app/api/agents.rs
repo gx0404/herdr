@@ -355,14 +355,14 @@ impl App {
         };
 
         let screen = pane.detection_text();
-        let osc_title = pane.agent_osc_title();
-        let osc_progress = pane.agent_osc_progress();
+        let osc = pane.agent_osc_snapshot();
         let explain = crate::detect::manifest::explain_with_input(
             agent,
             crate::detect::manifest::DetectionInput {
                 screen: &screen,
-                osc_title: &osc_title,
-                osc_progress: &osc_progress,
+                osc_title: &osc.title,
+                osc_progress: &osc.progress,
+                osc_program_status: &osc.program_status,
             },
         );
         let value = crate::detect::manifest::explain_to_json_value(&explain);

@@ -22,3 +22,37 @@ line_regex = [
   '^\s*(?:›\s*)?[0-9]+\.\s+Trust all and continue\s*$',
   '^\s*(?:›\s*)?[0-9]+\.\s+Continue without trusting\b',
 ]
+
+# Codex rust-v0.163.0::terminal_program_status 在 stdout 是终端时（含复用器）发
+# OSC 7501：state=<idle|working|blocked>:app=codex，仅状态变化时发送；交出终端、
+# 挂起或退出前发 state=clear，返回后重发。main 分支的 done/error 与 blocked 后的
+# :kind=permission|question|auth 也兼容。证据：2026-10-21 本机 Windows 10.0.26300
+# 的系统 ConPTY 与 herdr 自带 ConPTY 1.24 均实测原样透传该信号。
+# 旧版 Codex 不发此信号时，仍回退到既有标题与屏幕规则。
+
+[[rules]]
+id = "osc_program_status_blocked"
+state = "blocked"
+priority = 1200
+region = "osc_program_status"
+visible_blocker = true
+# Codex 自报需要用户输入，优先于全部屏幕与标题规则。
+regex = ['\Astate=blocked(?::|\z)', '(?:\A|:)app=codex(?::|\z)']
+
+[[rules]]
+id = "osc_program_status_working"
+state = "working"
+priority = 1060
+region = "osc_program_status"
+visible_working = true
+# 与标题转圈同口径，高于屏幕阻塞证据；Codex 真在等用户时自己会报 blocked。
+regex = ['\Astate=working(?::|\z)', '(?:\A|:)app=codex(?::|\z)']
+
+[[rules]]
+id = "osc_program_status_idle"
+state = "idle"
+priority = 110
+region = "osc_program_status"
+visible_idle = true
+# idle 低于全部屏幕规则，屏幕上的可见证据优先；兼容 main 的 done/error。
+regex = ['\Astate=(?:idle|done|error)(?::|\z)', '(?:\A|:)app=codex(?::|\z)']
