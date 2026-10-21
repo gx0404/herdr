@@ -374,6 +374,8 @@ impl ClientShellState {
                     Some(ClientShellOverlay::Settings(overlay)) => {
                         overlay.loading_integrations || overlay.installing_integrations
                     }
+                    // 子智能体页面上的运行中节点画转圈；属主自己不在运行时也要走时钟。
+                    Some(ClientShellOverlay::AgentActivity(overlay)) => overlay.has_running(),
                     _ => false,
                 })
     }

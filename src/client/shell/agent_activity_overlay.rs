@@ -556,6 +556,11 @@ pub(super) struct ClientAgentActivityOverlay {
 }
 
 impl ClientAgentActivityOverlay {
+    /// 最近读到的树里有运行中的节点：页面上它们画转圈，转圈时钟要继续走。
+    pub(super) fn has_running(&self) -> bool {
+        self.tree_summary.0 > 0
+    }
+
     fn new(endpoint_id: ClientEndpointId, owner: AgentActivityOwner, view: AgentPageView) -> Self {
         let follow = matches!(owner, AgentActivityOwner::Pane { .. });
         Self {
