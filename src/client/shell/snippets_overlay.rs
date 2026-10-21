@@ -31,8 +31,6 @@ pub(super) struct ClientSnippetsOverlay {
     pub(super) scroll: usize,
     /// 一次性「把选中行滚进视野」请求，由视图计算阶段消费后清零（STATE-04）。
     pub(super) reveal: bool,
-    /// One-shot feedback line shown in the list footer (saved/removed/...).
-    pub(super) message: Option<String>,
     /// Opened through the palette's "run snippet…": the title switches and
     /// the empty state points at creating a snippet first.
     pub(super) pick_for_run: bool,
@@ -306,7 +304,6 @@ impl ClientShellState {
             hovered: None,
             scroll: 0,
             reveal: false,
-            message: None,
             pick_for_run,
             library,
             library_error,
@@ -524,12 +521,14 @@ impl ClientShellState {
         let t = &crate::i18n::texts().snippets;
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
             overlay.set_view(ClientSnippetsView::List);
-            overlay.message = Some(match result {
-                Saved::Added | Saved::Updated => t.saved_message.to_owned(),
-                // The snippet vanished underneath the form (external edit).
-                Saved::Missing => t.removed_message.to_owned(),
-            });
         }
+        // 结果走统一吐司（不再占用页脚提示行）：保存成功为 Success；表单底下的片段已被
+        // 外部删除时只是告知，用 Warning。
+        let (kind, title) = match result {
+            Saved::Added | Saved::Updated => (ClientEndpointNoticeKind::Success, t.saved_message),
+            Saved::Missing => (ClientEndpointNoticeKind::Warning, t.removed_message),
+        };
+        self.push_endpoint_notice(kind, format!("snippet-save:{label}"), title, label);
     }
 
     fn delete_selected_snippet(&mut self) {
@@ -549,6 +548,17 @@ impl ClientShellState {
             },
             _ => return,
         };
+        // 名称在删除前取：删完之后库里就找不到了，吐司正文要的是人能认出来的名字。
+        let label = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Snippets(overlay)) => overlay
+                .library
+                .snippets
+                .iter()
+                .find(|snippet| snippet.id == snippet_id)
+                .map(|snippet| snippet.label.clone()),
+            _ => None,
+        }
+        .unwrap_or_else(|| snippet_id.to_string());
         let mut removed = false;
         let stored = self.mutate_snippet_library(|library| {
             removed = library.remove_snippet(&snippet_id);
@@ -557,11 +567,26 @@ impl ClientShellState {
         let t = &crate::i18n::texts().snippets;
         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
             overlay.set_view(ClientSnippetsView::List);
-            overlay.message = match (removed, stored) {
-                (true, Ok(())) => Some(t.removed_message.to_owned()),
-                (_, Err(error)) => Some(error),
-                (false, Ok(())) => None,
-            };
+        }
+        // 删除失败是错误（红色吐司），不再与成功共用一条绿色页脚。
+        match (removed, stored) {
+            (true, Ok(())) => {
+                self.push_endpoint_notice(
+                    ClientEndpointNoticeKind::Success,
+                    format!("snippet-delete:{snippet_id}"),
+                    t.removed_message,
+                    label,
+                );
+            }
+            (_, Err(error)) => {
+                self.push_endpoint_notice(
+                    ClientEndpointNoticeKind::Rejected,
+                    format!("snippet-delete:{snippet_id}"),
+                    t.delete_button,
+                    error,
+                );
+            }
+            (false, Ok(())) => {}
         }
     }
 
@@ -1290,7 +1315,6 @@ impl ClientShellState {
             KeyCode::Char('/') if plain => {
                 if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
                     overlay.search_focused = true;
-                    overlay.message = None;
                 }
                 outcome.repaint = true;
             }
@@ -1730,7 +1754,7 @@ fn render_snippet_list(
         stack.header.y,
         stack.header.width,
         &format!(" {title}"),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     let rows: Vec<&Snippet> = filtered_snippets(&overlay.library, overlay.query.as_str());
     let count = crate::i18n::fill(t.count_fmt, &[("count", &rows.len().to_string())]);
@@ -1778,15 +1802,26 @@ fn render_snippet_list(
             base.fg(p.red),
         );
     } else if rows.is_empty() {
-        put_text(b, body.x, body.y, body.width, t.empty, base.fg(p.overlay1));
-        put_text(
-            b,
-            body.x,
-            body.y + 1,
-            body.width,
-            t.empty_hint,
-            base.fg(p.overlay0),
-        );
+        // 区分「还没有片段」与「搜索无匹配」：后者不能说成库是空的。
+        let spec = if overlay.library.snippets.is_empty() {
+            crate::ui::kit::empty_state::EmptyState {
+                glyph: Some("◌"),
+                title: t.empty,
+                body: Some(t.empty_hint),
+                action: None,
+            }
+        } else {
+            crate::ui::kit::empty_state::EmptyState {
+                glyph: None,
+                title: super::observability::tr("No matching snippets", "没有匹配的片段"),
+                body: Some(super::observability::tr(
+                    "Try another name, command or tag",
+                    "换个名称、命令或标签再搜",
+                )),
+                action: None,
+            }
+        };
+        crate::ui::kit::empty_state::render_empty_state(b, body, &spec, p);
     }
     for (index, snippet) in rows.iter().enumerate().skip(scroll).take(visible) {
         let y = body.y + ((index - scroll) * row_height) as u16;
@@ -1806,53 +1841,42 @@ fn render_snippet_list(
         );
         if !snippet.tags.is_empty() {
             let tags = snippet.tags.join(" ");
-            put_right_text(b, rect, rect.y, &tags, style);
+            put_right_text(
+                b,
+                rect,
+                rect.y,
+                &tags,
+                style.fg(p.overlay1).remove_modifier(Modifier::BOLD),
+            );
         }
-        let meta_style = if is_selected {
-            style
-        } else {
-            Style::default()
-                .fg(p.overlay0)
-                .bg(list_row_bg(p, cx.components, false, is_hovered))
-        };
+        // 第二行是命令摘要（说明层级）：选中行也保持说明色，只换底色。
+        let command_style = style.fg(p.subtext0).remove_modifier(Modifier::BOLD);
         put_text(
             b,
             rect.x,
             rect.y + 1,
             rect.width,
             &format!("   {}", snippet.command),
-            meta_style,
+            command_style,
         );
+        paint_list_selection(b, rect, is_selected, p);
     }
 
-    if let Some(footer) = stack.footer {
-        if let Some(message) = overlay.message.as_deref() {
-            put_text(
-                b,
-                footer.x,
-                footer.y,
-                footer.width,
-                message,
-                base.fg(p.green),
-            );
-        } else {
-            snippet_footer_hints(
-                b,
-                Some(footer),
-                &[
-                    ("↑↓".to_owned(), t.hint_select.to_owned()),
-                    ("enter".to_owned(), t.hint_run.to_owned()),
-                    ("n".to_owned(), t.hint_new.to_owned()),
-                    ("e".to_owned(), t.hint_edit.to_owned()),
-                    ("x".to_owned(), t.hint_delete.to_owned()),
-                    ("h".to_owned(), t.hint_history.to_owned()),
-                    ("/".to_owned(), t.search_hint.trim().to_owned()),
-                    ("esc".to_owned(), t.hint_close.to_owned()),
-                ],
-                cx,
-            );
-        }
-    }
+    snippet_footer_hints(
+        b,
+        stack.footer,
+        &[
+            ("↑↓".to_owned(), t.hint_select.to_owned()),
+            ("enter".to_owned(), t.hint_run.to_owned()),
+            ("n".to_owned(), t.hint_new.to_owned()),
+            ("e".to_owned(), t.hint_edit.to_owned()),
+            ("x".to_owned(), t.hint_delete.to_owned()),
+            ("h".to_owned(), t.hint_history.to_owned()),
+            ("/".to_owned(), t.search_hint.trim().to_owned()),
+            ("esc".to_owned(), t.hint_close.to_owned()),
+        ],
+        cx,
+    );
 
     let mut action_hits = Vec::new();
     let back_label = crate::i18n::texts().overlays.back_button;
@@ -1960,7 +1984,7 @@ fn render_snippet_form(
         stack.header.y,
         stack.header.width,
         &format!(" {}", if editing { t.edit_title } else { t.new_title }),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
 
     let fields: [(&str, &TextEditor, Option<&str>); FORM_FIELD_COUNT] = [
@@ -1989,7 +2013,7 @@ fn render_snippet_form(
             rect.y,
             label_width,
             &format!(" {label:<12}"),
-            base.fg(if is_focused { p.text } else { p.overlay0 }),
+            base.fg(if is_focused { p.text } else { p.overlay1 }),
         );
         let input = Rect::new(
             rect.x + label_width,
@@ -2012,7 +2036,7 @@ fn render_snippet_form(
                         input.y,
                         input.width - used,
                         hint,
-                        base.fg(p.overlay0),
+                        base.fg(p.overlay1),
                     );
                 }
             }
@@ -2192,16 +2216,13 @@ fn render_run_targets(
         });
     }
     let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1);
-    let base = Style::default()
-        .bg(p.panel_bg)
-        .remove_modifier(Modifier::DIM);
     put_text(
         b,
         stack.header.x,
         stack.header.y,
         stack.header.width,
         &format!(" {}", run_title(&draft.snippet)),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     put_text(
         b,
@@ -2209,7 +2230,7 @@ fn render_run_targets(
         stack.header.y + 1,
         stack.header.width,
         &format!(" {}", t.target_title),
-        base.fg(p.overlay0),
+        crate::ui::design::section(p).bg(p.panel_bg),
     );
     let current_pane = crate::i18n::fill(t.target_current_fmt, &[("pane", "focused")]);
     let options = [
@@ -2230,6 +2251,7 @@ fn render_run_targets(
         let style = list_row_style(p, cx.components, index == selected, hovered == Some(index));
         b.set_style(rect, style);
         put_text(b, rect.x, rect.y, rect.width, &format!(" {label}"), style);
+        paint_list_selection(b, rect, index == selected, p);
     }
     snippet_footer_hints(
         b,
@@ -2266,16 +2288,13 @@ fn render_run_pick_pane(
         });
     }
     let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 1);
-    let base = Style::default()
-        .bg(p.panel_bg)
-        .remove_modifier(Modifier::DIM);
     put_text(
         b,
         stack.header.x,
         stack.header.y,
         stack.header.width,
         &format!(" {}", run_title(&draft.snippet)),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     put_text(
         b,
@@ -2283,7 +2302,7 @@ fn render_run_pick_pane(
         stack.header.y + 1,
         stack.header.width,
         &format!(" {}", t.pane_picker_title),
-        base.fg(p.overlay0),
+        crate::ui::design::section(p).bg(p.panel_bg),
     );
     let rows = pane_rows(endpoints);
     let body = stack.content;
@@ -2294,13 +2313,16 @@ fn render_run_pick_pane(
         .min(selected);
     let mut row_hits = Vec::new();
     if rows.is_empty() {
-        put_text(
+        crate::ui::kit::empty_state::render_empty_state(
             b,
-            body.x,
-            body.y,
-            body.width,
-            t.picker_empty,
-            base.fg(p.overlay0),
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some("◌"),
+                title: t.picker_empty,
+                body: None,
+                action: None,
+            },
+            p,
         );
     }
     for (index, row) in rows.iter().enumerate().skip(scroll).take(visible) {
@@ -2318,12 +2340,10 @@ fn render_run_pick_pane(
             &format!(" {} · {}", row.machine_label, row.pane_label),
             style,
         );
-        let id_style = if is_selected {
-            style
-        } else {
-            Style::default().fg(p.overlay0).bg(p.panel_bg)
-        };
+        // 窗格 id 是元信息：选中行也保持元信息色，只换底色。
+        let id_style = style.fg(p.overlay1).remove_modifier(Modifier::BOLD);
         put_right_text(b, rect, rect.y, &row.pane_id, id_style);
+        paint_list_selection(b, rect, is_selected, p);
     }
     snippet_footer_hints(
         b,
@@ -2369,7 +2389,7 @@ fn render_run_pick_machines(
         stack.header.y,
         stack.header.width,
         &format!(" {}", run_title(&draft.snippet)),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     put_text(
         b,
@@ -2377,7 +2397,7 @@ fn render_run_pick_machines(
         stack.header.y + 1,
         stack.header.width,
         &format!(" {}", t.machines_picker_title),
-        base.fg(p.overlay0),
+        crate::ui::design::section(p).bg(p.panel_bg),
     );
     let rows = machine_rows(endpoints);
     let body = stack.content;
@@ -2388,13 +2408,16 @@ fn render_run_pick_machines(
         .min(selected);
     let mut row_hits = Vec::new();
     if rows.is_empty() {
-        put_text(
+        crate::ui::kit::empty_state::render_empty_state(
             b,
-            body.x,
-            body.y,
-            body.width,
-            t.picker_empty,
-            base.fg(p.overlay0),
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some("◌"),
+                title: t.picker_empty,
+                body: None,
+                action: None,
+            },
+            p,
         );
     }
     for (index, (endpoint_id, label)) in rows.iter().enumerate().skip(scroll).take(visible) {
@@ -2413,6 +2436,7 @@ fn render_run_pick_machines(
             &format!(" {} {label}", if checked { "[x]" } else { "[ ]" }),
             style,
         );
+        paint_list_selection(b, rect, is_selected, p);
     }
     if let Some(error) = draft.error.as_deref() {
         let y = body.bottom().saturating_sub(1);
@@ -2470,7 +2494,7 @@ fn render_run_variables(
         stack.header.y,
         stack.header.width,
         &format!(" {}", run_title(&draft.snippet)),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     put_text(
         b,
@@ -2478,7 +2502,7 @@ fn render_run_variables(
         stack.header.y + 1,
         stack.header.width,
         &format!(" {}", t.variables_title),
-        base.fg(p.overlay0),
+        crate::ui::design::section(p).bg(p.panel_bg),
     );
     let body = stack.content;
     let mut field_hits = Vec::new();
@@ -2501,7 +2525,7 @@ fn render_run_variables(
             rect.y,
             label_width,
             &format!(" {name:<16}"),
-            base.fg(if is_focused { p.text } else { p.overlay0 }),
+            base.fg(if is_focused { p.text } else { p.overlay1 }),
         );
         let input = Rect::new(
             rect.x + label_width,
@@ -2549,26 +2573,27 @@ fn render_run_variables(
     })
 }
 
-/// 确认页的命令折行：按可视宽度切（不拆多字节字符），最多 `lines` 行，
-/// 放不下的部分在最后一行以 `…` 收尾——长命令必须能看清再确认（TOOL-10）。
+/// 确认页的命令折行：按可视宽度切（按字素切，不拆 CJK 与组合字符），最多
+/// `lines` 行，放不下的部分在最后一行以 `…` 收尾——长命令必须能看清再确认（TOOL-10）。
 fn wrap_command_rows(command: &str, width: usize, lines: usize) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
     if width == 0 || lines == 0 {
         return Vec::new();
     }
     let mut rows: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut current_width = 0usize;
-    for ch in command.chars() {
-        let ch_width = usize::from(display_width(&ch.to_string()));
-        if current_width + ch_width > width && !current.is_empty() {
+    for grapheme in command.graphemes(true) {
+        let grapheme_width = usize::from(display_width(grapheme));
+        if current_width + grapheme_width > width && !current.is_empty() {
             rows.push(std::mem::take(&mut current));
             current_width = 0;
             if rows.len() == lines {
                 break;
             }
         }
-        current.push(ch);
-        current_width += ch_width;
+        current.push_str(grapheme);
+        current_width += grapheme_width;
     }
     if rows.len() < lines && !current.is_empty() {
         rows.push(current);
@@ -2612,7 +2637,7 @@ fn render_run_confirm(
         stack.header.y,
         stack.header.width,
         &format!(" {}", run_title(&draft.snippet)),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     put_text(
         b,
@@ -2620,7 +2645,7 @@ fn render_run_confirm(
         stack.header.y + 1,
         stack.header.width,
         &format!(" {}", t.confirm_title),
-        base.fg(p.overlay0),
+        crate::ui::design::section(p).bg(p.panel_bg),
     );
     let body = stack.content;
     let mut y = body.y;
@@ -2633,7 +2658,7 @@ fn render_run_confirm(
         y,
         body.width,
         &format!(" {}", t.confirm_command),
-        base.fg(p.overlay0),
+        base.fg(p.overlay1),
     );
     y += 1;
     let command_rows = wrap_command_rows(&command, usize::from(body.width).saturating_sub(1), 3);
@@ -2662,7 +2687,7 @@ fn render_run_confirm(
         y,
         body.width,
         &format!(" {targets}"),
-        base.fg(p.overlay0),
+        base.fg(p.overlay1),
     );
     y += 1;
     for target in draft.targets.iter().take(3) {
@@ -2723,7 +2748,7 @@ fn render_run_confirm(
             y,
             body.width,
             t.run_confirm_hint,
-            base.fg(p.overlay0),
+            base.fg(p.subtext0),
         );
     }
     if let Some(error) = draft.error.as_deref() {
@@ -2817,7 +2842,7 @@ fn render_snippet_history(
         stack.header.y,
         stack.header.width,
         &format!(" {}", t.history_title),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     let history: Vec<SnippetExecution> = overlay.library.history.iter().rev().cloned().collect();
     let machine_label = |machine: &str| -> String {
@@ -2844,13 +2869,16 @@ fn render_snippet_history(
     let scroll = window.start;
     let mut row_hits = Vec::new();
     if history.is_empty() {
-        put_text(
+        crate::ui::kit::empty_state::render_empty_state(
             b,
-            body.x,
-            body.y,
-            body.width,
-            t.history_empty,
-            base.fg(p.overlay0),
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some("◌"),
+                title: t.history_empty,
+                body: None,
+                action: None,
+            },
+            p,
         );
     }
     for (index, record) in history.iter().enumerate().skip(scroll).take(visible) {
@@ -2874,14 +2902,10 @@ fn render_snippet_history(
         );
         put_text(b, rect.x, rect.y, rect.width, &text, style);
         let right = format!("{state_label} · {}", relative_epoch_ago(record.executed_at));
-        let right_style = if is_selected {
-            style
-        } else {
-            Style::default()
-                .fg(state_color)
-                .bg(list_row_bg(p, cx.components, false, is_hovered))
-        };
+        // 发送 / 失败是状态：选中行也保持状态色（选中只换底色、加粗与首列 ▌）。
+        let right_style = style.fg(state_color);
         put_right_text(b, rect, rect.y, &right, right_style);
+        paint_list_selection(b, rect, is_selected, p);
         if !record.success && index == selected {
             if let Some(error) = record.error.as_deref() {
                 if y + 1 < body.bottom() {

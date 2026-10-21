@@ -121,7 +121,6 @@ fn broadcast_mirror_refresh_keeps_overlay_editing_state_and_local_writes_win() {
     if let Some(ClientShellOverlay::Broadcast(overlay)) = state.overlay.as_mut() {
         overlay.view = super::super::broadcast::ClientBroadcastView::PickMachine;
         overlay.selected = 0;
-        overlay.message = Some("editing".into());
     }
     broadcast_set(&[(None, "pane_9")], true)
         .store()
@@ -136,7 +135,6 @@ fn broadcast_mirror_refresh_keeps_overlay_editing_state_and_local_writes_win() {
         overlay.view,
         super::super::broadcast::ClientBroadcastView::PickMachine
     ));
-    assert_eq!(overlay.message.as_deref(), Some("editing"));
 }
 
 #[test]
@@ -159,6 +157,13 @@ fn broadcast_overlay_defaults_to_disabled_empty_and_gate_persists() {
     state.handle_raw_events(vec![RawInputEvent::Key(key(KeyCode::Char('g')))]);
     assert!(state.broadcast.enabled);
     assert!(BroadcastSet::load().expect("stored set").enabled);
+    // 开关结果走统一吐司（成功），不再占用浮层页脚。
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("开关结果吐司");
+    assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Success);
+    assert_eq!(notice.title, crate::i18n::texts().broadcast.enabled_message);
 
     // An empty set still blocks the fan-out indicator.
     assert!(state.broadcast_indicator_count().is_none());

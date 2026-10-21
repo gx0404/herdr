@@ -178,6 +178,124 @@ fn snippet_form_saves_edits_and_deletes() {
     assert!(SnippetLibrary::load().expect("library").snippets.is_empty());
 }
 
+/// 保存 / 删除的结果走统一吐司（成功 Success，正文是片段名），不再占用列表页脚。
+#[test]
+fn snippet_save_and_delete_results_go_to_toasts_not_the_footer() {
+    let _dir = with_temp_state_home("toast-feedback");
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = state();
+    state.open_snippets_overlay(false);
+    state.route_snippets_key(&key(KeyCode::Char('n')), &mut ClientShellInput::default());
+    {
+        let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_mut() else {
+            panic!("overlay");
+        };
+        let super::super::snippets_overlay::ClientSnippetsView::Form(form) = &mut overlay.view
+        else {
+            panic!("form view");
+        };
+        form.label = TextEditor::new("restart", false);
+        form.command = TextEditor::new("systemctl restart x", false);
+    }
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let t = &crate::i18n::texts().snippets;
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("保存结果吐司");
+    assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Success);
+    assert_eq!(notice.title, t.saved_message);
+    assert_eq!(notice.body, "restart");
+    // 页脚仍是键位提示，不被一次性反馈顶掉（宽字符后面跟着占位格，比对前去掉空格）。
+    let text = frame_text(&mut state, 106, 30).replace(' ', "");
+    assert!(
+        text.contains(&t.hint_history.replace(' ', "")),
+        "页脚仍是键位提示：{text}"
+    );
+
+    state.route_snippets_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+    state.route_snippets_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("删除结果吐司");
+    assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Success);
+    assert_eq!(notice.title, t.removed_message);
+    assert_eq!(notice.body, "restart", "删除前取名，正文仍是人能认出的名字");
+}
+
+/// 「还没有片段」与「搜索无匹配」是两种空态：库里有片段时搜不到不能说库是空的。
+#[test]
+fn snippet_search_without_matches_does_not_claim_the_library_is_empty() {
+    let _dir = with_temp_state_home("no-match");
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let t = &crate::i18n::texts().snippets;
+    let mut state = state();
+    state.open_snippets_overlay(false);
+    let compact = |text: &str| text.replace(' ', "");
+    let text = compact(&frame_text(&mut state, 106, 30));
+    assert!(
+        text.contains(&compact(t.empty)),
+        "空库显示「还没有片段」：{text}"
+    );
+
+    state.overlay = None;
+    seed_snippet("logs", "kubectl logs -f svc/web", &[]);
+    state.open_snippets_overlay(false);
+    if let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_mut() {
+        overlay.search_focused = true;
+    }
+    for ch in "zzz".chars() {
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Char(ch),
+            KeyModifiers::empty(),
+        ))]);
+    }
+    let text = compact(&frame_text(&mut state, 106, 30));
+    assert!(text.contains("没有匹配的片段"), "搜索无匹配：{text}");
+    assert!(!text.contains(&compact(t.empty)), "不说库是空的：{text}");
+}
+
+/// 选中行首列画 accent ▌，悬浮行只换底色、不画竖条（MENU-01）。
+#[test]
+fn snippet_list_marks_only_the_keyboard_selection() {
+    let _dir = with_temp_state_home("selection-mark");
+    seed_snippet("deploy", "kubectl rollout restart deploy/web", &[]);
+    seed_snippet("logs", "kubectl logs -f svc/web", &[]);
+    let mut state = state();
+    state.open_snippets_overlay(false);
+    state.compose(106, 30).expect("frame");
+    let rows = state.hits.snippet_rows.clone();
+    assert!(rows.len() >= 2, "两行片段");
+    if let Some(ClientShellOverlay::Snippets(overlay)) = state.overlay.as_mut() {
+        overlay.selected = 0;
+        overlay.hovered = Some(1);
+    }
+    let frame = state.compose(106, 30).expect("frame");
+    let buffer = frame.to_ratatui_buffer().expect("buffer");
+    let (selected, _) = rows[0];
+    let (hovered, _) = rows[1];
+    for y in selected.y..selected.bottom() {
+        assert_eq!(
+            buffer[(selected.x, y)].symbol(),
+            crate::ui::design::SELECTION_MARK
+        );
+        assert_eq!(buffer[(selected.x, y)].fg, state.config.palette.accent);
+    }
+    assert_eq!(
+        buffer[(selected.x + 2, selected.y)].bg,
+        state.config.palette.selection_row_bg()
+    );
+    assert_ne!(
+        buffer[(hovered.x, hovered.y)].symbol(),
+        crate::ui::design::SELECTION_MARK
+    );
+    assert_eq!(
+        buffer[(hovered.x + 2, hovered.y)].bg,
+        state.config.components.hover_bg
+    );
+}
+
 #[test]
 fn snippet_run_current_pane_sends_input_and_records_history() {
     let _dir = with_temp_state_home("run");

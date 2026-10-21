@@ -214,8 +214,6 @@ pub(super) struct ClientScenesOverlay {
     /// 指针悬浮行：只由 `Moved` 改写。`selected` 只由键盘与点击改写，否则指针
     /// 划过浮层就会把键盘选中拉到最后路过的那条现场上（MENU-01）。
     pub(super) hovered: Option<usize>,
-    /// One-shot feedback line shown in the list view footer.
-    pub(super) message: Option<String>,
     /// Load failure of the snapshot file (list stays empty but usable).
     pub(super) load_error: Option<String>,
     /// Restore option: disable every machine that is not part of the scene.
@@ -247,7 +245,6 @@ impl ClientScenesOverlay {
             scenes: Vec::new(),
             selected: 0,
             hovered: None,
-            message: None,
             load_error: None,
             restore_disable_others: false,
             last_click: None,
@@ -532,7 +529,6 @@ impl ClientShellState {
             focused: 0,
             error: None,
         })));
-        overlay.message = None;
         overlay.last_click = None;
     }
 
@@ -555,7 +551,6 @@ impl ClientShellState {
             editor,
             error: None,
         });
-        overlay.message = None;
         overlay.last_click = None;
     }
 
@@ -568,14 +563,12 @@ impl ClientShellState {
         }
         let index = overlay.selected;
         overlay.set_view(ClientScenesView::ConfirmDelete(index));
-        overlay.message = None;
         overlay.last_click = None;
     }
 
     pub(super) fn scenes_back(&mut self) {
         if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
             overlay.set_view(ClientScenesView::List);
-            overlay.message = None;
             // 离开子视图就清点击痕迹：否则「点一行 → r 改名 → Esc 回列表 →
             // 再点同一行」会在双击窗口内被判成二次点击并直接恢复。
             overlay.last_click = None;
@@ -870,12 +863,13 @@ impl ClientShellState {
             return;
         }
         self.scenes_back();
-        if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
-            overlay.message = Some(crate::i18n::fill(
-                t.notice_renamed_fmt,
-                &[("name", &new_name)],
-            ));
-        }
+        // 结果走统一吐司，不再占用页脚提示行。
+        self.push_endpoint_notice(
+            ClientEndpointNoticeKind::Success,
+            "scene:rename",
+            crate::i18n::fill(t.notice_renamed_fmt, &[("name", &new_name)]),
+            String::new(),
+        );
         outcome.repaint = true;
     }
 
@@ -896,18 +890,25 @@ impl ClientShellState {
             return;
         }
         let removed = scenes.remove(index);
+        let t = &crate::i18n::texts().scenes;
         if let Err(error) = self.persist_scenes(scenes) {
-            self.set_endpoint_error(error);
+            // 删除失败是错误吐司（红），不是常驻的端点错误。
+            self.push_endpoint_notice(
+                ClientEndpointNoticeKind::Rejected,
+                "scene:delete",
+                t.delete_button,
+                error,
+            );
             outcome.repaint = true;
             return;
         }
         self.scenes_back();
-        if let Some(ClientShellOverlay::Scenes(overlay)) = self.overlay.as_mut() {
-            overlay.message = Some(crate::i18n::fill(
-                crate::i18n::texts().scenes.notice_deleted_fmt,
-                &[("name", &removed.name)],
-            ));
-        }
+        self.push_endpoint_notice(
+            ClientEndpointNoticeKind::Success,
+            "scene:delete",
+            crate::i18n::fill(t.notice_deleted_fmt, &[("name", &removed.name)]),
+            String::new(),
+        );
         outcome.repaint = true;
     }
 
@@ -1016,7 +1017,6 @@ impl ClientShellState {
                         disable,
                         labels,
                     });
-                    overlay.message = None;
                     overlay.last_click = None;
                 }
                 outcome.repaint = true;
@@ -1434,7 +1434,7 @@ fn render_scene_restore_confirm(
             " {}",
             crate::i18n::fill(t.restore_confirm_title_fmt, &[("name", name)])
         ),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
 
     let width = usize::from(stack.content.width);
@@ -1596,10 +1596,10 @@ fn render_scene_list(
         stack.header.y,
         stack.header.width,
         &format!(" {}", t.title),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     let count = crate::i18n::fill(t.count_fmt, &[("count", &overlay.scenes.len().to_string())]);
-    put_right_text(b, stack.header, stack.header.y, &count, base.fg(p.overlay0));
+    put_right_text(b, stack.header, stack.header.y, &count, base.fg(p.overlay1));
 
     let row_height = SCENE_LIST_ROW_HEIGHT;
     let selected = scene_list_selected(overlay);
@@ -1635,14 +1635,16 @@ fn render_scene_list(
             &format!(" {}", scene.name),
             style,
         );
-        put_right_text(b, rect, rect.y, &scene.created_at, style);
-        let meta_style = if is_selected {
-            style
-        } else {
-            Style::default()
-                .fg(p.overlay0)
-                .bg(list_row_bg(p, cx.components, false, is_hovered))
-        };
+        // 时间与第二行的机器数 / 备注是元信息与说明：选中行也保持这两级文字色，
+        // 只换底色（选中靠底色、粗体与首列 ▌）。
+        put_right_text(
+            b,
+            rect,
+            rect.y,
+            &scene.created_at,
+            style.fg(p.overlay1).remove_modifier(Modifier::BOLD),
+        );
+        let meta_style = style.fg(p.subtext0).remove_modifier(Modifier::BOLD);
         let machines = crate::i18n::fill(
             t.machines_count_fmt,
             &[("count", &scene.machines.len().to_string())],
@@ -1659,16 +1661,19 @@ fn render_scene_list(
             &meta,
             meta_style,
         );
+        paint_list_selection(b, rect, is_selected, p);
     }
     if overlay.scenes.is_empty() {
-        put_text(b, body.x, body.y, body.width, t.empty, base.fg(p.overlay1));
-        put_text(
+        crate::ui::kit::empty_state::render_empty_state(
             b,
-            body.x,
-            body.y.saturating_add(1),
-            body.width,
-            t.empty_hint,
-            base.fg(p.overlay0),
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some("◌"),
+                title: t.empty,
+                body: Some(t.empty_hint),
+                action: None,
+            },
+            p,
         );
     }
 
@@ -1693,7 +1698,7 @@ fn render_scene_list(
             toggle_rect.y,
             toggle_rect.width,
             &toggle_label,
-            base.fg(if toggle_hover { p.text } else { p.overlay0 }),
+            base.fg(if toggle_hover { p.text } else { p.subtext0 }),
         );
         action_hits.push((toggle_rect, SceneOverlayButton::ToggleDisableOthers));
         let hint_row = Rect::new(footer.x, footer.y.saturating_add(1), footer.width, 1);
@@ -1705,15 +1710,6 @@ fn render_scene_list(
                 hint_row.width,
                 error,
                 base.fg(p.red),
-            );
-        } else if let Some(message) = overlay.message.as_deref() {
-            put_text(
-                b,
-                hint_row.x,
-                hint_row.y,
-                hint_row.width,
-                message,
-                base.fg(p.green),
             );
         } else {
             render_key_hints(
@@ -1777,7 +1773,7 @@ fn render_scene_list(
                 delete,
                 delete_label,
                 SceneOverlayButton::Delete,
-                crate::ui::ModalButtonTone::Secondary,
+                crate::ui::ModalButtonTone::Danger,
                 !empty,
             ),
             (
@@ -1844,7 +1840,7 @@ fn render_scene_save_form(
         stack.header.y,
         stack.header.width,
         &format!(" {}", t.save_title),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     let body = stack.content;
     let mut cursor = None;
@@ -1857,7 +1853,7 @@ fn render_scene_save_form(
         if label_y.saturating_add(1) >= body.bottom() {
             break;
         }
-        put_text(b, body.x, label_y, body.width, label, base.fg(p.overlay0));
+        put_text(b, body.x, label_y, body.width, label, base.fg(p.overlay1));
         let input = Rect::new(body.x, label_y.saturating_add(1), body.width, 1);
         let is_focused = form.focused == index;
         // 两个字段都画成输入框（与机器导入表单同口径）：焦点由光标指示，字段
@@ -1970,7 +1966,7 @@ fn render_scene_rename_form(
         stack.header.y,
         stack.header.width,
         &title,
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     let input = Rect::new(stack.content.x, stack.content.y, stack.content.width, 1);
     let style = crate::ui::input_field_style(p);
@@ -2076,15 +2072,16 @@ fn render_scene_delete_confirm(
             " {}",
             crate::i18n::fill(t.delete_title_fmt, &[("name", name)])
         ),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        // 浮层边框是中性色：删除的危险语义落在红色标题与危险按钮上，与其他删除确认一致。
+        crate::ui::design::title(p).fg(p.red).bg(p.panel_bg),
     );
     put_text(
         b,
         stack.content.x,
         stack.content.y,
         stack.content.width,
-        t.delete_detail,
-        base.fg(p.overlay0),
+        &format!(" {}", t.delete_detail),
+        base.fg(p.text),
     );
     let delete_label = t.confirm_delete_button;
     let cancel_label = t.cancel_button;

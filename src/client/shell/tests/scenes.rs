@@ -291,6 +291,13 @@ fn scenes_overlay_lists_scenes_and_delete_flow_updates_store() {
         .expect("load scenes");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].name, "morning");
+    // 删除结果走统一吐司，不再占用列表的页脚提示行。
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("删除结果吐司");
+    assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Success);
+    assert!(notice.title.contains("night"), "{}", notice.title);
 }
 
 #[test]
@@ -320,6 +327,12 @@ fn scene_rename_flow_updates_store() {
         .expect("load scenes");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].name, "standup");
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("改名结果吐司");
+    assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Success);
+    assert!(notice.title.contains("standup"), "{}", notice.title);
     assert!(matches!(
         state.overlay,
         Some(ClientShellOverlay::Scenes(
@@ -999,8 +1012,18 @@ fn scene_hover_does_not_move_the_keyboard_selection() {
         state.config.components.hover_bg
     );
     assert_eq!(
-        buffer[(first.x, first.y)].bg,
+        buffer[(first.x + 2, first.y)].bg,
         state.config.palette.selection_row_bg()
+    );
+    assert_eq!(
+        buffer[(first.x, first.y)].symbol(),
+        crate::ui::design::SELECTION_MARK,
+        "选中行首列画 ▌"
+    );
+    assert_ne!(
+        buffer[(second.x, second.y)].symbol(),
+        crate::ui::design::SELECTION_MARK,
+        "悬浮行不画 ▌"
     );
 
     // 指针移出行区域：hover 清空，键盘选中不动，回车恢复的仍是第 0 条。

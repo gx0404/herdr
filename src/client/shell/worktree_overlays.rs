@@ -21,10 +21,7 @@ pub(super) fn render_worktree_create_overlay(
         stack.header.y,
         stack.header.width,
         crate::i18n::texts().worktree.new_worktree,
-        Style::default()
-            .fg(p.text)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     let content = stack.content;
     put_text(
@@ -33,7 +30,7 @@ pub(super) fn render_worktree_create_overlay(
         content.y,
         content.width,
         crate::i18n::texts().worktree.branch_hint,
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
+        Style::default().fg(p.overlay1).bg(p.panel_bg),
     );
     let input = Rect::new(content.x, content.y + 1, content.width, 1);
     let field = crate::ui::input_field_style(p);
@@ -50,7 +47,7 @@ pub(super) fn render_worktree_create_overlay(
         content.y + 3,
         content.width,
         crate::i18n::texts().worktree.checkout_hint,
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
+        Style::default().fg(p.overlay1).bg(p.panel_bg),
     );
     put_text(
         b,
@@ -156,10 +153,7 @@ pub(super) fn render_worktree_open_overlay(
         stack.header.y,
         stack.header.width,
         crate::i18n::texts().worktree.open_worktree,
-        Style::default()
-            .fg(p.text)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     let search = Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1);
     let filtered = open.filtered_indices();
@@ -219,11 +213,8 @@ pub(super) fn render_worktree_open_overlay(
         let rect = Rect::new(body.x, body.y + visible as u16 * 2, body.width, 2);
         row_hits.push((rect, entry_index));
         let selected = entry_index == open.selected;
-        let style = if selected {
-            Style::default().fg(panel_contrast_fg(p)).bg(p.accent)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        // 选中：中性选中底色 + 粗体 + 首列 ▌（不再 accent 反色）。
+        let style = list_row_style(p, cx.components, selected, false);
         b.set_style(rect, style);
         put_text(
             b,
@@ -235,29 +226,42 @@ pub(super) fn render_worktree_open_overlay(
         );
         let status = entry.status_label();
         if !status.is_empty() {
-            put_right_text(b, rect, rect.y, status, style);
+            put_right_text(
+                b,
+                rect,
+                rect.y,
+                status,
+                style.fg(p.overlay1).remove_modifier(Modifier::BOLD),
+            );
         }
+        // 第二行是检出路径（说明层级）：选中行也保持说明色，只换底色。
         put_text(
             b,
             rect.x,
             rect.y + 1,
             rect.width,
             &format!(" {}", entry.path),
-            if selected {
-                style
-            } else {
-                Style::default().fg(p.overlay0).bg(p.panel_bg)
-            },
+            style.fg(p.subtext0).remove_modifier(Modifier::BOLD),
         );
+        paint_list_selection(b, rect, selected, p);
     }
     if filtered.is_empty() {
-        put_text(
+        // 区分「这个仓库还没有工作树」与「筛选无匹配」。
+        let title = if open.entries.is_empty() {
+            super::observability::tr("No worktrees yet", "还没有工作树")
+        } else {
+            crate::i18n::texts().worktree.no_matching.trim()
+        };
+        crate::ui::kit::empty_state::render_empty_state(
             b,
-            body.x,
-            body.y,
-            body.width,
-            crate::i18n::texts().worktree.no_matching,
-            Style::default().fg(p.overlay0).bg(p.panel_bg),
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some("◌"),
+                title,
+                body: None,
+                action: None,
+            },
+            p,
         );
     }
     let status_y = stack.footer.map(|footer| footer.y).unwrap_or(body.bottom());
@@ -353,10 +357,8 @@ pub(super) fn render_worktree_remove_overlay(
         stack.header.y,
         stack.header.width,
         crate::i18n::texts().worktree.delete_title,
-        Style::default()
-            .fg(p.red)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD),
+        // 浮层边框是中性色：删除的危险语义落在红色标题与危险按钮上。
+        crate::ui::design::title(p).fg(p.red).bg(p.panel_bg),
     );
     put_text(
         b,

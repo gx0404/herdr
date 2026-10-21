@@ -1996,7 +1996,6 @@ impl ClientShellState {
                     if super::contains(self.hits.snippet_search, point) {
                         if let Some(ClientShellOverlay::Snippets(overlay)) = self.overlay.as_mut() {
                             overlay.search_focused = true;
-                            overlay.message = None;
                         }
                         outcome.repaint = true;
                     } else if let Some((_, button)) = self

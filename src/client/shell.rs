@@ -313,5 +313,16 @@ fn list_row_style(
         .fg(palette.text)
 }
 
+/// 浮层列表选中行的首列标记：选中行逐行在首列画 accent `▌`，悬浮行不画——选中与
+/// 悬浮因此始终可辨（MENU-01）。在行文字画完之后调用（行首的空格会盖掉首列）。
+fn paint_list_selection(buffer: &mut Buffer, row: Rect, selected: bool, palette: &Palette) {
+    if !selected {
+        return;
+    }
+    for y in row.y..row.bottom() {
+        crate::ui::kit::paint_selection_mark(buffer, row.x, y, palette);
+    }
+}
+
 #[cfg(test)]
 mod tests;

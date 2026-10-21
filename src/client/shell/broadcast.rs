@@ -29,7 +29,6 @@ use crate::client::endpoint::{BroadcastSet, BroadcastTarget, ProfileId};
 pub(super) struct ClientBroadcastOverlay {
     pub(super) view: ClientBroadcastView,
     pub(super) selected: usize,
-    pub(super) message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,8 +232,14 @@ impl ClientShellState {
         self.overlay = Some(ClientShellOverlay::Broadcast(ClientBroadcastOverlay {
             view: ClientBroadcastView::List,
             selected: 0,
-            message: None,
         }));
+    }
+
+    /// 广播浮层的一次性结果走统一吐司，不再占用页脚提示行：成功为 Success，
+    /// 需要用户换个做法（目标已不在、机器离线、没有窗格、重复）为 Warning，
+    /// 写盘失败为 Rejected。
+    fn broadcast_feedback(&mut self, kind: ClientEndpointNoticeKind, text: String) {
+        self.push_endpoint_notice(kind, format!("broadcast:{text}"), text, String::new());
     }
 
     fn broadcast_set_gate(&mut self, enabled: bool) {
@@ -243,16 +248,16 @@ impl ClientShellState {
             Ok(())
         });
         let t = &crate::i18n::texts().broadcast;
-        let message = match result {
-            Ok(()) => Some(if enabled {
-                t.enabled_message.to_owned()
-            } else {
-                t.disabled_message.to_owned()
-            }),
-            Err(error) => Some(error),
-        };
-        if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
-            overlay.message = message;
+        match result {
+            Ok(()) => self.broadcast_feedback(
+                ClientEndpointNoticeKind::Success,
+                if enabled {
+                    t.enabled_message.to_owned()
+                } else {
+                    t.disabled_message.to_owned()
+                },
+            ),
+            Err(error) => self.broadcast_feedback(ClientEndpointNoticeKind::Rejected, error),
         }
     }
 
@@ -266,32 +271,38 @@ impl ClientShellState {
         let target_count = self.broadcast.targets().len();
         if index >= target_count {
             if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
-                overlay.message = Some(crate::i18n::texts().broadcast.target_missing.to_owned());
                 overlay.selected = target_count.saturating_sub(1);
             }
+            self.broadcast_feedback(
+                ClientEndpointNoticeKind::Warning,
+                crate::i18n::texts().broadcast.target_missing.to_owned(),
+            );
             return;
         }
         let result = self.mutate_broadcast_set(|set| {
             let removed = set.remove_target(index.saturating_add(1))?;
             Ok(removed)
         });
-        let message = match result {
+        let (kind, text) = match result {
             Ok(removed) => {
                 let machine = self.broadcast_endpoint_label(removed.machine.as_ref());
-                Some(crate::i18n::fill(
-                    crate::i18n::texts().broadcast.removed_fmt,
-                    &[("machine", &machine), ("pane", &removed.pane_id)],
-                ))
+                (
+                    ClientEndpointNoticeKind::Success,
+                    crate::i18n::fill(
+                        crate::i18n::texts().broadcast.removed_fmt,
+                        &[("machine", &machine), ("pane", &removed.pane_id)],
+                    ),
+                )
             }
-            Err(error) => Some(error),
+            Err(error) => (ClientEndpointNoticeKind::Rejected, error),
         };
         if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
-            overlay.message = message;
             // 失败时列表长度没变，夹取等于原地不动；成功时列表变短，光标跟着
             // 收到新长度上（TOOL-23）。
             let last = self.broadcast.targets().len().saturating_sub(1);
             overlay.selected = overlay.selected.min(last);
         }
+        self.broadcast_feedback(kind, text);
     }
 
     fn broadcast_clear(&mut self) {
@@ -299,14 +310,17 @@ impl ClientShellState {
             set.clear();
             Ok(())
         });
-        let message = match result {
-            Ok(()) => Some(crate::i18n::texts().broadcast.cleared_message.to_owned()),
-            Err(error) => Some(error),
+        let (kind, text) = match result {
+            Ok(()) => (
+                ClientEndpointNoticeKind::Success,
+                crate::i18n::texts().broadcast.cleared_message.to_owned(),
+            ),
+            Err(error) => (ClientEndpointNoticeKind::Rejected, error),
         };
         if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
-            overlay.message = message;
             overlay.selected = 0;
         }
+        self.broadcast_feedback(kind, text);
     }
 
     /// Machines eligible for a new target, through the shared picker data.
@@ -333,23 +347,26 @@ impl ClientShellState {
             })
         });
         let t = &crate::i18n::texts().broadcast;
-        let message = match result {
-            Ok(()) => Some(crate::i18n::fill(
-                t.added_fmt,
-                &[("machine", &label), ("pane", &pane_id)],
-            )),
+        let (kind, text) = match result {
+            Ok(()) => (
+                ClientEndpointNoticeKind::Success,
+                crate::i18n::fill(t.added_fmt, &[("machine", &label), ("pane", &pane_id)]),
+            ),
             Err(error) => {
                 // The one-endpoint-one-pane rule is enforced by the picker
                 // already; any other backend error is shown verbatim.
                 let _ = error;
-                Some(crate::i18n::fill(t.duplicate_fmt, &[("machine", &label)]))
+                (
+                    ClientEndpointNoticeKind::Warning,
+                    crate::i18n::fill(t.duplicate_fmt, &[("machine", &label)]),
+                )
             }
         };
         if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
             overlay.view = ClientBroadcastView::List;
-            overlay.message = message;
             overlay.selected = self.broadcast.targets().len().saturating_sub(1);
         }
+        self.broadcast_feedback(kind, text);
     }
 
     fn broadcast_back(&mut self) {
@@ -411,12 +428,13 @@ impl ClientShellState {
                     return;
                 };
                 if !online {
-                    if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
-                        overlay.message = Some(crate::i18n::fill(
+                    self.broadcast_feedback(
+                        ClientEndpointNoticeKind::Warning,
+                        crate::i18n::fill(
                             crate::i18n::texts().broadcast.picker_offline_fmt,
                             &[("label", &label)],
-                        ));
-                    }
+                        ),
+                    );
                     None
                 } else {
                     Some(Activate::PickMachine(endpoint_id))
@@ -438,17 +456,17 @@ impl ClientShellState {
             Some(Activate::PickMachine(endpoint_id)) => {
                 let panes = self.broadcast_pane_candidates(&endpoint_id);
                 let label = self.endpoint_label(&endpoint_id).to_owned();
-                if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
-                    if panes.is_empty() {
-                        overlay.message = Some(crate::i18n::fill(
+                if panes.is_empty() {
+                    self.broadcast_feedback(
+                        ClientEndpointNoticeKind::Warning,
+                        crate::i18n::fill(
                             crate::i18n::texts().broadcast.picker_no_panes_fmt,
                             &[("label", &label)],
-                        ));
-                    } else {
-                        overlay.view = ClientBroadcastView::PickPane { endpoint_id };
-                        overlay.selected = 0;
-                        overlay.message = None;
-                    }
+                        ),
+                    );
+                } else if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
+                    overlay.view = ClientBroadcastView::PickPane { endpoint_id };
+                    overlay.selected = 0;
                 }
             }
             Some(Activate::PickPane(endpoint_id, pane_id)) => {
@@ -494,7 +512,6 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
                     overlay.view = ClientBroadcastView::PickMachine;
                     overlay.selected = 0;
-                    overlay.message = None;
                 }
                 outcome.repaint = true;
             }
@@ -542,7 +559,6 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::Broadcast(overlay)) = self.overlay.as_mut() {
                     overlay.view = ClientBroadcastView::PickMachine;
                     overlay.selected = 0;
-                    overlay.message = None;
                 }
             }
             BroadcastButton::Remove => self.broadcast_remove_selected(),
@@ -791,7 +807,7 @@ pub(super) fn render_broadcast_overlay(
         stack.header.y,
         stack.header.width,
         &title,
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p).bg(p.panel_bg),
     );
     if matches!(overlay.view, ClientBroadcastView::List) {
         let count = crate::i18n::fill(t.count_fmt, &[("count", &rows.len().to_string())]);
@@ -800,23 +816,39 @@ pub(super) fn render_broadcast_overlay(
             Rect::new(stack.header.x, stack.header.y, stack.header.width, 1),
             stack.header.y,
             &count,
-            base.fg(p.overlay0),
+            base.fg(p.overlay1),
         );
     }
 
     let body = stack.content;
     let mut row_hits = Vec::new();
     if body_rows.is_empty() {
-        let (line1, line2) = match &overlay.view {
-            ClientBroadcastView::List => (Some(t.empty), Some(t.empty_hint)),
-            _ => (None, None),
+        // 每个视图都有空态：目标列表给出添加提示，两个选择器说明为什么没有可选项。
+        let (title, detail) = match &overlay.view {
+            ClientBroadcastView::List => (t.empty, Some(t.empty_hint)),
+            ClientBroadcastView::PickMachine => (
+                super::observability::tr("No machines to add", "没有可添加的机器"),
+                Some(super::observability::tr(
+                    "Every machine already has a target, or none is enabled",
+                    "每台机器都已有目标，或没有启用的机器",
+                )),
+            ),
+            ClientBroadcastView::PickPane { .. } => (
+                super::observability::tr("No panes on this machine", "这台机器上没有窗格"),
+                None,
+            ),
         };
-        if let Some(line) = line1 {
-            put_text(b, body.x, body.y, body.width, line, base.fg(p.overlay1));
-        }
-        if let Some(line) = line2 {
-            put_text(b, body.x, body.y + 1, body.width, line, base.fg(p.overlay0));
-        }
+        crate::ui::kit::empty_state::render_empty_state(
+            b,
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some("◌"),
+                title: title.trim(),
+                body: detail.map(str::trim),
+                action: None,
+            },
+            p,
+        );
     }
     let visible = usize::from(body.height).max(1);
     let selected = if body_rows.is_empty() {
@@ -833,42 +865,26 @@ pub(super) fn render_broadcast_overlay(
         let rect = Rect::new(body.x, y, body.width, 1);
         row_hits.push((rect, index));
         let is_selected = index == selected;
-        let style = if is_selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        // 选中：中性选中底色 + 粗体 + 首列 ▌（不再 accent 反色）。
+        let style = list_row_style(p, cx.components, is_selected, false);
         b.set_style(rect, style);
+        // 离线目标降为元信息色（不用 DIM：部分终端把 DIM 画得几乎看不见）。
         let text_style = if *enabled {
             style
         } else {
-            style.add_modifier(Modifier::DIM)
+            style.fg(p.overlay1)
         };
         put_text(b, rect.x, rect.y, rect.width, text, text_style);
         if let Some(status) = status {
-            let status_style = if is_selected {
-                style
-            } else {
-                Style::default().fg(p.yellow).bg(p.panel_bg)
-            };
+            // 「重连中」是连接状态：选中行也保持状态色，只换底色。
+            let status_style = style.fg(p.yellow).remove_modifier(Modifier::BOLD);
             put_right_text(b, rect, rect.y, status, status_style);
         }
+        paint_list_selection(b, rect, is_selected, p);
     }
 
     if let Some(footer) = stack.footer {
-        if let Some(message) = overlay.message.as_deref() {
-            put_text(
-                b,
-                footer.x,
-                footer.y,
-                footer.width,
-                message,
-                base.fg(p.green),
-            );
-        } else {
+        {
             let hints: Vec<(String, String)> = match &overlay.view {
                 ClientBroadcastView::List => vec![
                     ("↑↓".to_owned(), t.hint_select.to_owned()),
