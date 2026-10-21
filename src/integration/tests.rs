@@ -25,6 +25,10 @@ fn extract_version_triple_parses_common_outputs() {
     );
     assert_eq!(extract_version_triple("0.14"), Some((0, 14, 0)));
     assert_eq!(extract_version_triple("0.14.1-beta.2"), Some((0, 14, 1)));
+    assert_eq!(
+        extract_version_triple("codex-cli 0.163.0-alpha.10.2"),
+        Some((0, 163, 0))
+    );
     assert_eq!(extract_version_triple("no version here"), None);
     assert_eq!(extract_version_triple(""), None);
 }
@@ -40,7 +44,7 @@ fn extract_version_triple_orders_versions() {
 }
 
 #[test]
-fn agent_version_requirements_cover_kimi_and_claude() {
+fn agent_version_requirements_cover_kimi_claude_and_codex() {
     use crate::api::schema::IntegrationTarget;
     let requirement = agent_version_requirement(IntegrationTarget::Kimi)
         .expect("kimi must have a version requirement");
@@ -62,11 +66,15 @@ fn agent_version_requirements_cover_kimi_and_claude() {
         extract_version_triple("2.1.32 (Claude Code)").unwrap()
             < extract_version_triple(CLAUDE_MIN_VERSION).unwrap()
     );
-    for target in [
-        IntegrationTarget::Codex,
-        IntegrationTarget::Opencode,
-        IntegrationTarget::Pi,
-    ] {
+    let requirement = agent_version_requirement(IntegrationTarget::Codex)
+        .expect("codex must have a version requirement");
+    assert_eq!(
+        (requirement.label, requirement.binary, requirement.args),
+        ("codex", "codex", &["--version"][..])
+    );
+    assert_eq!(requirement.min_version, CODEX_MIN_VERSION);
+    assert_eq!(CODEX_MIN_VERSION, "0.150.0");
+    for target in [IntegrationTarget::Opencode, IntegrationTarget::Pi] {
         assert!(agent_version_requirement(target).is_none(), "{target:?}");
     }
 }
@@ -114,6 +122,74 @@ fn enforce_agent_version_accepts_current_version() {
     let result =
         enforce_agent_version(&requirement).expect("matching version must not fail the install");
     assert!(result.is_none(), "matching version must not warn");
+}
+
+/// 调用方全程持有 `integration_env_lock()`，PATH 只在已有值前追加测试目录。
+fn fake_codex_version(output: &str) -> crate::config::test_dirs::TempDir {
+    let dir = crate::config::test_dirs::TempDir::new("codex-version-cli");
+    let (name, script) = if cfg!(windows) {
+        (
+            "codex.cmd",
+            format!("@echo off\r\nif not \"%~1\"==\"--version\" exit /b 1\r\necho {output}\r\n"),
+        )
+    } else {
+        (
+            "codex",
+            format!("#!/bin/sh\n[ \"$1\" = \"--version\" ] || exit 1\nprintf '%s\\n' '{output}'\n"),
+        )
+    };
+    let path = dir.join(name);
+    fs::write(&path, script).unwrap();
+    make_executable(&path).unwrap();
+    // Windows 的裸命令优先搜索 .exe：系统 where.exe 不认识 --version，会立即失败，
+    // 让 install_target 报警告而不启动真实 codex；版本断言显式调用上面的 .cmd。
+    if cfg!(windows) {
+        let system_root = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        fs::copy(
+            system_root.join("System32/where.exe"),
+            dir.join("codex.exe"),
+        )
+        .unwrap();
+    }
+    let mut paths = vec![dir.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+    dir
+}
+
+fn codex_test_version_requirement() -> AgentVersionRequirement {
+    let mut requirement = agent_version_requirement(crate::api::schema::IntegrationTarget::Codex)
+        .expect("codex version requirement");
+    if cfg!(windows) {
+        requirement.binary = "codex.cmd";
+    }
+    requirement
+}
+
+#[test]
+fn enforce_codex_version_accepts_minimum_and_0163_alpha() {
+    let _lock = integration_env_lock();
+    for output in ["codex-cli 0.150.0", "codex-cli 0.163.0-alpha.10.2"] {
+        let _cli = fake_codex_version(output);
+        assert_eq!(
+            enforce_agent_version(&codex_test_version_requirement()).unwrap(),
+            None,
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn enforce_codex_version_rejects_0149() {
+    let _lock = integration_env_lock();
+    let _cli = fake_codex_version("codex-cli 0.149.9");
+    let error = enforce_agent_version(&codex_test_version_requirement()).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("codex 0.149.9 is too old"), "{message}");
+    assert!(message.contains("codex 0.150.0 or newer"), "{message}");
+    assert!(message.contains("upgrade codex"), "{message}");
 }
 
 fn clear_integration_path_env() {
@@ -1368,9 +1444,12 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
             "{event}"
         );
         assert!(hooks["hooks"][event][0].get("matcher").is_none(), "{event}");
-        // codex 的信任哈希按 herdr 写的朴素形状计算：不带 async。
-        assert!(
-            hooks["hooks"][event][0]["hooks"][0].get("async").is_none(),
+        assert_eq!(
+            hooks["hooks"][event][0]["hooks"][0]["async"], true,
+            "{event}"
+        );
+        assert_eq!(
+            hooks["hooks"][event][0]["hooks"][0]["timeout"], 10,
             "{event}"
         );
     }
@@ -1387,6 +1466,16 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
         .as_str()
         .unwrap()
         .contains(" idle"));
+    for (event, timeout) in [
+        ("SessionStart", 10),
+        ("UserPromptSubmit", 10),
+        ("Stop", 10),
+        ("Interrupt", 3),
+    ] {
+        let handler = &hooks["hooks"][event][0]["hooks"][0];
+        assert_eq!(handler["timeout"], timeout, "{event}");
+        assert!(handler.get("async").is_none(), "{event}");
+    }
     assert!(config.contains("model = \"gpt-5.4\""));
     assert!(config.contains("[features]"));
     assert!(config.contains("hooks = true"));
@@ -1429,7 +1518,14 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     let _home = override_home_dir(&home);
 
     install_codex().unwrap();
+    let first_hooks = fs::read(codex_dir.join("hooks.json")).unwrap();
+    let first_config = fs::read(codex_dir.join("config.toml")).unwrap();
     install_codex().unwrap();
+    assert_eq!(fs::read(codex_dir.join("hooks.json")).unwrap(), first_hooks);
+    assert_eq!(
+        fs::read(codex_dir.join("config.toml")).unwrap(),
+        first_config
+    );
 
     let hooks: Value =
         serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
@@ -1457,6 +1553,132 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     assert!(config.contains("other = true"));
 
     let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_codex_upgrades_handlers_in_place_and_preserves_user_entries() {
+    let _lock = integration_env_lock();
+    let dir = crate::config::test_dirs::TempDir::new("codex-hook-shape-migration");
+    let codex_dir = dir.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let _home = override_home_dir(dir.path());
+    clear_integration_path_env();
+    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let specs = [
+        ("SessionStart", "session", 10, false),
+        ("UserPromptSubmit", "working", 10, false),
+        ("Stop", "idle", 10, false),
+        ("Interrupt", "idle", 3, false),
+        ("PermissionRequest", "attention", 10, true),
+        ("SubagentStart", "activity", 10, true),
+        ("SubagentStop", "activity", 10, true),
+    ];
+    let mut existing = json!({
+        "metadata": {"keep": true},
+        "hooks": {"OtherEvent": [{"hooks": [{"type": "command", "command": "echo other"}]}]}
+    });
+    for (event, action, _, background) in specs {
+        let command = hook_command(&hook_path, Some(action));
+        existing["hooks"][event] = json!([
+            {"hooks": [{"type": "command", "command": "echo first", "async": true}]},
+            {"hooks": [
+                {"type": "command", "command": "echo before", "timeout": 77},
+                {"type": "command", "command": command, "timeout": 600, "async": !background},
+                {"type": "command", "command": "echo after", "statusMessage": "keep"}
+            ]},
+            {"matcher": "keep-matcher", "hooks": [
+                {"type": "command", "command": "echo last"},
+                {"type": "command", "command": command, "timeout": 0, "async": false}
+            ]}
+        ]);
+    }
+    let hooks_path = codex_dir.join("hooks.json");
+    fs::write(&hooks_path, existing.to_string()).unwrap();
+    let mut expected = existing;
+    for (event, _, timeout, background) in specs {
+        for group_index in [1, 2] {
+            let handler = &mut expected["hooks"][event][group_index]["hooks"][1];
+            handler["timeout"] = json!(timeout);
+            if background {
+                handler["async"] = json!(true);
+            } else {
+                handler.as_object_mut().unwrap().remove("async");
+            }
+        }
+    }
+    install_codex().unwrap();
+    let installed = fs::read_to_string(&hooks_path).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&installed).unwrap(), expected);
+    install_codex().unwrap();
+    assert_eq!(fs::read_to_string(&hooks_path).unwrap(), installed);
+}
+
+#[test]
+fn install_codex_still_cleans_obsolete_actions_and_legacy_commands() {
+    let _lock = integration_env_lock();
+    let dir = crate::config::test_dirs::TempDir::new("codex-legacy-hook-migration");
+    let codex_dir = dir.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let _home = override_home_dir(dir.path());
+    clear_integration_path_env();
+    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let mut hooks_file = json!({"hooks": {}});
+    for (event, action) in [
+        ("PermissionRequest", "blocked"),
+        ("SessionStart", "idle"),
+        ("PreToolUse", "working"),
+        ("UserPromptSubmit", "working"),
+        ("Stop", "idle"),
+        ("SessionStart", "session"),
+    ] {
+        let current = hook_command(&hook_path, Some(action));
+        let mut handlers = vec![json!({"type": "command", "command": "echo keep"})];
+        for command in super::config_edit::hook_command_variants(&hook_path, Some(action)) {
+            // 活动命令仅放旧平台写法，废弃动作则把所有写法都放入旧配置。
+            let obsolete = matches!(action, "blocked")
+                || (event == "SessionStart" && action == "idle")
+                || event == "PreToolUse";
+            if obsolete || command != current {
+                handlers.push(json!({"type": "command", "command": command, "timeout": 10}));
+            }
+        }
+        hooks_file["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .entry(event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"hooks": handlers}));
+    }
+    let hooks_path = codex_dir.join("hooks.json");
+    fs::write(&hooks_path, hooks_file.to_string()).unwrap();
+    install_codex().unwrap();
+    let installed: Value = serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    let managed = codex_managed_hooks(&hook_path);
+    for (event, groups) in hooks_file["hooks"].as_object().unwrap() {
+        for group_index in 0..groups.as_array().unwrap().len() {
+            assert_eq!(
+                installed["hooks"][event][group_index],
+                json!({"hooks": [{"type": "command", "command": "echo keep"}]}),
+                "{event}"
+            );
+        }
+        let commands: Vec<_> = installed["hooks"][event]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().unwrap())
+            .filter_map(|handler| handler["command"].as_str())
+            .filter(|command| *command != "echo keep")
+            .collect();
+        let expected: Vec<_> = managed
+            .iter()
+            .filter(|hook| hook.event == event)
+            .map(|hook| hook.command.as_str())
+            .collect();
+        assert_eq!(commands, expected, "{event}");
+    }
 }
 
 #[test]
@@ -1828,6 +2050,7 @@ fn install_codex_errors_when_config_dir_missing() {
 #[test]
 fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
     let _lock = integration_env_lock();
+    let _cli = fake_codex_version("codex-cli 0.163.0-alpha.10.2");
     let base = unique_base();
     let home = base.join("home");
     let codex_dir = home.join(".codex");
@@ -1843,6 +2066,9 @@ fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
     };
 
     let messages = install_target(crate::api::schema::IntegrationTarget::Codex).unwrap();
+    assert!(messages
+        .iter()
+        .any(|message| message == "requires codex 0.150.0 or newer"));
     assert!(
         messages
             .iter()
@@ -1866,21 +2092,24 @@ fn install_codex_tells_the_user_to_trust_the_hooks_until_codex_does() {
     let hooks_path = codex_dir.join("hooks.json");
     let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
     let mut config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
-    for (event, command) in codex_managed_hooks(&hook_path) {
-        let label = match event {
+    for hook in codex_managed_hooks(&hook_path) {
+        let label = match hook.event {
             "SessionStart" => "session_start",
             "UserPromptSubmit" => "user_prompt_submit",
             "Stop" => "stop",
             "PermissionRequest" => "permission_request",
             "SubagentStart" => "subagent_start",
             "SubagentStop" => "subagent_stop",
-            // Interrupt/SessionEnd：codex 不为其持久化信任状态（hash 为 None）。
-            "Interrupt" | "SessionEnd" => continue,
+            "Interrupt" => "interrupt",
             other => panic!("unmapped codex hook event: {other}"),
         };
-        let Some(hash) = super::codex_trust::codex_hook_trust_hash(event, &command, 10) else {
-            continue;
-        };
+        let hash = super::codex_trust::codex_hook_trust_hash(
+            hook.event,
+            &hook.command,
+            Some(hook.timeout),
+            hook.background,
+        )
+        .expect("managed event must have a trust hash");
         config.push_str(&format!(
             "\n[hooks.state.{}]\ntrusted_hash = \"{hash}\"\n",
             super::config_edit::toml_basic_string(&format!("{}:{label}:0:0", hooks_path.display()))

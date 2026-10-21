@@ -11,6 +11,7 @@ use super::command::hook_command;
 use super::config_edit::{
     build_codex_config_with_hooks, build_kimi_config_with_hooks, ensure_command_hook,
     ensure_hooks_object, hooks_object_if_present, remove_hook_commands, remove_kimi_config_block,
+    remove_legacy_hook_commands,
 };
 use super::config_file::{check_config_targets, write_config};
 use super::env::{
@@ -95,30 +96,35 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     })
 }
 
-/// 活动钩子只告诉 herdr「这个 pane 的子 agent 线程变了」，树由 server 读 rollout
-/// 重建；codex 的钩子本就要求 `[features] hooks = true`，安装时一并写入。Windows
-/// 资产经 `herdr pane report-agent-activity` 上报，各平台装同一套。
-const CODEX_ACTIVITY_HOOK_EVENTS: [&str; 2] = ["SubagentStart", "SubagentStop"];
+/// herdr 在 codex `hooks.json` 里管理的一条 command 钩子。
+pub(crate) struct CodexManagedHook {
+    pub event: &'static str,
+    pub command: String,
+    pub timeout: u64,
+    pub background: bool,
+}
 
-/// herdr 在 codex `hooks.json` 里应当装好的钩子（事件名、命令），按写入顺序。
-pub(crate) fn codex_managed_hooks(hook_path: &Path) -> Vec<(&'static str, String)> {
-    let mut hooks = vec![
-        ("SessionStart", hook_command(hook_path, Some("session"))),
+/// 按写入顺序列出规范钩子。生命周期同步上报，避免中断与下一次提交乱序；审批详情
+/// 与活动通知在后台跑。活动树由 server 读 rollout 重建，各平台装同一套。
+pub(crate) fn codex_managed_hooks(hook_path: &Path) -> Vec<CodexManagedHook> {
+    let hook = |event, action, timeout, background| CodexManagedHook {
+        event,
+        command: hook_command(hook_path, Some(action)),
+        timeout,
+        background,
+    };
+    vec![
+        hook("SessionStart", "session", 10, false),
         // 上游 4b4705db：turn 开始/结束/中断经钩子直报，屏幕检测仍兜底可见阻塞。
-        ("UserPromptSubmit", hook_command(hook_path, Some("working"))),
-        ("Stop", hook_command(hook_path, Some("idle"))),
-        ("Interrupt", hook_command(hook_path, Some("idle"))),
+        hook("UserPromptSubmit", "working", 10, false),
+        hook("Stop", "idle", 10, false),
+        hook("Interrupt", "idle", 3, false),
         // 审批请求只补 needs-input 的说明（`pane.report_agent_attention`），受阻状态
         // 仍由屏幕检测决定；钩子从不替 codex 做审批决定。
-        (
-            "PermissionRequest",
-            hook_command(hook_path, Some("attention")),
-        ),
-    ];
-    for event in CODEX_ACTIVITY_HOOK_EVENTS {
-        hooks.push((event, hook_command(hook_path, Some("activity"))));
-    }
-    hooks
+        hook("PermissionRequest", "attention", 10, true),
+        hook("SubagentStart", "activity", 10, true),
+        hook("SubagentStop", "activity", 10, true),
+    ]
 }
 
 /// Install the Codex hook asset and managed entries without replacing the
@@ -169,12 +175,22 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     )?;
     remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
     remove_hook_commands(hooks, "SessionStart", &hook_path, Some("idle"))?;
-    remove_hook_commands(hooks, "UserPromptSubmit", &hook_path, Some("working"))?;
     remove_hook_commands(hooks, "PreToolUse", &hook_path, Some("working"))?;
-    remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
-    remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
-    for (event, command) in codex_managed_hooks(&hook_path) {
-        ensure_command_hook(hooks, event, command, 10, None)?;
+    for (event, action) in [
+        ("UserPromptSubmit", "working"),
+        ("Stop", "idle"),
+        ("SessionStart", "session"),
+    ] {
+        remove_legacy_hook_commands(hooks, event, &hook_path, Some(action))?;
+    }
+    for hook in codex_managed_hooks(&hook_path) {
+        ensure_command_hook(
+            hooks,
+            hook.event,
+            hook.command,
+            hook.timeout,
+            hook.background,
+        )?;
     }
     let new_hooks = serde_json::to_string_pretty(&hooks_file)?;
 

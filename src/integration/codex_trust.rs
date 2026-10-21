@@ -6,7 +6,8 @@
 //! `[hooks.state."<hooks.json 路径>:<事件>:<组序号>:<钩子序号>"]` 下的
 //! `trusted_hash`；`enabled = false` 表示用户在 codex 的 `/hooks` 里停用了它。
 //!
-//! 取证基线：codex 0.156.1（官方仓库 tag `rust-v0.156.1`，只读核对）。
+//! 取证基线：codex 0.150 / 0.163（官方仓库 tag `rust-v0.150.0` /
+//! `rust-v0.163.0`，只读核对）。
 //! - 键：`codex-rs/hooks/src/lib.rs::hook_key`，事件名取 `hook_event_key_label`
 //!   （`SessionStart` → `session_start`）；路径取 `hooks.json` 的完整路径，
 //!   `CODEX_HOME` 设了时 codex 会先 canonicalize。
@@ -14,12 +15,16 @@
 //!   `{event_name, matcher?, hooks: [handler]}` 转成 TOML 值，再由
 //!   `codex-rs/config/src/fingerprint.rs::version_for_toml` 转 JSON、按键排序、紧凑
 //!   序列化后取 sha256，写成 `sha256:<hex>`。command 型 handler 的规范化字段是
-//!   `type`、`command`、`timeout`（缺省 600 秒）与 `async`，其余可选字段为空时不出现。
+//!   `type`、`command`、`timeout` 与配置中的 `async`（缺省 false），其余可选字段
+//!   为空时不出现。
+//! - 归一：`discovery.rs::normalize_command_hook` 对 `SessionEnd` / `Interrupt`
+//!   使用缺省 1 秒并夹紧到 1–3 秒；其他事件缺省 600 秒、至少 1 秒。除 `SessionEnd`
+//!   外都支持后台运行；`SessionEnd` 即使配置 async 也同步跑，但哈希保留配置原值。
 //! - 真机核对：按本算法重算 herdr 三条钩子的哈希，与 codex 在用户选「Trust all and
 //!   continue」后写入的 `trusted_hash` 逐一相同（见本文件测试）。
 //!
 //! 只对 herdr 自己写的形状（组里只有 `hooks`，handler 只有 `type`/`command`/
-//! `timeout`/`async: false`）下结论；条目被改成别的形状时不猜，宁可不提示也不误报。
+//! `timeout`/`async`）下结论；条目被改成别的形状时不猜，宁可不提示也不误报。
 
 use std::fmt::Write as _;
 use std::fs;
@@ -27,6 +32,8 @@ use std::path::Path;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+use super::targets::CodexManagedHook;
 
 /// herdr 的一条 codex 钩子在 codex 眼里的状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,12 +57,12 @@ pub(crate) struct CodexHooksTrustSummary {
     pub disabled: bool,
 }
 
-/// 读 `hooks.json` 与 `config.toml`，汇总 herdr 管理的钩子（`managed`：事件名与命令）
+/// 读 `hooks.json` 与 `config.toml`，汇总 herdr 管理的钩子（`managed`）
 /// 在 codex 里的信任状态。
 pub(crate) fn codex_hooks_trust_summary(
     hooks_path: &Path,
     config_path: &Path,
-    managed: &[(&'static str, String)],
+    managed: &[CodexManagedHook],
 ) -> CodexHooksTrustSummary {
     let Some(hooks_file) = fs::read_to_string(hooks_path)
         .ok()
@@ -94,7 +101,7 @@ pub(crate) fn managed_hooks_trust(
     key_sources: &[String],
     hooks_file: &Value,
     config: &str,
-    managed: &[(&'static str, String)],
+    managed: &[CodexManagedHook],
 ) -> Vec<Option<CodexHookTrust>> {
     let table = match toml::from_str::<toml::Table>(config) {
         Ok(table) => table,
@@ -116,10 +123,11 @@ pub(crate) fn managed_hooks_trust(
 
     managed
         .iter()
-        .map(|(event, command)| {
-            let (group_index, handler_index, timeout) = find_handler(hooks_file, event, command)?;
-            let current = codex_hook_trust_hash(event, command, timeout)?;
-            let label = codex_event_key_label(event)?;
+        .map(|hook| {
+            let (group_index, handler_index, timeout, background) =
+                find_handler(hooks_file, hook.event, &hook.command)?;
+            let current = codex_hook_trust_hash(hook.event, &hook.command, timeout, background)?;
+            let label = codex_event_key_label(hook.event)?;
             let state = states.and_then(|states| {
                 key_sources.iter().find_map(|source| {
                     states
@@ -146,9 +154,13 @@ fn classify(state: Option<&toml::Table>, current: &str) -> CodexHookTrust {
     }
 }
 
-/// 在 `hooks.json` 的 `event` 下找 herdr 写的那条 handler：返回组序号、组内序号与
-/// 超时。组或 handler 带了 herdr 不写的字段时返回 `None`（哈希口径认不准）。
-fn find_handler(hooks_file: &Value, event: &str, command: &str) -> Option<(usize, usize, u64)> {
+/// 在 `hooks.json` 的 `event` 下找 herdr 写的那条 handler：返回组序号、组内序号、
+/// 配置超时与是否后台。组或 handler 带了 herdr 不写的字段时返回 `None`。
+fn find_handler(
+    hooks_file: &Value,
+    event: &str,
+    command: &str,
+) -> Option<(usize, usize, Option<u64>, bool)> {
     let groups = hooks_file.get("hooks")?.get(event)?.as_array()?;
     for (group_index, group) in groups.iter().enumerate() {
         let Some(handlers) = group.get("hooks").and_then(Value::as_array) else {
@@ -162,47 +174,37 @@ fn find_handler(hooks_file: &Value, event: &str, command: &str) -> Option<(usize
                 .as_object()
                 .is_some_and(|object| object.keys().all(|key| key == "hooks"));
             let handler_is_plain = handler.as_object().is_some_and(|object| {
-                object.iter().all(|(key, value)| match key.as_str() {
-                    "type" => value.as_str() == Some("command"),
-                    "command" => true,
-                    "timeout" => value.as_u64().is_some(),
-                    "async" => value.as_bool() == Some(false),
-                    _ => false,
-                })
+                object.get("type").and_then(Value::as_str) == Some("command")
+                    && object.iter().all(|(key, value)| match key.as_str() {
+                        "type" | "command" => true,
+                        "timeout" => value.as_u64().is_some(),
+                        "async" => value.as_bool().is_some(),
+                        _ => false,
+                    })
             });
             if !group_is_plain || !handler_is_plain {
                 return None;
             }
-            let timeout = handler
-                .get("timeout")
-                .and_then(Value::as_u64)
-                .unwrap_or(600);
-            return Some((group_index, handler_index, timeout));
+            let timeout = handler.get("timeout").and_then(Value::as_u64);
+            let background = handler
+                .get("async")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            return Some((group_index, handler_index, timeout, background));
         }
     }
     None
 }
 
 /// codex 为一条无 matcher 的 command 钩子记的信任哈希。`event` 用 `hooks.json` 里的
-/// 事件名（`SessionStart`）；codex 不认识的事件、以及超时会被 codex 另行夹紧的
-/// `SessionEnd` / `Interrupt` 返回 `None`。
+/// 事件名（`SessionStart`）；按 codex 规则归一超时，未知事件返回 `None`。
 pub(crate) fn codex_hook_trust_hash(
     event: &str,
     command: &str,
-    timeout_sec: u64,
+    timeout_sec: Option<u64>,
+    background: bool,
 ) -> Option<String> {
-    let label = codex_event_key_label(event)?;
-    if matches!(label, "session_end" | "interrupt") {
-        return None;
-    }
-    let timeout_sec = timeout_sec.max(1);
-    // 规范化身份按键排序后的紧凑 JSON：顶层 event_name < hooks，handler 内
-    // async < command < timeout < type。
-    let identity = format!(
-        "{{\"event_name\":{},\"hooks\":[{{\"async\":false,\"command\":{},\"timeout\":{timeout_sec},\"type\":\"command\"}}]}}",
-        Value::String(label.to_string()),
-        Value::String(command.to_string()),
-    );
+    let identity = codex_hook_identity(event, command, timeout_sec, background)?;
     let digest = Sha256::digest(identity.as_bytes());
     let mut hash = String::with_capacity("sha256:".len() + digest.len() * 2);
     hash.push_str("sha256:");
@@ -211,6 +213,27 @@ pub(crate) fn codex_hook_trust_hash(
         let _ = write!(hash, "{byte:02x}");
     }
     Some(hash)
+}
+
+fn codex_hook_identity(
+    event: &str,
+    command: &str,
+    timeout_sec: Option<u64>,
+    background: bool,
+) -> Option<String> {
+    let label = codex_event_key_label(event)?;
+    let timeout_sec = if matches!(label, "session_end" | "interrupt") {
+        timeout_sec.unwrap_or(1).clamp(1, 3)
+    } else {
+        timeout_sec.unwrap_or(600).max(1)
+    };
+    // 规范化身份按键排序后的紧凑 JSON：顶层 event_name < hooks，handler 内
+    // async < command < timeout < type。
+    Some(format!(
+        "{{\"event_name\":{},\"hooks\":[{{\"async\":{background},\"command\":{},\"timeout\":{timeout_sec},\"type\":\"command\"}}]}}",
+        Value::String(label.to_string()),
+        Value::String(command.to_string()),
+    ))
 }
 
 /// codex 持久化键里的事件名（`hook_event_key_label`）。
@@ -244,11 +267,20 @@ mod tests {
         format!("bash '/home/xyz/.codex/herdr-agent-state.sh' {action}")
     }
 
-    fn managed() -> Vec<(&'static str, String)> {
+    fn managed_hook(event: &'static str, command: String) -> CodexManagedHook {
+        CodexManagedHook {
+            event,
+            command,
+            timeout: 10,
+            background: false,
+        }
+    }
+
+    fn managed() -> Vec<CodexManagedHook> {
         vec![
-            ("SessionStart", command("session")),
-            ("SubagentStart", command("activity")),
-            ("SubagentStop", command("activity")),
+            managed_hook("SessionStart", command("session")),
+            managed_hook("SubagentStart", command("activity")),
+            managed_hook("SubagentStop", command("activity")),
         ]
     }
 
@@ -292,11 +324,12 @@ mod tests {
 
     #[test]
     fn hook_hash_matches_what_codex_recorded() {
-        for ((event, command), (_, recorded)) in managed().iter().zip(RECORDED) {
+        for (hook, (_, recorded)) in managed().iter().zip(RECORDED) {
             assert_eq!(
-                codex_hook_trust_hash(event, command, 10).as_deref(),
+                codex_hook_trust_hash(hook.event, &hook.command, Some(10), false).as_deref(),
                 Some(recorded),
-                "{event}"
+                "{}",
+                hook.event
             );
         }
     }
@@ -317,7 +350,7 @@ mod tests {
         let mut moved = hooks_file();
         moved["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
             json!("bash '/opt/herdr/herdr-agent-state.sh' session");
-        let managed_moved = vec![(
+        let managed_moved = vec![managed_hook(
             "SessionStart",
             "bash '/opt/herdr/herdr-agent-state.sh' session".to_string(),
         )];
@@ -347,7 +380,7 @@ mod tests {
             "[hooks.state.\"/real/codex/hooks.json:session_start:1:0\"]\ntrusted_hash = \"{}\"\n",
             RECORDED[0].1
         );
-        let session_only = vec![("SessionStart", command("session"))];
+        let session_only = vec![managed_hook("SessionStart", command("session"))];
 
         let plain = managed_hooks_trust(&[HOOKS_PATH.to_string()], &hooks, &config, &session_only);
         assert_eq!(plain, vec![Some(CodexHookTrust::Untrusted)]);
@@ -374,6 +407,151 @@ mod tests {
         assert_eq!(
             managed_hooks_trust(&sources, &hooks_file(), "not = [toml", &managed()),
             vec![None, None, None]
+        );
+    }
+
+    #[test]
+    fn async_hook_hash_keeps_the_configured_value_in_the_identity() {
+        let command = command("activity");
+        let identity = codex_hook_identity("SubagentStart", &command, Some(10), true).unwrap();
+        assert_eq!(
+            identity,
+            format!(
+                "{{\"event_name\":\"subagent_start\",\"hooks\":[{{\"async\":true,\"command\":{},\"timeout\":10,\"type\":\"command\"}}]}}",
+                json!(command)
+            )
+        );
+        let synchronous =
+            codex_hook_trust_hash("SubagentStart", &command, Some(10), false).unwrap();
+        let asynchronous =
+            codex_hook_trust_hash("SubagentStart", &command, Some(10), true).unwrap();
+        assert_ne!(synchronous, asynchronous);
+        assert_eq!(
+            asynchronous,
+            format!("sha256:{:x}", Sha256::digest(identity.as_bytes()))
+        );
+        // SessionEnd 同步执行，但身份保留配置里的 async 原值。
+        assert_ne!(
+            codex_hook_trust_hash("SessionEnd", &command, None, false).unwrap(),
+            codex_hook_trust_hash("SessionEnd", &command, None, true).unwrap()
+        );
+    }
+
+    #[test]
+    fn interrupt_and_session_end_hashes_normalize_the_timeout() {
+        let command = command("idle");
+        for event in ["Interrupt", "SessionEnd"] {
+            let hash = |timeout| codex_hook_trust_hash(event, &command, timeout, false).unwrap();
+            let default = hash(None);
+            let clamped = hash(Some(10));
+            let two = hash(Some(2));
+            assert_eq!(default, hash(Some(1)), "{event}");
+            assert_eq!(default, hash(Some(0)), "{event}");
+            assert_eq!(clamped, hash(Some(3)), "{event}");
+            assert_ne!(default, clamped, "{event}");
+            assert_ne!(default, two, "{event}");
+            assert_ne!(two, clamped, "{event}");
+            for (configured, normalized) in [(None, 1), (Some(10), 3), (Some(2), 2)] {
+                let identity: Value = serde_json::from_str(
+                    &codex_hook_identity(event, &command, configured, false).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(identity["hooks"][0]["timeout"], normalized, "{event}");
+            }
+        }
+        assert_eq!(
+            codex_hook_trust_hash("Unknown", &command, None, false),
+            None
+        );
+        assert_eq!(
+            codex_hook_trust_hash("Stop", &command, None, false),
+            codex_hook_trust_hash("Stop", &command, Some(600), false)
+        );
+        assert_eq!(
+            codex_hook_trust_hash("Stop", &command, Some(0), false),
+            codex_hook_trust_hash("Stop", &command, Some(1), false)
+        );
+    }
+
+    #[test]
+    fn find_handler_accepts_async_and_preserves_missing_timeout() {
+        let mut hooks = hooks_file();
+        let command = command("activity");
+        for background in [false, true] {
+            hooks["hooks"]["SubagentStart"][0]["hooks"][0]["async"] = json!(background);
+            assert_eq!(
+                find_handler(&hooks, "SubagentStart", &command),
+                Some((0, 0, Some(10), background))
+            );
+        }
+        hooks["hooks"]["SubagentStart"][0]["hooks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("timeout");
+        assert_eq!(
+            find_handler(&hooks, "SubagentStart", &command),
+            Some((0, 0, None, true))
+        );
+        hooks["hooks"]["SubagentStart"][0]["hooks"][0]["statusMessage"] = json!("syncing");
+        assert_eq!(find_handler(&hooks, "SubagentStart", &command), None);
+    }
+
+    #[test]
+    fn trust_uses_actual_async_and_timeout_instead_of_install_defaults() {
+        let sources = [HOOKS_PATH.to_string()];
+        let mut hooks = hooks_file();
+        // v9 的旧同步 activity 钩子仍按真实文件计算，不能套用新安装表里的后台值。
+        let mut hooks_to_manage = managed();
+        hooks_to_manage[1].background = true;
+        hooks_to_manage[1].timeout = 30;
+        assert_eq!(
+            managed_hooks_trust(&sources, &hooks, &recorded_config(""), &hooks_to_manage),
+            vec![Some(CodexHookTrust::Trusted); 3]
+        );
+        hooks["hooks"]["SubagentStart"][0]["hooks"][0]["async"] = json!(true);
+        assert_eq!(
+            managed_hooks_trust(&sources, &hooks, &recorded_config(""), &hooks_to_manage)[1],
+            Some(CodexHookTrust::Modified)
+        );
+        hooks["hooks"]["SubagentStart"][0]["hooks"][0]["async"] = json!(false);
+        assert_eq!(
+            managed_hooks_trust(&sources, &hooks, &recorded_config(""), &hooks_to_manage)[1],
+            Some(CodexHookTrust::Trusted)
+        );
+    }
+
+    #[test]
+    fn trust_summary_includes_interrupt() {
+        let dir = crate::config::test_dirs::TempDir::new("codex-interrupt-trust");
+        let hooks_path = dir.join("hooks.json");
+        let config_path = dir.join("config.toml");
+        let command = command("idle");
+        let hooks = json!({"hooks": {"Interrupt": [{"hooks": [
+            {"type": "command", "command": command, "timeout": 10}
+        ]}]}});
+        fs::write(&hooks_path, hooks.to_string()).unwrap();
+        let managed = [managed_hook("Interrupt", command.clone())];
+        assert!(codex_hooks_trust_summary(&hooks_path, &config_path, &managed).needs_review);
+        let hash = codex_hook_trust_hash("Interrupt", &command, Some(3), false).unwrap();
+        let config = format!(
+            "[hooks.state.{}]\ntrusted_hash = \"{hash}\"\n",
+            super::super::config_edit::toml_basic_string(&format!(
+                "{}:interrupt:0:0",
+                hooks_path.display()
+            ))
+        );
+        fs::write(&config_path, &config).unwrap();
+        assert_eq!(
+            codex_hooks_trust_summary(&hooks_path, &config_path, &managed),
+            CodexHooksTrustSummary::default()
+        );
+        fs::write(&config_path, format!("{config}enabled = false\n")).unwrap();
+        assert_eq!(
+            codex_hooks_trust_summary(&hooks_path, &config_path, &managed),
+            CodexHooksTrustSummary {
+                needs_review: false,
+                disabled: true
+            }
         );
     }
 }

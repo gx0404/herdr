@@ -61,7 +61,7 @@ pub(crate) fn ensure_command_hook(
     event: &str,
     command: String,
     timeout: u64,
-    matcher: Option<&str>,
+    background: bool,
 ) -> io::Result<()> {
     let entries = hooks
         .entry(event.to_string())
@@ -69,37 +69,35 @@ pub(crate) fn ensure_command_hook(
         .as_array_mut()
         .ok_or_else(|| io::Error::other(format!("hook entries for {event} must be an array")))?;
 
-    let already_installed = entries.iter().any(|entry| {
-        entry
-            .get("hooks")
-            .and_then(Value::as_array)
-            .is_some_and(|hook_entries| {
-                hook_entries.iter().any(|hook| {
-                    hook.get("type").and_then(Value::as_str) == Some("command")
-                        && hook.get("command").and_then(Value::as_str) == Some(command.as_str())
-                })
-            })
-    });
+    let mut already_installed = false;
+    for entry in entries.iter_mut() {
+        let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for handler in handlers {
+            if !is_matching_command_hook(handler, &command) {
+                continue;
+            }
+            if let Some(handler) = handler.as_object_mut() {
+                handler.insert("timeout".to_string(), json!(timeout));
+                if background {
+                    handler.insert("async".to_string(), json!(true));
+                } else {
+                    handler.remove("async");
+                }
+                already_installed = true;
+            }
+        }
+    }
     if already_installed {
         return Ok(());
     }
 
-    let mut entry = Map::new();
-    if let Some(matcher) = matcher {
-        entry.insert("matcher".to_string(), Value::String(matcher.to_string()));
+    let mut handler = json!({ "type": "command", "command": command, "timeout": timeout });
+    if background {
+        handler["async"] = json!(true);
     }
-    entry.insert(
-        "hooks".to_string(),
-        json!([
-            {
-                "type": "command",
-                "command": command,
-                "timeout": timeout,
-            }
-        ]),
-    );
-
-    entries.push(Value::Object(entry));
+    entries.push(json!({ "hooks": [handler] }));
     Ok(())
 }
 
@@ -171,6 +169,22 @@ pub(crate) fn hook_command_variants(hook_path: &Path, action: Option<&str>) -> V
     }
 
     commands
+}
+
+/// 只清理旧平台写法，保留当前命令的位置供原位升级。
+pub(crate) fn remove_legacy_hook_commands(
+    hooks: &mut Map<String, Value>,
+    event: &str,
+    hook_path: &Path,
+    action: Option<&str>,
+) -> io::Result<()> {
+    let current = hook_command(hook_path, action);
+    for command in hook_command_variants(hook_path, action) {
+        if command != current {
+            remove_command_hook(hooks, event, &command)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn push_unique_command(commands: &mut Vec<String>, command: String) {

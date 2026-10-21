@@ -11,6 +11,12 @@ pub(crate) fn agent_version_requirement(
     target: crate::api::schema::IntegrationTarget,
 ) -> Option<AgentVersionRequirement> {
     match target {
+        crate::api::schema::IntegrationTarget::Codex => Some(AgentVersionRequirement {
+            label: "codex",
+            binary: "codex",
+            args: &["--version"],
+            min_version: super::CODEX_MIN_VERSION,
+        }),
         crate::api::schema::IntegrationTarget::Kimi => Some(AgentVersionRequirement {
             label: "kimi code",
             binary: "kimi",

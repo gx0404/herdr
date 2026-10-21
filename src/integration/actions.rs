@@ -7,7 +7,7 @@ use super::targets::{
     uninstall_claude, uninstall_codex, uninstall_kimi, uninstall_opencode, uninstall_pi,
 };
 use super::version::{agent_version_requirement, enforce_agent_version};
-use super::{CLAUDE_MIN_VERSION, KIMI_MIN_VERSION};
+use super::{CLAUDE_MIN_VERSION, CODEX_MIN_VERSION, KIMI_MIN_VERSION};
 
 /// codex 还没信任（或信任后改过）herdr 的钩子时的安装提示，逐条作为安装消息输出：
 /// 第一条是要做的选择，第二条是不选的后果。设置页集成页把安装消息逐条单行显示、
@@ -73,6 +73,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                     "ensured codex config at {}",
                     installed.config_path.display()
                 ),
+                format!("requires codex {CODEX_MIN_VERSION} or newer"),
             ];
             // codex 只运行用户信任过的钩子：新装或改过的钩子要在它下次启动时的
             // 「Hooks need review」里信任，否则静默不跑。

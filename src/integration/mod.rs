@@ -65,6 +65,9 @@ const CODEX_HOOK_ASSET: &str = if cfg!(windows) {
     include_str!("assets/codex/herdr-agent-state.sh")
 };
 const CODEX_INTEGRATION_VERSION: u32 = 10;
+/// herdr 使用的钩子事件与字段从 codex 0.150 起才齐全；安装时用
+/// `codex --version` 校验。
+const CODEX_MIN_VERSION: &str = "0.150.0";
 const KIMI_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {

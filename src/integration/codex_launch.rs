@@ -204,10 +204,11 @@ fn interactive(args: &[OsString]) -> bool {
                 }
                 index += 1;
             }
-            // rust-v0.157.0 codex-rs/cli/src/main.rs::Subcommand, including
-            // hidden/platform commands and aliases. Keep legacy mcp-server and
-            // Clap-generated help. Future bare commands cannot be distinguished
-            // from prompts by argv alone; update this contract for new releases.
+            // Checked against rust-v0.163.0 codex-rs/cli/src/main.rs::Subcommand;
+            // the list is unchanged, including hidden/platform commands and aliases.
+            // Keep legacy mcp-server and Clap-generated help. Future bare commands
+            // cannot be distinguished from prompts by argv alone; update this
+            // contract for new releases.
             "agents"
             | "tcp-tunnel"
             | "exec"
