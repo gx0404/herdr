@@ -1875,3 +1875,395 @@ fn stale_cursor_from_an_old_generation_does_not_clear_the_current_view() {
         }
     }
 }
+
+// ---- 子智能体页面（全屏）：几何、视图、筛选、收起已完成、跳转与状态栏 ----
+
+/// 工作台状态：宣告 `client.views.set`，tick 一次让工作台接管布局。
+fn workbench_page_state() -> ClientShellState {
+    let mut state = state();
+    state.set_endpoint_methods(Some(vec![
+        "client.views.set".into(),
+        "agent.activity.read".into(),
+        "pane.focus".into(),
+    ]));
+    state.tick_workbench(Instant::now(), &mut ClientShellInput::default());
+    assert!(state.workbench.enabled, "工作台已接管");
+    state
+}
+
+fn press(state: &mut ClientShellState, keys: &str) -> ClientShellInput {
+    state.handle_raw_events(keys.chars().map(|ch| key(KeyCode::Char(ch))).collect())
+}
+
+fn frame_row(state: &ClientShellState, cols: u16, y: u16) -> String {
+    rows_text(state, Rect::new(0, y, cols, 1)).join("")
+}
+
+/// 工作台：页面是标题栏与状态栏之间的整块内容区；计算与绘制用同一个页面矩形；
+/// 状态栏显示「子智能体」模式块与页面固定键位（外部来源不列跳到终端）；页面外
+/// （标题栏）的点击吞掉、不关闭页面。
+#[test]
+fn workbench_page_fills_the_content_area_and_drives_the_status_bar() {
+    for (cols, rows) in [(160, 45), (100, 30)] {
+        let mut state = workbench_page_state();
+        open_with_tree(&mut state);
+        state.compose(cols, rows).expect("frame");
+        let page = state.hits.agent_activity_popup;
+        assert_eq!(page, super::super::workbench::content_area(cols, rows));
+        assert_eq!(
+            state.overlay_bounds(cols, rows),
+            Some(page),
+            "{cols}x{rows}: 视图计算与绘制共用页面矩形"
+        );
+        let status = frame_row(&state, cols, rows - 1);
+        assert!(has(&status, texts().mode_chip.trim()), "模式块: {status:?}");
+        assert!(has(&status, texts().hint_select), "页面提示: {status:?}");
+        let title = frame_row(&state, cols, 0);
+        assert!(
+            !has(&title, texts().page_title) || page.y == 1,
+            "标题栏不归页面"
+        );
+        state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left), 1, 0)]);
+        assert!(
+            matches!(state.overlay, Some(ClientShellOverlay::AgentActivity(_))),
+            "{cols}x{rows}: 标题栏的点击不关闭页面"
+        );
+    }
+    let mut state = workbench_page_state();
+    let outcome = open(
+        &mut state,
+        AgentActivityOwner::External {
+            external_id: "zcode:s1".into(),
+        },
+    );
+    let (id, _) = single_read(&outcome);
+    respond(&mut state, &id, tree_result(sample_nodes()));
+    state.compose(200, 45).expect("frame");
+    let status = frame_row(&state, 200, 44);
+    assert!(has(&status, texts().hint_select), "{status:?}");
+    assert!(
+        !has(&status, texts().hint_jump),
+        "外部来源不列跳到终端: {status:?}"
+    );
+}
+
+/// 经典布局各档：单栏（< 100）、每项一行（< 60）、按钮只留图标（< 80）、隐藏页头
+/// 第 2 行（高 < 12）、最小提示（< 40 × 8）；页面占满整帧，最后一行是页面页脚。
+#[test]
+fn page_geometry_degrades_at_each_threshold() {
+    use super::super::chrome::agent_page::page_layout;
+    let mut state = state();
+    open_with_tree(&mut state);
+    state.compose(120, 40).expect("frame");
+    let layout = |state: &ClientShellState, cols: u16, rows: u16| {
+        let area = Rect::new(0, 0, cols, rows);
+        page_layout(area, state.overlay_bounds(cols, rows), overlay(state)).expect("layout")
+    };
+    let wide = layout(&state, 120, 40);
+    assert!(!wide.single && !wide.compact && !wide.icons && !wide.tiny);
+    assert_eq!(wide.page, Rect::new(0, 0, 120, 40));
+    assert_eq!(wide.footer, Rect::new(0, 39, 120, 1), "经典布局自画页脚");
+    assert!(!wide.header2.is_empty());
+    assert!(!wide.divider.is_empty());
+    let list = wide.list.width;
+    assert!((36..=64).contains(&list), "列表宽夹在 36–64: {list}");
+    assert!(layout(&state, 99, 30).single);
+    assert!(!layout(&state, 100, 30).single);
+    assert!(layout(&state, 59, 30).compact);
+    assert!(!layout(&state, 60, 30).compact);
+    assert!(layout(&state, 79, 30).icons);
+    assert!(!layout(&state, 80, 30).icons);
+    assert!(layout(&state, 80, 11).header2.is_empty());
+    assert!(!layout(&state, 80, 12).header2.is_empty());
+    assert!(layout(&state, 39, 20).tiny);
+    assert!(layout(&state, 80, 7).tiny);
+    assert!(!layout(&state, 40, 8).tiny);
+
+    state.compose(79, 24).expect("frame");
+    let header = popup_text(&state)[0].clone();
+    assert!(
+        !has(&header, texts().refresh_button),
+        "按钮只留图标: {header:?}"
+    );
+    assert!(header.contains('↻') && header.contains('×'), "{header:?}");
+    state.compose(38, 7).expect("frame");
+    assert!(
+        has(&popup_text(&state).join("\n"), texts().too_small),
+        "最小提示"
+    );
+}
+
+/// 三种视图的行模型：1 层级（前序）、2 状态（按状态桶分组：失败、已完成、运行中、
+/// 等待）、3 时间线（泳道，没有开始时间写「时间未知」）。所选视图记在本次会话，
+/// 重开页面沿用。
+#[test]
+fn views_switch_with_digits_and_are_remembered_for_the_session() {
+    use super::super::chrome::agent_page::ListLine;
+    let mut state = state();
+    open_with_tree(&mut state);
+    state.compose(160, 45).expect("frame");
+    assert_eq!(overlay(&state).view, AgentPageView::Tree);
+    assert_eq!(
+        overlay(&state).visible_node_ids().collect::<Vec<_>>(),
+        ["a", "a.1", "a.2", "b"]
+    );
+
+    press(&mut state, "2");
+    assert_eq!(state.agent_page_view, AgentPageView::Status);
+    assert_eq!(
+        overlay(&state).visible_node_ids().collect::<Vec<_>>(),
+        ["b", "a.1", "a", "a.2"],
+        "失败、已完成、运行中、等待"
+    );
+    state.compose(160, 45).expect("frame");
+    let groups = overlay(&state)
+        .list_lines
+        .iter()
+        .filter_map(|line| match line {
+            ListLine::Group { bucket, count } => Some((*bucket, *count)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    use crate::harness::AgentBucket;
+    assert_eq!(
+        groups,
+        [
+            (AgentBucket::Failed, 1),
+            (AgentBucket::Review, 1),
+            (AgentBucket::Working, 1),
+            (AgentBucket::Idle, 1),
+        ]
+    );
+    let text = popup_text(&state).join("\n");
+    assert!(has(&text, texts().status_failed), "组标题:\n{text}");
+
+    press(&mut state, "3");
+    state.compose(160, 45).expect("frame");
+    assert_eq!(overlay(&state).view, AgentPageView::Timeline);
+    assert_eq!(
+        state.hits.agent_activity_tree_rows.len(),
+        4,
+        "每个节点一条泳道"
+    );
+    assert!(
+        state
+            .hits
+            .agent_activity_tree_rows
+            .iter()
+            .all(|(rect, _)| rect.height == 1),
+        "泳道一行"
+    );
+    let text = popup_text(&state).join("\n");
+    assert!(
+        has(&text, texts().timeline_unknown),
+        "没有开始时间:\n{text}"
+    );
+    assert!(has(&text, texts().timeline_now), "刻度右端:\n{text}");
+    state.handle_raw_events(vec![key(KeyCode::Down)]);
+    assert_eq!(
+        overlay(&state).selected_node.as_deref(),
+        Some("a"),
+        "↑↓ 选泳道"
+    );
+
+    state.handle_raw_events(vec![key(KeyCode::Esc)]);
+    assert!(state.overlay.is_none());
+    open_with_tree(&mut state);
+    assert_eq!(overlay(&state).view, AgentPageView::Timeline, "重开沿用");
+    press(&mut state, "1");
+    assert_eq!(overlay(&state).view, AgentPageView::Tree);
+}
+
+/// 筛选：`/` 进入输入，按标签 / 摘要 / 角色不分大小写匹配并保留祖先；Enter 确认并
+/// 保留筛选词；Esc 先清空筛选、再按一次才关闭页面；输入中 Esc 清空并退出输入。
+#[test]
+fn filter_keeps_ancestors_and_esc_clears_before_closing() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    press(&mut state, "/READ");
+    assert!(overlay(&state).filter_editing);
+    assert_eq!(overlay(&state).filter, "READ", "输入中字母不当快捷键");
+    assert_eq!(
+        overlay(&state).visible_node_ids().collect::<Vec<_>>(),
+        ["a", "a.1"],
+        "保留匹配项的祖先"
+    );
+    state.compose(160, 45).expect("frame");
+    assert!(popup_text(&state).join("\n").contains("/ READ▏"), "输入框");
+    state.handle_raw_events(vec![key(KeyCode::Backspace)]);
+    assert_eq!(overlay(&state).filter, "REA");
+    state.handle_raw_events(vec![key(KeyCode::Enter)]);
+    assert!(!overlay(&state).filter_editing);
+    assert_eq!(overlay(&state).filter, "REA");
+    state.handle_raw_events(vec![key(KeyCode::Esc)]);
+    assert!(state.overlay.is_some(), "第一次 Esc 只清空筛选");
+    assert!(overlay(&state).filter.is_empty());
+    assert_eq!(overlay(&state).visible_node_ids().count(), 4);
+
+    press(&mut state, "/explore");
+    assert_eq!(
+        overlay(&state).visible_node_ids().collect::<Vec<_>>(),
+        ["a"],
+        "按角色（agent_type）匹配"
+    );
+    state.handle_raw_events(vec![key(KeyCode::Esc)]);
+    assert!(!overlay(&state).filter_editing && overlay(&state).filter.is_empty());
+    press(&mut state, "/scanning");
+    assert_eq!(
+        overlay(&state).visible_node_ids().collect::<Vec<_>>(),
+        ["a"],
+        "按摘要匹配"
+    );
+    state.handle_raw_events(vec![key(KeyCode::Esc), key(KeyCode::Esc)]);
+    assert!(state.overlay.is_none(), "清空后再按 Esc 关闭页面");
+}
+
+/// 收起已完成（c 或点「已完成 N 项」行）：只隐藏整棵子树都已完成的节点，失败节点
+/// 与其祖先永远可见；再按一次展开。
+#[test]
+fn collapsing_done_hides_whole_done_subtrees_but_never_failures() {
+    let mut state = state();
+    let outcome = open(&mut state, pane_owner());
+    let (id, _) = single_read(&outcome);
+    let mut nodes = sample_nodes();
+    nodes.extend([
+        node(
+            "d",
+            None,
+            AgentActivityKind::Task,
+            AgentActivityStatus::Done,
+            "done parent",
+            Some((0, 5_000)),
+        ),
+        node(
+            "d.1",
+            Some("d"),
+            AgentActivityKind::Task,
+            AgentActivityStatus::Done,
+            "done child",
+            Some((0, 4_000)),
+        ),
+        node(
+            "e",
+            None,
+            AgentActivityKind::Task,
+            AgentActivityStatus::Done,
+            "done with failure",
+            Some((0, 3_000)),
+        ),
+        node(
+            "e.1",
+            Some("e"),
+            AgentActivityKind::Task,
+            AgentActivityStatus::Failed,
+            "failed child",
+            Some((0, 2_000)),
+        ),
+    ]);
+    respond(&mut state, &id, tree_result(nodes));
+    press(&mut state, "c");
+    assert!(overlay(&state).hide_done);
+    let visible = overlay(&state).visible_node_ids().collect::<Vec<_>>();
+    for hidden in ["a.1", "d", "d.1"] {
+        assert!(
+            !visible.contains(&hidden),
+            "{hidden} 整棵已完成: {visible:?}"
+        );
+    }
+    for shown in ["a", "a.2", "b", "e", "e.1"] {
+        assert!(visible.contains(&shown), "{shown} 可见: {visible:?}");
+    }
+    state.compose(160, 45).expect("frame");
+    assert!(has(&popup_text(&state).join("\n"), texts().show_done));
+    let toggle = state
+        .hits
+        .agent_activity_actions
+        .iter()
+        .find(|(_, button)| *button == AgentActivityButton::ToggleDone)
+        .map(|(rect, _)| *rect)
+        .expect("已完成行");
+    state.handle_raw_events(vec![mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        toggle.x + 1,
+        toggle.y,
+    )]);
+    assert!(!overlay(&state).hide_done, "点「已完成 N 项」展开");
+    assert_eq!(overlay(&state).visible_node_ids().count(), 8);
+}
+
+/// t / 跳到终端：pane 属主关闭页面并聚焦 pane；外部来源没有终端，什么也不做。
+#[test]
+fn jump_to_terminal_closes_the_page_only_for_pane_owners() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    press(&mut state, "t");
+    assert!(state.overlay.is_none(), "跳到终端关闭页面");
+
+    let mut state = self::state();
+    let outcome = open(
+        &mut state,
+        AgentActivityOwner::External {
+            external_id: "zcode:s1".into(),
+        },
+    );
+    let (id, _) = single_read(&outcome);
+    respond(&mut state, &id, tree_result(sample_nodes()));
+    press(&mut state, "t");
+    assert!(state.overlay.is_some(), "外部来源不跳转");
+    state.compose(160, 45).expect("frame");
+    assert!(
+        !state
+            .hits
+            .agent_activity_actions
+            .iter()
+            .any(|(_, button)| *button == AgentActivityButton::Jump),
+        "外部来源没有跳到终端按钮"
+    );
+}
+
+/// 转写：Text 内容走转写排版，`first_line` 是客户端累计丢弃的行数；焦点在转写时
+/// Enter 交给 `toggle_all`（不重读、不换焦点）。
+#[test]
+fn transcript_content_feeds_the_transcript_view() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    select_with_content(&mut state, "a", "first\nsecond\n");
+    state.compose(160, 45).expect("frame");
+    let rows = overlay(&state).transcript.rows().len();
+    assert!(rows >= 2, "转写已折行: {rows}");
+    assert_eq!(overlay(&state).content.as_ref().expect("内容").dropped, 0);
+    state.handle_raw_events(vec![key(KeyCode::Tab)]);
+    let outcome = state.handle_raw_events(vec![key(KeyCode::Enter)]);
+    assert!(reads(&outcome).is_empty(), "转写里的 Enter 不重读");
+    assert_eq!(overlay(&state).focus, AgentActivityFocus::Content);
+
+    // 头部丢行：累计丢弃的行数随内容增长。
+    let mut outcome = ClientShellInput::default();
+    state.select_agent_activity_node("a.1".into(), &mut outcome);
+    let (id, _) = single_read(&outcome);
+    let line = "z".repeat(1023);
+    let page = format!("{line}\n").repeat(CONTENT_CAP_BYTES / 1024 + 8);
+    respond(
+        &mut state,
+        &id,
+        content_result("a.1", &page, true, Some("z")),
+    );
+    let dropped = overlay(&state).content.as_ref().expect("内容").dropped;
+    assert!(dropped >= 8, "记下丢弃的行数: {dropped}");
+}
+
+/// 页面不可拖动、不保存位置：`window_key` 排除活动页，其余浮层照旧有键。
+#[test]
+fn the_page_has_no_floating_window_key() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    let page = state.overlay.as_ref().expect("页面");
+    assert_eq!(super::super::floating_pages::window_key(page), None);
+    let help = ClientShellOverlay::Help(ClientHelpOverlay {
+        query: TextEditor::default(),
+        search_focused: false,
+        max_scroll: 0,
+        scroll: 0,
+    });
+    assert!(super::super::floating_pages::window_key(&help).is_some());
+}

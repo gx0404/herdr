@@ -1872,3 +1872,338 @@ fn ui_gallery_monitor() {
     }
     write_shots("monitor", &shots);
 }
+
+/// 子智能体页面画廊的节点：Codex 风格的子智能体（昵称 · 任务），时间相对 `now_ms`。
+fn agent_page_nodes(now_ms: u64) -> Vec<crate::api::schema::AgentActivityNode> {
+    let node = |id: &str,
+                parent: Option<&str>,
+                label: &str,
+                role: &str,
+                status: AgentActivityStatus,
+                (start, end): (u64, Option<u64>),
+                summary: &str| crate::api::schema::AgentActivityNode {
+        id: id.into(),
+        kind: AgentActivityKind::Subagent,
+        label: label.into(),
+        status,
+        parent_id: parent.map(str::to_owned),
+        agent_type: Some(role.into()),
+        content_ref: Some(format!("ref-{id}")),
+        summary: Some(summary.into()),
+        started_at_ms: Some(now_ms.saturating_sub(start)),
+        ended_at_ms: end.map(|end| now_ms.saturating_sub(end)),
+    };
+    vec![
+        node(
+            "boyle",
+            None,
+            "Boyle · repo_scan",
+            "explorer",
+            AgentActivityStatus::Done,
+            (360_000, Some(252_000)),
+            "定位 14 个界面入口，汇总到 surfaces.md",
+        ),
+        node(
+            "hume",
+            None,
+            "Hume · ui_audit",
+            "worker",
+            AgentActivityStatus::Running,
+            (252_000, None),
+            "exec  just ui-gallery --filter agent",
+        ),
+        node(
+            "ada",
+            Some("hume"),
+            "Ada · screenshot",
+            "worker",
+            AgentActivityStatus::Running,
+            (41_000, None),
+            "exec  msedge --headless --screenshot target/tmp/ui-audit/page.png",
+        ),
+        node(
+            "noether",
+            None,
+            "Noether · codex_hooks",
+            "explorer",
+            AgentActivityStatus::Done,
+            (330_000, Some(148_000)),
+            "核对钩子事件与载荷字段，写入 hooks.md",
+        ),
+        node(
+            "turing",
+            None,
+            "Turing · fix_tests",
+            "worker",
+            AgentActivityStatus::Failed,
+            (300_000, Some(160_000)),
+            "cargo nextest 失败：3 个测试未通过",
+        ),
+        node(
+            "guardian",
+            None,
+            "guardian",
+            "审核",
+            AgentActivityStatus::Done,
+            (60_000, Some(51_000)),
+            "apply_patch 已批准 · src/ui/kit/card.rs",
+        ),
+    ]
+}
+
+/// 子智能体页面画廊的转写（Codex Text 格式）。
+const AGENT_PAGE_TRANSCRIPT: &str = "[message from /root → /root/ui_audit] 审计 herdr 全部 TUI 界面，按严重度输出问题清单和可直接实施的修改建议；截图写到临时目录，不要改仓库。
+(thinking)
+[exec_command] rg --files src/client/shell | rg overlay
+    src/client/shell/agent_activity_overlay.rs
+    src/client/shell/machine_files_overlay.rs
+[exec_command] rg -n \"ModalSize::Large\" src/client/shell
+    agent_activity_overlay.rs:1085    .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large))
+    machine_files_overlay.rs:1003    .or_else(|| crate::ui::modal_rect(area, ModalSize::Large))
+    … +6 lines
+活动窗口固定 76×22，在 200×50 终端里只占约 17% 面积；树列只有 25 列，Codex 子智能体名称几乎都被截断。下一步核对三处活动树的状态色。
+[spawn_agent] screenshot · worker · gpt-6.1-sol
+[wait_agent] → Ada
+";
+
+/// 把页面在途的 `agent.activity.read` 逐个应答：树读取回 `nodes`，内容读取回转写。
+/// `limit` 限制应答次数（0 = 不应答，看加载中）。
+fn answer_agent_page(
+    state: &mut ClientShellState,
+    nodes: &[crate::api::schema::AgentActivityNode],
+    limit: usize,
+) {
+    for _ in 0..limit {
+        let Some((request_id, boot_id, node_id)) =
+            state
+                .pending_requests
+                .iter()
+                .find_map(|(id, pending)| match &pending.kind {
+                    PendingEndpointKind::AgentActivityRead { node_id, .. } => {
+                        Some((id.clone(), pending.boot_id.clone(), node_id.clone()))
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let result = match node_id {
+            None => crate::api::schema::ResponseResult::AgentActivity {
+                nodes: nodes.to_vec(),
+                content: None,
+            },
+            Some(node) => crate::api::schema::ResponseResult::AgentActivity {
+                nodes: Vec::new(),
+                content: Some(crate::api::schema::AgentActivityContent {
+                    node_id: node,
+                    format: crate::api::schema::AgentActivityContentFormat::Text,
+                    text: AGENT_PAGE_TRANSCRIPT.into(),
+                    eof: true,
+                    truncated: false,
+                    next_cursor: Some("end".into()),
+                }),
+            },
+        };
+        state.handle_endpoint_result(&boot_id, &request_id, Ok(result));
+    }
+}
+
+/// 子智能体页面的一个场景：在工作台里打开 codex（p3，改成运行中）的页面，按需应答
+/// 读取、选中节点，再交给 `prepare` 调整后合成。
+struct AgentPageScene {
+    name: &'static str,
+    owner: super::super::agent_activity_overlay::AgentActivityOwner,
+    nodes: bool,
+    answers: usize,
+    select: Option<&'static str>,
+    supported: bool,
+    prepare: Prepare,
+}
+
+fn shoot_agent_page(
+    config: ClientShellConfig,
+    (cols, rows): (u16, u16),
+    scene: &AgentPageScene,
+    step: &mut u64,
+) -> FrameData {
+    let mut state = workbench_state(config);
+    let mut snapshot = gallery_snapshot();
+    snapshot.revision += 1;
+    if let Some(codex) = snapshot
+        .agents
+        .iter_mut()
+        .find(|agent| agent.pane_id == "p3")
+    {
+        codex.agent_status = AgentStatus::Working;
+        codex.insight.model = Some("gpt-6.1-sol high".into());
+        codex.insight.session_title = Some("重构 Agent 活动窗口并补齐 Codex 适配".into());
+        codex.insight.question = None;
+        codex.insight.options.clear();
+        codex.insight.working_since_ms = Some(
+            crate::harness::time::system_time_ms(std::time::SystemTime::now())
+                .unwrap_or_default()
+                .saturating_sub(372_000),
+        );
+    }
+    state.set_endpoint_snapshot_for_generation(
+        &ClientEndpointId::Local,
+        GENERATION,
+        Box::new(snapshot),
+    );
+    if !scene.supported {
+        state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+    }
+    let _ = shoot_workbench(&mut state, cols, rows, step);
+    let now_ms =
+        crate::harness::time::system_time_ms(std::time::SystemTime::now()).unwrap_or_default();
+    let nodes = if scene.nodes {
+        agent_page_nodes(now_ms)
+    } else {
+        Vec::new()
+    };
+    state.open_agent_activity(
+        ClientEndpointId::Local,
+        scene.owner.clone(),
+        &mut ClientShellInput::default(),
+    );
+    answer_agent_page(&mut state, &nodes, scene.answers.min(1));
+    if let Some(node) = scene.select {
+        state.select_agent_activity_node(node.into(), &mut ClientShellInput::default());
+    }
+    answer_agent_page(&mut state, &nodes, scene.answers.saturating_sub(1));
+    (scene.prepare)(&mut state);
+    // 两次合成：第一次建列表显示行并把选中项滚进视野。
+    let _ = state.compose(cols, rows);
+    shoot_workbench(&mut state, cols, rows, step)
+}
+
+#[test]
+#[ignore = "manual visual gallery; run `just ui-gallery`"]
+fn ui_gallery_agent_page() {
+    use super::super::agent_activity_overlay::AgentActivityOwner;
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let dark = || ClientShellConfig::from_config(&Config::default());
+    let light = || {
+        let mut config = Config::default();
+        config.theme.name = Some("graphite-light".into());
+        ClientShellConfig::from_config(&config)
+    };
+    let pane = || AgentActivityOwner::Pane {
+        pane_id: "p3".into(),
+    };
+    let scene = |name, select, prepare| AgentPageScene {
+        name,
+        owner: pane(),
+        nodes: true,
+        answers: 4,
+        select,
+        supported: true,
+        prepare,
+    };
+    let none: Prepare = |_| {};
+    let status: Prepare = |state| {
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+        ))]);
+    };
+    let timeline: Prepare = |state| {
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Char('3'),
+            KeyModifiers::NONE,
+        ))]);
+    };
+    let filtering: Prepare = |state| {
+        let keys = ['/', 'h', 'u'];
+        state.handle_raw_events(
+            keys.iter()
+                .map(|ch| {
+                    RawInputEvent::Key(crate::input::TerminalKey::new(
+                        KeyCode::Char(*ch),
+                        KeyModifiers::NONE,
+                    ))
+                })
+                .collect(),
+        );
+    };
+    let mut scenes = Vec::new();
+    for size in [(200, 50), (160, 45), (120, 40), (80, 24), (60, 20)] {
+        scenes.push((scene("tree", Some("hume"), none), size));
+    }
+    for (name, select, prepare) in [
+        ("status", Some("hume"), status),
+        ("timeline", Some("hume"), timeline),
+        ("failed", Some("turing"), none),
+        ("filter", Some("hume"), filtering),
+    ] {
+        scenes.push((scene(name, select, prepare), (160, 45)));
+    }
+    scenes.push((
+        AgentPageScene {
+            name: "external",
+            owner: AgentActivityOwner::External {
+                external_id: "zcode:01".into(),
+            },
+            ..scene("external", Some("boyle"), none)
+        },
+        (160, 45),
+    ));
+    scenes.push((
+        AgentPageScene {
+            supported: false,
+            answers: 0,
+            ..scene("unsupported", None, none)
+        },
+        (160, 45),
+    ));
+    scenes.push((
+        AgentPageScene {
+            answers: 0,
+            ..scene("loading", None, none)
+        },
+        (160, 45),
+    ));
+    scenes.push((
+        AgentPageScene {
+            nodes: false,
+            ..scene("empty", None, none)
+        },
+        (160, 45),
+    ));
+    scenes.push((scene("timeline", Some("turing"), timeline), (120, 40)));
+    scenes.push((scene("timeline", Some("hume"), timeline), (80, 24)));
+    let mut shots = Vec::new();
+    let mut step = 0;
+    for (scene, size) in &scenes {
+        for (theme, host) in [("dark", DARK_HOST), ("light", LIGHT_HOST)] {
+            let config = if theme == "light" { light() } else { dark() };
+            let frame = shoot_agent_page(config, *size, scene, &mut step);
+            shots.push(Shot {
+                title: format!("agent page {} {theme} {}x{}", scene.name, size.0, size.1),
+                frame,
+                host,
+            });
+        }
+    }
+    // 经典布局：页面占满整帧，最后一行是页面自己的页脚。
+    let mut state = classic_state(dark());
+    state.set_endpoint_methods(Some(vec!["agent.activity.read".into()]));
+    let _ = shoot_classic(&mut state, 140, 40);
+    let nodes = agent_page_nodes(
+        crate::harness::time::system_time_ms(std::time::SystemTime::now()).unwrap_or_default(),
+    );
+    state.open_agent_activity(
+        ClientEndpointId::Local,
+        pane(),
+        &mut ClientShellInput::default(),
+    );
+    answer_agent_page(&mut state, &nodes, 1);
+    state.select_agent_activity_node("hume".into(), &mut ClientShellInput::default());
+    answer_agent_page(&mut state, &nodes, 3);
+    let _ = state.compose(140, 40);
+    shots.push(Shot::dark(
+        "agent page classic dark 140x40".into(),
+        state.compose(140, 40).expect("经典布局页面").frame.clone(),
+    ));
+    write_shots("agent-page", &shots);
+}
