@@ -917,17 +917,9 @@ fn parent_indices(nodes: &[AgentActivityNode]) -> Vec<Option<usize>> {
 }
 
 /// 节点按 `parent_id` 前序展开：找不到父节点的是根；成环的链在首个节点处断开；
-/// 折叠节点的子树不展开。
-pub(in crate::client::shell) fn build_rows(
-    nodes: &[AgentActivityNode],
-    collapsed: &HashSet<String>,
-) -> Vec<TreeEntry<usize>> {
-    build_rows_where(nodes, collapsed, None)
-}
-
-/// 同 [`build_rows`]，只展开 `keep` 为真的节点（`None` = 全部）。`keep` 须对祖先
-/// 封闭（保留的节点其祖先也保留，[`visible_mask`] 保证），否则被丢掉的父节点下的
-/// 子树整个看不见。
+/// 折叠节点的子树不展开。只展开 `keep` 为真的节点（`None` = 全部）。`keep` 须对
+/// 祖先封闭（保留的节点其祖先也保留，[`visible_mask`] 保证），否则被丢掉的父节点下
+/// 的子树整个看不见。
 fn build_rows_where(
     nodes: &[AgentActivityNode],
     collapsed: &HashSet<String>,

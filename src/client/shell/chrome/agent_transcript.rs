@@ -23,9 +23,6 @@
 //!
 //! 公开接口是子智能体页面与本模块之间的约定，改动要同时照顾页面一侧。
 
-// 骨架阶段页面还没接入，接口暂时无人调用；页面落地后删掉这条 allow。
-#![allow(dead_code)]
-
 use std::collections::{HashSet, VecDeque};
 
 use unicode_width::UnicodeWidthChar;

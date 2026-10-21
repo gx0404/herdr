@@ -92,8 +92,6 @@ pub fn activity_bucket(status: AgentActivityStatus) -> AgentBucket {
 
 /// 内容强调：转写里的工具名。青色只用来区分「这是一次工具调用」，不表达状态，
 /// 也不出现在结构面上（状态仍只用 [`status_color`]）。
-// 子智能体页面接入前只有骨架引用；页面落地后删掉这条 allow。
-#[allow(dead_code)]
 pub fn tool_name(palette: &Palette) -> Style {
     Style::default().fg(palette.teal)
 }
