@@ -442,7 +442,7 @@ fn paint_agent_screen(buffer: &mut Buffer, area: Rect, agent: Option<&str>, pale
     }
 }
 
-/// 按视图规格合成一帧模拟的终端组画面：单窗格铺满；两个窗格左右拆分并画边框。边框
+/// 按视图规格合成一帧模拟的终端组画面：单窗格铺满；多窗格按均衡网格拆分并画边框。边框
 /// 字形、颜色与标题和 server 同一口径（`ui.border_style`、窗格边框 token、agent 窗格
 /// 标题 ` ◆ 名称 ` 画静态状态字形）。
 fn mock_surface(
@@ -466,12 +466,17 @@ fn mock_surface(
     let agent_name = |pane_id: &str| agent_of(pane_id).and_then(|agent| agent.agent.as_deref());
     let mut surface_panes = Vec::new();
     if panes.len() >= 2 {
-        let left_width = spec.cols / 2;
-        let rects = [
-            Rect::new(0, 0, left_width, spec.rows),
-            Rect::new(left_width, 0, spec.cols - left_width, spec.rows),
-        ];
-        for (pane, rect) in panes.iter().take(2).zip(rects) {
+        let columns = panes.len().saturating_sub(1).isqrt() + 1;
+        let rows = panes.len().div_ceil(columns);
+        for (index, pane) in panes.iter().enumerate() {
+            let row = index / columns;
+            let column = index % columns;
+            let in_row = columns.min(panes.len() - row * columns);
+            let x = (usize::from(spec.cols) * column / in_row) as u16;
+            let right = (usize::from(spec.cols) * (column + 1) / in_row) as u16;
+            let y = (usize::from(spec.rows) * row / rows) as u16;
+            let bottom = (usize::from(spec.rows) * (row + 1) / rows) as u16;
+            let rect = Rect::new(x, y, right - x, bottom - y);
             let color = if pane.focused {
                 config.components.pane_border_focused
             } else {
@@ -488,12 +493,7 @@ fn mock_surface(
                 let bucket = crate::client::shell::client_agent_bucket(agent);
                 let glyph = (bucket != crate::harness::AgentBucket::None).then(|| {
                     (
-                        crate::ui::design::status_glyph(
-                            bucket,
-                            crate::config::StatusIndicatorStyle::Graphite,
-                            0,
-                            false,
-                        ),
+                        crate::ui::design::status_glyph(bucket, config.status_indicators, 0, false),
                         crate::ui::design::status_style(
                             bucket,
                             &config.palette,
@@ -680,11 +680,12 @@ fn classic_state(config: ClientShellConfig) -> ClientShellState {
 
 fn shoot_classic(state: &mut ClientShellState, cols: u16, rows: u16) -> FrameData {
     let snapshot = state.snapshot.as_deref().cloned().expect("snapshot");
+    let surface_size = state.surface_size(cols, rows);
     let spec = ClientViewSpec {
         view_id: "classic".into(),
         tab_id: snapshot.focused_tab_id.clone().unwrap_or_default(),
-        cols: cols.saturating_sub(26),
-        rows: rows.saturating_sub(1),
+        cols: surface_size.cols,
+        rows: surface_size.rows,
         focused: true,
     };
     let surface = mock_surface(&spec, &snapshot, &state.config);
@@ -2237,11 +2238,11 @@ fn ui_gallery_agent_page() {
 #[path = "gallery_tools.rs"]
 mod tools;
 
-#[path = "gallery_toast.rs"]
-mod toast;
 #[path = "gallery_layout.rs"]
 mod layout;
-#[path = "gallery_overlays.rs"]
-mod overlays;
 #[path = "gallery_machines.rs"]
 mod machines;
+#[path = "gallery_overlays.rs"]
+mod overlays;
+#[path = "gallery_toast.rs"]
+mod toast;

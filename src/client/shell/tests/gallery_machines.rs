@@ -400,9 +400,20 @@ fn ui_gallery_machines() {
         let fleet = seed_fleet(state);
         state.open_machine_remove_confirm(&fleet[1].id);
     };
+    let feedback: Prepare = |state| {
+        seed_fleet(state);
+        state.open_machines_overlay();
+        state.push_endpoint_notice(
+            ClientEndpointNoticeKind::Success,
+            "gallery_machine_saved",
+            "已保存 build.example",
+            "连接设置已更新",
+        );
+    };
 
     let scenes: Vec<Scene> = vec![
         ("dashboard", dashboard, &[(160, 45), (120, 40)]),
+        ("feedback", feedback, &[(130, 40), (80, 24)]),
         ("list", list_hover, &[(80, 24)]),
         ("empty", empty, &[(80, 24), (120, 40)]),
         ("filter no match", no_match, &[(80, 24)]),

@@ -735,6 +735,16 @@ impl ClientShellState {
         cols: u16,
         rows: u16,
     ) -> Rect {
+        let mut safe = self.feedback_content_area(layout, cols, rows);
+        // 机器页的键表可占多行；操作反馈保留这片可点击区域，不覆盖末行键帽。
+        let footer = self.hits.machines_footer;
+        if !footer.is_empty() && safe.intersects(footer) {
+            safe.height = footer.y.saturating_sub(safe.y);
+        }
+        safe
+    }
+
+    fn feedback_content_area(&self, layout: ClientShellLayout, cols: u16, rows: u16) -> Rect {
         if self.workbench.enabled {
             return super::workbench::content_area(cols, rows);
         }

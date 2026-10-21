@@ -61,23 +61,7 @@ pub(super) struct ClientMachinesOverlay {
     /// 划过列表就把这些破坏性键重新指向「鼠标最后路过的机器」是不可接受的
     /// （MENU-01 / UX-04）。存身份而不是行号，筛选与重排后天然失效。
     pub(super) hovered: Option<ProfileId>,
-    /// 旧的页内 toast 槽位：操作反馈（复制修复命令、保存新机器）已改走端点通知
-    /// 吐司（`push_endpoint_notice`），不再覆盖页脚。这里恒为 `None`，只为
-    /// `feedback.rs` 的到期清理保留读写点，合并后与那两处一起删除。
-    pub(super) message: Option<MachineToast>,
 }
-
-/// 旧页内 toast 的写入时刻（见 [`ClientMachinesOverlay::message`]）。
-// 不再构造：页内 toast 已并入吐司；`feedback.rs`（本次范围外）仍读它的到期时刻，
-// 删除要与那边的 tick / deadline 分支一起做。
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(super) struct MachineToast {
-    pub(super) at: std::time::Instant,
-}
-
-/// 旧页内 toast 的在屏时长（`feedback.rs` 的到期清理仍引用）。
-pub(super) const MACHINE_TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// 宽屏 dashboard 的浮层尺寸；窄终端仍会被 `centered_rect` 按边距钳位。
 pub(super) const DASHBOARD_MODAL_SIZE: crate::ui::ModalSize = crate::ui::ModalSize::Content {
@@ -119,7 +103,6 @@ impl ClientMachinesOverlay {
             detail_scroll: 0,
             view_max_scroll: 0,
             hovered: None,
-            message: None,
         }
     }
 

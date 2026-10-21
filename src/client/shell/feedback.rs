@@ -411,16 +411,6 @@ impl ClientShellState {
             self.visual_bell_deadline = None;
             repaint = true;
         }
-        // 机器面板的公共 toast 到期自动消失（与 `feedback.animations` 无关：
-        // 它是一次性反馈，不是入场动画）。
-        if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
-            if overlay.message.as_ref().is_some_and(|toast| {
-                now.duration_since(toast.at) >= super::machines_overlay::MACHINE_TOAST_DURATION
-            }) {
-                overlay.message = None;
-                repaint = true;
-            }
-        }
         if !self.session_view.area.is_empty()
             && self
                 .session_rows
@@ -468,11 +458,6 @@ impl ClientShellState {
         let mut chain = |next: std::time::Instant| {
             deadline = Some(deadline.map_or(next, |current| current.min(next)));
         };
-        if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page() {
-            if let Some(toast) = overlay.message.as_ref() {
-                chain(toast.at + super::machines_overlay::MACHINE_TOAST_DURATION);
-            }
-        }
         if self.config.feedback.animations {
             for since in [self.overlay_since, self.toast_since].into_iter().flatten() {
                 chain(since + ENTRANCE_DURATION);

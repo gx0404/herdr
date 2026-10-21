@@ -34,11 +34,6 @@ pub(super) struct ClientMachineFilesOverlay {
     pub(super) pending: u64,
     requests: HashMap<u64, (FileRequest, crate::remote::TaskCancellation)>,
     latest_read: Option<u64>,
-    /// 旧的页内操作反馈槽位：下载 / 上传 / 新建 / 改名 / 删除的结果已改走端点
-    /// 通知吐司，不再画在列表最后一行（那会盖住同屏最后一条目录项）。恒为 `None`。
-    // 只剩 `mouse.rs`（本次范围外）的清除写入；合并后连同那一行一起删除。
-    #[allow(dead_code)]
-    pub(super) message: Option<String>,
     /// 目录列表读取失败（权限、路径不存在等）：页面状态，画成「出错」空状态。
     /// 读文件与写操作的失败走吐司，不写这里。
     pub(super) error: Option<String>,
@@ -256,7 +251,6 @@ impl ClientShellState {
             pending: 0,
             requests: HashMap::new(),
             latest_read: None,
-            message: None,
             error: None,
         };
         self.overlay = Some(ClientShellOverlay::MachineFiles(overlay));

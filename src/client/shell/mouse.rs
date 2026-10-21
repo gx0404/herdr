@@ -2189,7 +2189,6 @@ impl ClientShellState {
                             self.overlay.as_mut()
                         {
                             overlay.search_focused = true;
-                            overlay.message = None;
                         }
                         outcome.repaint = true;
                     } else if let Some((_, button)) = self

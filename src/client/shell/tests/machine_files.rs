@@ -251,7 +251,7 @@ fn mutating_results_refresh_the_listing_with_a_message() {
             "created src".to_owned()
         ))
     );
-    assert!(files_overlay(&mut state).message.is_none());
+    assert!(files_overlay(&mut state).error.is_none());
     // The refresh is a new List op on the new pending ticket.
     let refresh = outcome
         .actions

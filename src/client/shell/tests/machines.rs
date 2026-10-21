@@ -1739,7 +1739,6 @@ fn overlay_step_separates_every_destructive_machine_step() {
             detail_scroll: 0,
             view_max_scroll: 0,
             hovered: None,
-            message: None,
         })
     };
     let idle = forwards(None);
@@ -1762,7 +1761,6 @@ fn overlay_step_separates_every_destructive_machine_step() {
         detail_scroll: 0,
         view_max_scroll: 0,
         hovered: None,
-        message: None,
     });
     assert_ne!(idle.step(), confirm_remove.step());
     assert_ne!(pending.step(), confirm_remove.step());
@@ -1925,10 +1923,6 @@ fn machine_feedback_is_a_toast_that_leaves_the_footer_alone() {
             hits_before, state.hits.machines_actions,
             "{cols} 列：页脚命中区原样保留"
         );
-        let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
-            panic!("机器页");
-        };
-        assert!(overlay.message.is_none(), "不再写页内 toast");
     }
 }
 
