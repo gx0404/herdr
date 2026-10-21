@@ -1,11 +1,31 @@
 #![cfg(windows)]
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs;
+use std::io::{self, Read};
+use std::mem::size_of;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+use windows_sys::Win32::System::Threading::{
+    GetProcessIdOfThread, OpenThread, ResumeThread, CREATE_SUSPENDED,
+    THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+};
 
 fn success(output: &std::process::Output) {
     if !output.status.success() {
@@ -14,18 +34,6 @@ fn success(output: &std::process::Output) {
 
         let code_pages = unsafe { (GetACP(), GetOEMCP(), GetConsoleCP(), GetConsoleOutputCP()) };
         eprintln!("ACP/OEMCP/ConsoleCP/ConsoleOutputCP: {code_pages:?}");
-        if let Some(system) = std::env::var_os("SystemRoot") {
-            let native = PathBuf::from(system).join("System32/tar.exe");
-            match Command::new(&native).arg("--version").output() {
-                Ok(version) => eprintln!(
-                    "{native:?} --version: status={}\nstdout={}\nstderr={}",
-                    version.status,
-                    String::from_utf8_lossy(&version.stdout),
-                    String::from_utf8_lossy(&version.stderr),
-                ),
-                Err(error) => eprintln!("{native:?} --version: {error}"),
-            }
-        }
     }
     assert!(
         output.status.success(),
@@ -36,7 +44,7 @@ fn success(output: &std::process::Output) {
     );
 }
 
-struct Sandbox(PathBuf);
+struct Sandbox(PathBuf, Cell<bool>);
 
 impl Sandbox {
     fn new() -> Self {
@@ -47,7 +55,7 @@ impl Sandbox {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let sandbox = Self(root);
+        let sandbox = Self(root, Cell::new(false));
         for directory in [
             "bin",
             "home",
@@ -81,10 +89,13 @@ impl Sandbox {
         let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
         let source = sandbox.0.join("source 中文");
         let archive = sandbox
-            .command(&system.join("System32/tar.exe"))
-            .current_dir(&source)
-            .args(["-czf", "fixture.tar.gz", "payload.txt"])
-            .output()
+            .phase_output(
+                "archive-create",
+                sandbox
+                    .command(&system.join("System32/tar.exe"))
+                    .current_dir(&source)
+                    .args(["-czf", "fixture.tar.gz", "payload.txt"]),
+            )
             .unwrap();
         success(&archive);
         fs::rename(
@@ -96,10 +107,100 @@ impl Sandbox {
             "@echo off\r\nsetlocal DisableDelayedExpansion\r\n",
             "if \"%~1\"==\"--help\" (echo Options: --no-daemon & exit /b 0)\r\n",
             "set \"HERDR_TEST_ARG1=%~1\"\r\nset \"HERDR_TEST_ARG2=%~2\"\r\nset \"HERDR_TEST_ARG3=%~3\"\r\n",
-            "\"%HERDR_TEST_POWERSHELL%\" -NoLogo -NoProfile -NonInteractive -Command \"$report = @{path=$env:PATH; arg1=$env:HERDR_TEST_ARG1; arg2=$env:HERDR_TEST_ARG2; arg3=$env:HERDR_TEST_ARG3; active=$env:HERDR_CODEX_LAUNCH_ACTIVE}; [IO.File]::WriteAllText($env:HERDR_TEST_REPORT, ($report | ConvertTo-Json)); tar -xzf $env:HERDR_TEST_ARCHIVE -C $env:HERDR_TEST_OUTPUT; exit $LASTEXITCODE\"\r\n",
+            "\"%HERDR_TEST_POWERSHELL%\" -NoLogo -NoProfile -NonInteractive -Command \"",
+            "[Console]::Error.WriteLine('codex-fixture: powershell-start'); ",
+            "$report = @{path=$env:PATH; tar_path=(Get-Command tar).Path; arg1=$env:HERDR_TEST_ARG1; arg2=$env:HERDR_TEST_ARG2; arg3=$env:HERDR_TEST_ARG3; active=$env:HERDR_CODEX_LAUNCH_ACTIVE}; ",
+            "[IO.File]::WriteAllText($env:HERDR_TEST_REPORT, ($report | ConvertTo-Json)); ",
+            "[Console]::Error.WriteLine('codex-fixture: report-written'); ",
+            "tar -xzf $env:HERDR_TEST_ARCHIVE -C $env:HERDR_TEST_OUTPUT; ",
+            "[Console]::Error.WriteLine(('codex-fixture: tar-returned exit={0}' -f $LASTEXITCODE)); exit $LASTEXITCODE\"\r\n",
             "exit /b %errorlevel%\r\n"
         )).unwrap();
         sandbox
+    }
+
+    fn phase_output(&self, phase: &str, command: &mut Command) -> io::Result<Output> {
+        let started = Instant::now();
+        let stdout = self.0.join(format!("{phase}.stdout"));
+        let stderr = self.0.join(format!("{phase}.stderr"));
+        let mut job = None;
+        let mut child = None;
+        let mut root_status = None;
+        let mut active = None;
+        eprintln!("phase={phase} started; sandbox={}", self.0.display());
+        let result = (|| {
+            // Regular files avoid waiting for inherited pipe handles to reach EOF.
+            command
+                .stdin(Stdio::null())
+                .stdout(fs::File::create_new(&stdout)?)
+                .stderr(fs::File::create_new(&stderr)?)
+                .creation_flags(CREATE_SUSPENDED);
+            let job = job.insert(private_job()?);
+            let child = child.insert(command.spawn()?);
+            if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            resume_child(child)?;
+            loop {
+                root_status = child.try_wait()?;
+                active = Some(active_processes(job)?);
+                if let Some(status) = root_status.filter(|_| active == Some(0)) {
+                    return Ok(Output {
+                        status,
+                        stdout: bounded_file(&stdout)?,
+                        stderr: bounded_file(&stderr)?,
+                    });
+                }
+                if started.elapsed() >= Duration::from_secs(60) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "phase exceeded 60s",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        })();
+        match result {
+            Ok(output) => {
+                eprintln!(
+                    "phase={phase} elapsed={:?}; root={}; active_processes=0",
+                    started.elapsed(),
+                    output.status,
+                );
+                if !output.status.success() {
+                    eprintln!("{}", self.phase_diagnostics(&stdout, &stderr));
+                }
+                Ok(output)
+            }
+            Err(error) => {
+                self.1.set(true);
+                let cleanup = match (child.as_mut(), job.as_ref()) {
+                    (Some(child), Some(job)) => stop_phase(child, job),
+                    _ => Ok(()),
+                };
+                // Closing the non-inherited job is also the kill-tree fallback.
+                drop(job);
+                Err(io::Error::new(error.kind(), format!(
+                    "phase={phase} elapsed={:?}; root={root_status:?}; active_processes={active:?}; error={error}; cleanup={cleanup:?}; sandbox={}\n{}",
+                    started.elapsed(), self.0.display(), self.phase_diagnostics(&stdout, &stderr),
+                )))
+            }
+        }
+    }
+
+    fn phase_diagnostics(&self, stdout: &Path, stderr: &Path) -> String {
+        [stdout, stderr, &self.0.join("report.json")]
+            .into_iter()
+            .map(|path| {
+                let text = match bounded_file(path) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Err(error) => format!("<unavailable: {error}>"),
+                };
+                format!("{} (latest available):\n{text}", path.display())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn command(&self, executable: &Path) -> Command {
@@ -215,10 +316,137 @@ fn prepend_tools(command: &mut Command, tools: &Path) {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        if self.1.get() {
+            eprintln!("preserving failed phase sandbox: {}", self.0.display());
+            return;
+        }
         let deadline = Instant::now() + Duration::from_secs(30);
         while fs::remove_dir_all(&self.0).is_err() && self.0.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+fn bounded_file(path: &Path) -> io::Result<Vec<u8>> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(io::Error::other("diagnostic path is not a regular file"));
+    }
+    let mut file = fs::File::open(path)?;
+    let mut bytes = vec![0; 64 * 1024];
+    let mut length = 0;
+    while length < bytes.len() {
+        let read = file.read(&mut bytes[length..])?;
+        if read == 0 {
+            break;
+        }
+        length += read;
+    }
+    bytes.truncate(length);
+    if file.metadata()?.len() > length as u64 {
+        bytes.extend_from_slice(b"\n<diagnostic truncated at 64 KiB>\n");
+    }
+    Ok(bytes)
+}
+
+fn private_job() -> io::Result<OwnedHandle> {
+    let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(job)
+}
+
+fn active_processes(job: &OwnedHandle) -> io::Result<u32> {
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    if unsafe {
+        QueryInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectBasicAccountingInformation,
+            std::ptr::from_mut(&mut accounting).cast(),
+            size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(accounting.ActiveProcesses)
+}
+
+fn resume_child(child: &Child) -> io::Result<()> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry = THREADENTRY32 {
+        dwSize: size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    if unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    loop {
+        if entry.th32OwnerProcessID == child.id() {
+            let thread = unsafe {
+                OpenThread(
+                    THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION,
+                    0,
+                    entry.th32ThreadID,
+                )
+            };
+            if thread.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let thread = unsafe { OwnedHandle::from_raw_handle(thread) };
+            if unsafe { GetProcessIdOfThread(thread.as_raw_handle()) } != child.id() {
+                return Err(io::Error::other("created child thread identity changed"));
+            }
+            if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        if unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) } == 0 {
+            return Err(io::Error::other(
+                "created child primary thread was not found",
+            ));
+        }
+    }
+}
+
+fn stop_phase(child: &mut Child, job: &OwnedHandle) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let job_error =
+        (unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0).then(io::Error::last_os_error);
+    // Assignment failure leaves a suspended child outside the job. Use its handle.
+    let root_error = child.kill().err();
+    loop {
+        let root = child.try_wait();
+        let active = active_processes(job);
+        if matches!(root, Ok(Some(_))) && matches!(active, Ok(0)) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, format!(
+                "cleanup exceeded 5s; root={root:?}; active_processes={active:?}; terminate_job={job_error:?}; kill_root={root_error:?}",
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -321,9 +549,11 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
         .1
         .unwrap()
         .to_os_string();
-    let output = command
-        .args(["--internal-codex-launch", "exec", "中文 prompt"])
-        .output()
+    let output = sandbox
+        .phase_output(
+            "entry-exec",
+            command.args(["--internal-codex-launch", "exec", "中文 prompt"]),
+        )
         .unwrap();
     success(&output);
     assert_eq!(
@@ -352,7 +582,9 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
             )
             .unwrap(),
         );
-    let output = command.args(["resume", "中文 session"]).output().unwrap();
+    let output = sandbox
+        .phase_output("shim-resume", command.args(["resume", "中文 session"]))
+        .unwrap();
     success(&output);
     let report = sandbox.report();
     assert_eq!(report["arg1"], "--no-daemon");
@@ -360,9 +592,11 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
     assert_eq!(report["arg3"], "中文 session");
     assert_eq!(report["path"].as_str().unwrap(), configured);
     assert_eq!(fs::read_dir(shim.parent().unwrap()).unwrap().count(), 1);
-    let output = command
-        .env("HERDR_TEST_ARCHIVE", sandbox.0.join("missing.tar.gz"))
-        .output()
+    let output = sandbox
+        .phase_output(
+            "shim-missing-archive",
+            command.env("HERDR_TEST_ARCHIVE", sandbox.0.join("missing.tar.gz")),
+        )
         .unwrap();
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
