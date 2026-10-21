@@ -2233,3 +2233,6 @@ fn ui_gallery_agent_page() {
     ));
     write_shots("agent-page", &shots);
 }
+
+#[path = "gallery_tools.rs"]
+mod tools;
