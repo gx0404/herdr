@@ -1468,12 +1468,15 @@ impl ClientShellState {
             overlay.list_scroll = start;
             overlay.list_page = visible;
         }
+        // 转写同步与宽度无关：窄屏只显示列表时也同步，切到转写后的按键（Enter 全部
+        // 展开、点工具标题）立即有区块可切。
+        let mode = transcript_mode(&overlay.owner_view, overlay.is_external());
+        overlay.sync_transcript(mode);
         let text = layout.content_text;
         let height = usize::from(text.height);
         if text.width == 0 || height == 0 {
             return;
         }
-        let mode = transcript_mode(&overlay.owner_view, overlay.is_external());
         let speaker = overlay
             .selected_node
             .as_deref()
@@ -1483,26 +1486,10 @@ impl ClientShellState {
         let ClientAgentActivityOverlay {
             content,
             transcript,
-            transcript_synced,
             ..
         } = overlay;
         let rows = match content.as_mut() {
             Some(content) if content.is_transcript() => {
-                let current = transcript_synced
-                    .as_ref()
-                    .is_some_and(|(node, revision, synced)| {
-                        node == &content.node_id && *revision == content.revision && *synced == mode
-                    });
-                if !current {
-                    if transcript_synced
-                        .as_ref()
-                        .is_some_and(|(node, _, _)| node != &content.node_id)
-                    {
-                        *transcript = TranscriptView::default();
-                    }
-                    transcript.sync(&content.lines, content.dropped, mode);
-                    *transcript_synced = Some((content.node_id.clone(), content.revision, mode));
-                }
                 transcript.layout(text.width, &speaker);
                 transcript.rows().len()
             }
@@ -2098,6 +2085,36 @@ impl ClientShellState {
 }
 
 impl ClientAgentActivityOverlay {
+    /// 视图计算阶段：所选节点的 Text 内容有变化（节点、内容修订号或解析方式）时重新
+    /// 同步转写；换了节点先丢掉旧节点的展开状态。
+    fn sync_transcript(&mut self, mode: TranscriptMode) {
+        let Some(content) = self
+            .content
+            .as_ref()
+            .filter(|content| content.is_transcript())
+        else {
+            return;
+        };
+        let current = self
+            .transcript_synced
+            .as_ref()
+            .is_some_and(|(node, revision, synced)| {
+                node == &content.node_id && *revision == content.revision && *synced == mode
+            });
+        if current {
+            return;
+        }
+        if self
+            .transcript_synced
+            .as_ref()
+            .is_some_and(|(node, _, _)| node != &content.node_id)
+        {
+            self.transcript = TranscriptView::default();
+        }
+        self.transcript.sync(&content.lines, content.dropped, mode);
+        self.transcript_synced = Some((content.node_id.clone(), content.revision, mode));
+    }
+
     /// 按行滚内容；滚到底且在跟随时重新钉住底部。上界由视图计算阶段夹紧。
     fn scroll_content(&mut self, delta: isize) {
         self.content_scroll = self.content_scroll.saturating_add_signed(delta);
