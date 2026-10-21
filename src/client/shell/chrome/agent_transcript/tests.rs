@@ -134,7 +134,7 @@ fn codex_transcript_is_split_into_blocks() {
         ]
     );
     // 工具行可折叠，开关值是区块首行的绝对行号派生的键。
-    assert_eq!(toggles(&view), [2 * SUBS_PER_LINE, 5 * SUBS_PER_LINE]);
+    assert_eq!(toggles(&view), [block_key(2, 0), block_key(5, 0)]);
     let quote = row_with(&view, "│ Task name: /root/print_probe Payload: (encrypted)");
     assert_eq!(
         quote
@@ -172,15 +172,15 @@ fn claude_results_pair_with_calls_in_order() {
         ]
     );
     // 同一行的四个区块各有自己的键；报错的结果把工具名染成失败色。
-    assert_eq!(toggles(&view), [SUBS_PER_LINE + 2, SUBS_PER_LINE + 3]);
+    assert_eq!(toggles(&view), [block_key(1, 2), block_key(1, 3)]);
     let read = row_with(&view, "▸ Read  src/lib.rs  +1 行");
     assert_eq!(read.segments[1].tone, Tone::Failure);
     assert_eq!(view.stats().tool_calls, 2);
     assert_eq!(view.last_output(), Some("Done."));
 
     let mut view = view;
-    assert!(view.toggle(SUBS_PER_LINE + 2));
-    assert!(view.toggle(SUBS_PER_LINE + 3));
+    assert!(view.toggle(block_key(1, 2)));
+    assert!(view.toggle(block_key(1, 3)));
     view.layout(60, "Hume");
     let rows = texts(&view);
     let bash = rows
@@ -217,7 +217,7 @@ fn opencode_thinking_with_a_note_is_foldable() {
             "  Done anyway",
         ]
     );
-    assert!(view.toggle(SUBS_PER_LINE));
+    assert!(view.toggle(block_key(1, 0)));
     view.layout(60, "Hume");
     let rows = texts(&view);
     assert!(rows.contains(&"▾ 思考".to_owned()), "{rows:#?}");
@@ -269,7 +269,7 @@ fn cjk_text_wraps_within_the_width_without_splitting_characters() {
 fn toggle_and_toggle_all_switch_both_ways() {
     let _lang = zh();
     let mut view = transcript(CODEX, 60);
-    let exec = 2 * SUBS_PER_LINE;
+    let exec = block_key(2, 0);
     assert!(view.toggle(exec));
     view.layout(60, "Hume");
     assert!(texts(&view).contains(&"  │ Script completed".to_owned()));
@@ -282,8 +282,8 @@ fn toggle_and_toggle_all_switch_both_ways() {
     assert!(!texts(&view).contains(&"  │ Script completed".to_owned()));
 
     // 不可折叠或不存在的区块不变。
-    assert!(!view.toggle(8 * SUBS_PER_LINE));
-    assert!(!view.toggle(999 * SUBS_PER_LINE));
+    assert!(!view.toggle(block_key(8, 0)));
+    assert!(!view.toggle(block_key(999, 0)));
 
     assert!(view.toggle_all());
     view.layout(60, "Hume");
@@ -380,8 +380,8 @@ fn a_changed_line_after_a_blank_output_line_reparses_the_tool() {
 fn expanded_state_survives_appends_and_head_drops() {
     let _lang = zh();
     let mut view = transcript(CODEX, 60);
-    let exec = 2 * SUBS_PER_LINE;
-    let shell = 5 * SUBS_PER_LINE;
+    let exec = block_key(2, 0);
+    let shell = block_key(5, 0);
     assert!(view.toggle(exec));
     assert!(view.toggle(shell));
     let mut longer = CODEX.to_vec();
@@ -511,4 +511,40 @@ fn english_labels_follow_the_language() {
         rows.contains(&"▸ grep  grep docs  +1 lines".to_owned()),
         "{rows:#?}"
     );
+}
+
+/// Claude 一行里的并行工具调用再多，各自的折叠键也互不冲突。
+#[test]
+fn many_blocks_on_one_line_toggle_independently() {
+    let _lang = zh();
+    let calls: String = (0..20)
+        .map(|index| format!(" [tool T{index}] arg{index}"))
+        .collect();
+    let mut lines = vec![format!("[assistant]{calls}")];
+    for index in 0..20 {
+        lines.push("[user] [tool result]".to_owned());
+        lines.push(format!("    out{index}"));
+    }
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let mut view = transcript(&lines, 60);
+    let keys = toggles(&view);
+    assert_eq!(keys.len(), 20);
+    let unique: HashSet<u64> = keys.iter().copied().collect();
+    assert_eq!(unique.len(), 20, "键互不相同");
+    assert_eq!(keys[17], block_key(0, 17));
+
+    assert!(view.toggle(keys[17]));
+    view.layout(60, "Hume");
+    let rows = texts(&view);
+    assert!(rows.contains(&"▾ T17  arg17".to_owned()), "{rows:#?}");
+    assert!(rows.contains(&"  │ out17".to_owned()), "{rows:#?}");
+    assert!(
+        rows.contains(&"▸ T16  arg16  +1 行".to_owned()),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.contains(&"▸ T18  arg18  +1 行".to_owned()),
+        "{rows:#?}"
+    );
+    assert!(!rows.contains(&"  │ out16".to_owned()), "{rows:#?}");
 }

@@ -91,8 +91,9 @@ pub(in crate::client::shell) struct TranscriptStats {
 
 /// 适配器给工具输出、计划条目加的缩进。
 const INDENT: &str = "    ";
-/// 同一原文行最多区分的区块数（Claude 一行里可能有多个并行的工具调用）。
-const SUBS_PER_LINE: u64 = 16;
+/// 区块键里同一行序号占的低位数：首行绝对行号放高位，同一行（Claude 一行里可能有
+/// 很多并行的工具调用）的区块互不冲突。
+const SUB_BITS: u32 = 32;
 /// 方括号标签的长度上限：更长的不当作标签。
 const MAX_TAG_CHARS: usize = 96;
 /// 工具标题行里保住「+N 行」时，前面至少留给开关与名字开头的列数。
@@ -142,7 +143,7 @@ impl TranscriptView {
             self.blocks.clear();
             self.parse_from(0);
             self.associate();
-            let floor = first_line.saturating_mul(SUBS_PER_LINE);
+            let floor = block_key(first_line, 0);
             self.expanded.retain(|key| *key >= floor);
             self.laid = None;
             self.dirty = Some(0);
@@ -614,7 +615,7 @@ struct Block {
     /// 首行的绝对行号。
     line: u64,
     /// 同一行拆出的第几个区块。
-    sub: u8,
+    sub: u32,
     /// 来源原文的结束行（不含，绝对行号）。
     end: u64,
     kind: Kind,
@@ -622,10 +623,14 @@ struct Block {
 
 impl Block {
     fn key(&self) -> u64 {
-        self.line
-            .saturating_mul(SUBS_PER_LINE)
-            .saturating_add(u64::from(self.sub).min(SUBS_PER_LINE - 1))
+        block_key(self.line, self.sub)
     }
+}
+
+/// 区块键：首行绝对行号在高位、同一行里的序号在低 [`SUB_BITS`] 位。追加内容与丢弃
+/// 头部时不变；行号大到放不下时饱和（实际转写远到不了）。
+fn block_key(line: u64, sub: u32) -> u64 {
+    line.saturating_mul(1 << SUB_BITS) | u64::from(sub)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
