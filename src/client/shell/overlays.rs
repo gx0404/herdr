@@ -353,7 +353,12 @@ fn char_width(ch: char) -> usize {
 /// 末尾），没有空格时按列硬断（长路径）；溢出的恰好是空格时就在它前面断，这个
 /// 空格（连同紧跟的空格）不带到下一行行首，行首空格也不记作断点。消息里的
 /// 换行符强制断行。空文字也占一行。设置页安装消息与欢迎页正文共用。
-fn wrap_text(text: &str, first: usize, rest: usize, mut emit: impl FnMut(usize, usize)) {
+pub(in crate::client::shell) fn wrap_text(
+    text: &str,
+    first: usize,
+    rest: usize,
+    mut emit: impl FnMut(usize, usize),
+) {
     let mut width = first.max(1);
     let mut start = 0usize;
     let mut used = 0usize;

@@ -10,6 +10,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::api::schema::AgentActivityStatus;
 use crate::app::state::{ComponentStyles, Palette};
 use crate::config::StatusIndicatorStyle;
 use crate::harness::AgentBucket;
@@ -73,6 +74,28 @@ pub fn status_style(bucket: AgentBucket, palette: &Palette, components: &Compone
         AgentBucket::NeedsInput | AgentBucket::Failed => style.add_modifier(Modifier::BOLD),
         _ => style,
     }
+}
+
+/// 活动树节点状态 → 状态桶：子智能体页面、Inspector 与会话树共用这一个映射，字形与
+/// 颜色再经 [`status_glyph`] / [`status_color`] 取，不另建映射。已完成算「待查看」，
+/// 等待算空闲，未知不画状态、不参与汇总。
+pub fn activity_bucket(status: AgentActivityStatus) -> AgentBucket {
+    match status {
+        AgentActivityStatus::Running => AgentBucket::Working,
+        AgentActivityStatus::Blocked => AgentBucket::NeedsInput,
+        AgentActivityStatus::Failed => AgentBucket::Failed,
+        AgentActivityStatus::Done => AgentBucket::Review,
+        AgentActivityStatus::Pending => AgentBucket::Idle,
+        AgentActivityStatus::Unknown => AgentBucket::None,
+    }
+}
+
+/// 内容强调：转写里的工具名。青色只用来区分「这是一次工具调用」，不表达状态，
+/// 也不出现在结构面上（状态仍只用 [`status_color`]）。
+// 子智能体页面接入前只有骨架引用；页面落地后删掉这条 allow。
+#[allow(dead_code)]
+pub fn tool_name(palette: &Palette) -> Style {
+    Style::default().fg(palette.teal)
 }
 
 /// 文字层级：标题。
@@ -200,6 +223,23 @@ mod tests {
                 false
             ),
             WORKING_STATIC
+        );
+    }
+
+    #[test]
+    fn activity_statuses_map_onto_the_shared_buckets() {
+        use AgentActivityStatus::*;
+        let mapped = [Running, Blocked, Failed, Done, Pending, Unknown].map(activity_bucket);
+        assert_eq!(
+            mapped,
+            [
+                AgentBucket::Working,
+                AgentBucket::NeedsInput,
+                AgentBucket::Failed,
+                AgentBucket::Review,
+                AgentBucket::Idle,
+                AgentBucket::None,
+            ]
         );
     }
 

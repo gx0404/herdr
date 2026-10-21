@@ -302,14 +302,7 @@ fn label(bucket: AgentBucket) -> &'static str {
 }
 
 fn activity_bucket(status: AgentActivityStatus) -> AgentBucket {
-    match status {
-        AgentActivityStatus::Running => AgentBucket::Working,
-        AgentActivityStatus::Blocked => AgentBucket::NeedsInput,
-        AgentActivityStatus::Failed => AgentBucket::Failed,
-        AgentActivityStatus::Done => AgentBucket::Review,
-        AgentActivityStatus::Pending => AgentBucket::Idle,
-        AgentActivityStatus::Unknown => AgentBucket::None,
-    }
+    design::activity_bucket(status)
 }
 
 fn add(rows: &mut Vec<Row>, text: &str, tone: Tone, width: u16) {

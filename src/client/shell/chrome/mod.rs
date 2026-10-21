@@ -4,6 +4,8 @@
 //! 命中区作为返回值交给调用方登记。上游文件（`workbench/render.rs`、`render.rs`）
 //! 只留薄调用点，fork 自有的视觉代码集中在这里。
 
+pub(in crate::client::shell) mod agent_page;
+pub(in crate::client::shell) mod agent_transcript;
 pub(super) mod command;
 pub(in crate::client::shell) mod inspector;
 pub(super) mod notification;
