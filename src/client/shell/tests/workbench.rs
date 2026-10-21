@@ -3150,3 +3150,60 @@ fn terminal_panel_title_follows_the_active_tab_of_the_group() {
         expected
     );
 }
+
+/// 乘法路径规模证据（app-render「乘法性能路径」）：1 个与 16 个带边框窗格的同一几何下，
+/// 默认帧一个把手都不画、不登记（合并绘制段整段跳过），悬浮只为那一个窗格画，调整布局
+/// 才为每个窗格画。把手工作量从「每帧 × 窗格数」降到「悬浮时 1」。
+#[test]
+fn pane_handles_scale_with_hover_not_with_pane_count() {
+    for count in [1usize, 16] {
+        let mut state = ready_with_bordered_pane();
+        state.workbench.arranging = false;
+        state.config.mouse_capture = true;
+        let mut view = surface();
+        let template = view.panes[0].clone();
+        view.panes = (0..count)
+            .map(|index| {
+                let (col, row) = ((index % 4) as u16, (index / 4) as u16);
+                let mut pane = template.clone();
+                pane.pane_id = format!("pane_s{index}");
+                pane.rect = SurfaceRect {
+                    x: col * 20,
+                    y: row * 6,
+                    width: 20,
+                    height: 6,
+                };
+                pane.inner_rect = SurfaceRect {
+                    x: col * 20 + 1,
+                    y: row * 6 + 1,
+                    width: 18,
+                    height: 4,
+                };
+                pane
+            })
+            .collect();
+        state.workbench.views.insert(
+            "1".into(),
+            crate::client::shell::workbench::View {
+                tab: "tab_1".into(),
+                surface: view,
+                graphics: Default::default(),
+            },
+        );
+        state.compose(133, 32).expect("默认帧");
+        assert_eq!(state.hits.panes.len(), count, "{count} 个窗格都投影");
+        assert!(pane_handles(&state).is_empty(), "{count}：默认不画把手");
+        let last = format!("pane_s{}", count - 1);
+        state.hover = Some(super::super::feedback::ChromeHover::PaneHeader(
+            last.clone(),
+        ));
+        state.compose(133, 32).expect("悬浮帧");
+        let handles = pane_handles(&state);
+        assert_eq!(handles.len(), 1, "{count}：悬浮只画一个");
+        assert_eq!(handles[0].0, last);
+        state.hover = None;
+        state.workbench.arranging = true;
+        state.compose(133, 32).expect("调整布局帧");
+        assert_eq!(pane_handles(&state).len(), count, "{count}：调整布局全部画");
+    }
+}
