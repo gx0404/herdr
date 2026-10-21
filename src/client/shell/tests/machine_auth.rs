@@ -343,6 +343,57 @@ fn auth_guide_starts_interactive_auth_only_on_approval() {
 }
 
 #[test]
+fn auth_copy_actions_report_toasts_without_overwriting_the_guide() {
+    let machine = profile("Build", "dev@build.example", "1");
+    for (button, code, title) in [
+        (
+            MachineAuthButton::CopyFix,
+            "machine_auth:copied_fix",
+            crate::i18n::texts().machine_auth.auth_copied_fix,
+        ),
+        (
+            MachineAuthButton::CopySshAdd,
+            "machine_auth:copied_ssh_add",
+            crate::i18n::texts().machine_auth.copied_ssh_add,
+        ),
+    ] {
+        let mut state = state_with_profiles(std::slice::from_ref(&machine));
+        state.set_endpoint_connection_error_kind(
+            &ClientEndpointId::Ssh(machine.id.clone()),
+            Some(ConnectionErrorKind::AuthRequired {
+                methods: vec!["publickey".into()],
+                identity_file: Some("~/.ssh/build".into()),
+            }),
+        );
+        state.open_machine_auth_for_endpoint(&machine.id, &mut ClientShellInput::default());
+        let mut outcome = ClientShellInput::default();
+        state.activate_machine_auth_button(button, &mut outcome);
+        assert!(outcome.repaint);
+        assert!(outcome.actions.iter().any(|action| matches!(
+            action, ClientShellAction::ClipboardWrite(bytes) if !bytes.is_empty()
+        )));
+        let notice = state
+            .visible_endpoint_notice
+            .as_ref()
+            .expect("copy feedback");
+        assert_eq!(
+            notice.key.kind,
+            super::super::state::ClientEndpointNoticeKind::Success
+        );
+        assert_eq!(notice.key.code, code);
+        assert_eq!(notice.title, title);
+        let Some(ClientMachineAuthView::AuthGuide(guide)) = auth_overlay(&state).view.as_ref()
+        else {
+            panic!("auth guide stays open");
+        };
+        assert!(
+            guide.message.is_none(),
+            "copy feedback does not occupy the guide status line"
+        );
+    }
+}
+
+#[test]
 fn password_prompt_masks_input_and_answers_the_session() {
     let machine = profile("Build", "dev@build.example", "1");
     let mut state = state_with_profiles(std::slice::from_ref(&machine));

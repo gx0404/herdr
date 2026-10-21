@@ -82,7 +82,7 @@ pub(super) fn render_dashboard(
         layout.header.y,
         layout.header.width,
         t.title,
-        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p),
     );
     let cursor = render_search_bar(
         b,
@@ -136,13 +136,10 @@ pub(super) fn render_dashboard(
         );
         let is_selected = index == selected;
         let is_hovered = !is_selected && overlay.hovered.as_ref() == Some(&row.id);
-        // 宽屏工作台与窄屏列表同一套三态：选中 accent 反色 > 悬浮弱底色 > 常态。
-        let hover_bg = super::super::list_row_bg(p, cx.components, is_selected, is_hovered);
-        let style = if is_selected {
-            Style::default().fg(panel_contrast_fg(p)).bg(p.accent)
-        } else {
-            Style::default().fg(p.text).bg(hover_bg)
-        };
+        // 宽屏工作台与窄屏列表同一套三态：选中（中性选中底 + 粗体 + 首列 ▌）>
+        // 悬浮（只换底色）> 常态；状态色与元信息在选中行上照常叠加。
+        let row_bg = super::super::list_row_bg(p, cx.components, is_selected, is_hovered);
+        let style = super::super::list_row_style(p, cx.components, is_selected, is_hovered);
         b.set_style(rect, style);
         let (glyph, state, color) = endpoint_status_presentation(row.status, p, cx.spinner);
         let signal = format!("{glyph} {state}");
@@ -161,11 +158,7 @@ pub(super) fn render_dashboard(
             rect.y,
             signal_width,
             &signal,
-            if index == selected {
-                style
-            } else {
-                style.fg(color)
-            },
+            Style::default().fg(color).bg(row_bg),
         );
         let version = row
             .server_version
@@ -179,12 +172,8 @@ pub(super) fn render_dashboard(
             rect.y + 1,
             rect.width
                 .saturating_sub(version_width + u16::from(version_width > 0)),
-            &row.target,
-            if index == selected {
-                style
-            } else {
-                style.fg(p.overlay0)
-            },
+            &format!(" {}", row.target),
+            crate::ui::design::meta(p).bg(row_bg),
         );
         if version_width > 0 {
             put_text(
@@ -193,12 +182,13 @@ pub(super) fn render_dashboard(
                 rect.y + 1,
                 version_width,
                 &version,
-                if index == selected {
-                    style
-                } else {
-                    style.fg(p.overlay0)
-                },
+                crate::ui::design::meta(p).bg(row_bg),
             );
+        }
+        if is_selected {
+            for y in rect.y..rect.bottom() {
+                crate::ui::kit::paint_selection_mark(b, rect.x, y, p);
+            }
         }
         row_hits.push((rect, row.id.clone()));
     }
@@ -216,7 +206,7 @@ pub(super) fn render_dashboard(
             details.header.y,
             details.header.width,
             &profile.label,
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            crate::ui::design::title(p),
         );
         let mut lines = detail_lines(
             profile,
@@ -230,8 +220,8 @@ pub(super) fn render_dashboard(
         })
         .map(|(label, value)| {
             let line = Line::from(vec![
-                Span::styled(format!("{label}  "), Style::default().fg(p.overlay0)),
-                Span::styled(value, Style::default().fg(p.text)),
+                Span::styled(format!("{label}  "), crate::ui::design::meta(p)),
+                Span::styled(value, crate::ui::design::body(p)),
             ]);
             (line.width(), line)
         })

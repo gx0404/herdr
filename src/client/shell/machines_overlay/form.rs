@@ -1193,11 +1193,17 @@ impl ClientShellState {
             }
             (Ok(Some(profile_id)), false) => {
                 overlay.view = ClientMachinesView::List;
-                overlay.set_message(crate::i18n::fill(
-                    crate::i18n::texts().machine_form.saved_fmt,
-                    &[("label", &label)],
-                ));
                 self.select_machine_row(&profile_id);
+                // 保存成功走吐司（右下角），不再占机器页页脚的最后一行。
+                self.push_endpoint_notice(
+                    super::super::state::ClientEndpointNoticeKind::Success,
+                    "machine:saved",
+                    crate::i18n::fill(
+                        crate::i18n::texts().machine_form.saved_fmt,
+                        &[("label", &label)],
+                    ),
+                    target,
+                );
             }
             // 编辑期间档案被外部删掉：回列表。
             (Ok(None), _) => overlay.view = ClientMachinesView::List,

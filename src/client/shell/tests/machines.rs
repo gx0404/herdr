@@ -1729,7 +1729,7 @@ fn overlay_step_separates_every_destructive_machine_step() {
                 form: ClientForwardRuleForm::blank(),
                 pending_remove: pending,
                 error: None,
-                message: None,
+                note: None,
             })),
             query: TextEditor::default(),
             search_focused: false,
@@ -1793,14 +1793,17 @@ fn forward_remove_is_cancelled_when_the_rules_change_while_armed() {
         3,
         "规则变化后 Enter 不得落盘删除"
     );
-    let (text, _) = frame_compact(&mut state, 110, 32);
-    let stale: String = crate::i18n::texts()
-        .machines
-        .forward_remove_stale
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect();
-    assert!(text.contains(&stale), "给出「规则已变化」提示：{text}");
+    // 「规则已变化」需要用户重选：琥珀色告警吐司，不占列表下方的固定行。
+    assert_eq!(
+        notice(&state),
+        Some((
+            super::super::state::ClientEndpointNoticeKind::Warning,
+            crate::i18n::texts()
+                .machines
+                .forward_remove_stale
+                .to_owned()
+        )),
+    );
 }
 
 #[test]
@@ -1858,14 +1861,14 @@ fn compact(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
-/// 机器面板 toast 的写入时刻；`None` 表示当前没有 toast。
-fn machine_toast_at(state: &ClientShellState) -> Option<std::time::Instant> {
-    match state.overlay.as_ref() {
-        Some(ClientShellOverlay::Machines(overlay)) => {
-            overlay.message.as_ref().map(|toast| toast.at)
-        }
-        _ => None,
-    }
+/// 当前吐司（端点通知）的级别与标题。
+fn notice(
+    state: &ClientShellState,
+) -> Option<(super::super::state::ClientEndpointNoticeKind, String)> {
+    state
+        .visible_endpoint_notice
+        .as_ref()
+        .map(|notice| (notice.key.kind, notice.title.clone()))
 }
 
 /// 只取页脚那几行（`OverlayRender::machines_toast` 报出来的 rect，也是 toast
@@ -1888,95 +1891,45 @@ fn machines_footer_text(state: &mut ClientShellState, cols: u16, rows: u16) -> S
         .join(" ")
 }
 
-/// HERDR-MACH-006：`overlay.message` 是机器面板的公共 toast。Detail 视图按
-/// `c` 之后反馈必须画在弹窗底部（此前唯一渲染点在窄屏 List 分支，Detail 与
-/// 宽屏 dashboard 零反馈），并带时间戳由 feedback tick 自动清除。
+/// HERDR-MACH-006：机器页（详情、宽屏工作台、窄屏列表）里的操作反馈统一走
+/// 吐司（端点通知），不再叠画在页脚最后一行：页脚文字与命中区在反馈前后逐项
+/// 不变，页面状态里也不留页内 toast。
 #[test]
-fn machine_toast_renders_in_the_detail_view_and_expires() {
+fn machine_feedback_is_a_toast_that_leaves_the_footer_alone() {
+    use super::super::state::ClientEndpointNoticeKind;
     let saved = profile("Build", "dev@build.example", "60");
-    let mut state = state_with_profiles(std::slice::from_ref(&saved));
-    // 入场动画会让 `overlay_since` 也挂一个截止时刻，那样「toast 自己挂唤醒
-    // 时刻」这条断言只要有动画就恒真。关掉动画，`chrome_feedback_deadline()`
-    // 的唯一来源就只剩 toast。
-    state.config.feedback.animations = false;
-    state.open_machines_overlay_for(&saved.id);
-    let mut outcome = ClientShellInput::default();
-    state.route_machines_key(&key(KeyCode::Char('c')), &mut outcome);
+    for (detail, cols, rows) in [(true, 106u16, 36u16), (false, 130, 40), (false, 80, 30)] {
+        let mut state = state_with_profiles(std::slice::from_ref(&saved));
+        if detail {
+            state.open_machines_overlay_for(&saved.id);
+        } else {
+            state.open_machines_overlay();
+        }
+        let footer_before = machines_footer_text(&mut state, cols, rows);
+        let hits_before = state.hits.machines_actions.clone();
 
-    let copied = compact(crate::i18n::texts().machines.copied_fix_command);
-    let text = frame_text(&mut state, 106, 36);
-    assert!(
-        compact(&text).contains(&copied),
-        "Detail 视图应显示 toast: {text}"
-    );
-
-    // toast 必须自己挂一个截止时刻，否则没有后续事件时它永远不消失。
-    let at = machine_toast_at(&state).expect("toast 写入时刻");
-    assert_eq!(
-        state.chrome_feedback_deadline(),
-        Some(at + super::super::machines_overlay::MACHINE_TOAST_DURATION),
-        "唤醒时刻必须由 toast 自己给出"
-    );
-
-    // 边界：到期前一刻不清，到期即清。
-    let almost = at + super::super::machines_overlay::MACHINE_TOAST_DURATION
-        - std::time::Duration::from_millis(1);
-    assert!(!state.tick_chrome_feedback(almost), "到期前不应重绘");
-    assert!(
-        machine_toast_at(&state).is_some(),
-        "到期前 toast 不应被清除"
-    );
-
-    let expired = at + super::super::machines_overlay::MACHINE_TOAST_DURATION;
-    assert!(
-        state.tick_chrome_feedback(expired),
-        "toast 到期必须请求一次重绘"
-    );
-    assert!(machine_toast_at(&state).is_none(), "到期后 toast 应被清除");
-    let text = frame_text(&mut state, 106, 36);
-    assert!(
-        !compact(&text).contains(&copied),
-        "toast 到期后应消失: {text}"
-    );
-}
-
-/// toast 是一次性反馈而不是入场动画：`feedback.animations` 开着时同样按
-/// `MACHINE_TOAST_DURATION` 清除（提交注释声称的性质，此前无测试兜底）。
-#[test]
-fn machine_toast_expires_with_animations_enabled() {
-    let saved = profile("Build", "dev@build.example", "64");
-    let mut state = state_with_profiles(std::slice::from_ref(&saved));
-    assert!(
-        state.config.feedback.animations,
-        "默认应开启入场动画，这条用例才有意义"
-    );
-    state.open_machines_overlay_for(&saved.id);
-    state.route_machines_key(&key(KeyCode::Char('c')), &mut ClientShellInput::default());
-
-    let at = machine_toast_at(&state).expect("toast 写入时刻");
-    assert!(
-        state.tick_chrome_feedback(at + super::super::machines_overlay::MACHINE_TOAST_DURATION),
-        "toast 到期必须请求一次重绘"
-    );
-    assert!(machine_toast_at(&state).is_none(), "到期后 toast 应被清除");
-}
-
-/// 同一条 toast 在宽屏 dashboard 上也必须可见（向导成功的「机器 X 已就绪」
-/// 此前在宽屏直接消失）。
-#[test]
-fn machine_toast_renders_on_the_wide_dashboard() {
-    let saved = profile("Build", "dev@build.example", "61");
-    let mut state = state_with_profiles(std::slice::from_ref(&saved));
-    state.open_machines_overlay();
-    let mut outcome = ClientShellInput::default();
-    state.route_machines_key(&key(KeyCode::Char('c')), &mut outcome);
-
-    let copied = compact(crate::i18n::texts().machines.copied_fix_command);
-    let text = frame_text(&mut state, 130, 40);
-    assert!(
-        compact(&text).contains(&copied),
-        "dashboard 应显示 toast: {text}"
-    );
+        let mut outcome = ClientShellInput::default();
+        state.route_machines_key(&key(KeyCode::Char('c')), &mut outcome);
+        assert!(outcome.repaint, "{cols} 列：反馈要重绘");
+        assert_eq!(
+            notice(&state),
+            Some((
+                ClientEndpointNoticeKind::Success,
+                crate::i18n::texts().machines.copied_fix_command.to_owned()
+            )),
+            "{cols} 列：复制修复命令应推一条成功吐司"
+        );
+        let footer_after = machines_footer_text(&mut state, cols, rows);
+        assert_eq!(footer_before, footer_after, "{cols} 列：页脚不被反馈覆盖");
+        assert_eq!(
+            hits_before, state.hits.machines_actions,
+            "{cols} 列：页脚命中区原样保留"
+        );
+        let Some(ClientShellOverlay::Machines(overlay)) = state.overlay.as_ref() else {
+            panic!("机器页");
+        };
+        assert!(overlay.message.is_none(), "不再写页内 toast");
+    }
 }
 
 /// HERDR-MACH-007：宽屏 dashboard 接管 List 之后，网格里的「转发 / 浏览文件 /
@@ -3002,8 +2955,15 @@ fn save_persists_a_new_machine_without_testing() {
         crate::i18n::texts().machine_form.saved_fmt,
         &[("label", "build.example")],
     );
-    let text = compact(&frame_text(&mut state, 106, 32));
-    assert!(text.contains(&compact(&saved)), "保存反馈：{text}");
+    // 保存反馈是吐司（端点通知），落点由通知层决定，不画进机器页。
+    assert_eq!(
+        notice(&state),
+        Some((
+            super::super::state::ClientEndpointNoticeKind::Success,
+            saved
+        )),
+        "保存反馈"
+    );
     assert_eq!(state.saved_profiles.len(), 1);
 }
 
@@ -3665,10 +3625,10 @@ fn esc_with_unsaved_changes_asks_before_discarding_the_form() {
     ));
 }
 
-/// toast 盖在列表页脚的最后一行上时，那一行的页脚项既看不见也不可点：
-/// 点 toast 文字不会触发底下被盖住的按钮；toast 到期后页脚恢复可点。
+/// 反馈吐司不吞页脚：复制修复命令之后，页脚最后一行的按钮仍可点、点了照常
+/// 生效（此前页内 toast 盖住最后一行时要临时摘掉那几项命中区）。
 #[test]
-fn machine_toast_row_swallows_no_hidden_footer_clicks() {
+fn machine_footer_stays_clickable_while_feedback_is_shown() {
     let saved = profile("Build", "dev@build.example", "90");
     for (cols, rows) in [(80u16, 30u16), (130, 40)] {
         let mut state = state_with_profiles(std::slice::from_ref(&saved));
@@ -3677,79 +3637,54 @@ fn machine_toast_row_swallows_no_hidden_footer_clicks() {
         frame_text(&mut state, cols, rows);
         let footer = state.hits.machines_footer;
         let last_row = footer.bottom() - 1;
-        let covered: Vec<(Rect, MachineOverlayButton)> = state
+        let before: Vec<(Rect, MachineOverlayButton)> = state
             .hits
             .machines_actions
             .iter()
             .filter(|(rect, _)| rect.y == last_row)
             .copied()
             .collect();
-        assert!(!covered.is_empty(), "{cols} 列：页脚最后一行应有按钮");
+        assert!(!before.is_empty(), "{cols} 列：页脚最后一行应有按钮");
 
         state.route_machines_key(&key(KeyCode::Char('c')), &mut ClientShellInput::default());
-        let text = frame_text(&mut state, cols, rows);
-        assert!(
-            compact(&text).contains(&compact(crate::i18n::texts().machines.copied_fix_command)),
-            "{cols} 列：{text}"
-        );
-        assert!(
-            state
-                .hits
-                .machines_actions
-                .iter()
-                .all(|(rect, _)| rect.y != last_row),
-            "{cols} 列：toast 行不留命中区：{:?}",
-            state.hits.machines_actions
-        );
-        for (rect, button) in &covered {
-            let mut outcome = ClientShellInput::default();
-            state.handle_mouse(left_click(rect.x, rect.y), &mut outcome);
-            assert!(
-                outcome.actions.is_empty(),
-                "{cols} 列 {button:?}：{:?}",
-                outcome.actions
-            );
-            assert!(
-                machines_view_is_list(&state),
-                "{cols} 列：点 toast 不触发被盖住的 {button:?}"
-            );
-        }
-
-        // 到期后页脚最后一行恢复可点。
-        let at = machine_toast_at(&state).expect("toast");
-        state.tick_chrome_feedback(at + super::super::machines_overlay::MACHINE_TOAST_DURATION);
         frame_text(&mut state, cols, rows);
-        let restored = state
+        let after: Vec<(Rect, MachineOverlayButton)> = state
             .hits
             .machines_actions
             .iter()
             .filter(|(rect, _)| rect.y == last_row)
-            .count();
-        assert_eq!(restored, covered.len(), "{cols} 列");
+            .copied()
+            .collect();
+        assert_eq!(before, after, "{cols} 列：反馈期间页脚命中区不变");
     }
 }
 
-/// 保存新机器的 toast 落在列表；4 秒内再打开添加表单，表单唯一的一行页脚
-/// 不被 toast 盖住（toast 只在列表 / 详情显示），回到列表又能看到它。表单
-/// 里触发的复制修复命令改走通用通知。
+/// 保存新机器：成功走吐司，回列表并选中它；之后打开的表单页脚完整可点。表单里
+/// 触发的复制修复命令同样是吐司。
 #[test]
-fn machine_toast_stays_off_the_form_footer() {
+fn saving_a_new_machine_reports_a_toast_and_keeps_every_footer() {
+    use super::super::state::ClientEndpointNoticeKind;
     let _dir = with_temp_state_home("toast-form");
     let mut state = state_with_profiles(&[]);
     add_form_overlay(&mut state, "build.example", "");
     press(&mut state, key(KeyCode::Enter));
-    let saved_text = compact(&crate::i18n::fill(
+    let saved_text = crate::i18n::fill(
         crate::i18n::texts().machine_form.saved_fmt,
         &[("label", "build.example")],
-    ));
-    assert!(compact(&frame_text(&mut state, 106, 32)).contains(&saved_text));
+    );
+    assert_eq!(
+        notice(&state),
+        Some((ClientEndpointNoticeKind::Success, saved_text.clone()))
+    );
+    assert!(machines_view_is_list(&state));
+    let footer = compact(&machines_footer_text(&mut state, 106, 32));
+    assert!(
+        !footer.contains(&compact(&saved_text)),
+        "成功反馈不进页脚：{footer}"
+    );
 
     press(&mut state, key(KeyCode::Char('a')));
-    let text = compact(&frame_text(&mut state, 106, 32));
-    assert!(
-        !text.contains(&saved_text),
-        "表单页脚不被 toast 盖住：{text}"
-    );
+    frame_text(&mut state, 106, 32);
     let buttons = machine_buttons(&state);
     for expected in [
         MachineOverlayButton::Save,
@@ -3763,17 +3698,13 @@ fn machine_toast_stays_off_the_form_footer() {
     let mut outcome = ClientShellInput::default();
     state.machine_copy_fix_command(&profile_id, &mut outcome);
     assert_eq!(
-        state
-            .visible_endpoint_notice
-            .as_ref()
-            .map(|notice| notice.title.as_str()),
-        Some(crate::i18n::texts().machines.copied_fix_command),
-        "表单里没有 toast 落点，走通用通知"
+        notice(&state),
+        Some((
+            ClientEndpointNoticeKind::Success,
+            crate::i18n::texts().machines.copied_fix_command.to_owned()
+        )),
+        "表单里同一条反馈通道"
     );
-
-    press(&mut state, key(KeyCode::Esc));
-    assert!(machines_view_is_list(&state));
-    assert!(compact(&frame_text(&mut state, 106, 32)).contains(&saved_text));
 }
 
 // ---------------------------------------------------------------------
@@ -4062,7 +3993,12 @@ fn import_select_is_a_checklist_with_a_live_preview() {
     let f = &crate::i18n::texts().machine_form;
 
     let text = compact(&frame_text(&mut state, 110, 32));
-    assert!(text.contains(&compact(f.import_select_hint)), "{text}");
+    assert!(
+        text.contains(&compact(
+            &f.import_select_hint.replacen("Enter", "enter", 1)
+        )),
+        "{text}"
+    );
     assert!(text.contains(&compact(f.preview_title)), "{text}");
     assert!(text.contains("[x]bastion"), "{text}");
     assert!(
@@ -4304,4 +4240,115 @@ fn import_kitty_capital_g_uses_the_shifted_alternate() {
     state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Key(key)]);
     let probe = import_probe(&state);
     assert_eq!(probe.focus_row, probe.candidates + 1);
+}
+
+// ---------------------------------------------------------------------
+// Graphite 精修：选中态、危险确认
+// ---------------------------------------------------------------------
+
+fn frame_cell(frame: &crate::protocol::FrameData, x: u16, y: u16) -> &crate::protocol::CellData {
+    &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)]
+}
+
+/// 窄屏列表与宽屏工作台：键盘选中行是中性选中底 + 首列 accent `▌`（两行条目两行
+/// 都画），不再整行 accent 反色；指针悬浮只换底色、不画 `▌`，两者始终可辨。
+#[test]
+fn machine_rows_mark_the_selection_with_a_bar_not_an_accent_fill() {
+    let build = profile("Build", "dev@build.example", "1");
+    let stage = profile("Stage", "stage.example", "2");
+    for (cols, rows, hover) in [(80u16, 24u16, true), (130, 40, false)] {
+        let mut state = state_with_profiles(&[build.clone(), stage.clone()]);
+        state.open_machines_overlay();
+        state.compose(cols, rows).expect("machines");
+        let (second, _) = state.hits.machines_rows[1].clone();
+        if hover {
+            state.handle_mouse(
+                moved_mouse(second.x + 3, second.y),
+                &mut ClientShellInput::default(),
+            );
+        }
+        let frame = state.compose(cols, rows).expect("machines").clone();
+        let palette = &state.config.palette;
+        let accent = crate::protocol::color_to_u32(palette.accent);
+        let selected_bg = crate::protocol::color_to_u32(palette.selection_row_bg());
+        let (first, _) = state.hits.machines_rows[0].clone();
+        for y in first.y..first.bottom() {
+            let mark = frame_cell(&frame, first.x, y);
+            assert_eq!(mark.symbol, "▌", "{cols} 列：选中行首列竖条");
+            assert_eq!(mark.fg, accent, "{cols} 列：竖条是 accent");
+        }
+        let label = frame_cell(&frame, first.x + 4, first.y);
+        assert_eq!(label.bg, selected_bg, "{cols} 列：中性选中底");
+        assert_ne!(label.bg, accent, "{cols} 列：不再 accent 反色");
+        assert_ne!(frame_cell(&frame, second.x, second.y).symbol, "▌");
+        if hover {
+            assert_eq!(
+                frame_cell(&frame, second.x + 4, second.y).bg,
+                crate::protocol::color_to_u32(state.config.components.hover_bg),
+                "悬浮行只换底色"
+            );
+        }
+    }
+}
+
+/// 删除机器的确认：浮层边框是中性结构色，危险语义落在红色 `✕` 标题与危险色的
+/// 确认键帽上。
+#[test]
+fn remove_confirmation_carries_danger_on_the_title_and_the_confirm_key() {
+    let saved = profile("Build", "dev@build.example", "91");
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machine_remove_confirm(&saved.id);
+    let frame = state.compose(100, 30).expect("confirm").clone();
+    let red = crate::protocol::color_to_u32(state.config.palette.red);
+    let cross = frame
+        .cells
+        .iter()
+        .position(|cell| cell.symbol == "✕")
+        .expect("标题带 ✕");
+    assert_eq!(frame.cells[cross].fg, red, "标题图标是红色");
+    let (confirm, _) = state
+        .hits
+        .machines_actions
+        .iter()
+        .find(|(_, button)| *button == MachineOverlayButton::ConfirmRemove)
+        .copied()
+        .expect("确认键可点");
+    assert_eq!(
+        frame_cell(&frame, confirm.x, confirm.y).bg,
+        red,
+        "确认键帽用危险色"
+    );
+    // 边框不是红色。
+    let popup = state.hits.machines_popup;
+    assert_ne!(frame_cell(&frame, popup.x, popup.y).fg, red, "边框中性");
+}
+
+/// 端口转发规则：选中行同样是中性选中底 + `▌`；保存结果走成功吐司。
+#[test]
+fn forward_rules_use_the_bar_selection_and_report_saves_as_toasts() {
+    use super::super::state::ClientEndpointNoticeKind;
+    let _dir = with_temp_home("forwards-graphite");
+    let saved = seed_forward_profile(2);
+    let mut state = state_with_profiles(std::slice::from_ref(&saved));
+    state.open_machines_overlay_for(&saved.id);
+    state.route_machines_key(&key(KeyCode::Char('f')), &mut ClientShellInput::default());
+    let frame = state.compose(110, 32).expect("forwards").clone();
+    let (first, _) = state.hits.machines_wizard_rows[0];
+    let mark = frame_cell(&frame, first.x, first.y);
+    assert_eq!(mark.symbol, "▌");
+    assert_ne!(
+        frame_cell(&frame, first.x + 2, first.y).bg,
+        crate::protocol::color_to_u32(state.config.palette.accent)
+    );
+
+    // 删除一条：成功吐司，不在列表下方叠画绿色文字。
+    state.route_machines_key(&key(KeyCode::Char('x')), &mut ClientShellInput::default());
+    state.route_machines_key(&key(KeyCode::Enter), &mut ClientShellInput::default());
+    assert_eq!(
+        notice(&state),
+        Some((
+            ClientEndpointNoticeKind::Success,
+            crate::i18n::texts().machines.forward_removed.to_owned()
+        ))
+    );
 }

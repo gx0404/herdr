@@ -848,7 +848,14 @@ impl ClientShellState {
         outcome
             .actions
             .push(ClientShellAction::ClipboardWrite(command.into_bytes()));
-        guide.message = Some(crate::i18n::texts().machine_auth.auth_copied_fix.to_owned());
+        let label = guide.profile.label.clone();
+        // 复制结果是一次性反馈：走吐司，向导里的状态行只留给进行中 / 失败 / 完成。
+        self.push_endpoint_notice(
+            super::state::ClientEndpointNoticeKind::Success,
+            "machine_auth:copied_fix",
+            crate::i18n::texts().machine_auth.auth_copied_fix,
+            label,
+        );
         outcome.repaint = true;
     }
 
@@ -865,7 +872,12 @@ impl ClientShellState {
         outcome.actions.push(ClientShellAction::ClipboardWrite(
             format!("ssh-add {identity_file}").into_bytes(),
         ));
-        guide.message = Some(crate::i18n::texts().machine_auth.copied_ssh_add.to_owned());
+        self.push_endpoint_notice(
+            super::state::ClientEndpointNoticeKind::Success,
+            "machine_auth:copied_ssh_add",
+            crate::i18n::texts().machine_auth.copied_ssh_add,
+            format!("ssh-add {identity_file}"),
+        );
         outcome.repaint = true;
     }
 
@@ -1262,7 +1274,7 @@ fn render_host_key_unknown(
         stack.header.y + 5,
         stack.header.width,
         t.tofu_verify_hint,
-        base.fg(p.overlay0),
+        base.patch(crate::ui::design::muted(p)),
     );
     status_line(
         b,
@@ -1543,7 +1555,7 @@ fn render_auth_guide(
             stack.header.y + 4,
             stack.header.width,
             t.passphrase_agent_hint,
-            base.fg(p.overlay0),
+            base.patch(crate::ui::design::muted(p)),
         );
     }
     status_line(
@@ -1647,7 +1659,7 @@ fn render_ssh_host_prompt(
         layout.header.y,
         layout.header.width,
         t.tofu_title,
-        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p),
     );
     let clean = view
         .prompt
@@ -1693,12 +1705,12 @@ fn render_ssh_host_prompt(
         b,
         layout.footer,
         &[
-            ("Enter".into(), t.hint_trust.into()),
+            ("enter".into(), t.hint_trust.into()),
             (
-                "PgUp/PgDn".into(),
+                "pgup / pgdn".into(),
                 crate::i18n::texts().global_menu.footer_select.into(),
             ),
-            ("Esc".into(), t.hint_abort.into()),
+            ("esc".into(), t.hint_abort.into()),
         ],
         p,
     );
@@ -1791,7 +1803,7 @@ fn render_password_prompt(
         stack.header.y + 3,
         stack.header.width,
         t.password_hidden_note,
-        base.fg(p.overlay0),
+        base.patch(crate::ui::design::muted(p)),
     );
     if let Some(footer) = stack.footer {
         let footer_text = if view.is_passphrase {
@@ -1805,7 +1817,7 @@ fn render_password_prompt(
             footer.y,
             footer.width,
             footer_text,
-            base.fg(p.overlay0),
+            base.patch(crate::ui::design::muted(p)),
         );
     }
 

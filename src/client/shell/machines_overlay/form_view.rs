@@ -466,10 +466,7 @@ fn render_group_title(b: &mut Buffer, area: Rect, group: FieldGroup, p: &Palette
         area.y,
         width,
         title,
-        Style::default()
-            .fg(p.accent)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD),
+        crate::ui::design::section(p).bg(p.panel_bg),
     );
     let rule_x = area.x.saturating_add(width).saturating_add(1);
     if rule_x < area.right() {
@@ -528,7 +525,10 @@ fn test_lines(
                 format!(" ✓ {}", f.test_passed),
                 base.fg(p.green).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {}", f.test_not_saved), base.fg(p.overlay0)),
+            Span::styled(
+                format!("  {}", f.test_not_saved),
+                base.patch(crate::ui::design::muted(p)),
+            ),
         ]));
     } else if let Some(failure) = bootstrap.failure.as_deref() {
         let step = reached.map_or("SSH", bootstrap_step_label);
@@ -713,7 +713,10 @@ fn preview_lines(
             base.fg(p.text)
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{label}{}  ", " ".repeat(pad)), base.fg(p.overlay0)),
+            Span::styled(
+                format!("{label}{}  ", " ".repeat(pad)),
+                base.patch(crate::ui::design::meta(p)),
+            ),
             Span::styled(value, value_style),
         ]));
     }
@@ -725,7 +728,7 @@ fn preview_lines(
         ));
         lines.push(Line::styled(
             t.confirm_auth_note.to_owned(),
-            base.fg(p.overlay0),
+            base.patch(crate::ui::design::muted(p)),
         ));
     }
     lines

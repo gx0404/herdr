@@ -239,10 +239,19 @@ fn mutating_results_refresh_the_listing_with_a_message() {
         }),
         &mut outcome,
     );
+    // 操作结果走成功吐司（端点通知），不再画在列表最后一行。
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .map(|notice| (notice.key.kind, notice.title.clone()));
     assert_eq!(
-        files_overlay(&mut state).message.as_deref(),
-        Some("created src")
+        notice,
+        Some((
+            super::super::state::ClientEndpointNoticeKind::Success,
+            "created src".to_owned()
+        ))
     );
+    assert!(files_overlay(&mut state).message.is_none());
     // The refresh is a new List op on the new pending ticket.
     let refresh = outcome
         .actions
@@ -430,4 +439,161 @@ fn machine_files_viewer_slices_lines_and_clamps_scroll() {
         !text.contains("line 0001"),
         "frame must not render the head: {text}"
     );
+}
+
+/// 按一个键，返回它发出的文件操作票据（没有发操作时为 `None`）。
+fn press_files(state: &mut ClientShellState, code: KeyCode) -> Option<u64> {
+    let mut outcome = ClientShellInput::default();
+    state.route_machine_files_key(&crossterm_key(code), &mut outcome);
+    outcome.actions.iter().find_map(|action| match action {
+        ClientShellAction::MachineFsOp { ticket, .. } => Some(*ticket),
+        _ => None,
+    })
+}
+
+fn cell_at(frame: &crate::protocol::FrameData, x: u16, y: u16) -> &crate::protocol::CellData {
+    &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)]
+}
+
+/// 写操作 / 读文件失败是一次性反馈：红色吐司，列表与页面状态不变；列目录失败是
+/// 页面状态：清掉旧条目（不能对过期条目下载 / 删除），正文画「出错」空状态。
+#[test]
+fn file_failures_split_between_toasts_and_the_page_error_state() {
+    use super::super::machine_files_overlay::{machine_files_empty_kind, MachineFilesEmpty};
+    let build = profile("Build", "build.example", "53");
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    open_files(&mut state, &build);
+    state.handle_machine_fs_result(
+        1,
+        Ok(super::super::state::MachineFsOutcome::Entries {
+            entries: vec![entry("src", RemoteEntryKind::Directory)],
+        }),
+        &mut ClientShellInput::default(),
+    );
+    // mkdir 失败：吐司，条目仍在。
+    press_files(&mut state, KeyCode::Char('m'));
+    state.insert_overlay_text("new");
+    let ticket = press_files(&mut state, KeyCode::Enter).expect("mkdir op");
+    state.handle_machine_fs_result(
+        ticket,
+        Err("permission denied".into()),
+        &mut ClientShellInput::default(),
+    );
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .map(|notice| (notice.key.kind, notice.title.clone()));
+    assert_eq!(
+        notice.map(|(kind, _)| kind),
+        Some(super::super::state::ClientEndpointNoticeKind::Rejected)
+    );
+    assert!(
+        files_overlay(&mut state).error.is_none(),
+        "写失败不进页面状态"
+    );
+    assert_eq!(files_overlay(&mut state).filtered_count, 1);
+
+    // 刷新列目录失败：页面「出错」空状态。
+    let ticket = press_files(&mut state, KeyCode::Char('r')).expect("list op");
+    state.handle_machine_fs_result(
+        ticket,
+        Err("no such directory".into()),
+        &mut ClientShellInput::default(),
+    );
+    assert_eq!(files_overlay(&mut state).filtered_count, 0);
+    assert_eq!(
+        machine_files_empty_kind(files_overlay(&mut state)),
+        MachineFilesEmpty::Error("no such directory")
+    );
+    let frame = state.compose(100, 28).expect("files frame");
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("no such directory"), "{text}");
+}
+
+/// 「空目录」与「过滤无匹配」是两种空状态：过滤后为空时不能说目录是空的。
+#[test]
+fn empty_directory_and_filter_without_matches_are_distinct() {
+    use super::super::machine_files_overlay::{machine_files_empty_kind, MachineFilesEmpty};
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let t = &crate::i18n::texts().machine_files;
+    let build = profile("Build", "build.example", "54");
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    open_files(&mut state, &build);
+    assert_eq!(
+        machine_files_empty_kind(files_overlay(&mut state)),
+        MachineFilesEmpty::Loading
+    );
+    state.handle_machine_fs_result(
+        1,
+        Ok(super::super::state::MachineFsOutcome::Entries { entries: vec![] }),
+        &mut ClientShellInput::default(),
+    );
+    assert_eq!(
+        machine_files_empty_kind(files_overlay(&mut state)),
+        MachineFilesEmpty::EmptyDirectory
+    );
+    let text = frame_rows(&state.compose(100, 28).expect("frame")).join("\n");
+    assert!(text.contains(t.empty.trim()), "{text}");
+
+    // 有条目但过滤后为空。
+    let ticket = press_files(&mut state, KeyCode::Char('r')).expect("list op");
+    state.handle_machine_fs_result(
+        ticket,
+        Ok(super::super::state::MachineFsOutcome::Entries {
+            entries: vec![entry("app.log", RemoteEntryKind::File)],
+        }),
+        &mut ClientShellInput::default(),
+    );
+    files_overlay(&mut state).search_focused = true;
+    state.insert_overlay_text("zzz");
+    assert_eq!(
+        machine_files_empty_kind(files_overlay(&mut state)),
+        MachineFilesEmpty::NoMatches
+    );
+    let text = frame_rows(&state.compose(100, 28).expect("frame")).join("\n");
+    assert!(text.contains("No entries match the filter"), "{text}");
+    assert!(
+        !text.contains(t.empty.trim()),
+        "过滤无匹配不说空目录：{text}"
+    );
+    assert!(text.contains("Edit or clear the filter above"));
+    // 清空正在编辑的过滤词后恢复已有条目，不需要重新请求远端目录。
+    for _ in 0..3 {
+        assert!(press_files(&mut state, KeyCode::Backspace).is_none());
+    }
+    assert_eq!(files_overlay(&mut state).filtered_count, 1);
+    let text = frame_rows(&state.compose(100, 28).expect("frame")).join("\n");
+    assert!(text.contains("app.log"));
+    assert!(!text.contains("No entries match the filter"));
+}
+
+/// Graphite 选中态：选中条目是中性选中底 + 首列 accent `▌`，不再整行 accent 反色。
+#[test]
+fn selected_file_row_uses_the_neutral_selection_and_bar() {
+    let build = profile("Build", "build.example", "55");
+    let mut state = state_with_profiles(std::slice::from_ref(&build));
+    open_files(&mut state, &build);
+    state.handle_machine_fs_result(
+        1,
+        Ok(super::super::state::MachineFsOutcome::Entries {
+            entries: vec![
+                entry("src", RemoteEntryKind::Directory),
+                entry("README.md", RemoteEntryKind::File),
+            ],
+        }),
+        &mut ClientShellInput::default(),
+    );
+    let frame = state.compose(100, 28).expect("files frame");
+    let palette = &state.config.palette;
+    let accent = crate::protocol::color_to_u32(palette.accent);
+    let selected_bg = crate::protocol::color_to_u32(palette.selection_row_bg());
+    let (first, _) = state.hits.machine_files_rows[0];
+    let (second, _) = state.hits.machine_files_rows[1];
+    let mark = cell_at(&frame, first.x, first.y);
+    assert_eq!(mark.symbol, "▌");
+    assert_eq!(mark.fg, accent);
+    let name = cell_at(&frame, first.x + 1, first.y);
+    assert_eq!(name.bg, selected_bg, "选中行是中性选中底");
+    assert_ne!(name.bg, accent, "不再 accent 反色");
+    assert_ne!(cell_at(&frame, second.x, second.y).symbol, "▌");
 }

@@ -23,8 +23,12 @@ pub(in crate::client::shell) struct ClientForwardRulesView {
     pub(in crate::client::shell) form: ClientForwardRuleForm,
     /// 待确认删除的目标：`x` 只进入确认态，Enter 才真正删除。
     pub(in crate::client::shell) pending_remove: Option<PendingForwardRemoval>,
+    /// 添加表单的就地校验错误（端口、目标缺失等）。保存 / 删除的结果不在这里，
+    /// 走端点通知吐司。
     pub(in crate::client::shell) error: Option<String>,
-    pub(in crate::client::shell) message: Option<String>,
+    /// 就地的轻提示（取消删除确认后的「已取消移除」）：说明色，画在列表下方的
+    /// 固定行，不盖规则。落盘结果不在这里，走吐司。
+    pub(in crate::client::shell) note: Option<&'static str>,
 }
 
 /// 武装中的转发删除目标。只记下标不够：目录 watcher（`set_endpoint_catalog`）
@@ -86,7 +90,7 @@ impl ClientShellState {
                 form: ClientForwardRuleForm::blank(),
                 pending_remove: None,
                 error: None,
-                message: None,
+                note: None,
             }));
         }
     }
@@ -177,23 +181,19 @@ impl ClientShellState {
             if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                 view.selected = armed.index;
                 view.pending_remove = Some(armed);
-                view.message = None;
                 view.error = None;
+                view.note = None;
                 view.reveal = true;
             }
         }
     }
 
+    /// 取消删除确认：没有落盘，只在列表下方的固定行留一句说明色的「已取消移除」。
     pub(super) fn forward_cancel_remove(&mut self) {
         if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
             if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                 if view.pending_remove.take().is_some() {
-                    view.message = Some(
-                        crate::i18n::texts()
-                            .machines
-                            .forward_remove_cancelled
-                            .to_owned(),
-                    );
+                    view.note = Some(forwards_text().forward_remove_cancelled);
                 }
             }
         }
@@ -229,40 +229,66 @@ impl ClientShellState {
         if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
             if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                 view.pending_remove = None;
-                // 落盘失败必须走红色 error 分支，不能以绿色「成功」样式显示。
-                match outcome {
-                    Ok(()) => {
-                        view.message =
-                            Some(crate::i18n::texts().machines.forward_removed.to_owned());
-                        view.error = None;
-                        // 原位补位；删掉末条时回退一行。
-                        view.selected = armed.index.min(remaining.saturating_sub(1));
-                    }
-                    Err(error) => {
-                        view.error = Some(error);
-                        view.message = None;
-                    }
+                view.error = None;
+                view.note = None;
+                if outcome.is_ok() {
+                    // 原位补位；删掉末条时回退一行。
+                    view.selected = armed.index.min(remaining.saturating_sub(1));
                 }
                 view.reveal = true;
             }
         }
+        // 结果走吐司：成功绿色、落盘失败红色，不再占列表下方的固定行。
+        self.forward_rules_notice(
+            &profile.label,
+            outcome.err(),
+            forwards_text().forward_removed,
+        );
     }
 
-    /// 武装期间规则表被外部改写：清掉确认态并提示重选。
+    /// 转发规则落盘的结果吐司：`error` 为 `None` 时是成功（`success` 文案）。
+    fn forward_rules_notice(&mut self, label: &str, error: Option<String>, success: &str) {
+        use super::super::state::ClientEndpointNoticeKind;
+        match error {
+            None => self.push_endpoint_notice(
+                ClientEndpointNoticeKind::Success,
+                "machine:forwards",
+                success,
+                label,
+            ),
+            Some(error) => self.push_endpoint_notice(
+                ClientEndpointNoticeKind::Rejected,
+                "machine:forwards",
+                super::super::observability::tr("Couldn't save port forwards", "端口转发未能保存"),
+                error,
+            ),
+        };
+    }
+
+    /// 武装期间规则表被外部改写：清掉确认态，用告警吐司请用户重选。
     fn forward_remove_stale(&mut self) {
+        let mut label = None;
         if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
             if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                 view.pending_remove = None;
-                view.error = Some(
-                    crate::i18n::texts()
-                        .machines
-                        .forward_remove_stale
-                        .to_owned(),
-                );
-                view.message = None;
+                view.error = None;
                 view.reveal = true;
+                label = Some(view.profile_id.clone());
             }
         }
+        let Some(profile_id) = label else {
+            return;
+        };
+        let label = self
+            .saved_profile(&profile_id)
+            .map(|profile| profile.label.clone())
+            .unwrap_or_default();
+        self.push_endpoint_notice(
+            super::super::state::ClientEndpointNoticeKind::Warning,
+            "machine:forwards_stale",
+            forwards_text().forward_remove_stale,
+            label,
+        );
     }
 
     pub(super) fn forward_save_new_rule(&mut self) {
@@ -294,17 +320,17 @@ impl ClientShellState {
                         view.adding = false;
                         view.form = ClientForwardRuleForm::blank();
                         view.error = None;
-                        view.message = Some(crate::i18n::texts().machines.forward_saved.to_owned());
                         view.selected = rule_count;
+                        view.reveal = true;
                     }
                 }
+                self.forward_rules_notice(&profile.label, None, forwards_text().forward_saved);
             }
             Err(error) => {
+                // 添加表单还开着：落盘失败就地显示在表单的错误行（与字段校验同位）。
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
-                        // 失败只走红色 error 分支，别把上一次的绿色成功文案留在画面上。
                         view.error = Some(error);
-                        view.message = None;
                     }
                 }
             }
@@ -432,8 +458,8 @@ impl ClientShellState {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                         view.adding = true;
                         view.pending_remove = None;
-                        view.message = None;
                         view.error = None;
+                        view.note = None;
                     }
                 }
             }
@@ -456,6 +482,10 @@ impl ClientShellState {
             _ => 0,
         }
     }
+}
+
+fn forwards_text() -> &'static crate::i18n::MachinesTexts {
+    &crate::i18n::texts().machines
 }
 
 /// Rule one-liner shared by the detail card and the rules editor (matches
@@ -515,7 +545,7 @@ pub(super) fn render_machine_forwards(
             " {}",
             crate::i18n::fill(t.forwards_title_fmt, &[("label", &profile.label)])
         ),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        base.patch(crate::ui::design::title(p)),
     );
 
     let body = stack.content;
@@ -580,14 +610,9 @@ pub(super) fn render_machine_forwards(
         let rect = Rect::new(body.x, body.y + (index - scroll) as u16, body.width, 1);
         row_hits.push((rect, index));
         let is_selected = index == selected && !view.adding;
-        let style = if is_selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        // 选中行：中性选中底 + 粗体 + 首列 ▌；状态色照常叠加（与机器列表同口径）。
+        let style = super::super::list_row_style(p, cx.components, is_selected, false);
+        let row_bg = super::super::list_row_bg(p, cx.components, is_selected, false);
         b.set_style(rect, style);
         let status = statuses.and_then(|statuses| statuses.iter().find(|s| s.rule == *rule));
         let (status_text, status_color) = match status {
@@ -604,7 +629,7 @@ pub(super) fn render_machine_forwards(
                     p.red,
                 ),
             },
-            None => (t.forward_waiting.to_owned(), p.overlay0),
+            None => (t.forward_waiting.to_owned(), p.overlay1),
         };
         put_text(
             b,
@@ -614,12 +639,16 @@ pub(super) fn render_machine_forwards(
             &format!(" {}", forward_rule_display(rule)),
             style,
         );
-        let status_style = if is_selected {
-            style
-        } else {
-            Style::default().fg(status_color).bg(p.panel_bg)
-        };
-        put_right_text(b, rect, rect.y, &status_text, status_style);
+        put_right_text(
+            b,
+            rect,
+            rect.y,
+            &status_text,
+            Style::default().fg(status_color).bg(row_bg),
+        );
+        if is_selected {
+            crate::ui::kit::paint_selection_mark(b, rect.x, rect.y, p);
+        }
     }
     // 列表之后的内容一律从固定席位开始，不受滚动窗口影响。
     let mut y = body.y + list_height;
@@ -636,7 +665,7 @@ pub(super) fn render_machine_forwards(
                 y,
                 body.width,
                 &format!(" {}", t.forward_add_title),
-                base.fg(p.text).add_modifier(Modifier::BOLD),
+                base.patch(crate::ui::design::section(p)),
             );
             y += 1;
         }
@@ -677,7 +706,12 @@ pub(super) fn render_machine_forwards(
                 rect.y,
                 label_width,
                 &format!(" {label:<14}"),
-                base.fg(if is_focused { p.text } else { p.overlay0 }),
+                // 非聚焦字段不是禁用项：标签取元信息色，聚焦字段加粗成正文。
+                if is_focused {
+                    base.patch(crate::ui::design::title(p))
+                } else {
+                    base.patch(crate::ui::design::meta(p))
+                },
             );
             let input = Rect::new(
                 rect.x + label_width,
@@ -687,11 +721,9 @@ pub(super) fn render_machine_forwards(
             );
             match editor {
                 None => {
+                    // 类型选择器的聚焦态与列表选中同为中性选中底 + 粗体。
                     let style = if is_focused {
-                        Style::default()
-                            .fg(panel_contrast_fg(p))
-                            .bg(p.accent)
-                            .add_modifier(Modifier::BOLD)
+                        crate::ui::design::selected_row_text(p)
                     } else {
                         crate::ui::input_field_style(p)
                     };
@@ -739,7 +771,7 @@ pub(super) fn render_machine_forwards(
                 y,
                 body.width,
                 &format!(
-                    " {}",
+                    " ✕ {}",
                     crate::i18n::fill(
                         t.forward_remove_confirm_fmt,
                         &[("rule", &forward_rule_display(rule))]
@@ -747,10 +779,6 @@ pub(super) fn render_machine_forwards(
                 ),
                 base.fg(p.red).add_modifier(Modifier::BOLD),
             );
-        }
-    } else if let Some(message) = view.message.as_deref() {
-        if y < body.bottom() {
-            put_text(b, body.x, y, body.width, message, base.fg(p.green));
         }
     } else if let Some(error) = view.error.as_deref() {
         if y < body.bottom() {
@@ -763,13 +791,23 @@ pub(super) fn render_machine_forwards(
                 base.fg(p.red),
             );
         }
+    } else if let Some(note) = view.note {
+        if y < body.bottom() {
+            put_text(
+                b,
+                body.x,
+                y,
+                body.width,
+                &format!(" {note}"),
+                base.patch(crate::ui::design::muted(p)),
+            );
+        }
     }
 
     // 合并页脚：键位即按钮，取代此前并排的键位行与按钮行。
-    let t_overlays = &crate::i18n::texts().overlays;
     let hints: Vec<MachineHint<'static>> = if view.adding {
         vec![
-            MachineHint::key("tab/↑↓", t.hint_fields),
+            MachineHint::key("tab / ↑↓", t.hint_fields),
             MachineHint::key("←→", t.hint_change),
             MachineHint::button("enter", t.hint_confirm, MachineOverlayButton::ForwardSave)
                 .primary(),
@@ -778,10 +816,10 @@ pub(super) fn render_machine_forwards(
     } else if pending_rule.is_some() {
         vec![
             MachineHint::button("enter", t.hint_confirm, MachineOverlayButton::ForwardRemove)
-                .primary(),
+                .danger(),
             MachineHint::button(
                 "esc",
-                t_overlays.cancel_button,
+                super::super::observability::tr("cancel", "取消"),
                 MachineOverlayButton::ForwardCancelRemove,
             ),
         ]

@@ -13,6 +13,8 @@ pub(super) struct MachineHint<'a> {
     pub(super) label: &'a str,
     pub(super) button: Option<MachineOverlayButton>,
     pub(super) primary: bool,
+    /// 危险的主动作（删除确认）：键帽画成危险色，其余同 `primary`。
+    pub(super) danger: bool,
     pub(super) enabled: bool,
 }
 
@@ -24,6 +26,7 @@ impl<'a> MachineHint<'a> {
             label: label.trim(),
             button: None,
             primary: false,
+            danger: false,
             enabled: true,
         }
     }
@@ -40,6 +43,16 @@ impl<'a> MachineHint<'a> {
     pub(super) fn primary(self) -> Self {
         Self {
             primary: true,
+            ..self
+        }
+    }
+
+    /// 危险的主动作：放不下时同样最后丢，键帽用危险色而不是 accent。浮层边框
+    /// 已是中性色，危险语义落在这里与红色标题上。
+    pub(super) fn danger(self) -> Self {
+        Self {
+            primary: true,
+            danger: true,
             ..self
         }
     }
@@ -132,6 +145,19 @@ pub(super) fn render_machine_footer(
         });
         for (rect, index) in render_footer_hints(b, row_area, &kit_hints, hover_index, cx.palette) {
             let hint = &slice[index];
+            if hint.danger && hint.enabled {
+                // 只重涂键帽那几格：标签与悬浮底色仍由 kit 决定。
+                let cap = crate::ui::kit::key_cap::cap_width(hint.key).min(rect.width);
+                b.set_style(
+                    Rect::new(rect.x, rect.y, cap, 1),
+                    crate::ui::modal_button_style(
+                        cx.palette,
+                        crate::ui::ModalButtonTone::Danger,
+                        crate::ui::ModalButtonState::Normal,
+                    )
+                    .add_modifier(Modifier::BOLD),
+                );
+            }
             if let (Some(button), true) = (hint.button, hint.enabled) {
                 hits.push((rect, button));
             }

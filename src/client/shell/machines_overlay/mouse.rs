@@ -90,7 +90,6 @@ impl ClientShellState {
                 if contains(self.hits.machines_search, point) {
                     if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                         overlay.search_focused = true;
-                        overlay.message = None;
                     }
                     outcome.repaint = true;
                 } else if let Some((_, profile_id)) = self

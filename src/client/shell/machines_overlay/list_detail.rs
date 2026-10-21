@@ -198,7 +198,7 @@ pub(super) fn render_machine_list(
         stack.header.y,
         stack.header.width,
         &format!(" {}", t.title),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        base.patch(crate::ui::design::title(p)),
     );
     let count = crate::i18n::fill(t.count_fmt, &[("count", &rows.len().to_string())]);
     let cursor = render_search_bar(
@@ -231,25 +231,21 @@ pub(super) fn render_machine_list(
         let rect = Rect::new(body.x, y, body.width, row_height as u16);
         row_hits.push((rect, row.id.clone()));
         let is_selected = index == selected;
-        // 三态与其它浮层同一口径：选中 accent 反色 > 悬浮弱底色 > 常态。
+        // 三态与其它浮层同一口径：选中（中性选中底 + 粗体 + 首列 ▌）> 悬浮
+        // （只换底色）> 常态。状态色、身份色与元信息在选中行上照常叠加。
         let is_hovered = !is_selected && overlay.hovered.as_ref() == Some(&row.id);
         let row_bg = super::super::list_row_bg(p, cx.components, is_selected, is_hovered);
-        let style = if is_selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(row_bg)
-        };
+        let style = super::super::list_row_style(p, cx.components, is_selected, is_hovered);
         b.set_style(rect, style);
         let tag = machine_color_tag(row.color.as_deref(), &row.label, p);
-        let tag_style = if is_selected {
-            style
-        } else {
-            Style::default().fg(tag).bg(row_bg)
-        };
-        put_text(b, rect.x, rect.y, 2, " ▪", tag_style);
+        put_text(
+            b,
+            rect.x,
+            rect.y,
+            2,
+            " ▪",
+            Style::default().fg(tag).bg(row_bg),
+        );
         put_text(
             b,
             rect.x + 2,
@@ -268,17 +264,14 @@ pub(super) fn render_machine_list(
         } else {
             format!("{glyph} {state}")
         };
-        let signal_style = if is_selected {
-            style
-        } else {
-            Style::default().fg(color).bg(row_bg)
-        };
-        put_right_text(b, rect, rect.y, &signal, signal_style);
-        let meta_style = if is_selected {
-            style
-        } else {
-            Style::default().fg(p.overlay0).bg(row_bg)
-        };
+        put_right_text(
+            b,
+            rect,
+            rect.y,
+            &signal,
+            Style::default().fg(color).bg(row_bg),
+        );
+        let meta_style = crate::ui::design::meta(p).bg(row_bg);
         let group = row.group.as_deref().unwrap_or_default();
         let meta = if group.is_empty() {
             format!("   {}", row.target)
@@ -288,6 +281,12 @@ pub(super) fn render_machine_list(
         put_text(b, rect.x, rect.y + 1, rect.width, &meta, meta_style);
         if let Some(version) = row.server_version.as_deref() {
             put_right_text(b, rect, rect.y + 1, &format!("v{version}"), meta_style);
+        }
+        if is_selected {
+            // 两行条目：竖条贯穿两行，与侧栏的选中标记同形。
+            for y in rect.y..rect.bottom() {
+                crate::ui::kit::paint_selection_mark(b, rect.x, y, p);
+            }
         }
     }
     let mut action_hits = Vec::new();
@@ -524,7 +523,7 @@ pub(super) fn render_machine_detail(
         stack.header.y,
         stack.header.width.saturating_sub(2),
         &format!(" {}", profile.label),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        base.patch(crate::ui::design::title(p)),
     );
     let (glyph, state, color) = endpoint_status_presentation(status, p, cx.spinner);
     let header_row = Rect::new(stack.header.x, stack.header.y, stack.header.width, 1);
@@ -572,7 +571,7 @@ pub(super) fn render_machine_detail(
             y,
             (label_width + 2) as u16,
             &format!(" {label}"),
-            base.fg(p.overlay0),
+            base.patch(crate::ui::design::meta(p)),
         );
         put_text(
             b,
@@ -580,7 +579,7 @@ pub(super) fn render_machine_detail(
             y,
             body.width.saturating_sub(label_width as u16 + 2),
             value,
-            base.fg(p.text),
+            base.patch(crate::ui::design::body(p)),
         );
     }
     let mut action_hits = Vec::new();
@@ -603,9 +602,17 @@ pub(super) fn render_machine_detail(
                 ),
                 base.fg(p.red),
             );
-            put_attention_line(b, next_hint, base.fg(p.yellow));
+            put_attention_line(
+                b,
+                &format!(" {}", next_hint.trim_start()),
+                base.fg(p.yellow),
+            );
         }
-        put_attention_line(b, t.fix_hint, base.fg(p.yellow));
+        put_attention_line(
+            b,
+            &format!(" {}", t.fix_hint.trim_start()),
+            base.fg(p.yellow),
+        );
         let command = crate::remote::saved_ssh_bootstrap_command(&profile.target, &profile.session);
         put_attention_line(
             b,
@@ -638,6 +645,7 @@ pub(super) fn render_machine_confirm_remove(
         .find(|profile| &profile.id == profile_id)
         .map(|profile| profile.label.clone())
         .unwrap_or_else(|| profile_id.to_string());
+    // 浮层边框是中性结构色：危险语义落在红色 ✕ 标题与危险色的确认键帽上。
     let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), cx)?;
     let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 0);
     put_text(
@@ -646,7 +654,7 @@ pub(super) fn render_machine_confirm_remove(
         stack.header.y,
         stack.header.width,
         &format!(
-            " {}",
+            " ✕ {}",
             crate::i18n::fill(t.remove_title_fmt, &[("label", &label)])
         ),
         Style::default()
@@ -659,21 +667,16 @@ pub(super) fn render_machine_confirm_remove(
         stack.header.x,
         stack.header.y + 1,
         stack.header.width,
-        &format!(" {}", t.remove_detail),
-        Style::default().fg(p.text).bg(p.panel_bg),
+        &format!("   {}", t.remove_detail),
+        crate::ui::design::body(p).bg(p.panel_bg),
     );
     // 与其它机器页同一套合并页脚：键位即按钮。
-    let overlays = &crate::i18n::texts().overlays;
+    // 标签只写动作：按钮文案自带的 `↲` / `esc` 前缀会和键帽重复。
     let hints = [
-        MachineHint::button(
-            "enter",
-            overlays.confirm_button,
-            MachineOverlayButton::ConfirmRemove,
-        )
-        .primary(),
+        MachineHint::button("enter", t.hint_confirm, MachineOverlayButton::ConfirmRemove).danger(),
         MachineHint::button(
             "esc",
-            overlays.cancel_button,
+            super::super::observability::tr("cancel", "取消"),
             MachineOverlayButton::CancelRemove,
         ),
     ];

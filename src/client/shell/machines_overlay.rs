@@ -61,19 +61,22 @@ pub(super) struct ClientMachinesOverlay {
     /// 划过列表就把这些破坏性键重新指向「鼠标最后路过的机器」是不可接受的
     /// （MENU-01 / UX-04）。存身份而不是行号，筛选与重排后天然失效。
     pub(super) hovered: Option<ProfileId>,
-    /// 机器面板的一次性反馈（复制修复命令、向导成功）。带时间戳，由
-    /// `tick_chrome_feedback` 到期清除；渲染落点见 `render_machines_toast`。
+    /// 旧的页内 toast 槽位：操作反馈（复制修复命令、保存新机器）已改走端点通知
+    /// 吐司（`push_endpoint_notice`），不再覆盖页脚。这里恒为 `None`，只为
+    /// `feedback.rs` 的到期清理保留读写点，合并后与那两处一起删除。
     pub(super) message: Option<MachineToast>,
 }
 
-/// 机器面板公共 toast：一行反馈 + 写入时刻。
+/// 旧页内 toast 的写入时刻（见 [`ClientMachinesOverlay::message`]）。
+// 不再构造：页内 toast 已并入吐司；`feedback.rs`（本次范围外）仍读它的到期时刻，
+// 删除要与那边的 tick / deadline 分支一起做。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct MachineToast {
-    pub(super) text: String,
     pub(super) at: std::time::Instant,
 }
 
-/// toast 在屏时长；到期由 feedback tick 清除并请求一次重绘。
+/// 旧页内 toast 的在屏时长（`feedback.rs` 的到期清理仍引用）。
 pub(super) const MACHINE_TOAST_DURATION: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// 宽屏 dashboard 的浮层尺寸；窄终端仍会被 `centered_rect` 按边距钳位。
@@ -120,19 +123,6 @@ impl ClientMachinesOverlay {
         }
     }
 
-    /// 写入一条公共 toast（覆盖上一条，重新计时）。
-    ///
-    /// 时间戳在这里取：按键路由与向导 bootstrap 轮询这两条调用链都没有本帧
-    /// 的 now 可传（`record_terminal_bell` 的生产调用点同样是就地
-    /// `Instant::now()`），注入只会把同一行代码挪到调用方。`at` 是公开字段，
-    /// 测试可以据此在 `MACHINE_TOAST_DURATION` 边界上精确断言。
-    pub(super) fn set_message(&mut self, text: String) {
-        self.message = Some(MachineToast {
-            text,
-            at: std::time::Instant::now(),
-        });
-    }
-
     /// 表单里的测试连接正在跑（尚未通过或失败）：驱动 spinner。
     pub(super) fn bootstrap_running(&self) -> bool {
         matches!(&self.view, ClientMachinesView::Form(form) if form.running())
@@ -147,15 +137,6 @@ pub(super) enum ClientMachinesView {
     Form(Box<ClientMachineForm>),
     Forwards(Box<ClientForwardRulesView>),
     Import(Box<ClientMachineImportView>),
-}
-
-impl ClientMachinesView {
-    /// 公共 toast 只在列表（含宽屏工作台）与详情显示：它的来源就在这两处
-    /// （复制修复命令、保存新机器后回列表）。表单 / 导入 / 转发 / 删除确认
-    /// 的页脚只有一两行而且整行都是按钮，toast 盖上去会把它们藏起来。
-    fn shows_toast(&self) -> bool {
-        matches!(self, Self::List | Self::Detail(_))
-    }
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -420,9 +401,9 @@ impl ClientShellState {
         });
     }
 
-    /// 复制该机器的修复 / 启动命令，并给一条反馈。机器面板开着时落到公共
-    /// toast；侧栏右键菜单触发时面板根本没开（C-27 点名的第三个触发点），
-    /// 走通用 Success 通知通道，不至于零反馈。
+    /// 复制该机器的修复 / 启动命令，并给一条成功吐司。机器页、详情、表单与侧栏
+    /// 右键菜单（C-27 点名的第三个触发点）同一条反馈通道：吐司画在右下角，
+    /// 不盖页脚、不吞命中区。
     pub(super) fn machine_copy_fix_command(
         &mut self,
         profile_id: &ProfileId,
@@ -437,15 +418,6 @@ impl ClientShellState {
             .actions
             .push(ClientShellAction::ClipboardWrite(command.into_bytes()));
         let text = crate::i18n::texts().machines.copied_fix_command;
-        // 取法与向导成功路径、feedback tick 一致：命令面板盖在机器页之上时
-        // 仍写进机器页自己的 toast。
-        // 机器页停在不显示 toast 的视图（表单等）时同样走通用通知。
-        if let Some(ClientShellOverlay::Machines(overlay)) = self.content_page_mut() {
-            if overlay.view.shows_toast() {
-                overlay.set_message(text.to_owned());
-                return;
-            }
-        }
         self.push_endpoint_notice(
             super::state::ClientEndpointNoticeKind::Success,
             "machine:copy_fix_command",
@@ -817,7 +789,6 @@ impl ClientShellState {
             KeyCode::Char('/') if plain => {
                 if let Some(ClientShellOverlay::Machines(overlay)) = self.overlay.as_mut() {
                     overlay.search_focused = true;
-                    overlay.message = None;
                 }
                 outcome.repaint = true;
             }
@@ -977,7 +948,6 @@ impl ClientShellState {
                     if let ClientMachinesView::Forwards(view) = &mut overlay.view {
                         view.adding = true;
                         view.pending_remove = None;
-                        view.message = None;
                         view.error = None;
                     }
                 }
@@ -1153,44 +1123,6 @@ impl ClientShellState {
 
 // ---------- rendering ----------
 
-/// 机器面板公共 toast：视图各自把页脚行报成 `OverlayRender::machines_toast`，
-/// 这里在顶层统一画一次，所以 List / Detail / dashboard 反馈落点一致
-/// （HERDR-MACH-006）。返回盖住的那一行。
-fn render_machines_toast(b: &mut Buffer, rect: Rect, message: &str, p: &Palette) -> Option<Rect> {
-    use ratatui::widgets::Widget as _;
-    if rect.is_empty() {
-        return None;
-    }
-    let row = Rect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1);
-    ratatui::widgets::Clear.render(row, b);
-    b.set_style(row, Style::default().bg(p.panel_bg));
-    let icon_width = display_width("● ").min(row.width);
-    put_text(
-        b,
-        row.x,
-        row.y,
-        icon_width,
-        "● ",
-        Style::default().fg(p.green).bg(p.panel_bg),
-    );
-    put_text(
-        b,
-        row.x.saturating_add(icon_width),
-        row.y,
-        row.width.saturating_sub(icon_width),
-        message,
-        Style::default()
-            .fg(p.green)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD),
-    );
-    Some(row)
-}
-
-// 机器面板渲染入口：视图分派 + 公共 toast。参数与既有机器页渲染入口一致，
-// 集中在一次投影中避免从全局重新查状态；打包成 struct 反而要多一层生命周期
-// 标注，故豁免 too_many_arguments。
-#[allow(clippy::too_many_arguments)]
 /// 机器面板各视图的正文几何：视图计算阶段与渲染阶段共用（STATE-04）。
 /// 返回值 `None` 表示该视图本帧不画列表（窗口太小 / discover 步骤）。
 pub(super) enum MachinesBody {
@@ -1560,6 +1492,9 @@ impl ClientShellState {
     }
 }
 
+// 机器面板渲染入口：参数与既有机器页渲染入口一致，集中在一次投影中避免从全局
+// 重新查状态；打包成 struct 反而要多一层生命周期标注，故豁免 too_many_arguments。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_machines_overlay(
     b: &mut Buffer,
     overlay: &ClientMachinesOverlay,
@@ -1570,7 +1505,9 @@ pub(super) fn render_machines_overlay(
     session_log_dropped: &HashMap<ProfileId, u64>,
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<OverlayRender> {
-    let mut render = render_machines_view(
+    // 操作反馈走端点通知吐司（右下角），页面里不再叠画反馈行，页脚命中区原样
+    // 保留。
+    render_machines_view(
         b,
         overlay,
         endpoints,
@@ -1579,22 +1516,7 @@ pub(super) fn render_machines_overlay(
         port_forwards,
         session_log_dropped,
         cx,
-    );
-    // 公共 toast 最后画，盖在列表 / 详情页脚的最后一行上。页脚项就是按钮：
-    // 被盖住的那几项这几秒里看不见，也就不能留命中区（否则点 toast 文字会
-    // 触发底下的按钮），悬浮态随命中区一起消失。
-    if let (Some(render), Some(toast)) = (render.as_mut(), overlay.message.as_ref()) {
-        if overlay.view.shows_toast() {
-            if let Some(row) =
-                render_machines_toast(b, render.machines_toast, &toast.text, cx.palette)
-            {
-                render
-                    .machines_actions
-                    .retain(|(rect, _)| !rect.intersects(row));
-            }
-        }
-    }
-    render
+    )
 }
 
 // 参数与 `render_machines_overlay` 逐个一致（视图分派本身不带公共 chrome），

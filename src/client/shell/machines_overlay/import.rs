@@ -545,7 +545,7 @@ fn import_hints(view: &ClientMachineImportView) -> Vec<MachineHint<'static>> {
         ],
         ClientImportStep::Done => vec![
             MachineHint::key("↑↓", t.hint_scroll),
-            MachineHint::button("esc/enter", t.hint_back, MachineOverlayButton::Back).primary(),
+            MachineHint::button("esc / enter", t.hint_back, MachineOverlayButton::Back).primary(),
         ],
     }
 }
@@ -596,6 +596,16 @@ pub(super) fn import_select_layout(body: Rect) -> ImportSelectLayout {
     }
 }
 
+/// 选择步骤可聚焦行（候选、通配符开关）的整行样式：聚焦行是中性选中底 + 粗体
+/// （首列另画 `▌`），与机器列表、浮层列表同一口径；不用 accent 反色。
+fn import_row_style(focused: bool, p: &Palette) -> Style {
+    if focused {
+        crate::ui::design::selected_row_text(p)
+    } else {
+        Style::default().fg(p.text).bg(p.panel_bg)
+    }
+}
+
 /// user@target:port one-liner for a planned import (same shape as the CLI's
 /// interactive listing).
 fn import_planned_summary(planned: &crate::remote::PlannedImport) -> String {
@@ -638,7 +648,7 @@ pub(super) fn render_machine_import(
         stack.header.y,
         stack.header.width,
         &format!(" {}", t.import_title),
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        base.patch(crate::ui::design::title(p)),
     );
     // Step indicator + source path.
     let steps = [
@@ -655,10 +665,11 @@ pub(super) fn render_machine_import(
                 | (2, ClientImportStep::Done)
         );
         let text = format!(" {} {} ", index + 1, label);
+        // 当前步骤用标题级（粗体正文），其余步骤是元信息；结构面不借 accent。
         let style = if active {
-            base.fg(p.accent).add_modifier(Modifier::BOLD)
+            base.patch(crate::ui::design::title(p))
         } else {
-            base.fg(p.overlay0)
+            base.patch(crate::ui::design::meta(p))
         };
         let width = display_width(&text);
         put_text(b, x, stack.header.y + 1, width, &text, style);
@@ -678,7 +689,7 @@ pub(super) fn render_machine_import(
             stack.header.y + 1,
             path_width,
             &path_text,
-            base.fg(p.overlay0),
+            base.patch(crate::ui::design::meta(p)),
         );
     }
 
@@ -750,7 +761,8 @@ fn render_import_discover(
         let Some(line) = discover_line(view, index) else {
             break;
         };
-        let (text, color) = match line {
+        let section = base.patch(crate::ui::design::section(p));
+        let (text, style) = match line {
             DiscoverLine::Warnings => (
                 format!(
                     " {}",
@@ -759,9 +771,9 @@ fn render_import_discover(
                         &[("count", &view.warnings.to_string())]
                     )
                 ),
-                p.yellow,
+                base.fg(p.yellow),
             ),
-            DiscoverLine::ReadyHeader => (t.import_ready_header.to_owned(), p.overlay0),
+            DiscoverLine::ReadyHeader => (t.import_ready_header.to_owned(), section),
             DiscoverLine::Ready(planned) => {
                 let mut text = format!(" {} → {}", planned.label, import_planned_summary(planned));
                 if !planned.notes.is_empty() {
@@ -773,12 +785,15 @@ fn render_import_discover(
                         )
                     ));
                 }
-                (text, p.text)
+                (text, base.patch(crate::ui::design::body(p)))
             }
-            DiscoverLine::SkipHeader => (t.import_skip_header.to_owned(), p.overlay0),
-            DiscoverLine::Skip(skip) => (format!(" {} — {}", skip.label, skip.reason), p.overlay1),
+            DiscoverLine::SkipHeader => (t.import_skip_header.to_owned(), section),
+            DiscoverLine::Skip(skip) => (
+                format!(" {} — {}", skip.label, skip.reason),
+                base.patch(crate::ui::design::muted(p)),
+            ),
         };
-        put_text(b, body.x, y, body.width, &text, base.fg(color));
+        put_text(b, body.x, y, body.width, &text, style);
     }
 }
 
@@ -874,14 +889,25 @@ fn render_import_select(
             layout.header.y,
             layout.header.width,
             t.import_ready_header,
-            base.fg(p.overlay0),
+            base.patch(crate::ui::design::section(p)),
         );
-        put_right_text(
+        // 保留现有双语动作说明，键位交给共用键帽规范大小写。
+        let hint = crate::i18n::texts().machine_form.import_select_hint;
+        let (key, label) = hint.split_once(' ').unwrap_or(("enter", hint));
+        let hint_width = crate::ui::kit::key_cap::hint_width(key, label);
+        crate::ui::kit::key_cap::paint_hint(
             b,
-            layout.header,
+            layout
+                .header
+                .right()
+                .saturating_sub(hint_width)
+                .max(layout.header.x),
             layout.header.y,
-            crate::i18n::texts().machine_form.import_select_hint,
-            base.fg(p.overlay0),
+            layout.header.right(),
+            key,
+            label,
+            crate::ui::design::key_cap(p),
+            base.patch(crate::ui::design::key_label(p)),
         );
     }
     for (index, planned) in view
@@ -896,14 +922,7 @@ fn render_import_select(
         hits.push((rect, index));
         let focused = view.focus_row == index;
         let checked = view.selected.get(index).copied().unwrap_or(false);
-        let style = if focused {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let style = import_row_style(focused, p);
         b.set_style(rect, style);
         // 有 notes（会被丢弃的设置）时行尾要留 2 列给黄色记号；正文只在
         // 剩下的列里画，超出的部分用省略号收尾，不能让硬截断把数字砍成
@@ -927,8 +946,13 @@ fn render_import_select(
                 rect,
                 rect.y,
                 "! ",
-                if focused { style } else { base.fg(p.yellow) },
+                Style::default()
+                    .fg(p.yellow)
+                    .bg(style.bg.unwrap_or(p.panel_bg)),
             );
+        }
+        if focused {
+            crate::ui::kit::paint_selection_mark(b, rect.x, rect.y, p);
         }
     }
     let fixed = layout.fixed;
@@ -938,14 +962,7 @@ fn render_import_select(
         let rect = Rect::new(fixed.x, y, fixed.width, 1);
         hits.push((rect, candidates));
         let focused = view.focus_row == candidates;
-        let style = if focused {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text).bg(p.panel_bg)
-        };
+        let style = import_row_style(focused, p);
         b.set_style(rect, style);
         put_text(
             b,
@@ -959,6 +976,9 @@ fn render_import_select(
             ),
             style,
         );
+        if focused {
+            crate::ui::kit::paint_selection_mark(b, rect.x, rect.y, p);
+        }
         y += 1;
     }
     // Group input row.
@@ -974,7 +994,11 @@ fn render_import_select(
             rect.y,
             label_width,
             &format!(" {:<8}", t.import_group_label),
-            base.fg(if focused { p.text } else { p.overlay0 }),
+            if focused {
+                base.patch(crate::ui::design::title(p))
+            } else {
+                base.patch(crate::ui::design::meta(p))
+            },
         );
         let input = Rect::new(
             rect.x + label_width,
@@ -1016,7 +1040,14 @@ fn render_import_select(
                 ],
             ));
         }
-        put_text(b, fixed.x, y, fixed.width, &counter, base.fg(p.overlay0));
+        put_text(
+            b,
+            fixed.x,
+            y,
+            fixed.width,
+            &counter,
+            base.patch(crate::ui::design::meta(p)),
+        );
     }
     if !layout.preview.is_empty() {
         render_import_preview(b, layout.preview, view, base, p);
@@ -1052,7 +1083,7 @@ fn render_import_preview(
         area.y,
         area.width,
         crate::i18n::texts().machine_form.preview_title,
-        base.fg(p.text).add_modifier(Modifier::BOLD),
+        base.patch(crate::ui::design::title(p)),
     );
     let group = view.group.trim();
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1065,7 +1096,7 @@ fn render_import_preview(
             ));
             lines.push(Line::styled(
                 import_planned_summary(planned),
-                base.fg(p.accent),
+                base.patch(crate::ui::design::muted(p)),
             ));
             lines.push(Line::default());
             let mut rows = import_option_rows(planned);
@@ -1081,7 +1112,10 @@ fn render_import_preview(
             for (label, value) in rows {
                 let pad = label_width.saturating_sub(usize::from(display_width(label)));
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{label}{}  ", " ".repeat(pad)), base.fg(p.overlay0)),
+                    Span::styled(
+                        format!("{label}{}  ", " ".repeat(pad)),
+                        base.patch(crate::ui::design::meta(p)),
+                    ),
                     Span::styled(value, base.fg(p.text)),
                 ]));
             }
@@ -1113,7 +1147,10 @@ fn render_import_preview(
             ));
             if !group.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{}  ", t.detail_group), base.fg(p.overlay0)),
+                    Span::styled(
+                        format!("{}  ", t.detail_group),
+                        base.patch(crate::ui::design::meta(p)),
+                    ),
                     Span::styled(group.to_owned(), base.fg(p.text)),
                 ]));
             }
@@ -1257,7 +1294,7 @@ fn render_import_done(
         }
         let (tag, color) = match row.outcome {
             ClientImportOutcome::Imported => (t.import_result_imported, p.green),
-            ClientImportOutcome::Skipped => (t.import_result_skipped, p.overlay0),
+            ClientImportOutcome::Skipped => (t.import_result_skipped, p.subtext0),
             ClientImportOutcome::Failed => (t.import_result_failed, p.red),
         };
         if line >= scroll {
@@ -1299,8 +1336,8 @@ fn render_import_done(
             list.x,
             list.y + (line - scroll) as u16,
             list.width,
-            t.import_connect_note,
-            base.fg(p.overlay1),
+            &format!(" {}", t.import_connect_note.trim_start()),
+            base.patch(crate::ui::design::muted(p)),
         );
     }
     (scroll, max_scroll)

@@ -34,7 +34,13 @@ pub(super) struct ClientMachineFilesOverlay {
     pub(super) pending: u64,
     requests: HashMap<u64, (FileRequest, crate::remote::TaskCancellation)>,
     latest_read: Option<u64>,
+    /// 旧的页内操作反馈槽位：下载 / 上传 / 新建 / 改名 / 删除的结果已改走端点
+    /// 通知吐司，不再画在列表最后一行（那会盖住同屏最后一条目录项）。恒为 `None`。
+    // 只剩 `mouse.rs`（本次范围外）的清除写入；合并后连同那一行一起删除。
+    #[allow(dead_code)]
     pub(super) message: Option<String>,
+    /// 目录列表读取失败（权限、路径不存在等）：页面状态，画成「出错」空状态。
+    /// 读文件与写操作的失败走吐司，不写这里。
     pub(super) error: Option<String>,
 }
 
@@ -359,7 +365,6 @@ impl ClientShellState {
             overlay.selected = 0;
             overlay.view = ClientMachineFilesView::List;
             overlay.error = None;
-            overlay.message = None;
         }
         self.machine_files_refresh(outcome);
     }
@@ -468,7 +473,6 @@ impl ClientShellState {
                 context: prefill,
             };
             overlay.error = None;
-            overlay.message = None;
         }
     }
 
@@ -651,6 +655,9 @@ impl ClientShellState {
             return;
         }
         let refresh_after = matches!(result, Ok(MachineFsOutcome::Changed { .. }));
+        let profile_id = overlay.profile_id.clone();
+        // 一次性的操作反馈收集起来，借用结束后统一推成吐司。
+        let mut notice: Option<(super::state::ClientEndpointNoticeKind, &str, String)> = None;
         match result {
             Ok(MachineFsOutcome::Entries { entries }) => {
                 // 同机更新：名目小写表 + 过滤计数缓存 + selected 夹取。
@@ -679,17 +686,42 @@ impl ClientShellState {
                 overlay.error = None;
             }
             Ok(MachineFsOutcome::Changed { message }) => {
-                overlay.message = Some(message);
-                overlay.error = None;
+                notice = Some((
+                    super::state::ClientEndpointNoticeKind::Success,
+                    "machine_files:changed",
+                    message,
+                ));
             }
-            Err(error) => {
-                overlay.error = Some(error);
-                if overlay.entries.is_none() {
+            Err(error) => match request {
+                // 目录读不出来是页面状态：清掉旧条目（不能对过期条目下载 / 删除），
+                // 正文画「出错」空状态。
+                FileRequest::List { .. } => {
+                    overlay.error = Some(error);
                     overlay.set_entries(Some(Vec::new()));
+                    overlay.selected = 0;
                 }
-            }
+                FileRequest::Read { .. } | FileRequest::Mutation => {
+                    notice = Some((
+                        super::state::ClientEndpointNoticeKind::Rejected,
+                        "machine_files:failed",
+                        crate::i18n::fill(
+                            crate::i18n::texts().machine_files.error_fmt,
+                            &[("error", &error)],
+                        ),
+                    ));
+                }
+            },
         }
         outcome.repaint = true;
+        if let Some((kind, code, title)) = notice {
+            let label = self
+                .saved_profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .map(|profile| profile.label.clone())
+                .unwrap_or_default();
+            self.push_endpoint_notice(kind, code, title, label);
+        }
         if refresh_after {
             self.machine_files_refresh(outcome);
         }
@@ -857,7 +889,6 @@ impl ClientShellState {
             KeyCode::Char('/') if plain => {
                 if let Some(overlay) = self.machine_files_overlay_mut() {
                     overlay.search_focused = true;
-                    overlay.message = None;
                 }
                 outcome.repaint = true;
             }
@@ -1009,6 +1040,36 @@ pub(super) fn machine_files_geometry(
     Some((outer, stack.content))
 }
 
+/// 文件列表没有可显示条目时的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MachineFilesEmpty<'a> {
+    /// 首次列目录（或刷新）还在途。
+    Loading,
+    /// 列目录失败。
+    Error(&'a str),
+    /// 目录里有条目，但过滤后为空。
+    NoMatches,
+    /// 目录本身是空的。
+    EmptyDirectory,
+}
+
+/// 「没有数据」「过滤无匹配」「加载中」「出错」的判定：渲染与测试共用。只在
+/// `filtered_count == 0` 时有意义。
+pub(super) fn machine_files_empty_kind(
+    overlay: &ClientMachineFilesOverlay,
+) -> MachineFilesEmpty<'_> {
+    if let Some(error) = overlay.error.as_deref() {
+        return MachineFilesEmpty::Error(error);
+    }
+    match overlay.entries.as_deref() {
+        None => MachineFilesEmpty::Loading,
+        Some(entries) if !entries.is_empty() => MachineFilesEmpty::NoMatches,
+        // 刷新在途时空目录可能马上有内容：先显示加载中。
+        Some(_) if overlay.pending > 0 => MachineFilesEmpty::Loading,
+        Some(_) => MachineFilesEmpty::EmptyDirectory,
+    }
+}
+
 pub(super) fn render_machine_files_overlay(
     b: &mut Buffer,
     overlay: &ClientMachineFilesOverlay,
@@ -1043,7 +1104,7 @@ pub(super) fn render_machine_files_overlay(
         Rect::new(stack.header.x, stack.header.y, stack.header.width, 1),
         stack.header.y,
         &overlay.cwd,
-        base.fg(p.overlay0),
+        base.patch(crate::ui::design::meta(p)),
     );
 
     let mut action_hits = Vec::new();
@@ -1085,7 +1146,7 @@ pub(super) fn render_machine_files_overlay(
                     b,
                     footer,
                     &[
-                        ("↑↓ PgUp/PgDn".to_owned(), t.hint_scroll.to_owned()),
+                        ("↑↓ / pgup / pgdn".to_owned(), t.hint_scroll.to_owned()),
                         ("esc".to_owned(), t.hint_back.to_owned()),
                     ],
                     p,
@@ -1307,24 +1368,20 @@ pub(super) fn render_machine_files_overlay(
                 let rect = Rect::new(body.x, y, body.width, 1);
                 row_hits.push((rect, index));
                 let is_selected = index == selected;
-                let style = if is_selected {
-                    Style::default()
-                        .fg(panel_contrast_fg(p))
-                        .bg(p.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(p.text).bg(p.panel_bg)
-                };
+                // 选中行：中性选中底 + 粗体 + 首列 ▌（与机器列表同口径）；目录名的
+                // 蓝色与元信息色在选中行上照常叠加。
+                let style = super::list_row_style(p, cx.components, is_selected, false);
+                let row_bg = super::list_row_bg(p, cx.components, is_selected, false);
                 b.set_style(rect, style);
                 let name = if entry.kind == RemoteEntryKind::Directory {
                     format!(" {}/", entry.name)
                 } else {
                     format!(" {}", entry.name)
                 };
-                let name_style = if is_selected || entry.kind != RemoteEntryKind::Directory {
-                    style
+                let name_style = if entry.kind == RemoteEntryKind::Directory {
+                    style.fg(p.blue)
                 } else {
-                    Style::default().fg(p.blue).bg(p.panel_bg)
+                    style
                 };
                 put_text(b, rect.x, rect.y, rect.width, &name, name_style);
                 let meta = if entry.modified.is_empty() {
@@ -1337,37 +1394,55 @@ pub(super) fn render_machine_files_overlay(
                         entry.modified
                     )
                 };
-                let meta_style = if is_selected {
-                    style
-                } else {
-                    Style::default().fg(p.overlay0).bg(p.panel_bg)
-                };
-                put_right_text(b, rect, rect.y, &meta, meta_style);
-            }
-            if overlay.filtered_count == 0 && overlay.pending == 0 {
-                let line = if overlay.error.is_some() {
-                    None
-                } else {
-                    Some(t.empty)
-                };
-                if let Some(line) = line {
-                    put_text(b, body.x, body.y, body.width, line, base.fg(p.overlay1));
+                put_right_text(
+                    b,
+                    rect,
+                    rect.y,
+                    &meta,
+                    crate::ui::design::meta(p).bg(row_bg),
+                );
+                if is_selected {
+                    crate::ui::kit::paint_selection_mark(b, rect.x, rect.y, p);
                 }
             }
-            // 状态行落在正文最后一行：贴在 body.y 会盖住第一行条目（也就是
-            // 光标所在行），而末行只是同屏最后一条、滚动即可看到。
-            let status_y = body.bottom().saturating_sub(1);
-            if let Some(error) = overlay.error.as_deref() {
-                put_text(
-                    b,
-                    body.x,
-                    status_y,
-                    body.width,
-                    &crate::i18n::fill(t.error_fmt, &[("error", error)]),
-                    base.fg(p.red),
-                );
-            } else if let Some(message) = overlay.message.as_deref() {
-                put_text(b, body.x, status_y, body.width, message, base.fg(p.green));
+            // 没有可显示的条目：区分「加载中」「出错」「过滤无匹配」「空目录」。操作
+            // 反馈走吐司，正文不再叠画状态行。
+            if overlay.filtered_count == 0 {
+                let error_title;
+                let spec = match machine_files_empty_kind(overlay) {
+                    MachineFilesEmpty::Loading => crate::ui::kit::empty_state::EmptyState {
+                        title: t.loading.trim(),
+                        ..Default::default()
+                    },
+                    MachineFilesEmpty::Error(error) => {
+                        error_title = crate::i18n::fill(t.error_fmt, &[("error", error)]);
+                        crate::ui::kit::empty_state::EmptyState {
+                            glyph: Some("✕"),
+                            title: super::observability::tr(
+                                "Couldn't list this directory",
+                                "无法列出这个目录",
+                            ),
+                            body: Some(error_title.as_str()),
+                            ..Default::default()
+                        }
+                    }
+                    MachineFilesEmpty::NoMatches => crate::ui::kit::empty_state::EmptyState {
+                        title: super::observability::tr(
+                            "No entries match the filter",
+                            "没有匹配过滤条件的条目",
+                        ),
+                        body: Some(super::observability::tr(
+                            "Edit or clear the filter above",
+                            "修改或清空上方过滤条件",
+                        )),
+                        ..Default::default()
+                    },
+                    MachineFilesEmpty::EmptyDirectory => crate::ui::kit::empty_state::EmptyState {
+                        title: t.empty.trim(),
+                        ..Default::default()
+                    },
+                };
+                crate::ui::kit::empty_state::render_empty_state(b, body, &spec, p);
             }
             if let Some(footer) = stack.footer {
                 render_key_hints(
@@ -1376,7 +1451,7 @@ pub(super) fn render_machine_files_overlay(
                     &[
                         ("↑↓".to_owned(), t.hint_select.to_owned()),
                         ("enter".to_owned(), t.hint_open.to_owned()),
-                        ("⌫".to_owned(), t.hint_up.to_owned()),
+                        ("backspace".to_owned(), t.hint_up.to_owned()),
                         ("d".to_owned(), t.download_button.trim().to_owned()),
                         ("u".to_owned(), t.upload_button.trim().to_owned()),
                         ("m".to_owned(), t.mkdir_button.trim().to_owned()),
