@@ -824,14 +824,43 @@ impl ClientShellState {
     /// Hit-test order determines which overlapping control receives the event;
     /// the sidebar toggle takes precedence over the agent scrollbar beneath it.
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
-        // 端点通知画在浮层之上：点它先于浮层与页面处理，只关掉通知。
-        if self.visible_endpoint_notice.is_some()
-            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && contains(self.hits.endpoint_notice_toast, (mouse.column, mouse.row))
-        {
-            self.visible_endpoint_notice = None;
-            outcome.repaint = true;
+        // 通知最后绘制，也先接收指针事件，不能穿透到设置、确认按钮或终端。
+        let point = (mouse.column, mouse.row);
+        let semantic =
+            self.visible_notification.is_some() && contains(self.hits.notification_toast, point);
+        let endpoint = self.visible_endpoint_notice.is_some()
+            && contains(self.hits.endpoint_notice_toast, point);
+        // 已开始的拖动继续交给原捕获者，尤其不能吞掉释放事件而留下拖动状态。
+        let continuing_gesture =
+            matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
+        if (semantic || endpoint) && !continuing_gesture {
+            if mouse.kind == MouseEventKind::Moved {
+                self.update_chrome_hover(point, outcome);
+            } else if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if semantic {
+                    if self.mode != ClientShellMode::Terminal {
+                        return;
+                    }
+                    if contains(self.hits.notification_keys, point) {
+                        self.notification_focused = true;
+                        outcome.repaint = true;
+                    } else if self
+                        .visible_notification
+                        .as_ref()
+                        .is_some_and(|notice| notice.event.pane_id.is_some())
+                    {
+                        self.focus_visible_notification(outcome);
+                    }
+                } else {
+                    self.visible_endpoint_notice = None;
+                    outcome.repaint = true;
+                }
+            }
             return;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.notification_focused {
+            self.notification_focused = false;
+            outcome.repaint = true;
         }
         if self.pending_selection_mouse(mouse, outcome) {
             return;
@@ -1219,40 +1248,6 @@ impl ClientShellState {
                 }
                 return;
             }
-        }
-        if self.visible_endpoint_notice.is_some()
-            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && super::contains(self.hits.endpoint_notice_toast, point)
-        {
-            self.visible_endpoint_notice = None;
-            outcome.repaint = true;
-            return;
-        }
-        if self.overlay.is_none()
-            && self.mode == ClientShellMode::Terminal
-            && self.visible_notification.is_some()
-            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && super::contains(self.hits.notification_keys, point)
-        {
-            self.notification_focused = true;
-            outcome.repaint = true;
-            return;
-        }
-        if self.overlay.is_none()
-            && self.mode == ClientShellMode::Terminal
-            && self
-                .visible_notification
-                .as_ref()
-                .is_some_and(|notification| notification.event.pane_id.is_some())
-            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && super::contains(self.hits.notification_toast, point)
-        {
-            self.focus_visible_notification(outcome);
-            return;
-        }
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.notification_focused {
-            self.notification_focused = false;
-            outcome.repaint = true;
         }
         if self.handle_mobile_mouse(mouse, outcome) {
             return;

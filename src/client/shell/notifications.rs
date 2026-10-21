@@ -312,10 +312,7 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        if !self.notification_focused
-            || self.overlay.is_some()
-            || self.visible_notification.is_none()
-        {
+        if !self.notification_focused || self.visible_notification.is_none() {
             return false;
         }
         if key.modifiers.is_empty() {

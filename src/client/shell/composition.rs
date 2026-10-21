@@ -599,29 +599,13 @@ impl ClientShellState {
         }
         let top_reserved = band_bottom.saturating_sub(safe.y);
         let hovered = cx.hovered(&super::feedback::ChromeHover::NotificationToast);
-        // 同一锚点的吐司向安全区内部堆叠：端点通知是你刚做的操作的结果，离角落最近。
-        // 移动端的端点通知是贴底的一行横幅：底部吐司从它之上开始。
+        // 两种通知按实际矩形避让；左右不同锚点在窄屏也会相交。
         let banner_rows = u16::from(mobile && self.visible_endpoint_notice.is_some());
-        let mut stacks: Vec<(Anchor, u16)> = Vec::new();
-        let mut stack_offset = |anchor: Anchor, height: u16| -> u16 {
-            let base = if anchor.is_top() {
+        let stack_offset = |anchor: Anchor| {
+            if anchor.is_top() {
                 top_reserved
             } else {
                 banner_rows
-            };
-            match stacks
-                .iter_mut()
-                .find(|(candidate, _)| *candidate == anchor)
-            {
-                Some((_, used)) => {
-                    let offset = base + *used;
-                    *used = used.saturating_add(height);
-                    offset
-                }
-                None => {
-                    stacks.push((anchor, height));
-                    base
-                }
             }
         };
         let herdr_anchor = Anchor::herdr(self.config.toast_position);
@@ -641,7 +625,7 @@ impl ClientShellState {
                     hovered && self.visible_notification.is_none(),
                 );
                 let measured = toast::measure(&toast, safe);
-                let offset = stack_offset(herdr_anchor, measured.height);
+                let offset = stack_offset(herdr_anchor);
                 let rect =
                     toast::place(safe, herdr_anchor, measured.width, measured.height, offset);
                 toast::paint(canvas.buffer(), rect, &toast, &measured, &cx).card
@@ -667,11 +651,20 @@ impl ClientShellState {
                 compose_now,
             );
             let measured = toast::measure(&toast, safe);
-            let offset = stack_offset(anchor, measured.height);
-            let rect = toast::place(safe, anchor, measured.width, measured.height, offset);
+            let rect = toast::place_avoiding(
+                safe,
+                anchor,
+                measured.width,
+                measured.height,
+                stack_offset(anchor),
+                &[self.hits.endpoint_notice_toast],
+            );
             let painted = toast::paint(canvas.buffer(), rect, &toast, &measured, &cx);
             self.hits.notification_toast = painted.card;
             self.hits.notification_keys = painted.focus;
+        }
+        if self.hits.notification_toast.is_empty() {
+            self.notification_focused = false;
         }
         let entering = self.toast_since.is_some_and(|since| {
             compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
@@ -708,17 +701,14 @@ impl ClientShellState {
                 self.hits.notification_toast,
                 self.hits.endpoint_notice_toast,
             ];
-            let mut offset = if anchor.is_top() {
-                top_reserved
-            } else {
-                banner_rows
-            };
-            let mut rect = toast::place(safe, anchor, measured.width, measured.height, offset);
-            // 与通知吐司重叠时往安全区内部让开（不叠在通知上）。
-            while toasts.iter().any(|toast| toast.intersects(rect)) && offset < safe.height {
-                offset += 1;
-                rect = toast::place(safe, anchor, measured.width, measured.height, offset);
-            }
+            let rect = toast::place_avoiding(
+                safe,
+                anchor,
+                measured.width,
+                measured.height,
+                stack_offset(anchor),
+                &toasts,
+            );
             let rect = toast::paint(canvas.buffer(), rect, &toast, &measured, &cx).card;
             occlusion.cover(rect);
             canvas.clear_links_in(rect);

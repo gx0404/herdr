@@ -1019,6 +1019,159 @@ fn components_status_input(state: &ClientShellState) -> ratatui::style::Color {
     state.config.components.status_input
 }
 
+#[test]
+fn toast_pointer_and_focused_keys_take_precedence_over_settings() {
+    let mut state = toast_workbench_state();
+    state.open_settings_overlay();
+    state.visible_notification = Some(toast_notification(
+        SemanticNotificationKind::NeedsAttention,
+        crate::config::ToastHerdrPosition::BottomRight,
+    ));
+    state.compose(80, 24).expect("settings and notification");
+    let keys = state.hits.notification_keys;
+    assert!(!keys.is_empty());
+    // The settings control behind the card must not keep hover or receive wheel input.
+    let before = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Settings(settings)) => (settings.selected, settings.scroll),
+        _ => panic!("settings"),
+    };
+    state.hover = Some(ChromeHover::SettingsChoice(before.0));
+    for kind in [MouseEventKind::Moved, MouseEventKind::ScrollDown] {
+        state.handle_mouse(
+            MouseEvent {
+                kind,
+                column: keys.x,
+                row: keys.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut ClientShellInput::default(),
+        );
+    }
+    assert_eq!(state.hover, Some(ChromeHover::NotificationToast));
+    state.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: keys.x,
+            row: keys.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut ClientShellInput::default(),
+    );
+    assert!(state.notification_focused);
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_ref() else {
+        panic!("notification click must not close settings");
+    };
+    assert_eq!((settings.selected, settings.scroll), before);
+    state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Esc, KeyModifiers::NONE),
+    )]);
+    assert!(state.visible_notification.is_none());
+    assert!(!state.notification_focused);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Settings(_))
+    ));
+}
+
+#[test]
+fn different_toast_anchors_do_not_overlap_in_narrow_layouts() {
+    use crate::config::ToastHerdrPosition as P;
+    let positions = [P::TopLeft, P::TopRight, P::BottomLeft, P::BottomRight];
+    for workbench in [true, false] {
+        for (cols, rows) in [(60, 20), (80, 24), (160, 45)] {
+            for endpoint_position in positions {
+                for semantic_position in positions {
+                    let mut state = if workbench {
+                        toast_workbench_state()
+                    } else {
+                        chrome_state()
+                    };
+                    state.config.toast_position = endpoint_position;
+                    state.visible_endpoint_notice =
+                        Some(toast_notice(ClientEndpointNoticeKind::Rejected));
+                    state.visible_notification = Some(toast_notification(
+                        SemanticNotificationKind::NeedsAttention,
+                        semantic_position,
+                    ));
+                    state.compose(cols, rows).expect("mixed anchors");
+                    let a = state.hits.endpoint_notice_toast;
+                    let b = state.hits.notification_toast;
+                    assert!(!a.is_empty() && !b.is_empty());
+                    assert!(
+                        !a.intersects(b),
+                        "{cols}x{rows}: {endpoint_position:?} {semantic_position:?}: {a:?} {b:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn toast_does_not_capture_a_drag_release_or_keep_hidden_keyboard_focus() {
+    let mut state = toast_workbench_state();
+    state.visible_notification = Some(toast_notification(
+        SemanticNotificationKind::NeedsAttention,
+        crate::config::ToastHerdrPosition::BottomRight,
+    ));
+    state.compose(80, 24).expect("notification");
+    let rect = state.hits.notification_toast;
+    state.chrome_drag = Some(ClientChromeDrag::SidebarWidth);
+    state.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: rect.x + 1,
+            row: rect.y + 1,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut ClientShellInput::default(),
+    );
+    assert!(
+        state.chrome_drag.is_none(),
+        "release belongs to the captured gesture"
+    );
+
+    state.notification_focused = true;
+    state.visible_endpoint_notice = Some(toast_notice(ClientEndpointNoticeKind::Success));
+    state.compose(80, 10).expect("too small for two cards");
+    assert!(state.hits.notification_toast.is_empty());
+    assert!(
+        state.visible_notification.is_some(),
+        "hidden notification is retained"
+    );
+    assert!(
+        !state.notification_focused,
+        "invisible card cannot consume Enter/Esc"
+    );
+    assert!(!state.route_notification_key(
+        &crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut ClientShellInput::default(),
+    ));
+}
+
+#[test]
+fn noninteractive_notification_blocks_hover_on_underlying_settings() {
+    let mut state = toast_workbench_state();
+    state.open_settings_overlay();
+    let mut notice = toast_notification(
+        SemanticNotificationKind::UpdateInstalled,
+        crate::config::ToastHerdrPosition::BottomRight,
+    );
+    notice.event.pane_id = None;
+    state.visible_notification = Some(notice);
+    state
+        .compose(80, 24)
+        .expect("noninteractive notice over settings");
+    let rect = state.hits.notification_toast;
+    state.hits.settings_choices.push((rect, 0));
+    state.hover = Some(ChromeHover::SettingsChoice(0));
+    state.handle_mouse(
+        moved_mouse(rect.x + 1, rect.y + 1),
+        &mut ClientShellInput::default(),
+    );
+    assert!(state.hover.is_none());
+}
+
 /// 复制反馈限定在安全区内，与通知吐司同处底部时让开不重叠。
 #[test]
 fn copy_feedback_stays_in_the_safe_area_and_avoids_toasts() {

@@ -50,7 +50,7 @@ type ToastScene = fn(&mut ClientShellState);
 #[ignore = "manual visual gallery; run `just ui-gallery`"]
 fn ui_gallery_toast() {
     let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
-    let scenes: [(&str, ToastScene); 9] = [
+    let scenes: [(&str, ToastScene); 11] = [
         ("needsinput", |state| {
             state.visible_notification = Some(toast_event(
                 SemanticNotificationKind::NeedsAttention,
@@ -127,6 +127,31 @@ fn ui_gallery_toast() {
             state.copy_feedback = Some(crate::app::state::CopyFeedback {
                 message: "已复制 42 行到剪贴板".into(),
             });
+        }),
+        ("opposite anchors", |state| {
+            state.visible_endpoint_notice = Some(toast_notice(
+                ClientEndpointNoticeKind::Success,
+                "设置已保存",
+                "操作结果保留在右下角",
+            ));
+            let mut notification = toast_event(
+                SemanticNotificationKind::NeedsAttention,
+                "codex 等待确认",
+                "允许继续运行检查？",
+                None,
+            );
+            notification.event.position = Some(crate::config::ToastHerdrPosition::BottomLeft);
+            state.visible_notification = Some(notification);
+        }),
+        ("semantic over settings", |state| {
+            state.open_settings_overlay();
+            state.visible_notification = Some(toast_event(
+                SemanticNotificationKind::NeedsAttention,
+                "codex 等待确认",
+                "点击按键后可用 esc 关闭通知，设置保留。",
+                None,
+            ));
+            state.notification_focused = true;
         }),
     ];
     let mut shots = Vec::new();

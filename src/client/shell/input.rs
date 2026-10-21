@@ -702,6 +702,10 @@ impl ClientShellState {
         if !matches!(key.code, KeyCode::Modifier(_)) {
             self.pane_selection_press = None;
         }
+        // 显式聚焦的通知画在浮层与终端弹窗之上，Enter/Esc 必须遵循同一层级。
+        if self.route_notification_key(key, outcome) {
+            return None;
+        }
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
             return None;
@@ -721,9 +725,6 @@ impl ClientShellState {
         }
         if let Some(target) = self.popup_input_target() {
             return Some(target);
-        }
-        if self.route_notification_key(key, outcome) {
-            return None;
         }
         if self.popup_pending && self.overlay.is_none() {
             return None;

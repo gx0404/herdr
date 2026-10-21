@@ -647,6 +647,12 @@ impl ClientShellState {
     /// Cheap revalidation of the current hover identity against the latest
     /// hit map; true when the pointer still rests on the same target.
     fn chrome_hover_contains(&self, hover: &ChromeHover, point: (u16, u16)) -> bool {
+        if (super::contains(self.hits.notification_toast, point)
+            || super::contains(self.hits.endpoint_notice_toast, point))
+            && !matches!(hover, ChromeHover::NotificationToast)
+        {
+            return false;
+        }
         let hits = &self.hits;
         match hover {
             // 折叠开关落在行矩形之内：指针移到开关上时行悬浮必须让位。统一树的
@@ -861,6 +867,23 @@ impl ClientShellState {
     /// stationary over one row) never allocates.
     fn chrome_hover_at(&self, point: (u16, u16)) -> Option<ChromeHover> {
         let hits = &self.hits;
+        // 两张吐司共用一个悬浮身份：同时显示时只有语义通知响应悬浮，端点通知
+        // 单独显示时才响应（避免两张卡片一起加粗）。
+        if (super::contains(hits.notification_toast, point)
+            && self
+                .visible_notification
+                .as_ref()
+                .is_some_and(|notification| notification.event.pane_id.is_some()))
+            || (super::contains(hits.endpoint_notice_toast, point)
+                && hits.notification_toast.is_empty())
+        {
+            return Some(ChromeHover::NotificationToast);
+        }
+        if super::contains(hits.notification_toast, point)
+            || super::contains(hits.endpoint_notice_toast, point)
+        {
+            return None;
+        }
         if self.overlay.is_some() {
             if let Some((_, section)) = hits
                 .settings_tabs
@@ -979,18 +1002,6 @@ impl ClientShellState {
             .find(|(rect, _)| super::contains(*rect, point))
         {
             return Some(ChromeHover::Inspector(*rect));
-        }
-        // 两张吐司共用一个悬浮身份：同时显示时只有语义通知响应悬浮，端点通知
-        // 单独显示时才响应（避免两张卡片一起加粗）。
-        if (super::contains(hits.notification_toast, point)
-            && self
-                .visible_notification
-                .as_ref()
-                .is_some_and(|notification| notification.event.pane_id.is_some()))
-            || (super::contains(hits.endpoint_notice_toast, point)
-                && hits.notification_toast.is_empty())
-        {
-            return Some(ChromeHover::NotificationToast);
         }
         if super::contains(hits.lifecycle_banner_retry, point) {
             return Some(ChromeHover::LifecycleBannerRetry);

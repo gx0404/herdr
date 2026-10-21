@@ -207,6 +207,24 @@ pub(in crate::client::shell) fn place(
     Rect::new(x, y, width, height)
 }
 
+/// 不同锚点也可能横向相交；沿锚点向内寻找空位，放不下则本帧不画，保留通知状态。
+pub(in crate::client::shell) fn place_avoiding(
+    safe: Rect,
+    anchor: Anchor,
+    width: u16,
+    height: u16,
+    offset: u16,
+    occupied: &[Rect],
+) -> Rect {
+    for offset in offset..=safe.height.saturating_sub(height) {
+        let rect = place(safe, anchor, width, height, offset);
+        if !occupied.iter().any(|other| other.intersects(rect)) {
+            return rect;
+        }
+    }
+    Rect::default()
+}
+
 /// 绘制结果：卡片矩形与「按键」按钮（键盘焦点入口，没有时为空）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::client::shell) struct Painted {
