@@ -326,10 +326,13 @@ fn codex_deprecated_flag_range(
 }
 
 fn insert_codex_hooks(content: &str, mut document: toml_edit::DocumentMut) -> io::Result<String> {
-    let roundtrip = document.to_string();
+    // toml_edit normalizes some CRLF whitespace while serializing. Compare a normalized
+    // projection, but splice only the new flag into the original bytes below.
+    let baseline = content.replace("\r\n", "\n");
+    let roundtrip = document.to_string().replace("\r\n", "\n");
     let omit_final_newline =
-        !content.ends_with('\n') && roundtrip.strip_suffix('\n') == Some(content);
-    if roundtrip != content && !omit_final_newline {
+        !baseline.ends_with('\n') && roundtrip.strip_suffix('\n') == Some(baseline.as_str());
+    if roundtrip != baseline && !omit_final_newline {
         return Err(invalid_codex_config(
             "cannot preserve config.toml formatting while adding hooks",
         ));
@@ -340,27 +343,55 @@ fn insert_codex_hooks(content: &str, mut document: toml_edit::DocumentMut) -> io
         .as_table_like_mut()
         .ok_or_else(|| invalid_codex_config("features must be a table or inline table"))?;
     features.insert("hooks", toml_edit::value(true));
-    let mut candidate = document.to_string();
+    let mut candidate = document.to_string().replace("\r\n", "\n");
     if omit_final_newline && candidate.ends_with('\n') {
         candidate.pop();
     }
-    let prefix = content
+    let prefix = baseline
         .bytes()
         .zip(candidate.bytes())
         .take_while(|(before, after)| before == after)
         .count();
-    let suffix = content.as_bytes()[prefix..]
+    let suffix = baseline.as_bytes()[prefix..]
         .iter()
         .rev()
         .zip(candidate.as_bytes()[prefix..].iter().rev())
         .take_while(|(before, after)| before == after)
         .count();
-    if prefix + suffix != content.len() {
+    if prefix + suffix != baseline.len() {
         return Err(invalid_codex_config(
             "adding hooks would rewrite unrelated config.toml text",
         ));
     }
-    Ok(candidate)
+    let insertion = candidate
+        .get(prefix..candidate.len().saturating_sub(suffix))
+        .ok_or_else(|| invalid_codex_config("cannot locate inserted feature flag"))?;
+    let mut original_offset = 0;
+    for _ in 0..prefix {
+        original_offset +=
+            if content.as_bytes().get(original_offset..original_offset + 2) == Some(b"\r\n") {
+                2
+            } else {
+                1
+            };
+    }
+    if !content.is_char_boundary(original_offset) {
+        return Err(invalid_codex_config(
+            "cannot locate original feature insertion point",
+        ));
+    }
+    // Match the first existing line ending for new text; mixed endings in user text stay intact.
+    let crlf = content
+        .find('\n')
+        .is_some_and(|index| index > 0 && content.as_bytes().get(index - 1) == Some(&b'\r'));
+    let insertion = if crlf {
+        insertion.replace('\n', "\r\n")
+    } else {
+        insertion.to_owned()
+    };
+    let mut result = content.to_owned();
+    result.insert_str(original_offset, &insertion);
+    Ok(result)
 }
 
 /// Validate and replace Herdr's marked Kimi hooks without rewriting unmarked TOML.

@@ -143,6 +143,8 @@ Herdr 默认使用 `~/.claude`,设置了 `CLAUDE_CONFIG_DIR` 时使用后者。C
 
 ## Codex
 
+安装钩子会保留 `config.toml` 的原有注释及 LF、CRLF 或混合换行，只插入或更新所需的功能标志。TOML 无效或编辑会改写无关设置时，会在写入前拒绝操作。
+
 安装 Codex 钩子（要求 Codex `0.150.0` 或更新版本）：
 
 ```bash
