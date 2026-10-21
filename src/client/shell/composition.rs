@@ -1,3 +1,4 @@
+use super::chrome::toast::{self, Anchor};
 use super::*;
 
 /// 把 `rect` 之外、`buffer` 之内的四条件带压暗一帧（浮层入场提示，
@@ -191,7 +192,6 @@ impl ClientShellState {
             let area = self.layout(cols, rows).pane_surface;
             self.paint_observability(&mut canvas, area);
             let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
-            self.paint_shell_feedback(&mut canvas, self.layout(cols, rows), &mut occlusion)?;
             if self.session_view.mobile {
                 if let Some(cache) = self.session_rows.as_ref() {
                     let full = Rect::new(0, 0, cols, rows);
@@ -220,6 +220,8 @@ impl ClientShellState {
                 }
             }
             self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
+            // 吐司叠在浮层之上（浮层里的操作结果也要看得到）。
+            self.paint_shell_feedback(&mut canvas, self.layout(cols, rows), &mut occlusion)?;
             let (frame, buffer) = canvas.finish(Vec::new());
             self.compose_buffer = Some(buffer);
             return Some(frame.into());
@@ -411,7 +413,6 @@ impl ClientShellState {
                 canvas.restore_cells(bar, cells);
             }
         }
-        self.paint_shell_feedback(&mut canvas, layout, &mut occlusion)?;
         if let Some(covered) = self.paint_observability(&mut canvas, layout.pane_surface) {
             occlusion.cover(covered);
         }
@@ -428,7 +429,10 @@ impl ClientShellState {
                 let block = ratatui::widgets::Block::default()
                     .borders(ratatui::widgets::Borders::ALL)
                     .border_set(self.config.border_glyphs.border_set())
-                    .border_style(ratatui::style::Style::default().fg(self.config.palette.accent))
+                    .border_style(
+                        ratatui::style::Style::default()
+                            .fg(crate::ui::design::frame(&self.config.palette)),
+                    )
                     .title(popup.title.clone())
                     .style(ratatui::style::Style::default().bg(self.config.palette.panel_bg));
                 ratatui::widgets::Widget::render(ratatui::widgets::Clear, geometry.outer, composed);
@@ -449,39 +453,6 @@ impl ClientShellState {
                 });
             }
         }
-        let cx = super::feedback::ChromeContext {
-            page_bounds: None,
-            palette: &self.config.palette,
-            components: &self.config.components,
-            glyphs: self.config.border_glyphs,
-            hover: self.hover.as_ref(),
-            spinner,
-            now: compose_now,
-        };
-        let active_lifecycle = self
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
-            .filter(|endpoint| endpoint.status != ClientEndpointStatus::Online)
-            .map(|endpoint| {
-                let progress =
-                    self.endpoint_reconnect_progress(&endpoint.endpoint_id)
-                        .map(|progress| {
-                            (
-                                progress.attempts,
-                                progress
-                                    .next_attempt_at
-                                    .saturating_duration_since(compose_now)
-                                    .as_secs(),
-                            )
-                        });
-                (
-                    endpoint.endpoint_id.clone(),
-                    endpoint.label.clone(),
-                    endpoint.status,
-                    progress,
-                )
-            });
         if !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
             && self.overlay.is_none()
@@ -506,28 +477,7 @@ impl ClientShellState {
                     &mut self.hits,
                 );
             }
-            if let Some((_, label, status, progress)) = active_lifecycle.as_ref() {
-                let _ = endpoint_notices::render_lifecycle_banner(
-                    composed,
-                    Rect::new(0, 0, cols, rows),
-                    label,
-                    *status,
-                    *progress,
-                    false,
-                    2,
-                    &cx,
-                );
-            }
-            if let Some(notice) = self.visible_endpoint_notice.as_ref() {
-                self.hits.notification_toast = endpoint_notices::render_mobile_banner(
-                    composed,
-                    Rect::new(0, 0, cols, rows),
-                    notice,
-                    active_lifecycle.is_some(),
-                    &self.config.palette,
-                    &self.config.components,
-                );
-            }
+            // 生命周期横幅与端点通知由随后的 `paint_shell_feedback` 统一画在安全区内。
             canvas.set_cursor(None);
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
@@ -540,6 +490,8 @@ impl ClientShellState {
             occlusion.cover(bar);
         }
         self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
+        // 吐司与横幅叠在浮层之上：浮层里的操作结果（`push_endpoint_notice`）也要看得到。
+        self.paint_shell_feedback(&mut canvas, layout, &mut occlusion)?;
         if self.endpoint_status(&self.active_endpoint_id) != Some(ClientEndpointStatus::Online) {
             canvas.set_cursor(None);
             self.hits.panes.clear();
@@ -572,11 +524,13 @@ impl ClientShellState {
             now: compose_now,
         };
         self.hits.notification_toast = Rect::default();
+        self.hits.endpoint_notice_toast = Rect::default();
         self.hits.notification_keys = Rect::default();
-        self.hits.machine_auth_actions = Vec::new();
         self.hits.lifecycle_banner_retry = Rect::default();
         self.hits.lifecycle_banner_give_up = Rect::default();
-        let has_config_diagnostic = self.config_diagnostic.is_some();
+        let mobile = !layout.mobile_header.is_empty();
+        let frame_area = Rect::new(0, 0, cols, rows);
+        let safe = self.feedback_safe_area(layout, cols, rows);
         let active_lifecycle = self
             .endpoints
             .iter()
@@ -601,135 +555,207 @@ impl ClientShellState {
                     progress,
                 )
             });
-        if has_config_diagnostic
-            || active_lifecycle.is_some()
-            || self.visible_endpoint_notice.is_some()
-            || self.visible_notification.is_some()
-        {
-            let composed = canvas.buffer();
-            if let Some(diagnostic) = self.config_diagnostic.as_deref() {
-                let diagnostic_area = if layout.mobile_header.is_empty() {
-                    Rect::new(0, 0, cols, rows)
-                } else {
-                    layout.pane_surface
-                };
-                crate::ui::render_config_diagnostic_buffer(
-                    composed,
-                    diagnostic_area,
-                    diagnostic,
-                    &self.config.palette,
-                    |rect| occlusion.cover(rect),
-                );
-            }
-            let (lifecycle_offset, lifecycle_banner) = active_lifecycle.as_ref().map_or(
-                (0, None),
-                |(endpoint_id, label, status, progress)| {
-                    let banner = endpoint_notices::render_lifecycle_banner(
-                        composed,
-                        Rect::new(0, 0, cols, rows),
-                        label,
-                        *status,
-                        *progress,
-                        !endpoint_id.is_local(),
-                        u16::from(has_config_diagnostic) + layout.mobile_header.height,
-                        &cx,
-                    );
-                    occlusion.cover(banner.rect);
-                    (1, Some(banner))
+        // 持续横幅（配置诊断、端点生命周期）不是会消失的吐司：照旧画在顶端，工作台
+        // 下限定在内容区（不压标题栏）。记下它们占到的最低行，顶部吐司从那以下开始。
+        let banner_area = if self.workbench.enabled {
+            safe
+        } else {
+            frame_area
+        };
+        let mut band_bottom = 0u16;
+        let mut diagnostic_rows = 0u16;
+        if let Some(diagnostic) = self.config_diagnostic.as_deref() {
+            let diagnostic_area = if mobile {
+                layout.pane_surface
+            } else {
+                banner_area
+            };
+            diagnostic_rows = crate::ui::render_config_diagnostic_buffer(
+                canvas.buffer(),
+                diagnostic_area,
+                diagnostic,
+                &self.config.palette,
+                |rect| {
+                    occlusion.cover(rect);
+                    band_bottom = band_bottom.max(rect.bottom());
                 },
             );
-            if let Some(banner) = lifecycle_banner {
-                self.hits.lifecycle_banner_retry = banner.retry;
-                self.hits.lifecycle_banner_give_up = banner.give_up;
-            }
-            if let Some(notice) = self.visible_endpoint_notice.as_ref() {
-                self.hits.notification_toast = if layout.mobile_header.is_empty() {
-                    endpoint_notices::render_notice(
-                        composed,
-                        Rect::new(0, 0, cols, rows),
-                        notice,
-                        u16::from(has_config_diagnostic) + lifecycle_offset,
-                        &cx,
-                    )
-                } else {
-                    endpoint_notices::render_mobile_banner(
-                        composed,
-                        Rect::new(0, 0, cols, rows),
-                        notice,
-                        has_config_diagnostic || lifecycle_offset > 0,
-                        &self.config.palette,
-                        &self.config.components,
-                    )
-                };
-            } else if let Some(notification) = self.visible_notification.as_ref() {
-                self.hits.notification_toast = notifications::render_shell_notification(
-                    composed,
-                    Rect::new(0, 0, cols, rows),
-                    notification,
-                    &notifications::NotificationContext {
-                        endpoints: &self.endpoints,
-                        keybinds: &self.config.keybinds,
-                        status_indicators: self.config.status_indicators,
-                        history: &self.notification_history,
-                        focused: self.notification_focused,
-                        position: self.config.toast_position,
-                        offset: u16::from(has_config_diagnostic) + lifecycle_offset,
-                    },
-                    &cx,
-                );
-            }
-            occlusion.cover(self.hits.notification_toast);
-            if self.toast_since.is_some_and(|since| {
-                compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
-            }) && !self.hits.notification_toast.is_empty()
-            {
-                composed.set_style(
-                    self.hits.notification_toast,
-                    Style::default().add_modifier(Modifier::DIM),
-                );
-            }
         }
-        if !self.hits.notification_toast.is_empty() {
-            canvas.clear_links_in(self.hits.notification_toast);
-            if (self.notification_focused && self.visible_notification.is_some())
-                || canvas.cursor().is_some_and(|cursor| {
-                    cursor.visible
-                        && super::contains(self.hits.notification_toast, (cursor.x, cursor.y))
-                })
+        if let Some((endpoint_id, label, status, progress)) = active_lifecycle.as_ref() {
+            let banner = endpoint_notices::render_lifecycle_banner(
+                canvas.buffer(),
+                banner_area,
+                label,
+                *status,
+                *progress,
+                !endpoint_id.is_local(),
+                diagnostic_rows + layout.mobile_header.height,
+                &cx,
+            );
+            occlusion.cover(banner.rect);
+            band_bottom = band_bottom.max(banner.rect.bottom());
+            self.hits.lifecycle_banner_retry = banner.retry;
+            self.hits.lifecycle_banner_give_up = banner.give_up;
+        }
+        let top_reserved = band_bottom.saturating_sub(safe.y);
+        let hovered = cx.hovered(&super::feedback::ChromeHover::NotificationToast);
+        // 同一锚点的吐司向安全区内部堆叠：端点通知是你刚做的操作的结果，离角落最近。
+        // 移动端的端点通知是贴底的一行横幅：底部吐司从它之上开始。
+        let banner_rows = u16::from(mobile && self.visible_endpoint_notice.is_some());
+        let mut stacks: Vec<(Anchor, u16)> = Vec::new();
+        let mut stack_offset = |anchor: Anchor, height: u16| -> u16 {
+            let base = if anchor.is_top() {
+                top_reserved
+            } else {
+                banner_rows
+            };
+            match stacks
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == anchor)
+            {
+                Some((_, used)) => {
+                    let offset = base + *used;
+                    *used = used.saturating_add(height);
+                    offset
+                }
+                None => {
+                    stacks.push((anchor, height));
+                    base
+                }
+            }
+        };
+        let herdr_anchor = Anchor::herdr(self.config.toast_position);
+        if let Some(notice) = self.visible_endpoint_notice.as_ref() {
+            self.hits.endpoint_notice_toast = if mobile {
+                endpoint_notices::render_mobile_banner(
+                    canvas.buffer(),
+                    safe,
+                    notice,
+                    false,
+                    &self.config.palette,
+                    &self.config.components,
+                )
+            } else {
+                let toast = endpoint_notices::notice_toast(
+                    notice,
+                    hovered && self.visible_notification.is_none(),
+                );
+                let measured = toast::measure(&toast, safe);
+                let offset = stack_offset(herdr_anchor, measured.height);
+                let rect =
+                    toast::place(safe, herdr_anchor, measured.width, measured.height, offset);
+                toast::paint(canvas.buffer(), rect, &toast, &measured, &cx).card
+            };
+        }
+        if let Some(notification) = self.visible_notification.as_ref() {
+            let anchor = Anchor::herdr(
+                notification
+                    .event
+                    .position
+                    .unwrap_or(self.config.toast_position),
+            );
+            let toast = notifications::shell_notification_toast(
+                notification,
+                &notifications::NotificationContext {
+                    endpoints: &self.endpoints,
+                    keybinds: &self.config.keybinds,
+                    status_indicators: self.config.status_indicators,
+                    history: &self.notification_history,
+                    focused: self.notification_focused,
+                    hovered,
+                },
+                compose_now,
+            );
+            let measured = toast::measure(&toast, safe);
+            let offset = stack_offset(anchor, measured.height);
+            let rect = toast::place(safe, anchor, measured.width, measured.height, offset);
+            let painted = toast::paint(canvas.buffer(), rect, &toast, &measured, &cx);
+            self.hits.notification_toast = painted.card;
+            self.hits.notification_keys = painted.focus;
+        }
+        let entering = self.toast_since.is_some_and(|since| {
+            compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
+        });
+        for rect in [
+            self.hits.endpoint_notice_toast,
+            self.hits.notification_toast,
+        ] {
+            if rect.is_empty() {
+                continue;
+            }
+            occlusion.cover(rect);
+            if entering {
+                canvas
+                    .buffer()
+                    .set_style(rect, Style::default().add_modifier(Modifier::DIM));
+            }
+            canvas.clear_links_in(rect);
+            if canvas
+                .cursor()
+                .is_some_and(|cursor| cursor.visible && super::contains(rect, (cursor.x, cursor.y)))
             {
                 canvas.set_cursor(None);
             }
-            if self.visible_endpoint_notice.is_none() && self.visible_notification.is_some() {
-                self.hits.notification_keys =
-                    super::chrome::notification::keys_rect(self.hits.notification_toast);
-            }
+        }
+        if self.notification_focused && self.visible_notification.is_some() {
+            canvas.set_cursor(None);
         }
         if let Some(feedback) = self.copy_feedback.as_ref() {
-            let composed = canvas.buffer();
-            let base_offset = u16::from(has_config_diagnostic);
-            let feedback_area = if layout.mobile_header.is_empty() {
-                layout.pane_surface
-            } else {
-                Rect::new(0, 0, cols, rows)
-            };
-            let offset = crate::ui::copy_feedback_offset_for_toast(
-                feedback_area,
-                feedback,
-                base_offset,
-                self.config.clipboard_toast_position,
+            let anchor = Anchor::clipboard(self.config.clipboard_toast_position);
+            let toast = copy_feedback_toast(&feedback.message);
+            let measured = toast::measure(&toast, safe);
+            let toasts = [
                 self.hits.notification_toast,
-            );
-            occlusion.cover(crate::ui::render_copy_feedback_buffer_styled(
-                composed,
-                feedback_area,
-                feedback,
-                offset,
-                self.config.clipboard_toast_position,
-                &self.config.palette,
-                &self.config.components,
-            ));
+                self.hits.endpoint_notice_toast,
+            ];
+            let mut offset = if anchor.is_top() {
+                top_reserved
+            } else {
+                banner_rows
+            };
+            let mut rect = toast::place(safe, anchor, measured.width, measured.height, offset);
+            // 与通知吐司重叠时往安全区内部让开（不叠在通知上）。
+            while toasts.iter().any(|toast| toast.intersects(rect)) && offset < safe.height {
+                offset += 1;
+                rect = toast::place(safe, anchor, measured.width, measured.height, offset);
+            }
+            let rect = toast::paint(canvas.buffer(), rect, &toast, &measured, &cx).card;
+            occlusion.cover(rect);
+            canvas.clear_links_in(rect);
         }
         Some(())
+    }
+
+    /// 反馈层（吐司、复制反馈、移动端横幅）的安全区：工作台是标题栏与状态栏之间的
+    /// 内容区（`workbench::content_area`）；经典布局排除标签栏与模式条所在行；移动端
+    /// 排除顶部头与底栏（模式条）一行。
+    pub(super) fn feedback_safe_area(
+        &self,
+        layout: ClientShellLayout,
+        cols: u16,
+        rows: u16,
+    ) -> Rect {
+        if self.workbench.enabled {
+            return super::workbench::content_area(cols, rows);
+        }
+        let surface = layout.pane_surface;
+        if !layout.mobile_header.is_empty() {
+            return Rect::new(
+                surface.x,
+                surface.y,
+                surface.width,
+                surface.height.saturating_sub(1),
+            );
+        }
+        // 模式条画在底部标签栏里（有底部标签栏时）或终端区末行（其余情况）。
+        let bar_in_tab_bar = self.config.tab_bar_position == TabBarPositionConfig::Bottom
+            && !layout.tab_bar.is_empty();
+        let height = if bar_in_tab_bar {
+            surface.height
+        } else {
+            surface.height.saturating_sub(1)
+        };
+        Rect::new(0, surface.y, cols, height.min(rows))
     }
 
     pub(super) fn paint_shell_copy(
@@ -884,6 +910,7 @@ impl ClientShellState {
             now: compose_now,
         };
         let (frame_width, frame_height) = canvas.size();
+        self.hits.machine_auth_actions = Vec::new();
         self.hits.welcome_actions.clear();
         if self.welcome_active() {
             let area = if self.workbench.enabled {
@@ -1166,6 +1193,23 @@ pub(super) fn emphasize_pane_border(
             let cell = &mut buffer[(x, y)];
             cell.set_style(cell.style().fg(color).add_modifier(Modifier::BOLD));
         }
+    }
+}
+
+/// 复制反馈的吐司：成功等级、宽度按内容收缩、没有正文与动作。
+pub(super) fn copy_feedback_toast(message: &str) -> super::chrome::toast::Toast<'_> {
+    let level = super::feedback::ClientToastLevel::Success;
+    super::chrome::toast::Toast {
+        level,
+        icon: level.icon().into(),
+        agent: None,
+        title: message.into(),
+        age: None,
+        location: None,
+        body: "".into(),
+        actions: Vec::new(),
+        emphasized: false,
+        fit: true,
     }
 }
 

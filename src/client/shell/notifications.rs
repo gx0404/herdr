@@ -3,8 +3,7 @@ use super::notification_policy::COMPLETION_RECHECK_INTERVAL;
 use super::*;
 use ratatui::{
     style::Color,
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Clear, Widget},
 };
 
 pub(super) fn render_mobile_notice_banner(
@@ -59,7 +58,7 @@ pub(super) fn render_mobile_notice_banner(
             rect.y,
             rect.right().saturating_sub(x),
             body,
-            Style::default().fg(palette.overlay0).bg(background),
+            crate::ui::design::muted(palette).bg(background),
         );
     }
     rect
@@ -143,144 +142,79 @@ pub(super) fn render_mobile_notification_banner(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_notification_card(
-    buffer: &mut Buffer,
-    area: Rect,
-    title: &str,
-    body: &str,
-    position: crate::config::ToastHerdrPosition,
-    top_offset: u16,
-    level: super::feedback::ClientToastLevel,
-    cx: &super::feedback::ChromeContext<'_>,
-) -> Rect {
-    let palette = cx.palette;
-    if area.is_empty() {
-        return Rect::default();
-    }
-    let content_width = unicode_width::UnicodeWidthStr::width(title)
-        .max(unicode_width::UnicodeWidthStr::width(body))
-        .saturating_add(6);
-    let width = u16::try_from(content_width)
-        .unwrap_or(u16::MAX)
-        .min(area.width);
-    let height: u16 = if body.is_empty() { 3 } else { 4 }.min(area.height);
-    let x = match position {
-        crate::config::ToastHerdrPosition::TopLeft
-        | crate::config::ToastHerdrPosition::BottomLeft => area.x,
-        crate::config::ToastHerdrPosition::TopRight
-        | crate::config::ToastHerdrPosition::BottomRight => area.right().saturating_sub(width),
-    };
-    let max_y = area.bottom().saturating_sub(height).max(area.y);
-    let y = match position {
-        crate::config::ToastHerdrPosition::TopLeft
-        | crate::config::ToastHerdrPosition::TopRight => area.y.saturating_add(top_offset),
-        crate::config::ToastHerdrPosition::BottomLeft
-        | crate::config::ToastHerdrPosition::BottomRight => area
-            .bottom()
-            .saturating_sub(height.saturating_add(top_offset)),
-    }
-    .clamp(area.y, max_y);
-    let rect = Rect::new(x, y, width, height);
-    let level_color = level.color(cx.components);
-    let mut border_style = Style::default().fg(level_color);
-    if cx.hovered(&super::feedback::ChromeHover::NotificationToast) {
-        border_style = border_style.add_modifier(Modifier::BOLD);
-    }
-    Clear.render(rect, buffer);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(cx.glyphs.border_set())
-        .border_style(border_style)
-        .style(Style::default().bg(palette.panel_bg));
-    let inner = block.inner(rect);
-    block.render(rect, buffer);
-    Paragraph::new(Line::from(vec![
-        Span::styled(level.icon(), Style::default().fg(level_color)),
-        Span::raw(" "),
-        Span::styled(
-            title,
-            Style::default()
-                .fg(palette.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]))
-    .render(Rect::new(inner.x, inner.y, inner.width, 1), buffer);
-    if !body.is_empty() && inner.height > 1 {
-        Paragraph::new(Line::from(Span::styled(
-            body,
-            Style::default().fg(palette.overlay0),
-        )))
-        .render(
-            Rect::new(
-                inner.x.saturating_add(2),
-                inner.y + 1,
-                inner.width.saturating_sub(2),
-                1,
-            ),
-            buffer,
-        );
-    }
-    rect
-}
-
-#[cfg(test)]
-pub(super) fn render_visible_notification(
-    buffer: &mut Buffer,
-    area: Rect,
-    notification: &ClientVisibleNotification,
-    default_position: crate::config::ToastHerdrPosition,
-    top_offset: u16,
-    cx: &super::feedback::ChromeContext<'_>,
-) -> Rect {
-    let event = &notification.event;
-    render_notification_card(
-        buffer,
-        area,
-        &event.title,
-        event.body.as_deref().unwrap_or_default(),
-        event.position.unwrap_or(default_position),
-        top_offset,
-        super::feedback::ClientToastLevel::from_notification_kind(event.kind),
-        cx,
-    )
-}
-
 pub(super) struct NotificationContext<'a> {
     pub(super) endpoints: &'a [ClientShellEndpoint],
     pub(super) keybinds: &'a LiveKeybindConfig,
     pub(super) status_indicators: crate::config::StatusIndicatorStyle,
     pub(super) history: &'a VecDeque<super::feedback::ClientNotificationRecord>,
     pub(super) focused: bool,
-    pub(super) position: crate::config::ToastHerdrPosition,
-    pub(super) offset: u16,
+    pub(super) hovered: bool,
 }
 
-pub(super) fn render_shell_notification(
-    buffer: &mut Buffer,
-    area: Rect,
+/// 首行的「agent 名 + 标题」：标题以 agent 名（显示名或 canonical id）开头时拆出来，
+/// agent 名单独加粗；拆完为空时按通知种类补「等待中 / 已完成」。
+fn split_agent_title(
+    label: Option<&str>,
+    canonical: Option<&str>,
+    title: &str,
+    kind: SemanticNotificationKind,
+) -> (Option<String>, String) {
+    let Some(label) = label else {
+        return (None, title.to_owned());
+    };
+    let rest = [Some(label), canonical]
+        .into_iter()
+        .flatten()
+        .find_map(|prefix| {
+            let rest = title.strip_prefix(prefix)?;
+            (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim_start())
+        });
+    let fallback = |fmt: &str| crate::i18n::fill(fmt, &[("agent", "")]).trim().to_owned();
+    let title = match rest {
+        Some("") => match kind {
+            SemanticNotificationKind::NeedsAttention => {
+                fallback(crate::i18n::texts().notify.agent_waiting_fmt)
+            }
+            SemanticNotificationKind::Finished => {
+                fallback(crate::i18n::texts().notify.agent_done_fmt)
+            }
+            SemanticNotificationKind::UpdateInstalled | SemanticNotificationKind::Custom => {
+                String::new()
+            }
+        },
+        Some(rest) => rest.to_owned(),
+        None => title.to_owned(),
+    };
+    (Some(label.to_owned()), title)
+}
+
+/// 语义通知的吐司视图（合成阶段组装，绘制只读）。
+pub(super) fn shell_notification_toast(
     notification: &ClientVisibleNotification,
     presentation: &NotificationContext<'_>,
-    cx: &super::feedback::ChromeContext<'_>,
-) -> Rect {
-    use super::chrome::notification::{bucket, Card};
+    now: std::time::Instant,
+) -> super::chrome::toast::Toast<'static> {
+    use super::chrome::command::text;
+    use super::chrome::toast::{Action, ActionKind, Toast};
+    use crate::harness::AgentBucket;
     let event = &notification.event;
-    let bucket = bucket(event, presentation.endpoints, &notification.endpoint_id);
-    let agent = notification_agent_label(presentation.endpoints, notification);
-    let title = match (
-        event.kind,
-        agent.filter(|agent| Some(*agent) != event.agent.as_deref()),
-    ) {
-        (SemanticNotificationKind::NeedsAttention, Some(agent)) => crate::i18n::fill(
-            crate::i18n::texts().notify.agent_waiting_fmt,
-            &[("agent", agent)],
-        ),
-        (SemanticNotificationKind::Finished, Some(agent)) => crate::i18n::fill(
-            crate::i18n::texts().notify.agent_done_fmt,
-            &[("agent", agent)],
-        ),
-        _ => event.title.clone(),
+    let bucket = super::chrome::notification::bucket(
+        event,
+        presentation.endpoints,
+        &notification.endpoint_id,
+    );
+    let level = super::feedback::ClientToastLevel::for_notification(bucket, event.kind);
+    let icon = if matches!(bucket, AgentBucket::NeedsInput | AgentBucket::Failed) {
+        crate::ui::design::status_glyph(bucket, presentation.status_indicators, 0, false)
+    } else {
+        level.icon()
     };
+    let (agent, title) = split_agent_title(
+        notification_agent_label(presentation.endpoints, notification),
+        event.agent.as_deref(),
+        &event.title,
+        event.kind,
+    );
     let endpoint = presentation
         .endpoints
         .iter()
@@ -318,31 +252,58 @@ pub(super) fn render_shell_notification(
                 })
         })
         .map(|r| r.received_at)
-        .unwrap_or(cx.now);
-    let age = super::feedback::relative_time_ago(at, cx.now);
-    let jump = event.pane_id.as_ref().and_then(|_| {
-        super::chrome::key_sequence(
-            presentation.keybinds,
-            &presentation.keybinds.keybinds.open_notification_target,
-        )
-    });
-    super::chrome::notification::paint(
-        buffer,
-        area,
-        &Card {
-            title: &title,
-            location: &location,
-            body: event.body.as_deref().unwrap_or_default(),
-            bucket,
-            status_indicators: presentation.status_indicators,
-            age: &age,
-            jump_key: jump.as_deref(),
-            focused: presentation.focused,
-        },
-        event.position.unwrap_or(presentation.position),
-        presentation.offset,
-        cx,
-    )
+        .unwrap_or(now);
+    let has_target = event.pane_id.is_some();
+    let hint = |key: &str, label: &str| Action {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        kind: ActionKind::Hint,
+    };
+    let mut actions = Vec::new();
+    if presentation.focused {
+        // 卡片持有键盘焦点：enter / esc 归卡片。
+        if has_target {
+            actions.push(hint(
+                "enter",
+                if event.kind == SemanticNotificationKind::NeedsAttention {
+                    text("jump & answer", "跳转并回答")
+                } else {
+                    text("jump", "跳转")
+                },
+            ));
+        }
+        actions.push(hint("esc", text("dismiss", "忽略")));
+    } else {
+        if let Some(jump) = has_target
+            .then(|| {
+                super::chrome::key_sequence(
+                    presentation.keybinds,
+                    &presentation.keybinds.keybinds.open_notification_target,
+                )
+            })
+            .flatten()
+        {
+            actions.push(hint(&jump, text("jump", "跳转")));
+        }
+        // 普通输入归 pane：点「按键」把键盘焦点交给卡片，之后 enter / esc 才生效。
+        actions.push(Action {
+            key: text("keys", "按键").to_owned(),
+            label: text("use enter/esc", "启用 enter/esc").to_owned(),
+            kind: ActionKind::Focus,
+        });
+    }
+    Toast {
+        level,
+        icon: icon.into(),
+        agent: agent.map(Into::into),
+        title: title.into(),
+        age: Some(super::chrome::toast::age_label(now.saturating_duration_since(at)).into()),
+        location: Some(location.into()),
+        body: event.body.clone().unwrap_or_default().into(),
+        actions,
+        emphasized: presentation.focused || presentation.hovered,
+        fit: false,
+    }
 }
 
 impl ClientShellState {
@@ -381,21 +342,6 @@ impl ClientShellState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_chrome_context<'a>(
-        palette: &'a Palette,
-        components: &'a crate::app::state::ComponentStyles,
-    ) -> super::super::feedback::ChromeContext<'a> {
-        super::super::feedback::ChromeContext {
-            page_bounds: None,
-            palette,
-            components,
-            glyphs: crate::ui::BorderGlyphs::SINGLE,
-            hover: None,
-            spinner: "◐",
-            now: std::time::Instant::now(),
-        }
-    }
 
     fn notification() -> ClientVisibleNotification {
         ClientVisibleNotification {
@@ -737,27 +683,84 @@ mod tests {
 
     #[test]
     fn notification_rect_stays_inside_short_nonzero_area() {
-        let palette = crate::app::client_palette_from_config(&Config::default());
-        let components = crate::app::state::ComponentStyles::from_palette(&palette);
-        let cx = test_chrome_context(&palette, &components);
+        use super::super::chrome::toast::{measure, place, Anchor};
+        let config = ClientShellConfig::from_config(&Config::default());
+        let history = VecDeque::new();
+        let presentation = NotificationContext {
+            endpoints: &[],
+            keybinds: &config.keybinds,
+            status_indicators: config.status_indicators,
+            history: &history,
+            focused: false,
+            hovered: false,
+        };
+        let now = std::time::Instant::now();
+        let toast = shell_notification_toast(&notification(), &presentation, now);
         for height in [1, 2] {
             let area = Rect::new(3, 4, 8, height);
-            for position in [
-                crate::config::ToastHerdrPosition::TopRight,
-                crate::config::ToastHerdrPosition::BottomRight,
-            ] {
-                let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 10));
-                let rect = render_visible_notification(
-                    &mut buffer,
-                    area,
-                    &notification(),
-                    position,
-                    1,
-                    &cx,
-                );
+            for anchor in [Anchor::TopRight, Anchor::BottomRight] {
+                let measured = measure(&toast, area);
+                let rect = place(area, anchor, measured.width, measured.height, 1);
                 assert!(rect.y >= area.y);
                 assert!(rect.bottom() <= area.bottom());
+                assert!(rect.right() <= area.right());
             }
+        }
+    }
+
+    #[test]
+    fn notification_title_splits_the_agent_name_and_maps_levels() {
+        assert_eq!(
+            split_agent_title(
+                Some("Claude Code"),
+                Some("claude"),
+                "claude needs attention",
+                SemanticNotificationKind::NeedsAttention,
+            ),
+            (Some("Claude Code".into()), "needs attention".into())
+        );
+        assert_eq!(
+            split_agent_title(
+                Some("codex"),
+                Some("codex"),
+                "codex",
+                SemanticNotificationKind::Finished
+            )
+            .1,
+            crate::i18n::fill(crate::i18n::texts().notify.agent_done_fmt, &[("agent", "")]).trim()
+        );
+        assert_eq!(
+            split_agent_title(None, None, "notice", SemanticNotificationKind::Custom),
+            (None, "notice".into())
+        );
+        assert_eq!(
+            split_agent_title(
+                Some("codex"),
+                None,
+                "codexbot ran",
+                SemanticNotificationKind::Custom
+            ),
+            (Some("codex".into()), "codexbot ran".into())
+        );
+        use super::super::feedback::ClientToastLevel as L;
+        use crate::harness::AgentBucket as B;
+        for (bucket, kind, level) in [
+            (B::NeedsInput, SemanticNotificationKind::Custom, L::Warning),
+            (B::Failed, SemanticNotificationKind::Custom, L::Error),
+            (B::Review, SemanticNotificationKind::Finished, L::Success),
+            (
+                B::None,
+                SemanticNotificationKind::NeedsAttention,
+                L::Warning,
+            ),
+            (B::None, SemanticNotificationKind::UpdateInstalled, L::Info),
+            (B::None, SemanticNotificationKind::Custom, L::Info),
+        ] {
+            assert_eq!(
+                L::for_notification(bucket, kind),
+                level,
+                "{bucket:?} {kind:?}"
+            );
         }
     }
 

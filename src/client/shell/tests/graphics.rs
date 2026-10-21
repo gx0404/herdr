@@ -188,20 +188,15 @@ fn notifications_and_clipboard_feedback_only_cover_their_drawn_corners() {
                 message: "copied".into(),
             });
             let layout = state.layout(cols, rows);
-            let area = if layout.mobile_header.is_empty() {
-                layout.pane_surface
-            } else {
-                Rect::new(0, 0, cols, rows)
-            };
-            let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
-            let rect = crate::ui::render_copy_feedback_buffer_styled(
-                &mut buffer,
-                area,
-                state.copy_feedback.as_ref().unwrap(),
+            let safe = state.feedback_safe_area(layout, cols, rows);
+            let toast = super::super::composition::copy_feedback_toast("copied");
+            let measured = super::super::chrome::toast::measure(&toast, safe);
+            let rect = super::super::chrome::toast::place(
+                safe,
+                super::super::chrome::toast::Anchor::clipboard(position),
+                measured.width,
+                measured.height,
                 0,
-                position,
-                &state.config.palette,
-                &state.config.components,
             );
             assert_graphics_cover(&mut state, rect, cols, rows);
         }
@@ -225,7 +220,7 @@ fn endpoint_notice_and_multiline_diagnostic_cover_the_actual_rows() {
         deadline: std::time::Instant::now(),
     });
     state.compose(106, 20).unwrap();
-    let rect = state.hits.notification_toast;
+    let rect = state.hits.endpoint_notice_toast;
     assert_graphics_cover(&mut state, rect, 106, 20);
     state.visible_endpoint_notice = None;
     state.config_diagnostic = Some("first\nsecond warning".into());

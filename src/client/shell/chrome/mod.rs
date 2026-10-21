@@ -15,6 +15,7 @@ pub(in crate::client::shell) mod sessions;
 pub(super) mod settings;
 pub(super) mod status_bar;
 pub(super) mod title_bar;
+pub(in crate::client::shell) mod toast;
 pub(super) mod welcome;
 
 use std::borrow::Cow;

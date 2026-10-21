@@ -1,99 +1,15 @@
+//! 持续状态横幅（配置诊断）。复制反馈等会消失的吐司在
+//! `client::shell::chrome::toast`。
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    text::Span,
+    widgets::{Clear, Paragraph, Widget},
 };
 
-use crate::{
-    app::state::{CopyFeedback, Palette},
-    config::ToastClipboardPosition,
-};
-
-pub(crate) fn copy_feedback_rect(
-    area: Rect,
-    feedback: &CopyFeedback,
-    offset_rows: u16,
-    position: ToastClipboardPosition,
-) -> Rect {
-    if area.is_empty() {
-        return Rect::default();
-    }
-
-    let content_width = u16::try_from(unicode_width::UnicodeWidthStr::width(
-        feedback.message.as_str(),
-    ))
-    .unwrap_or(u16::MAX)
-    .saturating_add(4);
-    let width = content_width.min(area.width);
-    let height = 3u16.min(area.height);
-    let x = match position {
-        ToastClipboardPosition::TopLeft | ToastClipboardPosition::BottomLeft => area.x,
-        ToastClipboardPosition::TopCenter | ToastClipboardPosition::BottomCenter => {
-            area.x + area.width.saturating_sub(width) / 2
-        }
-        ToastClipboardPosition::TopRight | ToastClipboardPosition::BottomRight => {
-            area.x + area.width.saturating_sub(width)
-        }
-    };
-    let y = match position {
-        ToastClipboardPosition::TopLeft
-        | ToastClipboardPosition::TopCenter
-        | ToastClipboardPosition::TopRight => area.y + offset_rows.min(area.height),
-        ToastClipboardPosition::BottomLeft
-        | ToastClipboardPosition::BottomCenter
-        | ToastClipboardPosition::BottomRight => {
-            area.y + area.height.saturating_sub(height + offset_rows)
-        }
-    };
-    Rect::new(x, y, width, height)
-}
-
-/// Copy feedback toast with resolved component styles: the border and marker
-/// use the `toast_border_success` component token (fallback: palette green).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn render_copy_feedback_buffer_styled(
-    buffer: &mut Buffer,
-    area: Rect,
-    feedback: &CopyFeedback,
-    offset_rows: u16,
-    position: ToastClipboardPosition,
-    palette: &Palette,
-    components: &crate::app::state::ComponentStyles,
-) -> Rect {
-    let feedback_area = copy_feedback_rect(area, feedback, offset_rows, position);
-    if feedback_area.is_empty() {
-        return feedback_area;
-    }
-
-    let success = components.toast_border_success;
-    Clear.render(feedback_area, buffer);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(success))
-        .style(Style::default().bg(palette.panel_bg));
-    let inner = block.inner(feedback_area);
-    block.render(feedback_area, buffer);
-
-    if inner.height == 0 {
-        return feedback_area;
-    }
-
-    let text = Line::from(vec![
-        Span::styled("●", Style::default().fg(success).bg(palette.panel_bg)),
-        Span::raw(" "),
-        Span::styled(
-            &feedback.message,
-            Style::default()
-                .fg(palette.text)
-                .bg(palette.panel_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    Paragraph::new(text).render(inner, buffer);
-    feedback_area
-}
+use crate::app::state::Palette;
 
 pub(crate) fn render_config_diagnostic_buffer(
     buffer: &mut Buffer,
@@ -139,83 +55,6 @@ pub(crate) fn render_config_diagnostic_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn copy_feedback_rect_uses_configured_position() {
-        let area = Rect::new(10, 20, 100, 40);
-        let feedback = CopyFeedback {
-            message: "copied to clipboard".to_owned(),
-        };
-
-        let top = copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::TopCenter);
-        assert_eq!(top.y, area.y);
-        assert_eq!(top.x, area.x + area.width.saturating_sub(top.width) / 2);
-
-        let bottom = copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::BottomCenter);
-        assert_eq!(bottom.bottom(), area.bottom());
-        assert_eq!(
-            bottom.x,
-            area.x + area.width.saturating_sub(bottom.width) / 2
-        );
-    }
-
-    #[test]
-    fn copy_feedback_rect_sizes_by_display_width_not_bytes() {
-        let area = Rect::new(0, 0, 100, 10);
-        let feedback = CopyFeedback {
-            message: "已复制到剪贴板".to_owned(),
-        };
-
-        let rect = copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::TopLeft);
-
-        // Seven CJK chars occupy 14 display cells; byte length would report 21.
-        assert_eq!(rect.width, 14 + 4);
-    }
-
-    #[test]
-    fn styled_copy_feedback_uses_toast_border_success_token() {
-        use ratatui::style::Color;
-
-        let palette = Palette::catppuccin();
-        let feedback = CopyFeedback {
-            message: "copied".to_owned(),
-        };
-        let area = Rect::new(0, 0, 20, 5);
-
-        let defaults = crate::app::state::ComponentStyles::from_palette(&palette);
-        let mut legacy = Buffer::empty(area);
-        render_copy_feedback_buffer_styled(
-            &mut legacy,
-            area,
-            &feedback,
-            0,
-            ToastClipboardPosition::TopLeft,
-            &palette,
-            &defaults,
-        );
-        // Default components keep the historical green border.
-        assert_eq!(legacy[(0, 0)].style().fg, Some(palette.green));
-
-        let components = crate::app::state::ComponentStyles::resolve(
-            &palette,
-            Some(&crate::config::ThemeComponentsConfig {
-                toast_border_success: Some("#010203".to_string()),
-                ..Default::default()
-            }),
-            crate::config::ColorDepth::Truecolor,
-        );
-        let mut styled = Buffer::empty(area);
-        render_copy_feedback_buffer_styled(
-            &mut styled,
-            area,
-            &feedback,
-            0,
-            ToastClipboardPosition::TopLeft,
-            &palette,
-            &components,
-        );
-        assert_eq!(styled[(0, 0)].style().fg, Some(Color::Rgb(1, 2, 3)));
-    }
 
     /// 诊断条的底色是 yellow，前景必须按 yellow 挑：terminal 主题下按 accent
     /// 挑出来的是白字，叠在黄底上只有 4.2:1；按黄底挑得到黑字（5.0:1）。

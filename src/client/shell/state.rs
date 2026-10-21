@@ -175,6 +175,8 @@ pub(super) struct ShellHitMap {
         super::chrome::panel_header::PanelButton,
     )>,
     pub(super) notification_toast: Rect,
+    /// 端点通知吐司（与语义通知同时显示时上下堆叠，命中区分开）。
+    pub(super) endpoint_notice_toast: Rect,
     pub(super) notification_keys: Rect,
     pub(super) menu_popup: Rect,
     pub(super) menu_search: Rect,

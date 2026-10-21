@@ -276,6 +276,7 @@ impl ClientShellState {
         if self.workbench.drag.is_none()
             && [
                 self.hits.notification_toast,
+                self.hits.endpoint_notice_toast,
                 self.hits.lifecycle_banner_retry,
                 self.hits.lifecycle_banner_give_up,
             ]

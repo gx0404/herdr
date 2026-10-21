@@ -678,12 +678,12 @@ fn unavailable_endpoint_method_is_disabled_without_disconnect() {
     assert!(!repeated.repaint);
 
     state.compose(106, 20).expect("endpoint notice frame");
-    assert!(!state.hits.notification_toast.is_empty());
+    assert!(!state.hits.endpoint_notice_toast.is_empty());
 
     state.handle_input_bytes(b"x");
     assert!(state.visible_endpoint_notice.is_some());
 
-    let hit = state.hits.notification_toast;
+    let hit = state.hits.endpoint_notice_toast;
     let dismissed =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),

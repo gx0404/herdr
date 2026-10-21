@@ -824,6 +824,15 @@ impl ClientShellState {
     /// Hit-test order determines which overlapping control receives the event;
     /// the sidebar toggle takes precedence over the agent scrollbar beneath it.
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        // 端点通知画在浮层之上：点它先于浮层与页面处理，只关掉通知。
+        if self.visible_endpoint_notice.is_some()
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && contains(self.hits.endpoint_notice_toast, (mouse.column, mouse.row))
+        {
+            self.visible_endpoint_notice = None;
+            outcome.repaint = true;
+            return;
+        }
         if self.pending_selection_mouse(mouse, outcome) {
             return;
         }
@@ -851,6 +860,7 @@ impl ClientShellState {
                 )
             )
             && !contains(self.hits.notification_toast, point)
+            && !contains(self.hits.endpoint_notice_toast, point)
             && !contains(self.hits.lifecycle_banner_retry, point)
             && !contains(self.hits.lifecycle_banner_give_up, point)
         {
@@ -1212,7 +1222,7 @@ impl ClientShellState {
         }
         if self.visible_endpoint_notice.is_some()
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && super::contains(self.hits.notification_toast, point)
+            && super::contains(self.hits.endpoint_notice_toast, point)
         {
             self.visible_endpoint_notice = None;
             outcome.repaint = true;

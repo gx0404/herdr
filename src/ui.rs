@@ -45,10 +45,7 @@ pub(crate) use self::sidebar::{
     agent_panel_entries_from, resolved_token_spans, sidebar_agent_rows, sidebar_space_rows,
     AgentPanelEntry, AgentTokenContext, ResolvedToken, ResolvedTokenKind, SpaceTokenContext,
 };
-use self::status::copy_feedback_rect;
-pub(crate) use self::status::{
-    render_config_diagnostic_buffer, render_copy_feedback_buffer_styled,
-};
+pub(crate) use self::status::render_config_diagnostic_buffer;
 pub(crate) use self::tab_surface::{
     cjk_ime_reveal, compute_tab_surface, compute_tab_surface_for, pane_host_cursor,
     render_tab_surface, resize_tab_surface, tab_surface_cursor, tab_surface_hyperlinks,
@@ -146,26 +143,4 @@ fn resize_background_tab_panes(
             );
         }
     }
-}
-
-pub(crate) fn copy_feedback_offset_for_toast(
-    area: Rect,
-    feedback: &crate::app::state::CopyFeedback,
-    base_offset: u16,
-    position: crate::config::ToastClipboardPosition,
-    toast_rect: Rect,
-) -> u16 {
-    let feedback_rect = copy_feedback_rect(area, feedback, base_offset, position);
-    if rectangles_overlap(feedback_rect, toast_rect) {
-        base_offset.saturating_add(toast_rect.height)
-    } else {
-        base_offset
-    }
-}
-
-fn rectangles_overlap(left: Rect, right: Rect) -> bool {
-    left.x < right.right()
-        && right.x < left.right()
-        && left.y < right.bottom()
-        && right.y < left.bottom()
 }

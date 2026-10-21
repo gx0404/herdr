@@ -212,17 +212,13 @@ impl ClientShellState {
             let target_active =
                 self.notification_target_is_active(&pending.endpoint_id, &pending.event);
             let suppress_external = target_active && self.outer_focused != Some(false);
+            let bucket = super::chrome::notification::bucket(
+                &pending.event,
+                &self.endpoints,
+                &pending.endpoint_id,
+            );
             self.record_notification(
-                if super::chrome::notification::bucket(
-                    &pending.event,
-                    &self.endpoints,
-                    &pending.endpoint_id,
-                ) == crate::harness::AgentBucket::Failed
-                {
-                    super::feedback::ClientToastLevel::Error
-                } else {
-                    super::feedback::ClientToastLevel::from_notification_kind(pending.event.kind)
-                },
+                super::feedback::ClientToastLevel::for_notification(bucket, pending.event.kind),
                 pending.event.title.clone(),
                 pending.event.body.clone(),
                 Some(super::feedback::ClientNotificationTarget {
@@ -232,11 +228,6 @@ impl ClientShellState {
                         .endpoint_boot_id(&pending.endpoint_id)
                         .map(str::to_owned),
                 }),
-            );
-            let bucket = super::chrome::notification::bucket(
-                &pending.event,
-                &self.endpoints,
-                &pending.endpoint_id,
             );
             if let Some(record) = self.notification_history.back_mut() {
                 record.bucket = (bucket != crate::harness::AgentBucket::None).then_some(bucket);

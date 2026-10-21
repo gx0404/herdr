@@ -127,6 +127,21 @@ impl ClientToastLevel {
         }
     }
 
+    /// 语义通知的等级：状态桶优先（需要输入 → 告警，失败 → 错误，完成待查看 → 成功），
+    /// 没有状态桶时按通知种类。吐司描边、通知历史图标与颜色共用这一份映射。
+    pub(super) fn for_notification(
+        bucket: crate::harness::AgentBucket,
+        kind: SemanticNotificationKind,
+    ) -> Self {
+        use crate::harness::AgentBucket;
+        match bucket {
+            AgentBucket::NeedsInput => Self::Warning,
+            AgentBucket::Failed => Self::Error,
+            AgentBucket::Review => Self::Success,
+            _ => Self::from_notification_kind(kind),
+        }
+    }
+
     pub(super) fn from_notice_kind(kind: ClientEndpointNoticeKind) -> Self {
         match kind {
             // 警告请你处理，用琥珀色；被拒绝 / 不支持是请求失败，用错误色。
@@ -799,7 +814,10 @@ impl ClientShellState {
             ChromeHover::SidebarSectionDivider => {
                 super::contains(hits.sidebar_section_divider, point)
             }
-            ChromeHover::NotificationToast => super::contains(hits.notification_toast, point),
+            ChromeHover::NotificationToast => {
+                super::contains(hits.notification_toast, point)
+                    || super::contains(hits.endpoint_notice_toast, point)
+            }
             ChromeHover::SettingsSection(section) => hits
                 .settings_tabs
                 .iter()
@@ -972,12 +990,15 @@ impl ClientShellState {
         {
             return Some(ChromeHover::Inspector(*rect));
         }
-        if super::contains(hits.notification_toast, point)
-            && (self.visible_endpoint_notice.is_some()
-                || self
-                    .visible_notification
-                    .as_ref()
-                    .is_some_and(|notification| notification.event.pane_id.is_some()))
+        // 两张吐司共用一个悬浮身份：同时显示时只有语义通知响应悬浮，端点通知
+        // 单独显示时才响应（避免两张卡片一起加粗）。
+        if (super::contains(hits.notification_toast, point)
+            && self
+                .visible_notification
+                .as_ref()
+                .is_some_and(|notification| notification.event.pane_id.is_some()))
+            || (super::contains(hits.endpoint_notice_toast, point)
+                && hits.notification_toast.is_empty())
         {
             return Some(ChromeHover::NotificationToast);
         }
@@ -1237,6 +1258,7 @@ impl ShellHitMap {
             };
         };
         extend(&mut banners, self.notification_toast);
+        extend(&mut banners, self.endpoint_notice_toast);
         extend(&mut banners, self.lifecycle_banner_retry);
         extend(&mut banners, self.lifecycle_banner_give_up);
         for (rect, _) in &self.tabs {

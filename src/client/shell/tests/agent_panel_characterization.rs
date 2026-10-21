@@ -3390,10 +3390,26 @@ fn remote_pane_rename_and_close_failures_show_a_notice() {
                 !matches!(state.overlay, Some(ClientShellOverlay::ConfirmClose(_))),
                 "{case}：不替另一台机器的工作区弹确认框"
             );
-            let text = compact(&frame_rows(&state.compose(106, 40).expect("提示帧")).join(""));
+            // 吐司按显示宽度折行（最多两行，超出以 … 截断）：取卡片内的文字拼起来比对。
+            let frame = state.compose(106, 40).expect("提示帧").frame.clone();
+            let card = state.hits.endpoint_notice_toast;
+            let text = compact(
+                &(card.y + 1..card.bottom().saturating_sub(1))
+                    .flat_map(|y| (card.x + 2..card.right().saturating_sub(2)).map(move |x| (x, y)))
+                    .map(|(x, y)| {
+                        frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)]
+                            .symbol
+                            .clone()
+                    })
+                    .collect::<String>(),
+            );
+            let body = compact(&expected);
+            let shown = text
+                .split_once(&compact(texts.notice_action_rejected))
+                .map(|(_, rest)| rest.trim_end_matches('…').to_owned())
+                .unwrap_or_default();
             assert!(
-                text.contains(&compact(texts.notice_action_rejected))
-                    && text.contains(&compact(&expected)),
+                !shown.is_empty() && body.starts_with(&shown),
                 "{case}：提示画在画面上：{text}"
             );
         }

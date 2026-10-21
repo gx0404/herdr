@@ -481,6 +481,8 @@ impl ClientShellState {
                 self.observability.commit_paint(painted);
             }
         }
+        self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
+        // 吐司叠在浮层之上（浮层里的操作结果也要看得到）。
         self.paint_shell_feedback(
             &mut canvas,
             ClientShellLayout {
@@ -491,7 +493,6 @@ impl ClientShellState {
             },
             &mut occlusion,
         )?;
-        self.paint_shell_overlays(&mut canvas, &mut occlusion)?;
         // 图形与帧分开交出（上游 #4561）：由 `frame_output` 按输出通道写出。
         let mut graphics = crate::kitty_graphics::GraphicsOutput::from_bytes(std::mem::take(
             &mut self.workbench.cleanup,

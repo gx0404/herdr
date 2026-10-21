@@ -143,21 +143,22 @@ pub(super) fn render_lifecycle_banner(
     banner
 }
 
-pub(super) fn render_notice(
-    buffer: &mut Buffer,
-    area: Rect,
+/// 端点请求结果/错误的吐司视图：等级取自通知种类，没有 agent 与动作，点卡片关闭。
+pub(super) fn notice_toast(
     notice: &ClientVisibleEndpointNotice,
-    top_offset: u16,
-    cx: &super::feedback::ChromeContext<'_>,
-) -> Rect {
-    super::notifications::render_notification_card(
-        buffer,
-        area,
-        &notice.title,
-        &notice.body,
-        crate::config::ToastHerdrPosition::TopRight,
-        top_offset,
-        super::feedback::ClientToastLevel::from_notice_kind(notice.key.kind),
-        cx,
-    )
+    hovered: bool,
+) -> super::chrome::toast::Toast<'_> {
+    let level = super::feedback::ClientToastLevel::from_notice_kind(notice.key.kind);
+    super::chrome::toast::Toast {
+        level,
+        icon: level.icon().into(),
+        agent: None,
+        title: notice.title.as_str().into(),
+        age: None,
+        location: None,
+        body: notice.body.as_str().into(),
+        actions: Vec::new(),
+        emphasized: hovered,
+        fit: false,
+    }
 }

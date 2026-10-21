@@ -829,3 +829,220 @@ fn settings_boundary_notification_text_and_paste_release_card_focus() {
         assert!(state.visible_notification.is_some());
     }
 }
+
+fn toast_workbench_state() -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+    state.set_pane_surface(surface());
+    state.compose(120, 40).expect("初始画面");
+    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+    state.workbench.pending = false;
+    state.workbench.acknowledged = state.workbench.revision;
+    assert!(state.workbench.enabled, "夹具前提：workbench 布局已启用");
+    state
+}
+
+fn toast_notification(
+    kind: SemanticNotificationKind,
+    position: crate::config::ToastHerdrPosition,
+) -> ClientVisibleNotification {
+    ClientVisibleNotification {
+        endpoint_id: ClientEndpointId::Local,
+        event: SemanticNotification {
+            kind,
+            title: "codex needs attention".into(),
+            body: Some("请确认是否修改 src/client/shell/state.rs，当前终端等待权限输入。".into()),
+            sound: None,
+            agent: Some("codex".into()),
+            workspace_id: None,
+            tab_id: None,
+            pane_id: Some("pane_1".into()),
+            position: Some(position),
+        },
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+    }
+}
+
+fn toast_notice(kind: ClientEndpointNoticeKind) -> ClientVisibleEndpointNotice {
+    ClientVisibleEndpointNotice {
+        key: ClientEndpointNoticeKey {
+            endpoint_id: ClientEndpointId::Local,
+            boot_id: "boot-1".into(),
+            kind,
+            code: "test".into(),
+        },
+        title: "工作区切换失败".into(),
+        body: "目标工作区已不存在".into(),
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+    }
+}
+
+/// 工作台与经典布局在 60x20 / 80x24 / 160x45 下，四个位置的吐司都落在安全区内：
+/// 不压标题栏、状态栏 / 模式条；右侧距边 2 格；两张吐司堆叠不重叠，端点通知离角落最近。
+#[test]
+fn toasts_stay_inside_the_safe_area_and_stack_without_overlap() {
+    use crate::config::ToastHerdrPosition as P;
+    for workbench in [true, false] {
+        for (cols, rows) in [(60, 20), (80, 24), (160, 45)] {
+            for position in [P::TopLeft, P::TopRight, P::BottomLeft, P::BottomRight] {
+                let mut state = if workbench {
+                    toast_workbench_state()
+                } else {
+                    let mut state = chrome_state();
+                    state.config.toast_position = position;
+                    state
+                };
+                state.config.toast_position = position;
+                state.visible_notification = Some(toast_notification(
+                    SemanticNotificationKind::NeedsAttention,
+                    position,
+                ));
+                state.visible_endpoint_notice =
+                    Some(toast_notice(ClientEndpointNoticeKind::Rejected));
+                state.compose(cols, rows).expect("toast frame");
+                let layout = state.layout(cols, rows);
+                let safe = state.feedback_safe_area(layout, cols, rows);
+                let semantic = state.hits.notification_toast;
+                let notice = state.hits.endpoint_notice_toast;
+                let label = format!("workbench={workbench} {cols}x{rows} {position:?}");
+                assert!(!semantic.is_empty() && !notice.is_empty(), "{label}");
+                for rect in [semantic, notice] {
+                    assert_eq!(
+                        rect.intersection(safe),
+                        rect,
+                        "{label}: {rect:?} ⊄ {safe:?}"
+                    );
+                    if workbench {
+                        assert!(rect.y >= 1, "{label}: 压住标题栏");
+                        assert!(rect.bottom() < rows, "{label}: 压住状态栏");
+                    }
+                }
+                assert!(!semantic.intersects(notice), "{label}: 两张吐司重叠");
+                let mobile = !layout.mobile_header.is_empty();
+                if mobile {
+                    // 移动端端点通知是贴底横幅，语义通知在它之上。
+                    assert_eq!(notice.height, 1, "{label}");
+                    continue;
+                }
+                let corner = match position {
+                    P::TopLeft | P::TopRight => notice.y == safe.y && semantic.y == notice.bottom(),
+                    P::BottomLeft | P::BottomRight => {
+                        notice.bottom() == safe.bottom() && semantic.bottom() == notice.y
+                    }
+                };
+                assert!(corner, "{label}: {notice:?} {semantic:?} in {safe:?}");
+                if cols >= 60 {
+                    match position {
+                        P::TopRight | P::BottomRight => {
+                            assert_eq!(semantic.right(), safe.right() - 2, "{label}")
+                        }
+                        P::TopLeft | P::BottomLeft => assert_eq!(semantic.x, safe.x + 2, "{label}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 吐司按等级描边：需要输入琥珀、被拒绝红；动作命中区就是画出的「按键」键帽。
+#[test]
+fn toast_borders_use_level_colors_and_the_keys_hit_matches_the_paint() {
+    let mut state = toast_workbench_state();
+    state.visible_notification = Some(toast_notification(
+        SemanticNotificationKind::NeedsAttention,
+        crate::config::ToastHerdrPosition::BottomRight,
+    ));
+    state.visible_endpoint_notice = Some(toast_notice(ClientEndpointNoticeKind::Rejected));
+    let frame = state.compose(120, 40).expect("toast frame");
+    let buffer = frame.to_ratatui_buffer().expect("toast buffer");
+    let semantic = state.hits.notification_toast;
+    let notice = state.hits.endpoint_notice_toast;
+    let components = &state.config.components;
+    assert_eq!(buffer[(semantic.x, semantic.y)].symbol(), "╭");
+    assert_eq!(buffer[(semantic.x, semantic.y)].fg, components.status_input);
+    assert_eq!(
+        buffer[(notice.x, notice.y)].fg,
+        components.toast_border_error
+    );
+    assert_eq!(buffer[(notice.x + 2, notice.y + 1)].symbol(), "✕");
+    let keys = state.hits.notification_keys;
+    assert!(!keys.is_empty());
+    assert_eq!(keys.intersection(semantic), keys);
+    assert_eq!(keys.y, semantic.bottom() - 2);
+    assert_eq!(buffer[(keys.x, keys.y)].bg, state.config.palette.surface1);
+    let text: String = (keys.x..keys.right())
+        .map(|x| buffer[(x, keys.y)].symbol())
+        .collect();
+    assert!(text.contains("keys") || text.contains("按"), "{text}");
+    // 点「按键」把键盘焦点交给卡片；聚焦后末行换成 enter / esc，边框仍是琥珀色。
+    state.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: keys.x,
+            row: keys.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut ClientShellInput::default(),
+    );
+    assert!(state.notification_focused);
+    let frame = state.compose(120, 40).expect("focused frame");
+    let buffer = frame.to_ratatui_buffer().expect("focused buffer");
+    let semantic = state.hits.notification_toast;
+    assert_eq!(
+        buffer[(semantic.x, semantic.y)].fg,
+        components_status_input(&state)
+    );
+    let footer: String = (semantic.x..semantic.right())
+        .map(|x| buffer[(x, semantic.bottom() - 2)].symbol())
+        .collect();
+    assert!(
+        footer.contains("enter") && footer.contains("esc"),
+        "{footer}"
+    );
+    assert!(state.hits.notification_keys.is_empty());
+    // 点端点通知只关掉它，不动语义通知。
+    state.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: notice.x + 1,
+            row: notice.y + 1,
+            modifiers: KeyModifiers::NONE,
+        },
+        &mut ClientShellInput::default(),
+    );
+    assert!(state.visible_endpoint_notice.is_none());
+    assert!(state.visible_notification.is_some());
+}
+
+fn components_status_input(state: &ClientShellState) -> ratatui::style::Color {
+    state.config.components.status_input
+}
+
+/// 复制反馈限定在安全区内，与通知吐司同处底部时让开不重叠。
+#[test]
+fn copy_feedback_stays_in_the_safe_area_and_avoids_toasts() {
+    let mut state = toast_workbench_state();
+    state.config.clipboard_toast_position = crate::config::ToastClipboardPosition::BottomRight;
+    state.visible_notification = Some(toast_notification(
+        SemanticNotificationKind::Finished,
+        crate::config::ToastHerdrPosition::BottomRight,
+    ));
+    state.copy_feedback = Some(crate::app::state::CopyFeedback {
+        message: "已复制到剪贴板".into(),
+    });
+    let frame = state.compose(80, 24).expect("copy frame");
+    let buffer = frame.to_ratatui_buffer().expect("copy buffer");
+    let toast = state.hits.notification_toast;
+    let marker = (0..24u16)
+        .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+        .find(|&(x, y)| buffer[(x, y)].symbol() == "✓" && !toast.contains((x, y).into()))
+        .expect("copy feedback marker");
+    let safe = state.feedback_safe_area(state.layout(80, 24), 80, 24);
+    assert!(safe.contains(marker.into()));
+    assert!(marker.1 < toast.y, "复制反馈让到通知之上");
+    assert_eq!(
+        buffer[(marker.0 - 2, marker.1 - 1)].fg,
+        state.config.components.toast_border_success
+    );
+}

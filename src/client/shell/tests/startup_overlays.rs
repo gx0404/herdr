@@ -596,7 +596,8 @@ fn config_diagnostic_offsets_only_the_pane_rows_it_overlaps() {
     endpoint_snapshot.config_diagnostic = Some("first warning\nsecond warning".into());
     state.set_snapshot(Box::new(endpoint_snapshot));
     state.compose(106, 20).expect("two-line frame");
-    assert_eq!(state.hits.notification_toast.y, pane_area.y);
+    // 第二行诊断落进安全区顶端：顶部吐司从诊断之下开始，不压住它。
+    assert_eq!(state.hits.notification_toast.y, pane_area.y + 1);
 
     state
         .visible_notification
