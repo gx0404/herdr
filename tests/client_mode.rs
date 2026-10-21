@@ -276,6 +276,90 @@ fn send_json_request(socket_path: &PathBuf, request: &str) -> Value {
     serde_json::from_str(&response).expect("response should be valid JSON")
 }
 
+fn diagnostic_json_request(socket_path: &PathBuf, request: Value) -> String {
+    const LIMIT: usize = 64 * 1024;
+    let timeout = Duration::from_secs(2);
+    let deadline = Instant::now() + timeout;
+    let socket_path = socket_path.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // connect() has no timeout. Detach this failure-only worker; never join it.
+    if let Err(error) = thread::Builder::new()
+        .name("client-input-diagnostic".into())
+        .spawn(move || {
+            let response = (|| -> std::io::Result<String> {
+                let remaining = || {
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::TimedOut, "diagnostic deadline")
+                        })
+                };
+                let mut stream = UnixStream::connect(socket_path)?;
+                stream.set_write_timeout(Some(remaining()?))?;
+                writeln!(stream, "{request}")?;
+                let mut response = Vec::new();
+                let mut buffer = [0; 4096];
+                while response.len() < LIMIT {
+                    stream.set_read_timeout(Some(remaining()?))?;
+                    let count = buffer.len().min(LIMIT - response.len());
+                    let read = stream.read(&mut buffer[..count])?;
+                    if let Some(end) = buffer[..read].iter().position(|byte| *byte == b'\n') {
+                        response.extend_from_slice(&buffer[..end]);
+                        return Ok(String::from_utf8_lossy(&response).into_owned());
+                    }
+                    if read == 0 {
+                        return Ok(format!(
+                            "{}\n<diagnostic EOF before newline>",
+                            String::from_utf8_lossy(&response)
+                        ));
+                    }
+                    response.extend_from_slice(&buffer[..read]);
+                }
+                Ok(format!(
+                    "{}\n<diagnostic truncated at 64 KiB>",
+                    String::from_utf8_lossy(&response)
+                ))
+            })();
+            let _ = sender.send(response);
+        })
+    {
+        return format!("<diagnostic worker unavailable: {error}>");
+    }
+    match receiver.recv_timeout(timeout) {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => format!("<diagnostic API error: {error}>"),
+        Err(error) => format!("<diagnostic unavailable after at most 2s: {error}>"),
+    }
+}
+
+fn diagnostic_client_log_tail(config_home: &std::path::Path) -> String {
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // config_reload::init_logging -> session::data_dir -> config::config_dir.
+    // The client has no HERDR_SESSION and uses this fixture's XDG_CONFIG_HOME.
+    let path = config_home.join(app_dir_name()).join("herdr-client.log");
+    let tail = (|| -> std::io::Result<String> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::other("client log is not a regular file"));
+        }
+        file.seek(SeekFrom::Start(metadata.len().saturating_sub(64 * 1024)))?;
+        let mut bytes = Vec::new();
+        file.take(64 * 1024).read_to_end(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    })();
+    format!(
+        "{} (last at most 64 KiB):\n{}",
+        path.display(),
+        tail.unwrap_or_else(|error| format!("<diagnostic log unavailable: {error}>"))
+    )
+}
+
 fn first_pane_id_in_workspace(socket_path: &PathBuf, workspace_id: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -1125,7 +1209,11 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         &runtime_dir,
         &api_socket,
         &["client"],
-        &[("PATH", &path), ("HERDR_LANG", "en")],
+        &[
+            ("PATH", &path),
+            ("HERDR_LANG", "en"),
+            ("HERDR_LOG", "herdr::client=trace"),
+        ],
         FEDERATED_CLIENT_COLS,
         FEDERATED_CLIENT_ROWS,
     );
@@ -1401,8 +1489,20 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
                 .unwrap();
             false
         }),
-        "recovered Local must accept input: {}",
-        screen_text()
+        "recovered Local must accept input: {}\nlocal pane.read ({local_pane}): {}\nremote workspace.list: {}\nremote pane.read ({remote_pane}): {}\nclient tracing log: {}",
+        screen_text(),
+        diagnostic_json_request(&api_socket, serde_json::json!({
+            "id": "diagnostic-local-pane", "method": "pane.read",
+            "params": {"pane_id": local_pane, "source": "recent", "lines": 200},
+        })),
+        diagnostic_json_request(&remote_api, serde_json::json!({
+            "id": "diagnostic-remote-workspaces", "method": "workspace.list", "params": {},
+        })),
+        diagnostic_json_request(&remote_api, serde_json::json!({
+            "id": "diagnostic-remote-pane", "method": "pane.read",
+            "params": {"pane_id": remote_pane, "source": "recent", "lines": 200},
+        })),
+        diagnostic_client_log_tail(&config_home)
     );
     drop(input);
     drop(client);
