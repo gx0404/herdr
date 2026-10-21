@@ -857,6 +857,27 @@ fn quick_actions_paint_key_caps_before_their_labels() {
 }
 
 #[test]
+fn inspector_caps_measure_and_paint_normalized_keys_together() {
+    let palette = crate::app::state::Palette::graphite_dark();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 1));
+    for (key, expected) in [("↵", " enter "), ("Esc", " esc "), ("Ctrl+B", " ctrl+B ")] {
+        let end = paint_cap(&mut buffer, 0, 0, 40, key, &palette);
+        assert_eq!(end, cap_width(key));
+        assert_eq!(
+            (0..end)
+                .map(|x| buffer[(x, 0)].symbol())
+                .collect::<String>(),
+            expected
+        );
+        assert_eq!(
+            paint_cap(&mut buffer, 39, 0, 40, key, &palette),
+            39,
+            "不足宽度时不画半个键帽"
+        );
+    }
+}
+
+#[test]
 fn view_all_and_entries_open_the_sub_agent_page() {
     let mut state = ready(160);
     load(&mut state, mixed_nodes(now_ms()), 60);

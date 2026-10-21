@@ -1,6 +1,42 @@
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+type ThemeSwatches = Vec<([ratatui::style::Color; 5], [ratatui::style::Color; 5])>;
+static THEME_SWATCHES: std::sync::OnceLock<ThemeSwatches> = std::sync::OnceLock::new();
+
+/// 只在打开设置的事件阶段解析内置主题；绘制只读此缓存。
+fn prepare_theme_swatches() {
+    THEME_SWATCHES.get_or_init(|| {
+        let colors =
+            |p: &crate::app::state::Palette| [p.panel_bg, p.surface1, p.text, p.mauve, p.teal];
+        crate::config::THEME_NAMES
+            .iter()
+            .map(|name| {
+                if *name == "graphite" {
+                    (
+                        colors(&crate::app::state::Palette::graphite_dark()),
+                        colors(&crate::app::state::Palette::graphite_light()),
+                    )
+                } else {
+                    let palette = crate::app::state::Palette::from_name(name)
+                        .unwrap_or_else(crate::app::state::Palette::graphite_dark);
+                    (colors(&palette), colors(&palette))
+                }
+            })
+            .collect()
+    });
+}
+
+pub(super) fn theme_swatches(
+    index: usize,
+    palette: &crate::app::state::Palette,
+) -> Option<&'static [ratatui::style::Color; 5]> {
+    let (dark, light) = THEME_SWATCHES.get()?.get(index)?;
+    let is_light = crate::ui::color::color_to_rgb(palette.panel_bg)
+        .is_some_and(|rgb| crate::ui::color::relative_luminance(rgb) >= 0.4);
+    Some(if is_light { light } else { dark })
+}
+
 pub(super) fn normalized_theme_name(name: &str) -> String {
     name.to_lowercase().replace([' ', '_'], "-")
 }
@@ -40,6 +76,7 @@ impl ClientShellState {
         if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
             return;
         }
+        prepare_theme_swatches();
         self.pending_requests
             .retain(|_, request| !matches!(request.kind, PendingEndpointKind::IntegrationList));
         self.overlay = Some(ClientShellOverlay::Settings(ClientSettingsOverlay {

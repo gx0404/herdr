@@ -397,7 +397,7 @@ fn pick_entries(nodes: &[AgentActivityNode]) -> Vec<usize> {
 
 /// 键帽占的列数：键名两侧各留一格空格。
 fn cap_width(key: &str) -> u16 {
-    crate::ui::display_width_u16(key).saturating_add(2)
+    crate::ui::kit::key_cap::cap_width(key)
 }
 
 fn add(rows: &mut Vec<Row>, text: &str, tone: Tone, width: u16) {
@@ -1234,15 +1234,7 @@ fn paint_cap(
     if x.saturating_add(width) > right {
         return x;
     }
-    super::super::render::put_text(
-        buffer,
-        x,
-        y,
-        width,
-        &format!(" {key} "),
-        design::key_cap(palette),
-    );
-    x.saturating_add(width)
+    crate::ui::kit::key_cap::paint_cap(buffer, x, y, right, key, design::key_cap(palette))
 }
 
 pub(in crate::client::shell) fn paint(

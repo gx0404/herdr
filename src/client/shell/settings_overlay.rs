@@ -101,6 +101,42 @@ fn option_rows(settings: &ClientSettingsOverlay) -> Vec<OptionRow<'static>> {
         .collect()
 }
 
+fn option_previews(
+    section: ClientSettingsSection,
+    palette: &Palette,
+    components: &crate::app::state::ComponentStyles,
+) -> Vec<Vec<(&'static str, ratatui::style::Color)>> {
+    match section {
+        ClientSettingsSection::Theme => (0..crate::config::THEME_NAMES.len())
+            .map(|index| {
+                super::super::settings::theme_swatches(index, palette)
+                    .map_or_else(Vec::new, |colors| {
+                        colors.iter().map(|color| ("■", *color)).collect()
+                    })
+            })
+            .collect(),
+        ClientSettingsSection::Indicators => [
+            crate::config::StatusIndicatorStyle::Graphite,
+            crate::config::StatusIndicatorStyle::Dots,
+            crate::config::StatusIndicatorStyle::Symbols,
+        ]
+        .into_iter()
+        .map(|style| {
+            crate::harness::AgentBucket::LISTING
+                .iter()
+                .map(|bucket| {
+                    (
+                        crate::ui::design::status_glyph(*bucket, style, 0, true),
+                        crate::ui::design::status_color(*bucket, palette, components),
+                    )
+                })
+                .collect()
+        })
+        .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(in crate::client::shell) struct SettingsListWindow {
     body: Rect,
@@ -109,6 +145,21 @@ pub(in crate::client::shell) struct SettingsListWindow {
 }
 
 impl SettingsListWindow {
+    fn scrollbar(&self, requested: usize) -> Option<(Rect, crate::pane::ScrollMetrics)> {
+        let visible = usize::from(self.body.height);
+        let max = self.rows.saturating_sub(visible);
+        if max == 0 || self.body.is_empty() {
+            return None;
+        }
+        Some((
+            Rect::new(self.body.right() - 1, self.body.y, 1, self.body.height),
+            crate::pane::ScrollMetrics {
+                offset_from_bottom: max.saturating_sub(self.start(requested, false)),
+                max_offset_from_bottom: max,
+                viewport_rows: visible,
+            },
+        ))
+    }
     pub(in crate::client::shell) fn page_rows(&self) -> usize {
         usize::from(self.body.height).max(1)
     }
@@ -199,12 +250,13 @@ pub(super) fn render_settings_overlay(
         hits
     } else {
         let rows = option_rows(settings);
+        let previews = option_previews(settings.section, palette, cx.components);
         let gap = chrome::option_gap(body, rows.len());
         let hovered = match cx.hover {
             Some(ChromeHover::SettingsChoice(index)) => Some(*index),
             _ => None,
         };
-        chrome::paint_options(
+        chrome::paint_options_with_previews(
             buffer,
             body,
             &OptionList {
@@ -216,8 +268,26 @@ pub(super) fn render_settings_overlay(
                 gap,
             },
             palette,
+            &previews,
         )
     };
+    if let Some((track, metrics)) = settings_list_window(
+        buffer.area,
+        Some(popup),
+        settings,
+        integration_updates_available,
+    )
+    .and_then(|window| window.scrollbar(settings.scroll))
+    {
+        crate::ui::render_scrollbar_buffer(
+            buffer,
+            metrics,
+            track,
+            palette.surface1,
+            palette.overlay1,
+            "▐",
+        );
+    }
     let selected_installable = settings
         .integrations
         .get(settings.selected)
@@ -282,27 +352,31 @@ pub(super) fn render_settings_overlay(
         ClientSettingsSection::Keyboard | ClientSettingsSection::Monitor => t.hint_open,
         _ => t.hint_apply,
     };
+    use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
     let mut hints = vec![
-        ("←→".into(), t.hint_section.into()),
-        ("↑↓".into(), t.hint_select.into()),
-        ("enter".into(), action_hint.into()),
+        FooterHint::new("←→", t.hint_section),
+        FooterHint::new("↑↓", t.hint_select),
+        FooterHint {
+            primary: true,
+            ..FooterHint::new("enter", action_hint)
+        },
     ];
     if settings.section == ClientSettingsSection::Integrations {
-        hints.push(("a".into(), t.hint_install_all.into()));
+        hints.push(FooterHint::new("a", t.hint_install_all));
     }
-    hints.push((
-        "esc".into(),
+    hints.push(FooterHint::new(
+        "esc",
         if settings.section == ClientSettingsSection::Theme {
             t.hint_cancel_preview
         } else {
             t.hint_close
-        }
-        .into(),
+        },
     ));
-    super::super::render_key_hints(
+    render_footer_hints(
         buffer,
         chrome::footer_hint_area(&layout, &buttons),
         &hints,
+        None,
         palette,
     );
 
@@ -416,18 +490,23 @@ fn render_integrations(
     let p = cx.palette;
     let t = &crate::i18n::texts().settings;
     if settings.loading_integrations || settings.integrations.is_empty() {
-        // 这两句文案自带前导空格，已与其余正文同列。
-        put_text(
+        crate::ui::kit::empty_state::render_empty_state(
             buffer,
-            area.x,
-            area.y,
-            area.width,
-            if settings.loading_integrations {
-                t.loading
-            } else {
-                t.no_targets
+            area,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some(if settings.loading_integrations {
+                    "◌"
+                } else {
+                    "○"
+                }),
+                title: if settings.loading_integrations {
+                    t.loading.trim()
+                } else {
+                    t.no_targets.trim()
+                },
+                ..Default::default()
             },
-            Style::default().fg(p.subtext0),
+            p,
         );
         return;
     }
@@ -436,7 +515,7 @@ fn render_integrations(
         // 一次性提示（「选中的集成无需安装」）占用说明行，不挤掉下方承载
         // 服务端安装结果的消息区。
         let (line, color) = match settings.integration_notice.as_deref() {
-            Some(notice) => (notice.to_owned(), p.yellow),
+            Some(notice) => (notice.to_owned(), p.subtext0),
             None => (
                 format!(
                     "{} · ✓ {}/{} · {}",
@@ -532,6 +611,17 @@ fn render_integrations(
             .get(line.entry - settings.integrations.len())
             .and_then(|message| message.get(line.start..line.end))
         {
+            let selected = line.entry == settings.selected
+                && settings.focus == super::super::page::PageFocus::Content;
+            let style = if selected {
+                crate::ui::design::selected_row_text(p)
+            } else {
+                crate::ui::design::muted(p)
+            };
+            buffer.set_style(rect, style);
+            if selected {
+                crate::ui::kit::paint_selection_mark(buffer, rect.x, rect.y, p);
+            }
             // 消息与集成行的标记同列起笔（离边框 1 列），续行再缩进。
             let area = super::text_inset(rect);
             let indent = if line.continuation {
@@ -545,7 +635,7 @@ fn render_integrations(
                 area.y,
                 area.width - indent,
                 text,
-                Style::default().fg(p.subtext0),
+                style,
             );
         }
     }
@@ -554,6 +644,78 @@ fn render_integrations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollbar_tracks_the_same_revealed_window() {
+        let window = SettingsListWindow {
+            body: Rect::new(4, 3, 30, 8),
+            rows: 40,
+            selected: (22, 3),
+        };
+        let start = window.start(0, true);
+        assert_eq!(start, 17);
+        let (track, metrics) = window.scrollbar(start).expect("scrollbar");
+        assert_eq!(track, Rect::new(33, 3, 1, 8));
+        assert_eq!(metrics.max_offset_from_bottom, 32);
+        assert_eq!(metrics.offset_from_bottom, 32 - start);
+        assert_eq!(metrics.viewport_rows, window.page_rows());
+        assert_eq!(
+            window
+                .scrollbar(usize::MAX)
+                .expect("last page")
+                .1
+                .offset_from_bottom,
+            0
+        );
+        assert!(SettingsListWindow { rows: 3, ..window }
+            .scrollbar(0)
+            .is_none());
+    }
+
+    #[test]
+    fn indicator_previews_paint_every_style_with_bucket_colors() {
+        let (palette, components) = palette_and_components();
+        let mut settings = settings_overlay_with_integrations(&palette);
+        settings.section = ClientSettingsSection::Indicators;
+        let rows = option_rows(&settings);
+        let previews = option_previews(settings.section, &palette, &components);
+        let area = Rect::new(0, 0, 90, 3);
+        let mut buffer = Buffer::empty(area);
+        chrome::paint_options_with_previews(
+            &mut buffer,
+            area,
+            &OptionList {
+                rows: &rows,
+                start: 0,
+                selected: 0,
+                focused: true,
+                hovered: None,
+                gap: false,
+            },
+            &palette,
+            &previews,
+        );
+        for (row, style) in [
+            crate::config::StatusIndicatorStyle::Graphite,
+            crate::config::StatusIndicatorStyle::Dots,
+            crate::config::StatusIndicatorStyle::Symbols,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (column, bucket) in crate::harness::AgentBucket::LISTING.iter().enumerate() {
+                let cell = &buffer[(79 + column as u16 * 2, row as u16)];
+                assert_eq!(
+                    cell.symbol(),
+                    crate::ui::design::status_glyph(*bucket, style, 0, true)
+                );
+                assert_eq!(
+                    cell.fg,
+                    crate::ui::design::status_color(*bucket, &palette, &components)
+                );
+            }
+        }
+    }
 
     fn palette_and_components() -> (Palette, crate::app::state::ComponentStyles) {
         let palette = Palette::catppuccin();

@@ -2,6 +2,77 @@ use super::*;
 use crate::api::schema::{AgentAttentionKind, AgentStatus};
 mod behaviour;
 
+#[test]
+fn location_detail_geometry_scales_with_visible_panes() {
+    let area = Rect::new(0, 0, 160, 45);
+    for panes in [1, 15] {
+        let mut buffer = Buffer::empty(area);
+        for y in 0..panes {
+            buffer.set_string(0, y, " ├─ ◆ ● agent-name", Style::default());
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            for y in 0..panes {
+                let rect = location_detail_area(&buffer, Rect::new(0, y, 160, 1), "agent-name", 24)
+                    .expect("location area");
+                assert_eq!(rect.x, 20);
+                std::hint::black_box(rect);
+            }
+        }
+        println!(
+            "location detail geometry: {panes} panes, 1000 frames, {:?}",
+            start.elapsed()
+        );
+    }
+}
+
+#[test]
+fn location_details_follow_painted_labels_without_overwriting_names() {
+    for width in [28, 48, 80, 160] {
+        for prefix in [" └─ ○ ", " ├─ ◆ ● ", "     └─ ✕ "] {
+            for label in [
+                "codex",
+                "kimi",
+                "长名称 e\u{301} 👩‍💻 工作会话",
+                "a very long agent name that fills the available navigator row",
+            ] {
+                let area = Rect::new(0, 0, width, 1);
+                let mut buffer = Buffer::empty(area);
+                let reserve = if width >= 64 {
+                    24
+                } else if width >= 36 {
+                    12
+                } else {
+                    0
+                };
+                let text = format!("{prefix}{label}");
+                buffer.set_stringn(0, 0, &text, usize::from(width - reserve), Style::default());
+                let before = buffer.clone();
+                if let Some(detail) = location_detail_area(&buffer, area, label, reserve) {
+                    let name_end = crate::ui::display_width_u16(&text);
+                    assert_eq!(detail.x, name_end + 2, "{width}: {text}");
+                    buffer.set_stringn(
+                        detail.x,
+                        0,
+                        "Local / project / branch",
+                        usize::from(detail.width),
+                        Style::default(),
+                    );
+                    for x in 0..name_end {
+                        assert_eq!(buffer[(x, 0)], before[(x, 0)], "{width}: {text}");
+                    }
+                    assert!(detail.right() < width - reserve);
+                } else {
+                    assert!(
+                        crate::ui::display_width_u16(&text) + 2 >= width - reserve - 1,
+                        "{width}: {text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn snapshot() -> ClientShellSnapshot {
     let mut snapshot = crate::client::shell::tests::snapshot();
     for (index, status) in [

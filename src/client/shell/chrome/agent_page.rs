@@ -836,6 +836,25 @@ fn paint_list(
     }
     if overlay.rows.is_empty() {
         let (text, style) = empty_list_text(overlay, cx);
+        if (overlay.done_count() == 0 || !overlay.tree_loaded) && area.height >= 4 {
+            crate::ui::kit::empty_state::render_empty_state(
+                b,
+                area,
+                &crate::ui::kit::empty_state::EmptyState {
+                    glyph: Some(if overlay.tree_error.is_some() {
+                        "✕"
+                    } else if !overlay.tree_loaded {
+                        "◌"
+                    } else {
+                        "○"
+                    }),
+                    title: &text,
+                    ..Default::default()
+                },
+                p,
+            );
+            return (rows, actions);
+        }
         put(
             b,
             area.x + ITEM_PAD,
@@ -978,7 +997,7 @@ fn paint_item_line(
     let hovered = overlay.hovered_node.as_deref() == Some(node.id.as_str());
     if selected {
         b.set_style(rect, Style::default().bg(p.selection_row_bg()));
-        put_text(b, rect.x, rect.y, 1, "▌", Style::default().fg(p.accent));
+        crate::ui::kit::paint_selection_mark(b, rect.x, rect.y, p);
     } else if hovered {
         b.set_style(rect, Style::default().bg(hover_bg(cx)));
     }
@@ -1216,7 +1235,7 @@ fn paint_lanes(
             b.set_style(rect, Style::default().bg(bg));
         }
         if selected {
-            put_text(b, rect.x, y, 1, "▌", Style::default().fg(p.accent));
+            crate::ui::kit::paint_selection_mark(b, rect.x, y, p);
         }
         let strong = move |style: Style| {
             if selected {

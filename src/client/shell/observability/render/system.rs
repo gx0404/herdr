@@ -7,11 +7,11 @@
 //!
 //! Graphite 外观：圆角卡片（字形随 `ui.border_style`）、`surface1` 细边框、说明色的
 //! 卡片标题；卡片的主读数（CPU / 内存 / GPU / 磁盘占用、最高温度、进程数）粗体压在
-//! 上边框右侧。颜色分三层含义：分类色表达数据类型（CPU 蓝、内存紫、GPU 绿、磁盘
-//! 青绿、网络收 / 发青 / 品红、温度天蓝，见 `tone`），染卡片标题、常态条形、曲线与
-//! 主读数；越过告警规则的警告线转黄、越过规则阈值转红（`thresholds`）；过期数据
+//! 上边框右侧。标题与正常读数保持中性；分类色仅用于条形与曲线，取紫、青、桃与
+//! 中性色，避开运行中和待查看等状态色。越过告警规则的警告线转黄、越过规则阈值
+//! 转红（`thresholds`）；过期数据
 //! （整份样本或该卡分组过期，GPU 另按设备）的曲线、速率、主读数与条形退回中性
-//! 灰阶（`Tone::data`），卡片标题作为数据类型标识仍保留分类色。卡片边框、主机
+//! 灰阶（`Tone::data`），卡片标题保持中性。卡片边框、主机
 //! 摘要条与进程卡保持中性色阶。
 
 use std::borrow::Cow;
@@ -621,23 +621,10 @@ fn headline(
 }
 
 /// 卡片的数据是否过期：整份样本过期，或该卡的分组过期。过期时数据元素退回中性
-/// 灰阶（`Tone::data`），标题仍保留分类色。
+/// 灰阶（`Tone::data`），标题始终保持中性。
 fn card_stale(id: &str, sample: &SystemMetricsSnapshot) -> bool {
     sample.status == ObservationStatus::Stale
         || sample.group_status.get(id) == Some(&ObservationStatus::Stale)
-}
-
-/// 卡片标题的分类色：逐核卡随 CPU、网络卡取收方向的颜色，进程卡保持中性。
-fn card_tone(id: &str) -> Option<Tone> {
-    match id {
-        "cpu" | "cores" => Some(Tone::Cpu),
-        "memory" => Some(Tone::Memory),
-        "gpu" => Some(Tone::Gpu),
-        "disks" => Some(Tone::Disk),
-        "network" => Some(Tone::NetRx),
-        "sensors" => Some(Tone::Temperature),
-        _ => None,
-    }
 }
 
 /// 画一张系统页卡片：kit `card` 外框（编辑布局时顶边带 ↑↓）与卡片正文；卡片与
@@ -678,9 +665,10 @@ fn system_card(
         focused: selected,
         hovered: false,
         dimmed: state.layout_editing && state.selected_card.is_some() && !selected,
-        tone: card_tone(id).map(|tone| tone.color(palette)),
+        tone: Some(palette.text),
     };
     let inner = render_card(buffer, rect, &spec, cx.glyphs, palette);
+    card_title_style(buffer, rect, &spec, crate::ui::design::title(palette));
     hits.push((rect, Action::Card(id.to_owned())));
     if state.layout_editing && rect.width > 18 {
         secondary_button(
@@ -2889,14 +2877,13 @@ mod tests {
     }
 
     /// 黄 / 红只表达严重程度，阈值与告警规则同一条线：GPU 规则是 95 %，所以 85 %
-    /// 只到警告（黄），96 % 才严重（红），常态是 GPU 的分类色；CPU 规则 90 %，42 %
-    /// 保持 CPU 的分类色。
+    /// 只到警告（黄），96 % 才严重（红），常态读数保持中性。
     #[test]
     fn severity_colors_follow_the_alert_rule_thresholds() {
         let _guard = lang_guard(Lang::ZhCn);
         let palette = config().palette;
         for (usage, expected) in [
-            (60.0, Tone::Gpu.color(&palette)),
+            (60.0, palette.text),
             (85.0, palette.yellow),
             (96.0, palette.red),
         ] {
@@ -2929,14 +2916,10 @@ mod tests {
         assert_eq!(color_at(&buffer, cpu.y, "42.0%"), Some(palette.red));
         let (buffer, output) = paint_page(&monitored(), Page::Monitor, 120, 100);
         let cpu = card_rect(&output, "cpu");
-        assert_eq!(
-            color_at(&buffer, cpu.y, "42.0%"),
-            Some(Tone::Cpu.color(&palette))
-        );
+        assert_eq!(color_at(&buffer, cpu.y, "42.0%"), Some(palette.text));
     }
 
-    /// 分类色表达数据类型：CPU 卡的标题与常态条形是 CPU 色，网络卡的 ↓ / ↑ 速率
-    /// 分别是收 / 发色；越过阈值的 GPU 主读数与条形仍是黄 / 红；进程卡标题保持中性。
+    /// 分类色只用于图形：标题、正常读数和速率保持中性，越过阈值仍用黄 / 红。
     #[test]
     fn category_tones_mark_titles_bars_and_network_directions() {
         let _guard = lang_guard(Lang::ZhCn);
@@ -2955,8 +2938,8 @@ mod tests {
         let cpu = card_rect(&output, "cpu");
         let cpu_color = Tone::Cpu.color(&palette);
         let title = first_in(cpu, cpu.y, "C").expect("CPU 标题");
-        assert_eq!(title.fg, Some(cpu_color), "{}", row_text(&buffer, cpu.y));
-        assert!(!title.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(title.fg, Some(palette.text), "{}", row_text(&buffer, cpu.y));
+        assert!(title.add_modifier.contains(Modifier::BOLD));
         assert_eq!(
             first_in(cpu, cpu.y + 1, "━").expect("CPU 条形").fg,
             Some(cpu_color)
@@ -2969,15 +2952,15 @@ mod tests {
         let network = card_rect(&output, "network");
         assert_eq!(
             first_in(network, network.y + 1, "↓").expect("收速率").fg,
-            Some(Tone::NetRx.color(&palette))
+            Some(palette.text)
         );
         assert_eq!(
             first_in(network, network.y + 1, "↑").expect("发速率").fg,
-            Some(Tone::NetTx.color(&palette))
+            Some(palette.text)
         );
         let processes = card_rect(&output, "processes");
         let title = first_in(processes, processes.y, "进").expect("进程标题");
-        assert_eq!(title.fg, Some(palette.subtext0), "进程卡保持中性");
+        assert_eq!(title.fg, Some(palette.text), "进程卡保持中性");
 
         for (usage, expected) in [(85.0, palette.yellow), (96.0, palette.red)] {
             let mut state = monitored();
@@ -3034,8 +3017,8 @@ mod tests {
         let cpu_tone = [Tone::Cpu.color(&palette), Tone::Cpu.soft(&palette)];
         assert_eq!(
             first_in(cpu, cpu.y, "C").expect("CPU 标题").fg,
-            Some(Tone::Cpu.color(&palette)),
-            "标题保留分类色"
+            Some(palette.text),
+            "标题保持中性"
         );
         assert_eq!(color_at(&buffer, cpu.y, "42.0%"), Some(palette.overlay0));
         let chart = (cpu.y + 2..cpu.bottom() - 1)
@@ -3063,7 +3046,7 @@ mod tests {
         assert_eq!(color_at(&buffer, gpu.y, "97.0%"), Some(palette.overlay0));
         assert_eq!(
             first_in(gpu, gpu.y, "G").expect("GPU 标题").fg,
-            Some(Tone::Gpu.color(&palette))
+            Some(palette.text)
         );
         let cores = card_rect(&output, "cores");
         assert_eq!(

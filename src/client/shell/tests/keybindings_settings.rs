@@ -2,6 +2,20 @@ use super::*;
 use crate::input::TerminalKey;
 
 #[test]
+fn settings_theme_swatches_are_cached_before_painting() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.open_settings_overlay();
+    let first = super::super::settings::theme_swatches(0, &state.config.palette).expect("prepared");
+    state.compose(80, 24).expect("first paint");
+    state.compose(160, 45).expect("resized paint");
+    let second = super::super::settings::theme_swatches(0, &state.config.palette).expect("cached");
+    assert!(std::ptr::eq(first, second), "重绘与尺寸变化只读同一份色板");
+    for index in 0..crate::config::THEME_NAMES.len() {
+        assert!(super::super::settings::theme_swatches(index, &state.config.palette).is_some());
+    }
+}
+
+#[test]
 fn plus_commands_survive_snapshots_and_reload_for_both_keybinding_sources() {
     for source in [
         ClientShellKeybindingSource::Local,
@@ -1333,7 +1347,10 @@ fn settings_popup_rows(state: &ClientShellState, frame: &FrameData) -> Vec<Strin
             rows[usize::from(y)]
                 .chars()
                 .skip(usize::from(content.x))
-                .take(usize::from(content.width))
+                // 正文末列留给滚动条；消息折行本来就保留这一列。
+                .take(usize::from(content.width.saturating_sub(1)))
+                .enumerate()
+                .map(|(x, ch)| if x == 0 && ch == '▌' { ' ' } else { ch })
                 .collect()
         })
         .collect()

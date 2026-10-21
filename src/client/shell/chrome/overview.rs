@@ -1526,6 +1526,32 @@ impl ClientShellState {
     }
 }
 
+/// 位置详情跟随已经画出的完整名称，不能猜测树连接线、当前项和状态字形的宽度。
+/// 名称被裁切时不追加详情；因此不同导航器标签前缀也共用实际单元格几何。
+fn location_detail_area(buffer: &Buffer, rect: Rect, label: &str, reserve: u16) -> Option<Rect> {
+    if label.is_empty() || rect.is_empty() {
+        return None;
+    }
+    let right = rect.right().saturating_sub(reserve + 1);
+    for start in rect.x..right {
+        let mut end = start;
+        let matches = label.graphemes(true).all(|glyph| {
+            let width = crate::ui::display_width_u16(glyph);
+            if end.saturating_add(width) > right || buffer[(end, rect.y)].symbol() != glyph {
+                return false;
+            }
+            end += width;
+            true
+        });
+        // 名称与位置之间至少两列，保持两段文字分离。
+        let x = end.saturating_add(2);
+        if matches && x < right {
+            return Some(Rect::new(x, rect.y, right - x, 1));
+        }
+    }
+    None
+}
+
 pub(in crate::client::shell) fn paint_location_details(
     buffer: &mut Buffer,
     n: &ClientNavigatorOverlay,
@@ -1548,17 +1574,13 @@ pub(in crate::client::shell) fn paint_location_details(
         } else {
             0
         };
-        let prefix = u16::from(row.depth.saturating_sub(1)) * 2 + 6;
-        let name = crate::ui::display_width_u16(&row.label).min(rect.width.saturating_sub(reserve));
-        let start = rect.x.saturating_add(prefix).saturating_add(name);
-        let right = rect.right().saturating_sub(reserve + 1);
-        if start >= right {
+        let Some(detail) = location_detail_area(buffer, *rect, &row.label, reserve) else {
             continue;
-        }
+        };
         let cue = format!("{}  {}  {}", row.location, row.summary, row.age);
-        let style = design::meta(cx.palette).bg(buffer[(start, rect.y)].bg);
-        let cue = crate::ui::truncate_end(&cue, usize::from(right - start));
-        super::super::render::put_text(buffer, start, rect.y, right - start, &cue, style);
+        let style = design::meta(cx.palette).bg(buffer[(detail.x, detail.y)].bg);
+        let cue = super::settings::truncate_with_ellipsis(&cue, detail.width);
+        super::super::render::put_text(buffer, detail.x, detail.y, detail.width, &cue, style);
     }
 }
 
@@ -1661,7 +1683,8 @@ pub(in crate::client::shell) fn paint(
         (Action::Reply, tr("e Reply", "e 回复")),
         (Action::Close, "Esc"),
     ] {
-        let width = crate::ui::display_width_u16(text).saturating_add(2);
+        let (key, label) = text.split_once(' ').unwrap_or((text, ""));
+        let width = crate::ui::kit::key_cap::hint_width(key, label);
         if x + width > geometry.controls.right() {
             break;
         }
@@ -1680,7 +1703,20 @@ pub(in crate::client::shell) fn paint(
         } else {
             design::muted(palette).bg(palette.surface0)
         };
-        put(buffer, rect, &format!(" {text} "), style);
+        crate::ui::kit::key_cap::paint_hint(
+            buffer,
+            rect.x,
+            rect.y,
+            rect.right(),
+            key,
+            label,
+            if enabled {
+                design::key_cap(palette)
+            } else {
+                style
+            },
+            style,
+        );
         if enabled {
             result.overview_actions.push((rect, action));
         }
@@ -1705,14 +1741,14 @@ pub(in crate::client::shell) fn paint(
         let style = if row.stale {
             design::meta(palette).add_modifier(Modifier::DIM)
         } else if index == state.selected {
-            design::body(palette).patch(design::selected_row(palette))
+            design::selected_row_text(palette)
         } else if state.hovered == Some(Action::Row(index)) {
             design::body(palette).bg(palette.hover_row_bg())
         } else {
             design::body(palette)
         };
         buffer.set_style(rect, style);
-        let indent = usize::from(row.depth).min(3) * 2;
+        let indent = usize::from(row.depth).min(3) * 2 + 1;
         let budget = rect.width.saturating_sub(2 + indent as u16);
         let meta = if budget >= 90 {
             format!("{}  {}  {}", row.location, row.summary, row.age)
@@ -1764,6 +1800,9 @@ pub(in crate::client::shell) fn paint(
                 &crate::ui::truncate_end(&meta, usize::from(meta_rect.width)),
                 design::meta(palette),
             );
+        }
+        if index == state.selected && row.group.is_none() {
+            crate::ui::kit::paint_selection_mark(buffer, rect.x, rect.y, palette);
         }
         result.overview_actions.push((rect, Action::Row(index)));
         if let Some(target) = &row.target {
@@ -1854,9 +1893,10 @@ pub(in crate::client::shell) fn paint(
         let label = if state.in_flight.is_some() {
             tr("Sending…", "发送中…")
         } else {
-            tr("Send (Ctrl+Enter)", "发送（Ctrl+Enter）")
+            tr("Send", "发送")
         };
-        let width = crate::ui::display_width_u16(label).min(geometry.footer.width);
+        let width =
+            crate::ui::kit::key_cap::hint_width("ctrl+enter", label).min(geometry.footer.width);
         let send = Rect::new(
             geometry.footer.right().saturating_sub(width),
             geometry.footer.y,
@@ -1866,30 +1906,62 @@ pub(in crate::client::shell) fn paint(
         if state.in_flight.is_none() && state.can_reply {
             result.overview_actions.push((send, Action::Send));
         }
-        put(buffer, send, label, design::title(palette));
+        crate::ui::kit::key_cap::paint_hint(
+            buffer,
+            send.x,
+            send.y,
+            send.right(),
+            "ctrl+enter",
+            label,
+            design::key_cap(palette),
+            design::title(palette),
+        );
         let notice = Rect::new(
             geometry.footer.x,
             geometry.footer.y,
             geometry.footer.width.saturating_sub(width + 1),
             1,
         );
-        put(
-            buffer,
-            notice,
-            reply_notice(state)
-                .unwrap_or(tr("Enter: newline · Esc: back", "Enter 换行 · Esc 返回")),
-            design::meta(palette),
-        );
+        if let Some(message) = reply_notice(state) {
+            put(buffer, notice, message, design::meta(palette));
+        } else {
+            use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
+            render_footer_hints(
+                buffer,
+                notice,
+                &[
+                    FooterHint::new("enter", tr("Newline", "换行")),
+                    FooterHint::new("esc", tr("Back", "返回")),
+                ],
+                None,
+                palette,
+            );
+        }
     } else {
-        put(
-            buffer,
-            geometry.footer,
-            reply_notice(state).unwrap_or(tr(
-                "↑↓ Select · Space Preview · Enter Jump · r/u/R Read · e Reply",
-                "↑↓ 选择 · Space 预览 · Enter 跳转 · r/u/R 已读 · e 回复",
-            )),
-            design::meta(palette),
-        );
+        if let Some(message) = reply_notice(state) {
+            put(buffer, geometry.footer, message, design::meta(palette));
+        } else {
+            use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
+            render_footer_hints(
+                buffer,
+                geometry.footer,
+                &[
+                    FooterHint::new("↑↓", tr("Select", "选择")),
+                    FooterHint::new("space", tr("Preview", "预览")),
+                    FooterHint {
+                        primary: true,
+                        ..FooterHint::new("enter", tr("Jump", "跳转"))
+                    },
+                    FooterHint::new("r / u / R", tr("Read", "已读")),
+                    FooterHint {
+                        enabled: state.can_reply,
+                        ..FooterHint::new("e", tr("Reply", "回复"))
+                    },
+                ],
+                None,
+                palette,
+            );
+        }
     }
     Some(result)
 }

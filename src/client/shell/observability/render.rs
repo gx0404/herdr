@@ -15,6 +15,33 @@ mod tone;
 use settings::*;
 use system::*;
 
+/// kit 卡片的标题几何保持不变，只应用本页的标题层级。
+fn card_title_style(
+    buffer: &mut Buffer,
+    area: Rect,
+    spec: &crate::ui::kit::card::CardSpec<'_>,
+    style: Style,
+) {
+    let ellipsis_width = |text: &str, width| {
+        crate::ui::display_width_u16(&super::super::chrome::settings::truncate_with_ellipsis(
+            text, width,
+        ))
+    };
+    if spec.dimmed || area.width < 4 || area.height < 2 {
+        return;
+    }
+    let mut budget = area.width - 2;
+    if let Some((badge, _)) = spec.badge {
+        if budget >= 3 {
+            budget = budget.saturating_sub(ellipsis_width(badge, budget - 2) + 3);
+        }
+    }
+    if budget >= 3 {
+        let width = ellipsis_width(spec.title, budget - 2);
+        buffer.set_style(Rect::new(area.x + 2, area.y, width, 1), style);
+    }
+}
+
 pub(super) use system::CardScrollLimits;
 
 /// 页面级滚动的度量：本次绘制算出，`State::commit_paint` 写回，`State::scroll_page`

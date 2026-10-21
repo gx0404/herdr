@@ -3,7 +3,7 @@
 //! 可达。版式是纯函数（[`settings_layout`]、[`nav_items`]、[`list_body`]），视图
 //! 计算、绘制与鼠标命中共用同一份几何；绘制只读入参，命中区作为返回值交回。
 //!
-//! 选中行用浅一档的 `surface1` 底加粗正文，不用彩色；键盘焦点所在的一侧（导航或
+//! 选中行用设计真源的中性底、粗体与首列竖条；键盘焦点所在的一侧（导航或
 //! 正文）选中行用这一档，另一侧的当前分区退一档，焦点在哪一眼可见。颜色只表达
 //! 语义：集成有更新时导航上的 `●` 用「需要处理」色。
 
@@ -74,7 +74,7 @@ pub(in crate::client::shell) struct SettingsLayout {
     /// 宽屏导航与正文之间的竖线。
     pub divider: Option<Rect>,
     pub content: Rect,
-    /// 操作按钮上方的键位提示，最多两行。
+    /// 与操作按钮同一行的键位提示，空间不足时优先保留主动作。
     pub footer: Rect,
     /// 按钮行：按钮在这一行里靠右排。
     pub actions: Rect,
@@ -137,7 +137,7 @@ pub(in crate::client::shell) fn settings_layout(
             .saturating_add(5)
             .clamp(NAV_MIN_WIDTH, NAV_MAX_WIDTH);
         let body_y = inner.y + 2;
-        let bottom_rule_y = actions_y - 3;
+        let bottom_rule_y = actions_y - 1;
         let body_height = bottom_rule_y - body_y;
         let divider = Rect::new(inner.x + nav_width, body_y, 1, body_height);
         let content_x = divider.x + CONTENT_GAP_LEFT;
@@ -149,7 +149,7 @@ pub(in crate::client::shell) fn settings_layout(
                 .saturating_sub(content_x.saturating_add(CONTENT_GAP_RIGHT)),
             body_height.saturating_sub(1),
         );
-        let footer = Rect::new(inner.x + 1, actions_y - 2, inner.width - 2, 2);
+        let footer = Rect::new(inner.x + 1, actions_y, inner.width - 2, 1);
         return Some(SettingsLayout {
             header,
             nav: SettingsNav::Column(Rect::new(
@@ -175,17 +175,7 @@ pub(in crate::client::shell) fn settings_layout(
     let nav = Rect::new(tabs_area.x, tabs_area.y, tabs_area.width, tab_rows);
     let top_rule = Rect::new(inner.x, nav.bottom(), inner.width, 1);
     let content_y = top_rule.bottom();
-    let footer_rows = if actions_y >= content_y.saturating_add(6) {
-        2
-    } else {
-        1
-    };
-    let footer = Rect::new(
-        inner.x + 1,
-        actions_y - footer_rows,
-        inner.width - 2,
-        footer_rows,
-    );
+    let footer = Rect::new(inner.x + 1, actions_y, inner.width - 2, 1);
     let content = Rect::new(
         inner.x + 1,
         content_y,
@@ -281,13 +271,9 @@ fn put(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style
     buffer.set_stringn(x, y, text, usize::from(width), style);
 }
 
-/// 选中行底色：`surface1`，与面板分不开时退到主题的选中底色。
+/// 选中行底色与设计真源一致。
 pub(in crate::client::shell) fn selected_bg(palette: &Palette) -> Color {
-    if Palette::row_bg_is_distinct(palette.panel_bg, palette.surface1) {
-        palette.surface1
-    } else {
-        palette.selection_row_bg()
-    }
+    palette.selection_row_bg()
 }
 
 /// 焦点不在这一侧时「当前项」的弱底色。
@@ -403,6 +389,9 @@ pub(in crate::client::shell) fn paint_nav(
                 put(buffer, rect.x + 1, rect.y, 1, "●", badge_style);
             }
         }
+        if is_active && focused {
+            crate::ui::kit::paint_selection_mark(buffer, rect.x, rect.y, palette);
+        }
     }
     hits
 }
@@ -500,6 +489,16 @@ pub(in crate::client::shell) fn paint_options(
     list: &OptionList<'_>,
     palette: &Palette,
 ) -> Vec<(Rect, usize)> {
+    paint_options_with_previews(buffer, body, list, palette, &[])
+}
+
+pub(in crate::client::shell) fn paint_options_with_previews(
+    buffer: &mut Buffer,
+    body: Rect,
+    list: &OptionList<'_>,
+    palette: &Palette,
+    previews: &[Vec<(&'static str, Color)>],
+) -> Vec<(Rect, usize)> {
     let mut hits = Vec::new();
     if body.is_empty() {
         return hits;
@@ -535,6 +534,9 @@ pub(in crate::client::shell) fn paint_options(
         };
         let base = Style::default().bg(bg);
         buffer.set_style(rect, base);
+        if selected {
+            crate::ui::kit::paint_selection_mark(buffer, rect.x, y, palette);
+        }
         let mut label_style = base.fg(readable_on(palette, bg, &[palette.text]));
         if selected || row.current {
             label_style = label_style.add_modifier(Modifier::BOLD);
@@ -552,14 +554,26 @@ pub(in crate::client::shell) fn paint_options(
         let key_width = row
             .key
             .as_deref()
-            .map_or(0, |key| display_width_u16(key).saturating_add(2));
+            .map_or(0, crate::ui::kit::key_cap::cap_width);
         let right = rect.right().saturating_sub(if key_width > 0 {
             key_width.saturating_add(1)
         } else {
             1
         });
         let label_x = rect.x + 3;
-        let label_room = right.saturating_sub(label_x);
+        let preview = previews.get(index).map_or(&[][..], Vec::as_slice);
+        let preview_width = preview
+            .iter()
+            .map(|(text, _)| display_width_u16(text) + 1)
+            .sum::<u16>();
+        let preview_x = right.saturating_sub(preview_width);
+        let show_preview = preview_width > 0 && preview_x >= label_x.saturating_add(8);
+        let label_right = if show_preview {
+            preview_x.saturating_sub(1)
+        } else {
+            right
+        };
+        let label_room = label_right.saturating_sub(label_x);
         put(
             buffer,
             label_x,
@@ -569,8 +583,8 @@ pub(in crate::client::shell) fn paint_options(
             label_style,
         );
         let detail_x = label_x.saturating_add(label_width).saturating_add(3);
-        if !row.detail.is_empty() && detail_x.saturating_add(8) <= right {
-            let room = right - detail_x;
+        if !row.detail.is_empty() && detail_x.saturating_add(8) <= label_right {
+            let room = label_right - detail_x;
             put(
                 buffer,
                 detail_x,
@@ -584,26 +598,23 @@ pub(in crate::client::shell) fn paint_options(
                 )),
             );
         }
+        if show_preview {
+            let mut x = preview_x;
+            for (glyph, color) in preview {
+                let width = display_width_u16(glyph);
+                put(buffer, x, y, width, glyph, base.fg(*color));
+                x += width + 1;
+            }
+        }
         if let Some(key) = row.key.as_deref() {
             if key_width > 0 && key_width < rect.width {
-                let cap = Style::default()
-                    .fg(readable_on(
-                        palette,
-                        palette.surface0,
-                        &[palette.subtext0, palette.text],
-                    ))
-                    .bg(if selected {
-                        palette.surface0
-                    } else {
-                        selected_bg(palette)
-                    });
-                put(
+                crate::ui::kit::key_cap::paint_cap(
                     buffer,
                     rect.right() - key_width - 1,
                     y,
-                    key_width,
-                    &format!(" {key} "),
-                    cap,
+                    rect.right() - 1,
+                    key,
+                    crate::ui::design::key_cap(palette),
                 );
             }
         }
@@ -659,6 +670,43 @@ pub(in crate::client::shell) fn footer_hint_area(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_focus_marks_only_the_selected_section() {
+        let palette = Palette::graphite_dark();
+        let components = ComponentStyles::from_palette(&palette);
+        for cols in [60, 80, 160] {
+            let area = Rect::new(0, 0, cols, 24);
+            let layout = settings_layout(area, &items()).expect("layout");
+            let mut buffer = Buffer::empty(area);
+            let hits = paint_nav(
+                &mut buffer,
+                &layout,
+                &items(),
+                ClientSettingsSection::Theme,
+                true,
+                Some(ClientSettingsSection::Sound),
+                &palette,
+                &components,
+            );
+            for (rect, section) in hits {
+                if section == ClientSettingsSection::Theme {
+                    assert_eq!(
+                        buffer[(rect.x, rect.y)].symbol(),
+                        crate::ui::design::SELECTION_MARK
+                    );
+                    assert_eq!(buffer[(rect.x, rect.y)].bg, palette.selection_row_bg());
+                } else {
+                    assert_ne!(
+                        buffer[(rect.x, rect.y)].symbol(),
+                        crate::ui::design::SELECTION_MARK
+                    );
+                }
+            }
+            assert_eq!(layout.footer.height, 1);
+            assert_eq!(layout.footer.y, layout.actions.y);
+        }
+    }
 
     fn items() -> Vec<NavItem<'static>> {
         ClientSettingsSection::ALL
@@ -746,7 +794,7 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("🇨🇳abcd", 3), "🇨🇳…");
     }
 
-    /// 选中行（焦点在正文）用 `surface1` 底加粗，当前值带 `✓`，说明列是灰色。
+    /// 选中行用设计底色、粗体和竖条，当前值带 `✓`，说明列是灰色。
     #[test]
     fn option_rows_mark_selection_current_value_and_grey_details() {
         let palette = Palette::graphite_dark();
@@ -771,7 +819,8 @@ mod tests {
         );
         assert_eq!(hits.len(), 2);
         assert_eq!(buffer[(1, 0)].symbol(), "✓");
-        assert_eq!(buffer[(3, 1)].bg, palette.surface1);
+        assert_eq!(buffer[(3, 1)].bg, palette.selection_row_bg());
+        assert_eq!(buffer[(0, 1)].symbol(), crate::ui::design::SELECTION_MARK);
         assert!(buffer[(3, 1)].modifier.contains(Modifier::BOLD));
         assert_eq!(buffer[(9, 0)].symbol(), "c");
         assert_eq!(buffer[(9, 0)].fg, palette.subtext0);

@@ -365,6 +365,15 @@ pub(super) fn settings(
             state.glyphs,
             palette,
         );
+        card_title_style(
+            &mut page,
+            Rect::new(0, y, area.width, height),
+            &CardSpec {
+                title: card.title,
+                ..CardSpec::default()
+            },
+            crate::ui::design::section(palette),
+        );
         let mut row_y = inner.y;
         if let Some(caption) = card.caption {
             text(

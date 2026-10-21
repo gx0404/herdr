@@ -1,13 +1,10 @@
-//! 系统页的分类色：每类数据（CPU、内存、GPU、磁盘、网络收 / 发、温度）一种颜色，
+//! 系统页的分类色：CPU、内存、GPU、磁盘、网络收 / 发、温度复用有限的分类色，
 //! 只用来区分数据类型；严重程度仍由黄 / 红表达（`Severity`），过期数据仍转灰。
-//! 数据元素（曲线、速率、主读数、条形常态色）一律经 [`Tone::data`] /
-//! [`Tone::data_soft`] 取色，过期时退回改动前的中性灰阶（[`Neutral`]）；卡片标题是
-//! 数据类型标识，过期时仍用 [`Tone::color`]。
+//! 分类色仅用于曲线与条形，取主题的紫 / 青 / 桃及中性色，避开状态 token。
+//! 标题和正常读数保持中性；阈值警告仍用黄 / 红，过期数据仍转灰。
 //!
-//! 按面板底色 `panel_bg` 选组，不看主题名（用户可以自定义 `panel_bg`）：取不到 sRGB
-//! （终端 16 色主题，`panel_bg` 为 `Reset`）用 ANSI 组，相对亮度 < 0.4 用深色组，
-//! 否则用浅色组。深色 / 浅色组在所有 RGB 内置主题的面板底上对比度都不低于 3:1，
-//! 且与各主题的黄 / 红不同色（见单测）。纯函数，不分配。
+//! 分类色来自主题，若与状态色重合或不足 3:1 则退回中性色。曲线填充根据面板底色
+//! 混合；终端默认底色无法混合时用 overlay0。纯函数，不分配。
 
 use ratatui::style::Color;
 
@@ -85,31 +82,22 @@ impl Tone {
         Self::Temperature,
     ];
 
-    /// 主色：卡片标题、常态条形、曲线描边、常态主读数。
+    /// 分类主色仅用于图表；旧主题若将分类色映射到状态色，则退回中性色。
     pub(super) fn color(self, palette: &Palette) -> Color {
-        match (group(palette), self) {
-            (Group::Dark, Self::Cpu) => Color::Rgb(0x60, 0xA5, 0xFA),
-            (Group::Dark, Self::Memory) => Color::Rgb(0xA7, 0x8B, 0xFA),
-            (Group::Dark, Self::Gpu) => Color::Rgb(0x4A, 0xDE, 0x80),
-            (Group::Dark, Self::Disk) => Color::Rgb(0x2D, 0xD4, 0xBF),
-            (Group::Dark, Self::NetRx) => Color::Rgb(0x22, 0xD3, 0xEE),
-            (Group::Dark, Self::NetTx) => Color::Rgb(0xE8, 0x79, 0xF9),
-            (Group::Dark, Self::Temperature) => Color::Rgb(0x7D, 0xD3, 0xFC),
-            (Group::Light, Self::Cpu) => Color::Rgb(0x25, 0x63, 0xEB),
-            (Group::Light, Self::Memory) => Color::Rgb(0x7C, 0x3A, 0xED),
-            (Group::Light, Self::Gpu) => Color::Rgb(0x15, 0x80, 0x3D),
-            (Group::Light, Self::Disk) => Color::Rgb(0x0F, 0x76, 0x6E),
-            (Group::Light, Self::NetRx) => Color::Rgb(0x0E, 0x74, 0x90),
-            (Group::Light, Self::NetTx) => Color::Rgb(0xC0, 0x26, 0xD3),
-            (Group::Light, Self::Temperature) => Color::Rgb(0x03, 0x69, 0xA1),
-            (Group::Ansi, Self::Cpu) => Color::Blue,
-            (Group::Ansi, Self::Memory) => Color::Magenta,
-            (Group::Ansi, Self::Gpu) => Color::Green,
-            (Group::Ansi, Self::Disk) => Color::Cyan,
-            (Group::Ansi, Self::NetRx) => Color::LightCyan,
-            (Group::Ansi, Self::NetTx) => Color::LightMagenta,
-            (Group::Ansi, Self::Temperature) => Color::LightBlue,
-        }
+        let preferred = match self {
+            Self::Cpu | Self::NetTx => palette.mauve,
+            Self::Memory | Self::NetRx => palette.teal,
+            Self::Gpu | Self::Temperature => palette.peach,
+            Self::Disk => palette.subtext0,
+        };
+        [preferred, palette.subtext0, palette.overlay1, palette.text]
+            .into_iter()
+            .find(|color| {
+                ![palette.blue, palette.green, palette.yellow, palette.red].contains(color)
+                    && crate::ui::color::contrast_ratio(*color, palette.panel_bg)
+                        .is_none_or(|ratio| ratio >= 3.0)
+            })
+            .unwrap_or(palette.text)
     }
 
     /// 柔和色：曲线下方的填充。RGB 主题是主色朝面板底混合 `SOFT_MIX`；终端 16 色
@@ -136,6 +124,8 @@ impl Tone {
     pub(super) fn data(self, stale: bool, neutral: Neutral, palette: &Palette) -> Color {
         if stale {
             neutral.color(palette)
+        } else if matches!(neutral, Neutral::Text | Neutral::Reading) {
+            palette.text
         } else {
             self.color(palette)
         }
@@ -156,8 +146,7 @@ mod tests {
     use super::*;
     use crate::ui::color::contrast_ratio;
 
-    /// 每个内置主题：7 个分类色在面板底上对比度 ≥ 3:1（终端默认底色无从比较，
-    /// 改为断言用 ANSI 组）、两两不同、不与该主题的黄 / 红撞色。
+    /// 所有内置主题的图表至少 3:1；分类色允许复用，但不能冒充状态。
     #[test]
     fn tones_are_distinct_readable_and_never_alias_severity_colors() {
         for name in crate::config::THEME_NAMES {
@@ -178,28 +167,26 @@ mod tests {
                 }
                 assert_ne!(*color, palette.yellow, "{name} {tone:?}: 与警告色撞色");
                 assert_ne!(*color, palette.red, "{name} {tone:?}: 与严重色撞色");
-                for other in &colors[index + 1..] {
-                    assert_ne!(color, other, "{name} {tone:?}: 分类色重复");
-                }
+                assert_ne!(*color, palette.blue, "{name} {tone:?}: 与运行色撞色");
+                assert_ne!(*color, palette.green, "{name} {tone:?}: 与待查看色撞色");
             }
         }
     }
 
-    /// 选组只看 `panel_bg` 的亮度：同一主题换成浅底就用浅色组；柔和色介于主色与
-    /// 底色之间。
+    /// 柔和色介于主题主色与面板底之间；终端默认底色用中性填充。
     #[test]
     fn group_follows_the_panel_background_and_soft_mixes_toward_it() {
         let mut palette = Palette::catppuccin();
         palette.panel_bg = Color::Rgb(0x1E, 0x1E, 0x2E);
-        assert_eq!(Tone::Cpu.color(&palette), Color::Rgb(0x60, 0xA5, 0xFA));
+        assert_eq!(Tone::Cpu.color(&palette), palette.mauve);
         assert_eq!(
             Tone::Cpu.soft(&palette),
-            mix(Color::Rgb(0x60, 0xA5, 0xFA), palette.panel_bg, SOFT_MIX)
+            mix(Tone::Cpu.color(&palette), palette.panel_bg, SOFT_MIX)
         );
         palette.panel_bg = Color::Rgb(0xFA, 0xFA, 0xFA);
-        assert_eq!(Tone::Cpu.color(&palette), Color::Rgb(0x25, 0x63, 0xEB));
+        assert_eq!(group(&palette), Group::Light);
         palette.panel_bg = Color::Reset;
-        assert_eq!(Tone::Cpu.color(&palette), Color::Blue);
+        assert_eq!(Tone::Cpu.color(&palette), palette.mauve);
         assert_eq!(Tone::Cpu.soft(&palette), palette.overlay0);
         assert_eq!(Tone::Cpu.faint(&palette), palette.overlay0);
     }
