@@ -237,10 +237,6 @@ impl StatusGlyphs {
     fn bucket(self, bucket: crate::harness::AgentBucket) -> &'static str {
         crate::ui::design::status_glyph(bucket, self.style, self.frame, self.animate)
     }
-
-    fn status(self, status: crate::api::schema::AgentStatus) -> &'static str {
-        self.bucket(agent_bucket(status))
-    }
 }
 
 /// 静态状态字形（运行中画静态字形；需要转圈的界面用 [`StatusGlyphs`]）。
