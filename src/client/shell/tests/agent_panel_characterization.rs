@@ -1770,6 +1770,64 @@ fn tree_activity_with_several_nodes_expands_children_on_demand() {
     );
 }
 
+/// 失败的活动子节点走共享的状态桶：画失败字形与失败色，不再借「需要输入」的 `◆`；
+/// 受阻节点仍是需要输入。字形在三种指示风格下都一致。
+#[test]
+fn failed_activity_child_renders_the_failed_glyph_and_color() {
+    use crate::api::schema::{AgentActivityKind, AgentActivityStatus};
+    let mut projected = summary_snapshot();
+    projected.agents[0].activity.truncated = false;
+    projected.agents[0].activity.nodes = vec![
+        ClientShellActivityNode {
+            id: "boom".into(),
+            kind: AgentActivityKind::Subagent,
+            label: "boom".into(),
+            status: AgentActivityStatus::Failed,
+            ..Default::default()
+        },
+        ClientShellActivityNode {
+            id: "ask".into(),
+            kind: AgentActivityKind::Subagent,
+            label: "ask".into(),
+            status: AgentActivityStatus::Blocked,
+            ..Default::default()
+        },
+    ];
+    let mut state = classic_state_with(AgentPanelSortConfig::Spaces, projected);
+    state.sidebar_width = 40;
+    state.sidebar_width_manual = true;
+    state.toggle_collapsed_group(
+        &ClientEndpointId::Local,
+        "agent-activity:pane:pane_0".into(),
+    );
+    state.compose(106, 30).expect("失败子节点");
+    let components = state.config.components.clone();
+    let row = |id: &str| {
+        state
+            .hits
+            .session_activity_rows
+            .iter()
+            .find(|hit| hit.node_id == id)
+            .expect("活动行")
+            .rect
+    };
+    let boom = row("boom");
+    let text = rect_rows(&state, boom).join("");
+    assert!(text.contains("✕ boom") && !text.contains('◆'), "{text}");
+    assert_eq!(text_cell(&state, boom, "✕").fg, components.status_failed);
+    let ask = row("ask");
+    let glyph = crate::ui::design::status_glyph(
+        crate::harness::AgentBucket::NeedsInput,
+        state.config.status_indicators,
+        0,
+        false,
+    );
+    assert!(rect_rows(&state, ask)
+        .join("")
+        .contains(&format!("{glyph} ask")));
+    assert_eq!(text_cell(&state, ask, glyph).fg, components.status_input);
+}
+
 /// workflow → phase → 子 agent 的类型、层级与进度必须真实画到字符缓冲。
 #[test]
 fn active_workflow_tree_renders_group_types_progress_and_finished_summary() {

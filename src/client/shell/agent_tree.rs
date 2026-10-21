@@ -674,7 +674,8 @@ fn render_tree_row(
 
 /// 活动节点行：`状态图标 标签 [种类]`。标签优先于种类（次要信息）。分组节点
 /// （workflow / phase）行首换成类型字形（颜色仍随状态），标签后灰显的是进度
-/// `<活跃>/<总数>` 而不是种类。
+/// `<活跃>/<总数>` 而不是种类。状态字形与颜色经 [`crate::ui::design::activity_bucket`]
+/// 取共享状态桶，失败画失败字形与失败色，与子智能体页面、Inspector 同一映射。
 // 一行的只读呈现参数保持集中，避免为传参构造临时拥有型对象。
 #[allow(clippy::too_many_arguments)]
 fn render_activity_line(
@@ -688,9 +689,9 @@ fn render_activity_line(
     muted: ratatui::style::Color,
 ) {
     let palette = &cx.config.palette;
-    let mapped = activity_status_as_agent(status);
+    let bucket = crate::ui::design::activity_bucket(status);
     let icon = group.map_or_else(
-        || cx.glyphs.status(mapped),
+        || cx.glyphs.bucket(bucket),
         |group| {
             if content.width < 12 {
                 match group.glyph {
@@ -703,7 +704,7 @@ fn render_activity_line(
             }
         },
     );
-    let icon_color = status_color(mapped, palette, &cx.config.components);
+    let icon_color = crate::ui::design::status_color(bucket, palette, &cx.config.components);
     let texts = &crate::i18n::texts().agent_activity;
     let kind_label = match (group, kind) {
         (Some(group), _) => group.progress.as_deref().unwrap_or_default(),
@@ -747,17 +748,6 @@ fn render_activity_line(
             kind_label,
             Style::default().fg(muted),
         );
-    }
-}
-
-/// 活动节点状态到面板状态图标 / 颜色的映射。
-fn activity_status_as_agent(status: AgentActivityStatus) -> AgentStatus {
-    match status {
-        AgentActivityStatus::Running => AgentStatus::Working,
-        AgentActivityStatus::Done => AgentStatus::Done,
-        AgentActivityStatus::Blocked | AgentActivityStatus::Failed => AgentStatus::Blocked,
-        AgentActivityStatus::Pending => AgentStatus::Idle,
-        AgentActivityStatus::Unknown => AgentStatus::Unknown,
     }
 }
 
