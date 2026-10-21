@@ -4,525 +4,536 @@
 - cluster-only mode — file stats not available
 
 ## Summary
-- 25007 nodes · 76792 edges · 598 communities (587 shown, 11 thin omitted)
+- 25012 nodes · 76812 edges · 606 communities (595 shown, 11 thin omitted)
 - Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 3263 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b5627e50`
+- Built from commit: `2289f2b2`
 - Run `just graph-check` to validate source and pipeline fingerprints, including uncommitted edits.
 - Run `just graph` after source changes; the repository indexes src/ and disables incremental update.
 
 ## Community Hubs (Navigation)
 - snapshot
-- PaneRuntime
 - terminal.rs
-- mod.rs
 - agent_activity.rs
-- pane.rs
-- actions.rs
-- worktrees.rs
 - wire.rs
-- render_ansi.rs
-- AgentActivityNode
-- zcode.rs
-- kimi.rs
-- machines.rs
-- model.rs
-- sessions.rs
+- mod.rs
+- PaneRuntime
+- pane.rs
 - TerminalRuntime
-- ClientShellState
-- Agent
-- windows.rs
-- TerminalState
+- worktrees.rs
+- GhosttyPaneTerminal
+- ServerEvent
+- render_ansi.rs
+- zcode.rs
+- PaneId
+- machines.rs
+- kimi.rs
+- raw_input.rs
+- actions.rs
+- actor.rs
 - HeadlessServer
+- agent_panel_characterization.rs
+- ClientShellState
+- windows.rs
 - windows_vti.rs
+- LocalStream
+- Workspace
+- worktree.rs
+- osc.rs
+- plugin.rs
+- tests.rs
+- shutdown.rs
+- opencode.rs
+- mod.rs
+- mod.rs
+- TerminalState
+- agent_transcript.rs
+- persist_files.rs
 - mod.rs
 - state.rs
-- LocalStream
-- opencode.rs
-- worktree.rs
-- mod.rs
-- plugin.rs
-- agent_panel_characterization.rs
-- tests.rs
-- actor.rs
-- mod.rs
-- osc.rs
-- attach.rs
-- agent_transcript.rs
-- macos.rs
-- ClientAgentActivityOverlay
-- Workspace
-- persist_files.rs
-- ChromeContext
-- ClientEndpointId
-- ClientMessage
-- mod.rs
-- panes.rs
-- render.rs
-- gallery.rs
-- workbench.rs
 - layout.rs
+- attach.rs
+- run_client_loop
+- EndpointRegistry
+- Agent
+- workbench.rs
 - session.rs
+- ClientEndpointId
+- encode_success
 - ClientShellEndpoint
-- surface.rs
-- manifest_update.rs
+- client_transport.rs
+- mod.rs
 - codex_launch.rs
 - api.rs
 - update.rs
-- encode_success
-- panes.rs
 - workspace_navigation.rs
+- manifest.rs
+- restore.rs
+- Option
+- panes.rs
 - agent_activity_window.rs
-- Palette
-- GhosttyPaneTerminal
 - ssh_config.rs
-- run_client_loop
 - snapshot.rs
+- panes.rs
 - mod.rs
+- catalog.rs
+- ClientMachineForm
+- model.rs
 - terminal_setup.rs
 - Option
 - process_redaction.rs
-- system.rs
 - State
-- HostAppearance
+- ClientConnection
 - spec.rs
-- catalog.rs
 - input_conformance.rs
-- client_transport.rs
-- ProfileId
 - agent_tree.rs
-- PaneId
-- writer.rs
-- ClientPaneInputEvent
-- config.rs
-- claude_settings.rs
-- Option
-- scenes_overlay.rs
-- rollout_io.rs
-- i18n.rs
-- shutdown.rs
-- history_read.rs
-- process.rs
-- keybinds.rs
+- TerminalKey
 - subscriptions.rs
-- String
-- parse.rs
+- i18n.rs
+- render_machine_detail
+- writer.rs
+- AgentActivityNode
+- claude_settings.rs
+- rollout_io.rs
+- AppState
+- process.rs
+- history_read.rs
+- overlays.rs
 - endpoints.rs
-- Result
+- parse.rs
+- codex.rs
 - registry.rs
+- Option
 - session_log.rs
-- GhosttyPaneCore
-- AgentStatus
+- fallback.rs
+- BroadcastSet
+- forward.rs
+- scenes_overlay.rs
 - App
 - ClientRenderState
-- TerminalKey
-- observability_system.rs
+- ChromeHover
 - Result
-- ClientShellInput
+- temp_test_dir
+- observability_system.rs
 - cli.rs
-- raw_input.rs
-- TerminalTheme
-- EndpointRegistry
-- socket_paths.rs
-- Vec
-- CellData
+- linux.rs
 - Option
-- ProcessSessionMember
-- put_str
+- Palette
+- ClientState
+- client_commands.rs
+- macos.rs
+- processes.rs
 - WindowsProcessEntry
-- agent_activity.rs
-- sidebar.rs
-- Input
-- endpoint_commands.rs
-- command_search.rs
 - ResponseResult
-- PopupSize
-- ClientShellState
-- menus.rs
+- ClientLoopEvent
+- command_search.rs
 - kitty_graphics.rs
-- machine.rs
-- toast.rs
-- io.rs
+- endpoint_commands.rs
 - inspector.rs
-- Target
+- menus.rs
+- keybinds.rs
+- String
 - PaneSurfaceFrame
+- ChromeContext
+- sessions.rs
+- Result
+- Target
+- Self
+- tests.rs
+- io.rs
+- machine.rs
+- push_endpoint_sessions
 - logging.rs
-- SystemMetricsSnapshot
-- monitoring.rs
 - session.rs
+- ClientAgentActivityOverlay
+- surface_scroll.rs
 - ipc.rs
 - client_shell.rs
-- pi.rs
-- tests.rs
+- ProfileId
 - .spawn
-- git_refresh.rs
+- monitoring.rs
+- pi.rs
+- tab_bar_status.rs
 - ParseError
-- context_menu.rs
-- SourceError
-- String
+- socket_paths.rs
+- ClientShellInput
+- RawInputEvent
+- SurfaceGraphicsScene
 - metadata.rs
 - .new
-- tab_bar_status.rs
-- agent_page.rs
+- EndpointNegotiation
+- tr
 - String
+- Input
+- git_refresh.rs
 - writer.rs
-- sessions.rs
-- discovery.rs
+- context_menu.rs
+- system.rs
+- HostPowerEvent
 - ApiRequestMessage
 - notifications.rs
-- form_view.rs
+- DockLayout
+- render.rs
+- sessions.rs
 - handoff.rs
-- fallback.rs
-- HostPowerEvent
 - HeadlessServer
-- agent_view.rs
-- App
+- AgentStatus
 - activation_tests.rs
 - settings.rs
+- ClientShellState
+- TerminalRuntimeRegistry
+- InsightScan
 - herdr-agent-state.ts
-- EndpointSupervisors
-- restore.rs
-- unix_image_files.rs
-- temp_test_dir
-- TerminalId
-- BroadcastSet
-- action_table.rs
-- ShellRenderState
-- ClientShellState
+- put_str
+- App
+- form_view.rs
 - agent_detection.rs
-- ServerEvent
-- agent_resume.rs
-- ApiClient
-- CustomCommandKeybind
+- unix_image_files.rs
 - agents.rs
+- ApiClient
 - autodetect.rs
-- menu.rs
-- fs.rs
-- shutdown.rs
-- ChromeHover
-- ClientShellState
-- Source
-- String
-- ClientMachineFilesOverlay
-- render_machine_detail
-- gpu_fdinfo.rs
-- DeliveryCache
-- claude.rs
-- processes.rs
-- retained_test_server_with_control
+- supervisor.rs
+- agent_activity.rs
 - mod.rs
+- shutdown.rs
+- agent_activity_overlay.rs
+- retained_test_server_with_control
+- action_table.rs
+- ClientMachineFilesOverlay
+- gpu_fdinfo.rs
+- Source
+- surface.rs
 - TurnTracker
-- gauge.rs
+- menu.rs
+- AgentSessionRef
+- SystemMetricsSnapshot
+- RgbColor
 - SnippetLibrary
+- ClientShellEndpointError
+- command_palette.rs
 - frozen_selection.rs
+- State
 - io.rs
+- ClientPaneInputEvent
+- clipboard_images.rs
+- gallery.rs
+- theme.rs
+- ServerClientStream
 - PtyIoActorHandle
 - AgentInfo
-- keybindings_settings.rs
+- CustomCommandKeybind
+- bindings.rs
 - projection.rs
 - tests.rs
-- command_palette.rs
-- SemanticNotification
 - import.rs
+- keybindings_settings.rs
+- mouse_selection.rs
 - TextEditor
-- ClientWriter
 - ssh_agent.rs
 - launchd_spawn.rs
-- .spawn
-- .push
-- askpass.rs
-- ClientConnection
-- common.rs
+- RawInputByteFramer
+- saved.rs
+- render_scale_benchmark.rs
+- PopupSize
+- SavedSshEndpoint
 - title_bar.rs
 - preferences.rs
-- State
 - bootstrap.rs
 - tail.rs
-- ServerClientStream
 - plugin_registry.rs
 - transport_lifecycle.rs
-- Option
 - attention.rs
+- gpu.rs
 - layouts.rs
 - table.rs
 - opencode_config.rs
-- linux.rs
-- native_graphics.rs
-- agent.rs
-- endpoint_agent_state.rs
-- ClientShellState
-- kimi_audit_read
 - cursor.rs
-- gpu.rs
-- .flush_timeout
-- known_hosts.rs
-- Option
-- render_scale_benchmark.rs
-- bindings.rs
+- Vec
+- PtyIoActorRunner
+- common.rs
+- agent.rs
+- toast.rs
 - ClientShellState
-- ClientMachineForm
+- feedback.rs
+- kimi_audit_read
+- askpass.rs
+- status.rs
+- Option
+- native_graphics.rs
+- schema.rs
+- endpoint_agent_state.rs
 - config_edit.rs
+- .spawn
+- Option
 - endpoint.rs
-- saved.rs
-- agents.rs
+- String
 - EventHub
 - status.rs
-- status_bar.rs
+- EndpointSupervisors
 - ClientShellConfig
+- ClientShellState
+- AgentBucket
+- status_bar.rs
 - retained_surface.rs
-- codex.rs
-- schema.rs
 - agent_resume.rs
-- App
 - manifest.rs
-- build_info.rs
-- terminal_sessions.rs
+- ComponentStyles
 - scenes.rs
-- config.rs
+- Tab
 - targets.rs
-- .new
+- input.rs
 - release_info_from_manifest
 - PluginInvocationContext
-- supervisor.rs
-- widgets.rs
-- feedback.rs
-- restore
+- WindowsKeyRecord
+- Vec
 - windows_recent_fallback.rs
 - unix_common.rs
 - workspaces.rs
+- App
 - ClientNavigatorOverlay
-- Arc
-- theme.rs
+- form_field.rs
 - product_announcements.rs
 - endpoint_responses.rs
-- ComponentStyles
-- ServerMessage
-- DockLayout
+- widgets.rs
+- ClientShellState
 - ClientShellState
 - snippets.rs
+- terminal_geometry.rs
+- CellData
+- config.rs
+- config.rs
 - WidePane
-- RawInputByteFramer
-- status.rs
-- AgentInsight
-- ClientShellState
-- tool_display.rs
-- Admission
-- PtyIoActorRunner
-- ProcessLineage
-- bindings.rs
-- form_field.rs
+- Option
 - ConnectionErrorKind
-- render_machine_forwards
-- RawInputEvent
-- PathBuf
-- codex_launch.rs
+- ClientShellState
+- write_fake_tracked_repo
+- tool_display.rs
 - process_lineage.rs
-- clipboard_image.rs
-- EndpointResponseIdentity
-- sound.rs
-- events.rs
-- run_client_with_mode
-- ResponseMatcher
-- input.rs
-- .forward_reported_transition_notifications
+- api_helpers.rs
+- plugins.rs
+- agent_view.rs
+- Self
+- bindings.rs
+- put_right_text
+- render_machine_forwards
+- .local_keybindings_profile_toml
 - keybind_help.rs
+- codex_launch.rs
+- clipboard_image.rs
+- .forward_reported_transition_notifications
+- write_shared_test_pane
+- FrozenText
+- sound.rs
+- ResponseMatcher
 - codex_trust.rs
 - main.rs
 - .new
 - Result
 - release_notes.rs
-- plugins.rs
+- .new
+- Path
+- design.rs
 - target.rs
-- LiveKeybindConfig
+- fs.rs
+- endpoint_requests.rs
+- Admission
+- remote.rs
 - selection.rs
+- apply_client_pane_input_events
 - tokens.rs
+- report_origin.rs
 - workspace_bindings.rs
 - machine_auth.rs
-- input.rs
-- unix.rs
-- client_commands.rs
-- write_shared_test_pane
-- api_helpers.rs
+- ProcessSessionId
+- .read
+- .set_agent_session_ref_for_session_start
+- card.rs
+- events.rs
+- ClientShellState
+- attach.rs
+- ServerMessage
 - behaviour.rs
-- BucketCounts
-- subprocess.rs
-- Self
-- surface_delta.rs
-- EndpointResponses
-- App
-- Self
-- server.rs
 - panel_header.rs
+- subprocess.rs
+- String
+- Self
+- Bytes
+- Option
+- App
+- server.rs
+- notifications.rs
 - ComposeCanvas
-- GraphicsOutput
+- which_key.rs
 - registry.rs
 - herdr-agent-state.test.ts
-- Option
-- ClientShellEndpointError
+- RemotePlatform
+- gauge.rs
+- agent_suspend_tests.rs
+- App
+- tree.rs
 - quick.rs
-- endpoint_requests.rs
-- ClientState
+- unix.rs
+- claude.rs
 - peripherals.rs
 - footer_hints.rs
 - catalog_reload.rs
 - handshake.rs
+- braille_chart.rs
 - persist_files.rs
 - plugin_installations.rs
-- .host_color_query_sent
-- BorderGlyphs
-- App
+- sidebar.rs
+- PanelId
 - herdr-agent-state.js
-- Bytes
-- RemotePlatform
+- Value
 - HeadlessServer
-- braille_chart.rs
 - Option
+- agents.rs
+- TextCell
 - .start_plugin_command
+- release_notes.rs
 - machine_fs.rs
 - snippet.rs
 - ClientShellState
-- .workbench_mouse
-- machine_files.rs
-- tree.rs
+- PathBuf
 - metadata_tokens.rs
-- .scroll_metrics
 - ScrollMetrics
 - shutdown.rs
 - Activity
-- tests_0163.rs
 - report_origin.rs
 - attention.rs
-- unix_stdin_reader_loop
-- mod.rs
 - ClientShellState
-- form.rs
-- state.rs
-- IsolatedDirs
+- ClientShellLayout
+- LinkHoverTarget
+- machine_files.rs
+- time.rs
 - AppEvent
 - install_target_inner
 - background_agent.rs
 - ShellInputHarness
-- release_notes.rs
 - App
+- .spawn_popup_command
 - api.rs
-- LinkHoverTarget
+- gallery_tools.rs
 - link_hover.rs
+- SidebarTokenStyle
+- SoundConfig
 - window_title.rs
 - env.rs
-- Option
+- SurfaceGraphicsAssetKey
+- .scroll_metrics
 - monitoring.rs
 - monitoring_fallback.rs
-- tab_surface.rs
+- context
+- tests_0163.rs
+- TerminalId
 - integration.rs
 - SshMachineMetadata
-- raw_console_reader_loop
+- settings.rs
+- color.rs
 - isolate_dirs
-- text.rs
-- env_lock
 - plugin_command.rs
 - render_prof.rs
+- .new
 - event_fairness.rs
 - TerminalTargetError
 - auto_update_for_package
-- SavedSshEndpoint
-- handle_notify_with_notifiers
-- Option
-- settings.rs
-- broadcast.rs
-- time.rs
-- String
+- link_hints.rs
+- SemanticNotification
+- .new
+- region
 - .new
 - xtgettcap.rs
-- String
+- Result
 - plugin_paths.rs
 - Selection<P>
-- parse_notification_text
-- Value
-- TerminalRuntimeRegistry
+- AppAgentViewEntry
 - PluginManifestPane
-- ServerStop
 - map_server_not_running_or_io
-- frame_output.rs
+- handle_notify_with_notifiers
 - Keybinds
-- PanelId
-- start_word_drag
-- .new
-- SoundConfig
-- child_groups_foreground_process_group_with
-- input_tests.rs
+- Option
+- ServerStop
+- RemoteFs
 - ssh_agent.rs
 - terminal_notify.rs
+- meter_row.rs
 - aggregate.rs
 - completion.rs
 - control.rs
 - health.rs
 - key_labels.rs
-- link_hints.rs
 - write.rs
 - shell
 - ClientShellState
+- IsolatedDirs
+- Ok
 - SidebarTokenRule
 - herdr-agent-state.test.ts
-- Result
-- Result
 - CellBaseline
-- text_snapshots.rs
+- RemoteAssetRef
+- build_info.rs
 - .floating_page_rect
-- .new
+- ui_gallery_machines
 - HostGeometry
 - herdr-tui-session.test.ts
 - GpuWorker
 - clipboard_image.rs
 - KittyKeyboardTracker
-- Vec
 - Bridge
 - unix.rs
 - fd.rs
-- .try_send
-- .handle_client_shell_endpoint_request
-- ClientKeyCode
-- graphics.rs
+- agent_view_eval.rs
+- paint
 - WorkspaceNavigationTarget
+- Occlusion
+- RetainedInputSource
 - spawn_server_signal_monitor
 - .new
-- remote.rs
+- Path
+- .handle_client_shell_endpoint_request
 - thread_spawn.rs
-- AgentActivityStatus
 - machine_status.rs
 - protocol_guard.rs
 - server_not_running.rs
-- endpoint.rs
-- ComposedFrame
-- frame_output_tests.rs
 - FileTransport
+- ClientShellState
 - close_pane.rs
+- graphics.rs
 - .new
-- HostShutdownIntentCell
 - String
-- power.rs
 - terminal_modes.rs
 - test_support.rs
-- HeadSeed
+- AgentActivityStatus
 - App
+- .push
+- ClientShellState
 - tone.rs
 - close_tab.rs
-- RetainedInputSource
+- GraphicsOutput
+- Command
+- Result
 - observation_entry
 - .anchor
 - two_headless_servers_drive_atomic_endpoint_handoff
-- FrozenText
+- AttentionReport
 - machine_log.rs
 - command.rs
 - .compose_workbench
+- gallery_overlays.rs
+- terminal_sessions.rs
 - MonitorConfig
-- tab_bar.rs
 - restart_policy.rs
-- surface_delta.rs
-- .handle_agent_view_set
+- ClientShellState
+- tab_bar.rs
 - legacy_statusline.rs
+- Vec
+- .for_host_input
+- surface_delta.rs
 - UpdateManifest
+- HeadSeed
+- bindings_tests.rs
 - machine_exec.rs
 - worktree.rs
 - worktree_bindings.rs
@@ -530,60 +541,57 @@
 - agent_tree_seam.rs
 - local_socket.rs
 - .enable_host_appearance_query_on_focus
-- App
-- agent_row
-- paint
+- PathBuf
 - ClientShellState
-- put_right_text
 - scroll.rs
+- detect_with_osc
 - json.rs
 - MacosAclAllocation
 - SpawnedPty
+- spawn_windows_client_accept_thread
 - terminal_effects.rs
 - .handle_integration_install
 - plugin_path_env
+- notification_bindings.rs
 - title.rs
+- restore_plan
 - request
 - public_move
 - sidebar.rs
 - normalize_launch_env
 - file_sha256
 - tab_bindings.rs
-- ClientLoopEvent
 - render_mobile_header
 - mouse
-- copy_mode.rs
+- ClientKeyKind
 - herdr-agent-state.test.ts
 - attribute
-- decode_endpoint_request
 - .restamp_client_shell_surface
 - title.rs
 - operations.rs
 - protocol_schema_document
 - App
+- ui_gallery_layout
+- ui_gallery_toast
 - client_state.rs
-- collect
-- AttentionReport
 - tabs.rs
 - text_snapshot.rs
-- EndpointResponseReady
 - herdr-tui-session.js
 - read_output
 - client_stream_control
 - App
+- vti_raw_win32_paste_keeps_decoded_controls_as_text_and_surrogates_local
 - ClientShellState
+- AgentState
 - herdr-agent-state.ps1
 - command
 - run_remote_client_bridge
 - server.rs
 - run_notification_command
 - herdr-agent-state.ps1
-- process_session_id
 - .visible_node_ids
 - chrome_context
-- pane_input_event_limit
 - .set_client_shell_surface_active
-- SurfaceEncodingClient
 - herdr-agent-state.sh script
 - herdr-agent-state.sh script
 - herdr-agent-state.sh script
@@ -602,8 +610,6 @@
 10. `Agent` - 144 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `publish_codex_prompt_observation()` --calls--> `codex_prompt_ready()`  [INFERRED]
-  pane.rs → pane/agent_detection.rs
 - `connect()` --calls--> `parse_response_value()`  [INFERRED]
   remote/ssh_agent.rs → api/client.rs
 - `pane_updated_events()` --references--> `EventHub`  [EXTRACTED]
@@ -612,6 +618,8 @@
   app/state.rs → api/schema/agents.rs
 - `status_label()` --references--> `AgentActivityStatus`  [EXTRACTED]
   client/shell/agent_activity_overlay.rs → api/schema/agents.rs
+- `layout_menu_lists_monitor_arrange_lock_and_reset_under_the_ellipsis()` --calls--> `position()`  [INFERRED]
+  client/shell/tests/menus.rs → api/schema/common.rs
 
 ## Import Cycles
 - 1-file cycle: `harness/time.rs -> harness/time.rs`
@@ -635,275 +643,275 @@
 - 4-file cycle: `api/schema.rs -> api/schema/response.rs -> api/schema/workspaces.rs -> cli/projection.rs -> api/schema.rs`
 - 4-file cycle: `api/schema.rs -> events.rs -> cli/workspace.rs -> cli/workspace_bindings.rs -> api/schema.rs`
 
-## Communities (598 total, 11 thin omitted)
+## Communities (606 total, 11 thin omitted)
 
 ### Community 0 - "snapshot"
 Cohesion: 0.02
-Nodes (224): active_agent_view_controls_sidebar_order_and_focus_indices(), agent_sidebar_honors_launch_order_symbols_tokens_and_stable_hits(), agent_sort_toggle_is_client_local_and_persists_per_endpoint(), agent_tree_rows_group_by_workspace_with_collapsible_headers(), clicking_workspace_header_collapses_agent_group(), collapsed_workspace_jitter_remains_a_click(), desktop_workspace_navigation_reveals_overflowing_selection(), duplicate_repo_parent_drag_does_not_target_its_own_move_block() (+216 more)
+Nodes (204): active_agent_view_controls_sidebar_order_and_focus_indices(), agent_sidebar_honors_launch_order_symbols_tokens_and_stable_hits(), agent_sort_toggle_is_client_local_and_persists_per_endpoint(), agent_tree_rows_group_by_workspace_with_collapsible_headers(), clicking_workspace_header_collapses_agent_group(), collapsed_workspace_jitter_remains_a_click(), desktop_workspace_navigation_reveals_overflowing_selection(), duplicate_repo_parent_drag_does_not_target_its_own_move_block() (+196 more)
 
-### Community 1 - "PaneRuntime"
-Cohesion: 0.02
-Nodes (101): AtomicU16, absolute_process_cwd(), active_pending_release(), local_terminal_mutations_can_invalidate_idle_scan_skip(), mark_detection_content_changed(), AgentDetection, AgentDetectionPublishUpdate, apply_agent_detection_publish_update() (+93 more)
-
-### Community 2 - "terminal.rs"
+### Community 1 - "terminal.rs"
 Cohesion: 0.03
-Nodes (172): CursorVisualStyle, alternate_screen_recent_reads_keep_physical_row_ranges(), child_default_color_reset_restores_cached_host_color(), child_palette_override_survives_host_refresh_until_reset(), color_scheme_queries_and_live_updates_follow_terminal_mode(), contains_kitty_graphics_sequence(), current_cursor_state(), current_palette_color() (+164 more)
+Nodes (182): CursorVisualStyle, alternate_screen_recent_reads_keep_physical_row_ranges(), child_default_color_reset_restores_cached_host_color(), child_palette_override_survives_host_refresh_until_reset(), color_scheme_queries_and_live_updates_follow_terminal_mode(), contains_kitty_graphics_sequence(), current_cursor_state(), current_palette_color() (+174 more)
 
-### Community 3 - "mod.rs"
-Cohesion: 0.03
-Nodes (188): a_foreground_client_without_a_writer_does_not_cache_the_window_title(), a_newly_promoted_client_gets_the_window_title_again(), an_attaching_client_gets_the_title_even_when_it_has_not_changed(), api_report_agent_stores_valid_resume_argv_and_rejects_invalid(), api_resume_argv_is_ignored_when_its_session_report_is_refused(), api_window_title_wins_until_it_is_cleared(), apply_terminal_attach_page_up(), assert_different_size_shells_retained_boundary_matches_full() (+180 more)
-
-### Community 4 - "agent_activity.rs"
+### Community 2 - "agent_activity.rs"
 Cohesion: 0.04
-Nodes (130): JobStarted, a_late_older_session_report_keeps_the_newer_transcript(), a_slow_subprocess_discovery_does_not_delay_file_sources(), activity_read_of_an_unimplemented_source_answers_not_implemented(), activity_read_returns_the_tree_or_one_node_and_refreshes_the_store(), activity_read_validates_its_target_before_touching_the_worker(), ActivitySource, agent_config_dir_mirrors_the_integration_layout() (+122 more)
+Nodes (130): InsightCache, JobStarted, a_late_older_session_report_keeps_the_newer_transcript(), a_slow_subprocess_discovery_does_not_delay_file_sources(), activity_read_of_an_unimplemented_source_answers_not_implemented(), activity_read_returns_the_tree_or_one_node_and_refreshes_the_store(), activity_read_validates_its_target_before_touching_the_worker(), agent_config_dir() (+122 more)
 
-### Community 5 - "pane.rs"
-Cohesion: 0.03
-Nodes (121): ShellModeConfig, agent_hint_for_foreground_job_members(), agent_hint_for_non_leader_foreground_job_members(), apply_pane_launch_env(), apply_pane_ssh_auth_sock(), apply_pane_terminal_env(), auto_shell_builder_keeps_direct_shell_on_non_macos_target(), auto_shell_builder_uses_login_shell_on_macos_target() (+113 more)
-
-### Community 6 - "actions.rs"
-Cohesion: 0.03
-Nodes (124): a_delayed_failed_toast_survives_the_rest_of_its_turn(), active_tab_completion_marks_pane_seen(), active_workspace_active_tab_does_not_set_toast(), active_workspace_active_tab_keeps_herdr_toast_suppressed_when_outer_terminal_is_unfocused(), agent_detection_manifest_update_event_updates_status_and_toast(), app_with_workspaces(), apply_workspace_git_statuses_clears_missing_git_status(), apply_workspace_git_statuses_does_not_change_worktree_membership() (+116 more)
-
-### Community 7 - "worktrees.rs"
-Cohesion: 0.05
-Nodes (109): json_compatibility(), Option, String, workspace(), WorktreeInfo, WorktreeSourceInfo, absolute_user_path(), api_worktree_create_from_cwd_emits_parent_with_membership() (+101 more)
-
-### Community 8 - "wire.rs"
+### Community 3 - "wire.rs"
 Cohesion: 0.02
-Nodes (83): Self, CursorShapeParam, Modifier, blank_cell(), check_client_version(), ChunkedReader, client_shell_activity_mirrors_roundtrip_through_bincode(), client_shell_graphics_payload_codec_is_frozen() (+75 more)
+Nodes (100): Self, Result, CustomCommandAction, Modifier, blank_cell(), check_client_version(), ChunkedReader, client_shell_activity_mirrors_roundtrip_through_bincode() (+92 more)
 
-### Community 9 - "render_ansi.rs"
-Cohesion: 0.05
-Nodes (117): RepeatImeCursorAnchorConfig, a_visible_cursor_frame_still_hides_before_the_next_paint(), assert_only_post_sync_anchor_outside_block(), assert_single_sync_block_without_trailing_bytes(), batched_ascii_diff_replays_to_current_frame(), blit_frame_begins_sync_before_hiding_cursor_after_visible_cursor_repeat(), blit_frame_can_repeat_final_cursor_state_after_synchronized_output(), blit_frame_can_skip_final_cursor_state_after_synchronized_output() (+109 more)
-
-### Community 10 - "AgentActivityNode"
+### Community 4 - "mod.rs"
 Cohesion: 0.04
-Nodes (76): AgentActivityNode, activity_agent_key(), activity_parent_indices(), activity_priority_order(), activity_writes_report_counts_only_when_the_tree_changes(), ActivityCounts, ActivitySummary, adversarial_identity_state_satisfies_app_invariants_after_mutation() (+68 more)
+Nodes (159): a_foreground_client_without_a_writer_does_not_cache_the_window_title(), a_newly_promoted_client_gets_the_window_title_again(), an_attaching_client_gets_the_title_even_when_it_has_not_changed(), api_report_agent_stores_valid_resume_argv_and_rejects_invalid(), api_resume_argv_is_ignored_when_its_session_report_is_refused(), api_window_title_wins_until_it_is_cleared(), assert_different_size_shells_retained_boundary_matches_full(), backpressured_observer_skips_runtime_access_and_recovers_without_new_output() (+151 more)
 
-### Community 11 - "zcode.rs"
+### Community 5 - "PaneRuntime"
+Cohesion: 0.03
+Nodes (54): AtomicU16, clear_pane_preserves_alternate_screen_and_primary_history(), clear_pane_preserves_wrapped_input_and_unfinished_vt_sequence(), compressed_scrollback_survives_shrink_and_grow_resize(), compression_permit_survives_an_aborted_async_waiter(), compression_task_rechecks_history_after_a_read(), cwd_lookup_failure_retains_last_valid_persistence_directory(), dirty_patch_snapshot_keeps_clean_metadata_and_terminal_fallback() (+46 more)
+
+### Community 6 - "pane.rs"
+Cohesion: 0.03
+Nodes (110): agent_hint_for_foreground_job_members(), agent_hint_for_non_leader_foreground_job_members(), apply_pane_launch_env(), apply_pane_ssh_auth_sock(), apply_pane_terminal_env(), auto_shell_builder_keeps_direct_shell_on_non_macos_target(), auto_shell_builder_uses_login_shell_on_macos_target(), bind_test_socket() (+102 more)
+
+### Community 7 - "TerminalRuntime"
+Cohesion: 0.03
+Nodes (47): coalesces_pty_sources_until_taken(), coalesces_terminal_title_sources_without_making_them_pty_damage(), hidden_pty_sources_coalesce_to_one_wake(), immediate_pty_source_wakes_pending_hidden_work(), keeps_generic_and_pty_requests_distinct(), RenderRequest, RenderSignal, RenderSignalState (+39 more)
+
+### Community 8 - "worktrees.rs"
+Cohesion: 0.05
+Nodes (108): json_compatibility(), Option, String, workspace(), WorktreeInfo, WorktreeSourceInfo, absolute_user_path(), api_worktree_create_from_cwd_emits_parent_with_membership() (+100 more)
+
+### Community 9 - "GhosttyPaneTerminal"
+Cohesion: 0.03
+Nodes (63): ColorScheme, AgentOscSnapshot, apply_default_terminal_colors(), CapturedTextSnapshot, finish_detection_text(), finish_recent_snapshot(), frozen_text_preserves_cell_style_hyperlinks_and_dirty_rows(), ghostty_cell_symbol() (+55 more)
+
+### Community 10 - "ServerEvent"
+Cohesion: 0.04
+Nodes (58): ClientStreamControl, ClientTransportRegistry, SendError, clamp_terminal_size(), client_read_loop_with_endpoint_controls(), client_shell_geometry_error(), client_writer_loop(), ClientCloseState (+50 more)
+
+### Community 11 - "render_ansi.rs"
+Cohesion: 0.05
+Nodes (116): a_visible_cursor_frame_still_hides_before_the_next_paint(), assert_only_post_sync_anchor_outside_block(), assert_single_sync_block_without_trailing_bytes(), batched_ascii_diff_replays_to_current_frame(), blit_frame_begins_sync_before_hiding_cursor_after_visible_cursor_repeat(), blit_frame_can_repeat_final_cursor_state_after_synchronized_output(), blit_frame_can_skip_final_cursor_state_after_synchronized_output(), blit_frame_diff_only_writes_changed_cells() (+108 more)
+
+### Community 12 - "zcode.rs"
 Cohesion: 0.05
 Nodes (127): ExternalAgentInfo, clip_chars(), first_line(), a_growing_file_is_followed_from_the_cursor_returned_at_eof(), a_hung_sqlite3_is_killed_at_the_deadline(), a_missing_sqlite3_makes_the_source_unavailable(), a_single_read_scans_a_bounded_number_of_bytes(), agent() (+119 more)
 
-### Community 12 - "kimi.rs"
-Cohesion: 0.06
-Nodes (125): AgentActivityContentFormat, str_field(), modified_ms(), Metadata, a_broken_state_json_still_yields_directory_agents_and_tasks(), a_context_without_session_or_cwd_is_unsupported(), a_foreground_subagent_is_running_only_while_its_wire_is_fresh(), a_question_interaction_is_the_pending_question() (+117 more)
+### Community 13 - "PaneId"
+Cohesion: 0.04
+Nodes (75): activity_agent_key(), activity_parent_indices(), activity_priority_order(), activity_writes_report_counts_only_when_the_tree_changes(), ActivityCounts, ActivitySummary, adversarial_identity_state_satisfies_app_invariants_after_mutation(), AgentActivityApplied (+67 more)
 
-### Community 13 - "machines.rs"
+### Community 14 - "machines.rs"
 Cohesion: 0.06
 Nodes (133): add_form_is_one_page_with_quick_input_groups_preview_and_footer(), add_form_overlay(), add_form_text_field_states_stay_distinct_across_themes(), attention_machine_click_opens_the_detail_overlay(), click_machine_button(), compact(), compact_frame(), composing_twice_leaves_the_machine_list_scroll_untouched() (+125 more)
 
-### Community 14 - "model.rs"
-Cohesion: 0.03
-Nodes (75): advanced_defaults_include_scrollback_limit_bytes(), AdvancedConfig, border_style_defaults_rounded_and_parses_variants(), BorderStyleConfig, cjk_ime_agents_default_empty_and_parse(), cjk_ime_cursor_shape_default_bar_and_parse(), ClipboardToastConfig, color_depth_defaults_auto_and_parses_variants() (+67 more)
-
-### Community 15 - "sessions.rs"
-Cohesion: 0.05
-Nodes (89): ClientEndpointStatus, agent_bucket(), external_group_key(), cached_endpoint_snapshots(), CachedEndpointSnapshot, Item, Iterator, paint_spans() (+81 more)
-
-### Community 16 - "TerminalRuntime"
-Cohesion: 0.03
-Nodes (28): paste_payload_for_runtime(), String, agent_osc_snapshot_captures_three_payloads_from_pty_bytes(), Item, Iterator, ActiveScreen, Bytes, Duration (+20 more)
-
-### Community 17 - "ClientShellState"
-Cohesion: 0.04
-Nodes (87): PaneCopySearchDirection, ProductAnnouncementState, ReleaseNotesState, Option, super::ClientShellState, AgentActivityHit, ClientChromeDrag, ClientConfirmCloseOverlay (+79 more)
-
-### Community 18 - "Agent"
+### Community 15 - "kimi.rs"
 Cohesion: 0.06
-Nodes (113): above_prompt_box(), after_current_prompt_block_marker(), after_last_horizontal_rule(), after_last_prompt_marker(), agent_state_label(), AgentManifest, AgentManifestSummary, AgentState (+105 more)
+Nodes (122): AgentActivityContentFormat, str_field(), fit_chars(), a_broken_state_json_still_yields_directory_agents_and_tasks(), a_context_without_session_or_cwd_is_unsupported(), a_foreground_subagent_is_running_only_while_its_wire_is_fresh(), a_question_interaction_is_the_pending_question(), activity_after_an_end_record_means_the_agent_kept_working() (+114 more)
 
-### Community 19 - "windows.rs"
+### Community 16 - "raw_input.rs"
+Cohesion: 0.03
+Nodes (102): alt_utf8_char_drains_as_one_event_before_following_input(), assert_fixture_extracts_whole_events(), assert_raw_key(), bare_csi_intro_reassembles_when_its_parameters_arrive_one_window_late(), bracketed_paste_scan_is_linear_across_lengths_and_chunk_sizes(), byte_framer_does_not_hold_non_osc_default_color_text(), chunked_alt_utf8_waits_for_continuation_byte_after_escape(), chunked_bracketed_paste_scan_preserves_utf8_and_cross_chunk_terminator() (+94 more)
+
+### Community 17 - "actions.rs"
+Cohesion: 0.04
+Nodes (102): a_delayed_failed_toast_survives_the_rest_of_its_turn(), active_tab_completion_marks_pane_seen(), active_workspace_active_tab_does_not_set_toast(), active_workspace_active_tab_keeps_herdr_toast_suppressed_when_outer_terminal_is_unfocused(), agent_detection_manifest_update_event_updates_status_and_toast(), app_with_workspaces(), apply_workspace_git_statuses_clears_missing_git_status(), apply_workspace_git_statuses_does_not_change_worktree_membership() (+94 more)
+
+### Community 18 - "actor.rs"
+Cohesion: 0.06
+Nodes (96): app_with_actor(), canonical_api_rejection_writes_nothing_and_allows_same_name_retry(), canonical_multiline_submission_preserves_each_line(), canonical_preflight_respects_quoted_and_translated_delimiters(), input_admission_does_not_wait_for_actor_and_raw_input_stays_intact(), input_guard_does_not_keep_the_master_open(), pane_request(), pty_pair() (+88 more)
+
+### Community 19 - "HeadlessServer"
+Cohesion: 0.04
+Nodes (44): NotificationShowReason, ClientClipboardImageTarget, AltScreenReadConflict, AltScreenReadSpec, HeadlessServer, LoopEvent, notification_show_result(), RenderImpact (+36 more)
+
+### Community 20 - "agent_panel_characterization.rs"
+Cohesion: 0.05
+Nodes (118): agent_group_key(), agent_row(), group_key_workspace(), launch_order_key(), ordered_agent_pane_ids(), ClientShellConfig, Option, String (+110 more)
+
+### Community 21 - "ClientShellState"
+Cohesion: 0.04
+Nodes (82): PaneCopySearchDirection, ProductAnnouncementState, Option, super::ClientShellState, AgentActivityHit, ClientChromeDrag, ClientConfirmCloseOverlay, ClientContextMenuItem (+74 more)
+
+### Community 22 - "windows.rs"
 Cohesion: 0.03
 Nodes (92): apply_pane_runtime_marker_platform(), argv_strings(), CachedAgentClassification, CachedGitBashProcess, CachedProcessRuntimeMarker, ChildWindow, classify_child_exit(), clipboard_global_bytes() (+84 more)
 
-### Community 20 - "TerminalState"
+### Community 23 - "windows_vti.rs"
 Cohesion: 0.04
-Nodes (31): AgentSessionRef, AgentSessionRefKind, AgentMetadata, AgentNameOwner, attention_kind(), border_label_prefers_manual_label_over_agent_label(), codex_managed_readiness_requires_current_prompt_without_idle(), FullLifecycleHookReportRoute (+23 more)
+Nodes (80): ctrl_bracket_idle_does_not_cancel_later_host_color_reply(), ctrl_bracket_precedes_next_key_while_host_color_reply_is_pending(), expired_host_color_reply_tail_does_not_swallow_semantic_key(), host_default_color_replies_reach_shell_without_pane_input(), key_char(), key_vk(), key_vk_up_with_scan_unicode(), key_vk_up_with_unicode() (+72 more)
 
-### Community 21 - "HeadlessServer"
-Cohesion: 0.04
-Nodes (43): NotificationShowReason, ClientClipboardImageTarget, AltScreenReadConflict, AltScreenReadSpec, HeadlessServer, LoopEvent, non_empty_body(), notification_show_result() (+35 more)
-
-### Community 22 - "windows_vti.rs"
-Cohesion: 0.04
-Nodes (82): ctrl_bracket_idle_does_not_cancel_later_host_color_reply(), ctrl_bracket_precedes_next_key_while_host_color_reply_is_pending(), expired_host_color_reply_tail_does_not_swallow_semantic_key(), host_default_color_replies_reach_shell_without_pane_input(), key_char(), key_vk(), key_vk_up_with_scan_unicode(), key_vk_up_with_unicode() (+74 more)
-
-### Community 23 - "mod.rs"
-Cohesion: 0.03
-Nodes (94): foreground_process(), MonitoredProcess, foreground_process(), remote_ssh_config_paths(), apply_pane_runtime_marker(), apply_pane_runtime_marker_platform(), available_pane_shell_from_job(), capabilities() (+86 more)
-
-### Community 24 - "state.rs"
-Cohesion: 0.07
-Nodes (104): a_confirmed_agent_exit_still_frees_the_name_for_reuse(), a_process_exit_observation_alone_does_not_free_the_name(), accepted_hook_replacement_clears_the_previous_agents_alias(), accepted_hook_report_stores_session_ref(), accepted_hook_report_without_session_ref_clears_previous_ref(), accepted_same_kind_hook_owner_replacement_clears_the_alias(), agent_alias_survives_detection_uncertainty_and_reported_release_but_not_replacement(), agent_process_exit_tracks_recent_respawn_window() (+96 more)
-
-### Community 25 - "LocalStream"
+### Community 24 - "LocalStream"
 Cohesion: 0.06
-Nodes (111): Option, ServerCapabilities, accept_error(), api_accept_thread_spawn_failure_removes_bound_socket(), api_method_name(), api_response_details(), api_response_outcome_keeps_the_error_code_but_never_the_message(), api_response_outcome_uses_top_level_error_shape() (+103 more)
+Nodes (112): Option, ServerCapabilities, accept_error(), api_accept_thread_spawn_failure_removes_bound_socket(), api_method_name(), api_response_details(), api_response_outcome_keeps_the_error_code_but_never_the_message(), api_response_outcome_uses_top_level_error_shape() (+104 more)
 
-### Community 26 - "opencode.rs"
-Cohesion: 0.07
-Nodes (98): a_running_question_tool_is_the_pending_question(), alias_set(), broken_cli_output_is_reported_without_a_tree(), build_tree(), clean_line(), clipped(), clipped_line(), context() (+90 more)
+### Community 25 - "Workspace"
+Cohesion: 0.06
+Nodes (48): PaneShellConfig, HostAppearance, Default, Self, TerminalTheme, adversarial_identity_state_satisfies_workspace_invariants_after_mutation(), decode_public_number(), discover_workspace_git_identity() (+40 more)
 
-### Community 27 - "worktree.rs"
+### Community 26 - "worktree.rs"
 Cohesion: 0.06
 Nodes (99): block(), branch_to_path_slug(), build_worktree_add_existing_branch_command(), build_worktree_add_new_branch_command(), build_worktree_remove_command(), canonical_or_original(), checkout_dirty_detection_reports_clean_and_dirty_worktrees(), checkout_git_file_is_missing() (+91 more)
 
-### Community 28 - "mod.rs"
-Cohesion: 0.04
-Nodes (104): exiting_test_command(), a_pane_exit_cascade_costs_one_synchronous_save_at_one_and_fifteen_panes(), a_pane_exit_cascade_crossing_the_debounce_window_never_shrinks_the_snapshot(), a_short_window_burst_of_clean_pane_exits_is_suspicious(), agent_target_rejects_a_pane_that_only_has_a_launch_command(), agent_target_treats_legacy_pane_syntax_as_a_name(), an_automatic_default_workspace_does_not_overwrite_the_pane_exit_checkpoint(), api_request_drains_all_pending_internal_events_before_reading_state() (+96 more)
+### Community 27 - "osc.rs"
+Cohesion: 0.05
+Nodes (88): agent_osc_bel_and_st_terminators_both_work(), agent_osc_cap_length_is_respected(), agent_osc_control_chars_stripped(), agent_osc_default_state_is_empty(), agent_osc_empty_osc0_clears_title(), agent_osc_interleaved_sequences(), agent_osc_osc0_title_with_bel(), agent_osc_osc2_title_with_st() (+80 more)
 
-### Community 29 - "plugin.rs"
+### Community 28 - "plugin.rs"
 Cohesion: 0.06
 Nodes (97): InstalledPluginInfo, build_platform_supported(), CappedOutput, command(), command_failure_message(), confirm(), create_plugin_temp_dir(), current_plugin_platform() (+89 more)
 
-### Community 30 - "agent_panel_characterization.rs"
-Cohesion: 0.06
-Nodes (108): agent_group_key(), active_workflow_tree_renders_group_types_progress_and_finished_summary(), activity_badge_shows_running_then_finished_only_for_running_owners(), activity_snapshot(), agent_context_menu_lists_the_same_actions_for_every_agent(), agent_leaf_rows_are_readable_and_blocked_is_not_color_only(), agent_panel_header_keeps_a_gap_between_title_and_sort_toggle(), agent_panel_hits() (+100 more)
-
-### Community 31 - "tests.rs"
+### Community 29 - "tests.rs"
 Cohesion: 0.06
 Nodes (97): override_home_dir(), override_search_path(), AsRef, OsStr, scoped_overrides_nest_and_restore_the_previous_value(), integration_env_lock(), make_executable(), codex_executable_name() (+89 more)
 
-### Community 32 - "actor.rs"
+### Community 30 - "shutdown.rs"
+Cohesion: 0.06
+Nodes (74): advance(), advance_targets(), anchor(), drain_pending(), EmptyScan, FakeProcess, FakeProcesses, FakeState (+66 more)
+
+### Community 31 - "opencode.rs"
 Cohesion: 0.07
-Nodes (78): abandoned_committed_submission_finishes_without_blocking_executor(), abandoned_submission_still_commits_enter_before_following_input(), cancelled_forwarder_preserves_committed_submission_and_releases_permits(), ClosingMaster, ClosingWriter, enqueue_submission_part(), enter_backpressure_does_not_block_input_acceptance_or_shutdown(), expired_queued_submission_is_not_written() (+70 more)
+Nodes (97): a_running_question_tool_is_the_pending_question(), alias_set(), broken_cli_output_is_reported_without_a_tree(), build_tree(), clean_line(), clipped(), clipped_line(), context() (+89 more)
+
+### Community 32 - "mod.rs"
+Cohesion: 0.03
+Nodes (70): clear_received_kitty_graphics(), contains_kitty_graphics_bytes(), find_subslice(), frame_graphics_land_between_the_frame_sync_markers(), kitty_graphics_command_image_id(), kitty_graphics_image_ids(), record_received_kitty_graphics(), Option (+62 more)
 
 ### Community 33 - "mod.rs"
 Cohesion: 0.03
-Nodes (76): cell_size_fallback(), current_terminal_geometry(), current_terminal_geometry_with(), host_cell_size_query_required(), initial_terminal_geometry(), ioctl_cell_size(), ioctl_terminal_geometry(), pack_cell_size() (+68 more)
+Nodes (85): foreground_process(), foreground_process(), remote_ssh_config_paths(), apply_pane_runtime_marker(), apply_pane_runtime_marker_platform(), available_pane_shell_from_job(), capabilities(), child_exit_classification_only_checkpoints_interruptions() (+77 more)
 
-### Community 34 - "osc.rs"
+### Community 34 - "TerminalState"
 Cohesion: 0.05
-Nodes (83): agent_osc_bel_and_st_terminators_both_work(), agent_osc_cap_length_is_respected(), agent_osc_control_chars_stripped(), agent_osc_default_state_is_empty(), agent_osc_empty_osc0_clears_title(), agent_osc_interleaved_sequences(), agent_osc_osc0_title_with_bel(), agent_osc_osc2_title_with_st() (+75 more)
+Nodes (27): ReportedAgentResume, AgentMetadata, AgentNameOwner, attention_kind(), border_label_prefers_manual_label_over_agent_label(), EffectiveStateChange, FullLifecycleHookReportRoute, FullLifecycleHookSuppressionReason (+19 more)
 
-### Community 35 - "attach.rs"
-Cohesion: 0.03
-Nodes (81): extract_remote_args(), RemoteKeybindings, RemoteLaunch, Option, Result, Self, String, Vec (+73 more)
-
-### Community 36 - "agent_transcript.rs"
+### Community 35 - "agent_transcript.rs"
 Cohesion: 0.06
-Nodes (86): Block, bracket(), breakable(), claude_continuation(), claude_parts(), claude_role(), ClaudePart, encrypted_spans() (+78 more)
+Nodes (87): Block, bracket(), breakable(), claude_continuation(), claude_parts(), claude_role(), ClaudePart, encrypted_spans() (+79 more)
 
-### Community 37 - "macos.rs"
-Cohesion: 0.05
-Nodes (96): gid_t, pid_t, all_pids(), available_pane_shell(), bsdinfo_start_token(), build_procargs2(), build_terminal_notifier_command(), bundle_identifier_available() (+88 more)
-
-### Community 38 - "ClientAgentActivityOverlay"
-Cohesion: 0.06
-Nodes (44): AgentActivityContentView, AgentActivityFocus, AgentActivityOwner, AgentActivityRead, AgentPageOwner, AgentPageSummary, AgentPageView, bucket_label() (+36 more)
-
-### Community 39 - "Workspace"
-Cohesion: 0.07
-Nodes (41): adversarial_identity_state_satisfies_workspace_invariants_after_mutation(), decode_public_number(), discover_workspace_git_identity(), display_name_reads_cached_identity_without_rechecking_filesystem(), encode_public_number(), failed_moved_pane_insert_returns_pane_for_recovery(), generate_workspace_id(), generated_workspace_ids_are_short_base32_handles() (+33 more)
-
-### Community 40 - "persist_files.rs"
+### Community 36 - "persist_files.rs"
 Cohesion: 0.05
 Nodes (90): ACL, FILE_BASIC_INFO, backup_paths(), check_recovery(), check_source(), PendingBackup, Phase, Drop (+82 more)
 
-### Community 41 - "ChromeContext"
-Cohesion: 0.08
-Nodes (97): render_broadcast_overlay(), Buffer, ChromeContext, MachineAuthButton, put_line(), render_auth_guide(), render_host_key_changed(), render_host_key_unknown() (+89 more)
-
-### Community 42 - "ClientEndpointId"
+### Community 37 - "mod.rs"
 Cohesion: 0.05
-Nodes (40): AgentViewSetParams, ClientEndpointId, ClientShellState, LifecycleBanner, notice_toast(), render_lifecycle_banner(), render_mobile_banner(), Buffer (+32 more)
+Nodes (94): exiting_test_command(), a_pane_exit_cascade_costs_one_synchronous_save_at_one_and_fifteen_panes(), a_pane_exit_cascade_crossing_the_debounce_window_never_shrinks_the_snapshot(), a_short_window_burst_of_clean_pane_exits_is_suspicious(), agent_target_rejects_a_pane_that_only_has_a_launch_command(), agent_target_treats_legacy_pane_syntax_as_a_name(), an_automatic_default_workspace_does_not_overwrite_the_pane_exit_checkpoint(), api_request_drains_all_pending_internal_events_before_reading_state() (+86 more)
 
-### Community 43 - "ClientMessage"
-Cohesion: 0.06
+### Community 38 - "state.rs"
+Cohesion: 0.07
+Nodes (86): a_confirmed_agent_exit_still_frees_the_name_for_reuse(), a_process_exit_observation_alone_does_not_free_the_name(), accepted_hook_replacement_clears_the_previous_agents_alias(), accepted_hook_report_stores_session_ref(), accepted_hook_report_without_session_ref_clears_previous_ref(), accepted_same_kind_hook_owner_replacement_clears_the_alias(), agent_alias_survives_detection_uncertainty_and_reported_release_but_not_replacement(), agent_process_exit_tracks_recent_respawn_window() (+78 more)
+
+### Community 39 - "layout.rs"
+Cohesion: 0.08
+Nodes (68): bsp_layout_profile(), close_focused_does_not_reuse_history_after_it_is_consumed(), close_focused_returns_to_the_pane_focus_came_from(), close_focused_returns_to_the_pane_that_opened_a_split(), close_focused_uses_tree_order_without_focus_history(), closing_a_background_pane_keeps_the_focused_pane_history(), closing_the_remembered_pane_drops_the_focus_history(), collect_ids() (+60 more)
+
+### Community 40 - "attach.rs"
+Cohesion: 0.04
+Nodes (69): extract_remote_args(), Option, Vec, accepted_bridge_stream_is_reset_to_blocking(), bridge_drop_while_waiting_for_client_is_bounded(), bridge_socket_is_user_only(), bridge_stream_delivers_large_frame_before_delayed_reply(), channel_share_key() (+61 more)
+
+### Community 41 - "run_client_loop"
+Cohesion: 0.05
+Nodes (84): decode_clipboard_payload(), forward_clipboard(), Option, Vec, apply_reload(), init_logging(), reload_local_client_config(), AtomicBool (+76 more)
+
+### Community 42 - "EndpointRegistry"
+Cohesion: 0.07
 Nodes (47): ActivationBeginError, ActivationCompletion, ActivationEvidence, ActivationPhase, ActivationRollback, EndpointActivationIntent, EndpointLease, PendingEndpointActivation (+39 more)
 
-### Community 44 - "mod.rs"
-Cohesion: 0.04
-Nodes (52): agent_label(), agent_name_from_basename(), agent_name_from_known_package_path(), agent_name_from_path_token(), AgentDetection, AgentState, argv0_agent_name(), cmdline_argv0_agent_name() (+44 more)
-
-### Community 45 - "panes.rs"
-Cohesion: 0.05
-Nodes (84): api_clear_pane_mutates_endpoint_owned_history(), api_copy_motion_uses_endpoint_terminal_word_semantics(), api_copy_search_bounds_returned_matches_but_keeps_exact_total(), api_copy_search_rejects_stale_content_revision(), api_copy_search_uses_endpoint_terminal_matches_and_wraps(), api_edit_scrollback_rejects_a_pane_that_is_no_longer_focused(), api_pane_close_closes_linked_worktree_workspace_only(), api_pane_current_dispatches_through_socket_request() (+76 more)
-
-### Community 46 - "render.rs"
+### Community 43 - "Agent"
 Cohesion: 0.07
-Nodes (85): active_page_tab_sits_on_a_lighter_surface_with_a_readable_label(), age_text(), block(), buffer_has(), buffer_text(), button(), bytes(), card_title_style() (+77 more)
+Nodes (76): remote_update_status(), AgentRemoteStatus, agents_needing_cache_reload(), atomic_write(), auto_update(), auto_update_does_not_reload_agents_whose_check_failed(), auto_update_reloads_manifest_cache_after_remote_commit(), auto_update_reloads_manifest_cache_when_remote_is_already_current() (+68 more)
 
-### Community 47 - "gallery.rs"
-Cohesion: 0.05
-Nodes (84): agent_page_nodes(), AgentPageScene, answer_agent_page(), classic_state(), escape(), frame_html(), gallery_dir(), gallery_snapshot() (+76 more)
-
-### Community 48 - "workbench.rs"
+### Community 44 - "workbench.rs"
 Cohesion: 0.06
 Nodes (90): frame_rows(), String, advance_snapshot(), arrange_arrows_resize_projected_focus_when_auto_inspector_hides(), arrange_enter_maximizes_projected_focus_when_auto_inspector_hides(), arrange_footer_done_hint_shows_hover_feedback(), arrange_mode_pane_handle_leaves_the_first_terminal_row_intact(), arrange_shift_arrows_move_projected_focus_when_auto_inspector_hides() (+82 more)
 
-### Community 49 - "layout.rs"
-Cohesion: 0.08
-Nodes (66): bsp_layout_profile(), close_focused_does_not_reuse_history_after_it_is_consumed(), close_focused_returns_to_the_pane_focus_came_from(), close_focused_returns_to_the_pane_that_opened_a_split(), close_focused_uses_tree_order_without_focus_history(), closing_a_background_pane_keeps_the_focused_pane_history(), closing_the_remembered_pane_drops_the_focus_history(), collect_ids() (+58 more)
-
-### Community 50 - "session.rs"
+### Community 45 - "session.rs"
 Cohesion: 0.07
 Nodes (82): active_api_socket_path(), active_name(), active_restart_after_update_guidance(), active_restart_after_update_guidance_respects_socket_override(), api_socket_path_for(), apply_explicit_name(), clear_explicit_session_for_test(), client_socket_path_for() (+74 more)
 
-### Community 51 - "ClientShellEndpoint"
-Cohesion: 0.08
-Nodes (49): ClientShellEndpoint, HashSet, list_row_style(), paint_list_selection(), ClientShellState, ClientSnippetForm, ClientSnippetRunDraft, ClientSnippetRunState (+41 more)
+### Community 46 - "ClientEndpointId"
+Cohesion: 0.05
+Nodes (25): AgentViewSetParams, ClientEndpointId, ClientShellState, acknowledge_active_surface_agents_on(), ClientShellState, endpoint_lifecycle_clears_only_accepted_generation_diagnostics(), estimated_retry_delay(), MachineHit (+17 more)
 
-### Community 52 - "surface.rs"
-Cohesion: 0.09
-Nodes (67): asset(), asset_key(), asset_key_from_descriptor(), boot_scope_cleanup_does_not_wait_for_a_coherent_surface(), client_encodes_final_main_origin_upload_once_and_replays_placement(), client_hides_and_restores_without_reuploading_pixels(), client_host_piece(), client_placement_origin() (+59 more)
-
-### Community 53 - "manifest_update.rs"
+### Community 47 - "encode_success"
 Cohesion: 0.07
-Nodes (73): AgentRemoteStatus, agents_needing_cache_reload(), atomic_write(), auto_update(), auto_update_does_not_reload_agents_whose_check_failed(), auto_update_reloads_manifest_cache_after_remote_commit(), auto_update_reloads_manifest_cache_when_remote_is_already_current(), auto_update_throttles_checks_within_six_hours() (+65 more)
+Nodes (46): PaneTarget, normalize_reported_agent_label(), api_edit_scrollback_rejects_a_pane_that_is_no_longer_focused(), api_pane_get_exposes_scroll_metrics(), api_pane_read_reports_when_older_rows_are_omitted(), api_pane_scroll_sets_and_clamps_endpoint_owned_history(), App, app_with_scrollback_runtime() (+38 more)
 
-### Community 54 - "codex_launch.rs"
+### Community 48 - "ClientShellEndpoint"
+Cohesion: 0.08
+Nodes (50): ClientEndpointAgentViewProjection, ClientShellEndpoint, local_endpoint(), HashSet, list_row_style(), paint_list_selection(), ClientShellState, ClientSnippetForm (+42 more)
+
+### Community 49 - "client_transport.rs"
+Cohesion: 0.08
+Nodes (71): assert_handshake_deadline_closes_client(), bracketed_paste_with_total_len(), client_accept_spawn_failure_releases_bound_listener(), client_close_discards_accepted_control_on_abort(), client_connection_spawn_failure_releases_permit_and_keeps_accepting(), client_control_backlog_is_bounded_and_wedges_the_client(), client_handshake_limiter_bounds_idle_connections_and_allows_second_client(), client_read_loop() (+63 more)
+
+### Community 50 - "mod.rs"
+Cohesion: 0.05
+Nodes (47): explain_for_label(), agent_label(), agent_name_from_basename(), agent_name_from_known_package_path(), agent_name_from_path_token(), argv0_agent_name(), cmdline_argv0_agent_name(), command_text_agent_name() (+39 more)
+
+### Community 51 - "codex_launch.rs"
 Cohesion: 0.07
 Nodes (76): a_losing_installer_discards_its_copy_and_adopts_the_winner(), Claim, command(), concurrent_installs_converge_on_one_valid_directory(), configure_child(), configure_probe(), create_process_shim(), damaged_identity_directories_are_never_reused() (+68 more)
 
-### Community 55 - "api.rs"
+### Community 52 - "api.rs"
 Cohesion: 0.05
 Nodes (50): activity_events(), activity_refresh_emits_one_changed_event_per_tree_change(), agent_explain_evaluates_with_server_manifest_cache(), agent_explain_rejects_hook_only_full_lifecycle_authority(), agent_manifest_info(), App, app_with_overlay(), app_with_panes() (+42 more)
 
-### Community 56 - "update.rs"
+### Community 53 - "update.rs"
 Cohesion: 0.04
 Nodes (56): classify_failed_live_handoff_state_at(), client_protocol_server_is_running_at_detects_live_socket(), client_protocol_server_is_running_at_ignores_missing_socket(), download_update_rejects_missing_checksum_before_network_access(), env_lock(), explicit_session_update_targets_only_that_session(), failed_handoff_classification_detects_missing_server(), failed_handoff_classification_detects_old_server() (+48 more)
 
-### Community 57 - "encode_success"
-Cohesion: 0.07
-Nodes (42): PaneTarget, normalize_reported_agent_label(), App, invalid_agent(), normalize_presentation_text(), normalize_state_labels(), pane_not_found(), PaneMoveRecoveryContext (+34 more)
-
-### Community 58 - "panes.rs"
-Cohesion: 0.06
-Nodes (81): add_pane_border_cells(), add_split_border_cells(), agent_pane_border_title_leads_with_a_static_status_glyph(), alternate_screen_reclaims_scrollbar_gutter_and_restores_it_on_exit(), always_pane_borders_frame_lone_pane(), apply_pane_chrome(), automatic_selection_background_uses_host_background(), automatic_selection_bg() (+73 more)
-
-### Community 59 - "workspace_navigation.rs"
+### Community 54 - "workspace_navigation.rs"
 Cohesion: 0.08
 Nodes (85): accepted_local_navigation_keeps_highlight_until_authoritative_focus(), active_preview_is_not_retargeted_by_deletion_or_reboot(), agent_sidebar_state(), aggregate_navigation_reveals_overflow_and_preserves_order(), assert_local_highlight(), assert_selected(), cancelled_close_does_not_restore_an_older_navigation_highlight(), clicked_pane() (+77 more)
 
-### Community 60 - "agent_activity_window.rs"
-Cohesion: 0.12
-Nodes (83): AgentActivityReadParams, a_stale_cursor_reread_resyncs_the_transcript_and_summary(), activity_tree_prioritizes_running_ancestry_and_recently_ended_nodes(), agent(), an_external_owner_leaving_the_active_list_refreshes_its_final_tree_once(), cancelled_reads_are_requeued_for_the_next_tick(), cell(), clicking_an_activity_row_in_the_panel_opens_the_window_on_that_node() (+75 more)
+### Community 55 - "manifest.rs"
+Cohesion: 0.08
+Nodes (79): AgentManifest, AgentManifestSummary, bounded_preview(), build_bundled_manifest_cache(), build_manifest_cache(), bundled_loaded_manifest(), bundled_manifest(), compile_gate() (+71 more)
 
-### Community 61 - "Palette"
+### Community 56 - "restore.rs"
+Cohesion: 0.07
+Nodes (81): ImportedHandoffRuntime, RawFd, AgentRestoreState, capture_and_restore_node_round_trip(), captured_sizes(), cold_restore_initial_spawn_app_uses_configured_headless_area(), cold_restore_initial_spawn_nested_background_zoom_chrome_and_tiny(), cold_restore_initial_spawn_uses_each_remapped_leaf() (+73 more)
+
+### Community 57 - "Option"
 Cohesion: 0.06
-Nodes (47): built_in_active_rows_remain_visible_with_matching_terminal_backgrounds(), built_in_selection_rows_stay_distinct_from_background_and_active_rows(), component_styles_apply_explicit_overrides(), component_styles_fall_back_to_semantic_palette_tokens(), component_styles_out_of_range_ratio_falls_back_to_default(), contrast_ratio(), custom_sidebar_colors_override_the_defaults(), hover_bg_component_token_falls_back_and_accepts_overrides() (+39 more)
+Nodes (56): absolute_process_cwd(), active_pending_release(), codex_prompt_ready(), AgentDetection, AgentDetectionPublishUpdate, apply_agent_detection_publish_update(), clear_osc_evidence_for_agent_transition(), codex_prompt_observation_revokes_on_working_or_skipped_screen() (+48 more)
 
-### Community 62 - "GhosttyPaneTerminal"
-Cohesion: 0.04
-Nodes (18): MouseProtocolEncoding, AgentOscSnapshot, ghostty_keyboard_protocol_state_replays_nested_stack(), ghostty_seed_handoff_input_state_restores_input_modes(), ghostty_seed_keyboard_protocol_flags_restores_shift_enter_encoding(), GhosttyPaneTerminal, InputState, PaneTerminal (+10 more)
+### Community 58 - "panes.rs"
+Cohesion: 0.05
+Nodes (78): api_clear_pane_mutates_endpoint_owned_history(), api_copy_motion_uses_endpoint_terminal_word_semantics(), api_copy_search_bounds_returned_matches_but_keeps_exact_total(), api_copy_search_rejects_stale_content_revision(), api_copy_search_uses_endpoint_terminal_matches_and_wraps(), api_pane_close_closes_linked_worktree_workspace_only(), api_pane_current_dispatches_through_socket_request(), api_pane_current_falls_back_to_focused_pane() (+70 more)
 
-### Community 63 - "ssh_config.rs"
+### Community 59 - "agent_activity_window.rs"
+Cohesion: 0.12
+Nodes (82): a_stale_cursor_reread_resyncs_the_transcript_and_summary(), activity_tree_prioritizes_running_ancestry_and_recently_ended_nodes(), agent(), an_external_owner_leaving_the_active_list_refreshes_its_final_tree_once(), cancelled_reads_are_requeued_for_the_next_tick(), cell(), clicking_an_activity_row_in_the_panel_opens_the_window_on_that_node(), collapsing_done_hides_whole_done_subtrees_but_never_failures() (+74 more)
+
+### Community 60 - "ssh_config.rs"
 Cohesion: 0.07
 Nodes (67): bare_hop_alias(), candidate_maps_config_to_profile_fields(), candidate_notes_unsupported_values_and_keeps_importing(), canonical_or_original(), ConfigDirective, ConfigItem, DirectiveKey, DiscoveredHost (+59 more)
 
-### Community 64 - "run_client_loop"
-Cohesion: 0.06
-Nodes (77): decode_clipboard_payload(), forward_clipboard(), Option, Vec, apply_reload(), init_logging(), reload_local_client_config(), AtomicBool (+69 more)
-
-### Community 65 - "snapshot.rs"
+### Community 61 - "snapshot.rs"
 Cohesion: 0.07
-Nodes (78): load_history(), capture(), capture_contract_includes_reported_agent_resume(), capture_contract_omits_legacy_server_chrome_state(), capture_contract_preserves_restored_agent_session(), capture_contract_tracks_focus_navigation(), capture_contract_tracks_history_for_each_pane(), capture_contract_tracks_hook_authority_agent_session() (+70 more)
+Nodes (78): load_history(), collect_snapshot_ids_inner(), collect_snapshot_pane_ids(), capture(), capture_contract_includes_reported_agent_resume(), capture_contract_omits_legacy_server_chrome_state(), capture_contract_preserves_restored_agent_session(), capture_contract_tracks_focus_navigation() (+70 more)
 
-### Community 66 - "mod.rs"
+### Community 62 - "panes.rs"
+Cohesion: 0.06
+Nodes (79): add_pane_border_cells(), add_split_border_cells(), agent_pane_border_title_leads_with_a_static_status_glyph(), alternate_screen_reclaims_scrollbar_gutter_and_restores_it_on_exit(), always_pane_borders_frame_lone_pane(), apply_pane_chrome(), automatic_selection_background_uses_host_background(), automatic_selection_bg() (+71 more)
+
+### Community 63 - "mod.rs"
 Cohesion: 0.09
 Nodes (77): load_plugin_manifest(), canonical_path_string(), closed_event_context_uses_closed_target_ids(), current_plugin_context_leaves_client_owned_selection_empty(), event_hooks_skip_registry_refresh_without_cached_subscriber(), event_hooks_use_event_target_context(), invoke_on_unsupported_platform_returns_error(), invoke_with_action_platform_override_uses_action_platforms() (+69 more)
+
+### Community 64 - "catalog.rs"
+Cohesion: 0.08
+Nodes (52): absent_selected_profile_falls_back_without_discarding_catalog(), catalog_accepts_256_profiles_and_rejects_the_257th(), catalog_path(), catalog_rejects_passwords_embedded_in_ssh_targets(), catalog_rejects_unknown_fields_instead_of_retaining_possible_secrets(), catalog_roundtrip_persists_profiles_without_secret_fields(), catalog_roundtrip_preserves_connection_and_presentation_options(), catalogs_without_port_forwards_load_with_an_empty_rule_set() (+44 more)
+
+### Community 65 - "ClientMachineForm"
+Cohesion: 0.07
+Nodes (25): ClientMachineBootstrap, ClientMachineForm, ClientShellState, invalid_value(), MachineField, parse_port_field(), parse_proxy_jump(), parse_u16_field() (+17 more)
+
+### Community 66 - "model.rs"
+Cohesion: 0.04
+Nodes (48): Self, ClientShellConfig, PathBuf, advanced_defaults_include_scrollback_limit_bytes(), AdvancedConfig, border_style_defaults_rounded_and_parses_variants(), BorderStyleConfig, cjk_ime_agents_default_empty_and_parse() (+40 more)
 
 ### Community 67 - "terminal_setup.rs"
 Cohesion: 0.06
@@ -911,1983 +919,2015 @@ Nodes (68): consume_host_keyboard_probe_responses(), disable_windows_native_mous
 
 ### Community 68 - "Option"
 Cohesion: 0.07
-Nodes (40): PaneLinkRegion, Position, CachedForegroundJob, ghostty_mouse_button_encoding_uses_live_terminal_state(), ghostty_mouse_drag_encoding_uses_motion_reporting_state(), ghostty_mouse_drag_without_motion_reporting_is_not_forwarded(), ghostty_mouse_moved_encoding_uses_any_motion_state(), live_terminal_word_end_expands_through_a_long_soft_wrap() (+32 more)
+Nodes (36): PaneLinkRegion, Position, append_upper_hex(), CachedForegroundJob, expected_xtgettcap_response(), LogicalTextLine, RetainedTextBuffer, ActiveScreen (+28 more)
 
 ### Community 69 - "process_redaction.rs"
 Cohesion: 0.08
 Nodes (78): assert_redacted(), assignment_name(), assignments_inside_command_lines_keep_the_rest_of_the_command(), bearer_and_authorization_options_are_redacted(), bearer_tokens_are_redacted_wherever_they_appear(), body_option(), BodyKind, closing_punctuation_after_a_secret_is_kept() (+70 more)
 
-### Community 70 - "system.rs"
-Cohesion: 0.09
-Nodes (71): count_label(), bucket_label(), percent(), status(), card_grid_scroll(), card_stale(), card_text(), CardScrollLimits (+63 more)
-
-### Community 71 - "State"
-Cohesion: 0.07
+### Community 70 - "State"
+Cohesion: 0.06
 Nodes (45): Action, alert_body_names_the_metric_in_the_ui_language(), AlertState, audit_p1_observability_new_source_clears_histories_and_rearms_alerts(), audit_p1_observability_same_source_retains_histories_and_alert_latch(), bucket_history(), ChartGlyphsPreference, ClientShellState (+37 more)
 
-### Community 72 - "HostAppearance"
-Cohesion: 0.07
-Nodes (40): DetachedPane, coalesces_pty_sources_until_taken(), coalesces_terminal_title_sources_without_making_them_pty_damage(), hidden_pty_sources_coalesce_to_one_wake(), immediate_pty_source_wakes_pending_hidden_work(), keeps_generic_and_pty_requests_distinct(), RenderRequest, RenderSignal (+32 more)
+### Community 71 - "ClientConnection"
+Cohesion: 0.06
+Nodes (39): RenderEncoding, RenderTarget, EndpointResponseIdentity, EndpointResponseKind, AtomicBool, AtomicUsize, OnceLock, client_shell_key_press_id() (+31 more)
 
-### Community 73 - "spec.rs"
+### Community 72 - "spec.rs"
 Cohesion: 0.07
 Nodes (77): agent_command(), agent_prompt_until_requires_wait(), agent_rename_requires_exactly_one_name_or_clear(), agent_resources_appear_on_command_groups_but_not_leaf_commands(), api_activity_read_help_is_translated_and_mirrors_the_method(), api_command(), argument(), assert_command_descriptions() (+69 more)
 
-### Community 74 - "catalog.rs"
-Cohesion: 0.09
-Nodes (50): absent_selected_profile_falls_back_without_discarding_catalog(), catalog_accepts_256_profiles_and_rejects_the_257th(), catalog_path(), catalog_rejects_passwords_embedded_in_ssh_targets(), catalog_rejects_unknown_fields_instead_of_retaining_possible_secrets(), catalog_roundtrip_persists_profiles_without_secret_fields(), catalog_roundtrip_preserves_connection_and_presentation_options(), catalogs_without_port_forwards_load_with_an_empty_rule_set() (+42 more)
-
-### Community 75 - "input_conformance.rs"
+### Community 73 - "input_conformance.rs"
 Cohesion: 0.07
 Nodes (63): Chord, deliver_record(), Failure, framed_events(), framed_events_with(), func(), goto_search_opens_on_shifted_slash_from_a_report_all_pane(), goto_search_opens_only_for_a_typed_slash() (+55 more)
 
-### Community 76 - "client_transport.rs"
-Cohesion: 0.10
-Nodes (62): assert_handshake_deadline_closes_client(), bracketed_paste_with_total_len(), client_accept_spawn_failure_releases_bound_listener(), client_close_discards_accepted_control_on_abort(), client_connection_spawn_failure_releases_permit_and_keeps_accepting(), client_control_backlog_is_bounded_and_wedges_the_client(), client_handshake_limiter_bounds_idle_connections_and_allows_second_client(), client_read_loop() (+54 more)
-
-### Community 77 - "ProfileId"
+### Community 74 - "agent_tree.rs"
 Cohesion: 0.07
-Nodes (54): ForwardListRow, forward_rule(), PortForwardKind, PortForwardRule, ProfileId, Display, ForwardStarter, current_generation_rebuilds_the_latest_catalog_profile() (+46 more)
+Nodes (52): AgentActivityKind, SummaryNodeView, AgentActivityOwner, activity_group_mark(), activity_list_key(), activity_node_key(), ActivityGroupMark, AgentKeyboardTarget (+44 more)
 
-### Community 78 - "agent_tree.rs"
-Cohesion: 0.07
-Nodes (51): AgentActivityKind, SummaryNodeView, activity_group_mark(), activity_list_key(), activity_node_key(), ActivityGroupMark, AgentKeyboardTarget, AgentTreeKind (+43 more)
+### Community 75 - "TerminalKey"
+Cohesion: 0.05
+Nodes (37): ClientShellState, char_cell_width(), copy_mode_command_char(), first_non_blank_col(), last_character_col(), Option, shifted_ascii_char(), host_modify_other_keys_mode() (+29 more)
 
-### Community 79 - "PaneId"
-Cohesion: 0.07
-Nodes (31): active_tab_suppresses_notifications(), AppState, is_background_completion_transition(), is_completion_transition(), notification_context(), notification_sound(), PaneStateUpdate, PaneZoomCommand (+23 more)
-
-### Community 80 - "writer.rs"
-Cohesion: 0.11
-Nodes (67): backups(), capture_logs(), committed_directory_sync_failure_keeps_layout_and_skips_history(), copy_recovery(), dangling_symlink_allows_first_save_and_late_target_is_preserved(), failed_recovery_blocks_mutations_then_retries_preserving_exact_bytes_once(), finish_recovery(), first_clear_preserves_an_unloaded_file_even_after_an_earlier_missing_clear() (+59 more)
-
-### Community 81 - "ClientPaneInputEvent"
-Cohesion: 0.06
-Nodes (55): attach_escape_does_not_interpret_bracketed_paste_contents(), attach_escape_forwards_kitty_encoded_literal_prefix(), attach_escape_forwards_modified_page_key(), attach_escape_forwards_prefix_before_non_escape_key(), attach_escape_sends_literal_prefix_on_double_prefix(), attach_escape_turns_plain_page_keys_into_scroll_actions(), attach_escape_turns_wheel_into_scroll_action(), attach_scroll_action() (+47 more)
-
-### Community 82 - "config.rs"
-Cohesion: 0.06
-Nodes (56): Config, env_key(), env_var(), EnvChange, global_test_env_lock_keeps_std_mutex_call_sites_working(), Holder, is_config_load_failure(), is_keybinding_config_diagnostic() (+48 more)
-
-### Community 83 - "claude_settings.rs"
+### Community 76 - "subscriptions.rs"
 Cohesion: 0.09
-Nodes (72): AstArray, AstObject, CstInputValue, CstNode, append_array_element(), append_hook_entry_compact(), append_hook_property_compact(), append_hooks_property_compact() (+64 more)
+Nodes (58): ReadSource, EventGap, SubscriptionEventEnvelope, PaneScrollInfo, ErrorBody, ErrorResponse, ActiveAgentStatusChangedSubscription, ActiveEventSubscription (+50 more)
 
-### Community 84 - "Option"
-Cohesion: 0.06
-Nodes (56): StrictHostKeyChecking, AskpassEnvironment, apply_managed_channel_options(), apply_managed_ssh_options(), apply_noninteractive_ssh_options(), apply_pinned_host_options(), apply_probe_ssh_options(), askpass_retry_drops_batch_mode_and_attaches_the_channel() (+48 more)
-
-### Community 85 - "scenes_overlay.rs"
-Cohesion: 0.08
-Nodes (41): ClientSceneForm, ClientSceneMachine, ClientSceneMachineFocus, ClientSceneSidebar, ClientSceneSnapshot, ClientSceneSnapshotsFile, ClientScenesOverlay, ClientScenesView (+33 more)
-
-### Community 86 - "rollout_io.rs"
-Cohesion: 0.08
-Nodes (58): Cursor, Lifecycle, cache_entry_budget_and_live_reader_memory_remain_accounted(), compressed(), compressed_completed_thread_becomes_running_on_followup(), concatenated_frames_skips_checksums_and_failure_cache(), content(), decode() (+50 more)
-
-### Community 87 - "i18n.rs"
+### Community 77 - "i18n.rs"
 Cohesion: 0.05
 Nodes (65): AgentActivityTexts, AgentPanelTexts, apply_config_language(), assert_translated(), BroadcastTexts, canonical_theme_fallback(), ChromeTexts, CliErrorTexts (+57 more)
 
-### Community 88 - "shutdown.rs"
-Cohesion: 0.08
-Nodes (53): anchor(), drain_pending(), FakeProcess, FakeState, lock_state(), platform_ladder_terminates_a_real_windows_process_tree(), pty_close_idle_and_cancelled_input_release_without_fixed_grace(), pty_close_preserves_save_window_for_runtime_shutdown_and_drop() (+45 more)
-
-### Community 89 - "history_read.rs"
+### Community 78 - "render_machine_detail"
 Cohesion: 0.07
-Nodes (60): PollOutcome, aligned_intermediate_redraw_is_coalesced_before_scrolling_again(), draw(), fallback_after_leaving_alt_screen_restores_viewport_downward(), fallback_after_restore_timeout_restores_viewport_downward(), hard_deadline_wins_over_continuous_output_coalescing(), incomplete_redraw_waits_for_an_aligned_screen_without_resetting_timeout(), pending_read() (+52 more)
+Nodes (65): endpoint_status_label(), endpoint_status_presentation(), Color, ClientMachinesOverlay, ClientMachinesView, dashboard_layout(), render_dashboard(), Buffer (+57 more)
 
-### Community 90 - "process.rs"
+### Community 79 - "writer.rs"
+Cohesion: 0.11
+Nodes (67): backups(), capture_logs(), committed_directory_sync_failure_keeps_layout_and_skips_history(), copy_recovery(), dangling_symlink_allows_first_save_and_late_target_is_preserved(), failed_recovery_blocks_mutations_then_retries_preserving_exact_bytes_once(), finish_recovery(), first_clear_preserves_an_unloaded_file_even_after_an_earlier_missing_clear() (+59 more)
+
+### Community 80 - "AgentActivityNode"
+Cohesion: 0.07
+Nodes (41): AgentActivityNode, AgentInsight, ActivitySource, AuditFinishedTree, blocking_source_for(), BlockingTree, ContentChunk, discover_nodes() (+33 more)
+
+### Community 81 - "claude_settings.rs"
+Cohesion: 0.09
+Nodes (72): AstArray, AstObject, CstInputValue, CstNode, append_array_element(), append_hook_entry_compact(), append_hook_property_compact(), append_hooks_property_compact() (+64 more)
+
+### Community 82 - "rollout_io.rs"
+Cohesion: 0.08
+Nodes (58): Cursor, Lifecycle, cache_entry_budget_and_live_reader_memory_remain_accounted(), compressed(), compressed_completed_thread_becomes_running_on_followup(), concatenated_frames_skips_checksums_and_failure_cache(), content(), decode() (+50 more)
+
+### Community 83 - "AppState"
+Cohesion: 0.07
+Nodes (30): active_tab_suppresses_notifications(), AppState, is_background_completion_transition(), is_completion_transition(), notification_context(), notification_sound(), PaneStateUpdate, PaneZoomCommand (+22 more)
+
+### Community 84 - "process.rs"
 Cohesion: 0.08
 Nodes (53): ChildPipe, bounded_output_truncates_without_blocking_the_child(), CancellablePipe, cancellation_and_timeout_reap_child_with_blocked_pipes(), cancellation_stops_only_its_child_and_clears_thread_context(), cancelled(), cancelled_task_note_follows_the_interface_language(), check_cancelled() (+45 more)
 
-### Community 91 - "keybinds.rs"
-Cohesion: 0.04
-Nodes (31): back_and_forth_keybinds_are_unset_by_default(), CommandKeybindType, copy_mode_uses_tmux_prefix_bracket_by_default(), default_keymap_is_prefix_first_and_tab_centered(), goto_defaults_to_prefix_g(), key_codes_match(), key_event_matches_combo(), key_parts_match_combo() (+23 more)
+### Community 85 - "history_read.rs"
+Cohesion: 0.07
+Nodes (60): PollOutcome, aligned_intermediate_redraw_is_coalesced_before_scrolling_again(), draw(), fallback_after_leaving_alt_screen_restores_viewport_downward(), fallback_after_restore_timeout_restores_viewport_downward(), hard_deadline_wins_over_continuous_output_coalescing(), incomplete_redraw_waits_for_an_aligned_screen_without_resetting_timeout(), pending_read() (+52 more)
 
-### Community 92 - "subscriptions.rs"
-Cohesion: 0.10
-Nodes (55): EventGap, SubscriptionEventEnvelope, PaneScrollInfo, ErrorBody, ActiveAgentStatusChangedSubscription, ActiveEventSubscription, ActiveOutputMatchedSubscription, ActiveScrollChangedSubscription (+47 more)
+### Community 86 - "overlays.rs"
+Cohesion: 0.08
+Nodes (64): balanced_room(), buffer_text(), char_width(), help_caps_width(), help_footer_hints(), help_geometry(), help_lines(), help_lines_align_the_action_column_for_cjk_key_labels() (+56 more)
 
-### Community 93 - "String"
-Cohesion: 0.09
-Nodes (44): ActionKeybinds, append_custom_command_bindings(), append_legacy_indexed_bindings(), binding_triggers(), BindingConfig, BindingRegistry, BindingSource, BindingTrigger (+36 more)
+### Community 87 - "endpoints.rs"
+Cohesion: 0.06
+Nodes (72): acknowledging_a_surface_refreshes_cached_federated_agent_rows(), active_workspace_is_the_only_highlight_when_machine_is_expanded(), agent(), agent_navigation_keeps_scroll_when_target_is_visible(), agent_navigation_reveal_is_cancelled_by_another_selection(), agent_navigation_reveals_offscreen_targets(), agent_navigation_reveals_target_using_destination_sort(), aggregate_agent_scroll_still_clamps_when_rows_shrink_on_activation() (+64 more)
 
-### Community 94 - "parse.rs"
+### Community 88 - "parse.rs"
 Cohesion: 0.07
 Nodes (70): assert_fixture_corpus_parses(), assert_terminal_key_eq(), decode_hex(), ghostty_maps_ctrl_to_physical_key(), is_non_latin_script(), key_modifiers_from_u8(), keyboard_protocol_corpus_fixture_parses(), kitty_codepoint_to_keycode() (+62 more)
 
-### Community 95 - "endpoints.rs"
-Cohesion: 0.06
-Nodes (71): acknowledging_a_surface_refreshes_cached_federated_agent_rows(), active_workspace_is_the_only_highlight_when_machine_is_expanded(), agent_navigation_keeps_scroll_when_target_is_visible(), agent_navigation_reveal_is_cancelled_by_another_selection(), agent_navigation_reveals_offscreen_targets(), agent_navigation_reveals_target_using_destination_sort(), aggregate_agent_scroll_still_clamps_when_rows_shrink_on_activation(), aggregate_agents_use_configured_rows_machine_token_and_status_colors() (+63 more)
+### Community 89 - "codex.rs"
+Cohesion: 0.09
+Nodes (60): clean_output(), collapse(), a_pending_request_user_input_is_the_pending_question(), agent_list(), agent_message_summary(), apply_lifecycle(), arguments_summary(), call_line() (+52 more)
 
-### Community 96 - "Result"
-Cohesion: 0.10
-Nodes (51): command_failed(), confirm_remote_install(), confirm_remote_install_with_running_server(), detect_remote_platform(), detect_windows_remote_platform(), discover_remote_api_metadata(), endpoint_probe_preserves_setup_ssh_options(), ensure_remote_server_ready() (+43 more)
-
-### Community 97 - "registry.rs"
+### Community 90 - "registry.rs"
 Cohesion: 0.07
 Nodes (63): IntegrationInfo, IntegrationInstallParams, IntegrationInstallResult, IntegrationState, IntegrationTarget, IntegrationUninstallParams, IntegrationUninstallResult, Option (+55 more)
 
-### Community 98 - "session_log.rs"
+### Community 91 - "Option"
+Cohesion: 0.06
+Nodes (51): StrictHostKeyChecking, apply_managed_channel_options(), apply_managed_ssh_options(), apply_noninteractive_ssh_options(), apply_pinned_host_options(), apply_probe_ssh_options(), askpass_retry_drops_batch_mode_and_attaches_the_channel(), bridge_cancellation_releases_stalled_preamble_upload_and_download() (+43 more)
+
+### Community 92 - "session_log.rs"
 Cohesion: 0.08
 Nodes (52): date(), date_fallback(), dump_session_log_once(), dump_snapshots(), fake_starter(), flush_all(), flush_file(), LogCommand (+44 more)
 
-### Community 99 - "GhosttyPaneCore"
-Cohesion: 0.07
-Nodes (49): ColorScheme, apply_default_terminal_colors(), finish_detection_text(), finish_recent_snapshot(), ghostty_cell_symbol(), ghostty_detection_text(), ghostty_detection_text_for_cache(), ghostty_extract_selection() (+41 more)
-
-### Community 100 - "AgentStatus"
+### Community 93 - "fallback.rs"
 Cohesion: 0.06
-Nodes (60): AgentStatus, age_uses_turn_start_while_working_and_state_change_otherwise(), agent(), full_insight(), summary_follows_the_bucket_priority(), contains(), list_row_bg(), Buffer (+52 more)
+Nodes (58): available_pane_shell(), clipboard_text_matches(), configure_status_command(), create_remote_private_dir(), create_remote_ssh_config_dir(), create_remote_ssh_config_file(), default_known_hosts_path(), detach_server_daemon_command() (+50 more)
 
-### Community 101 - "App"
+### Community 94 - "BroadcastSet"
+Cohesion: 0.08
+Nodes (55): add(), clear(), load_set(), machine_label(), remove(), Option, Result, String (+47 more)
+
+### Community 95 - "forward.rs"
+Cohesion: 0.08
+Nodes (51): ForwardListRow, forward_rule(), PortForwardKind, PortForwardRule, ForwardStarter, current_generation_rebuilds_the_latest_catalog_profile(), dropping_forward_with_inherited_stderr_is_bounded(), ensure_listen_address_available() (+43 more)
+
+### Community 96 - "scenes_overlay.rs"
+Cohesion: 0.07
+Nodes (36): ClientSceneMachine, ClientSceneMachineFocus, ClientSceneSidebar, ClientSceneSnapshot, ClientSceneSnapshotsFile, ClientScenesView, ClientShellState, endpoint_online() (+28 more)
+
+### Community 97 - "App"
 Cohesion: 0.05
-Nodes (54): agent_panel_sort_from_config(), App, AppPolicy, auto_updates_enabled(), background_update_check_enabled(), background_version_check_enabled(), client_component_styles_from_config(), client_palette_for_appearance() (+46 more)
+Nodes (57): agent_panel_sort_from_config(), App, AppPolicy, auto_updates_enabled(), background_update_check_enabled(), background_version_check_enabled(), client_component_styles_from_config(), client_palette_for_appearance() (+49 more)
 
-### Community 102 - "ClientRenderState"
+### Community 98 - "ClientRenderState"
 Cohesion: 0.08
 Nodes (35): Backend, ClearType, RenderedTabSurface, apply_pane_surface_patch(), ClientRenderState, CursorTrackingBackend, deferred_file_upload_keeps_identical_metadata_and_retries_without_committing(), forced_full_surface_keeps_the_connection_revision_monotonic() (+27 more)
 
-### Community 103 - "TerminalKey"
+### Community 99 - "ChromeHover"
 Cohesion: 0.06
-Nodes (30): ClientShellState, host_modify_other_keys_mode(), host_modify_other_keys_mode_for_env(), ime_compatible_keyboard_enhancement_flags(), keyboard_enhancement_flags_stay_ime_compatible(), KeyboardProtocol, KeyIdentity, KeySource (+22 more)
+Nodes (35): ChromeBounds, ChromeContext<'a>, ChromeHover, ClientFeedbackToggles, ClientNotificationHistoryOverlay, ClientNotificationRecord, ClientNotificationTarget, ClientShellState (+27 more)
 
-### Community 104 - "observability_system.rs"
-Cohesion: 0.09
-Nodes (68): a_card_cut_by_the_page_bottom_shows_its_top_rows_instead_of_an_empty_frame(), alert_threshold_stepper_follows_its_ladder(), arrow_keys_on_a_selected_card_with_nothing_to_scroll_scroll_the_page(), audit_p1_monitor_alert_demand_tracks_rules_instead_of_hidden_cards(), audit_p1_monitor_classic_pause_keeps_sampling_and_inflight_dedup(), audit_p1_monitor_hidden_alerts_ignore_unknown_rules(), audit_p1_monitor_samples_only_visible_system_page_or_enabled_alerts(), blit_clamps_an_out_of_range_cursor_instead_of_dropping_it() (+60 more)
-
-### Community 105 - "Result"
+### Community 100 - "Result"
 Cohesion: 0.06
 Nodes (63): OBJECT_SECURITY_INFORMATION, check_config_write_target(), ChildPipe, config_file_link_count(), config_security_descriptor(), config_security_sddl(), configure_background_command_platform(), connect_local_stream_with_timeout() (+55 more)
 
-### Community 106 - "ClientShellInput"
-Cohesion: 0.07
-Nodes (17): PaneCopyMotion, ClientShellState, MouseEvent, ClientShellState, Option, String, ClientShellState, Option (+9 more)
+### Community 101 - "temp_test_dir"
+Cohesion: 0.09
+Nodes (68): absent_loose_ref_still_reads_packed_refs(), automatic_workspace_label(), bare_source_and_linked_checkout_share_repo_name_but_not_auto_label(), canonical_parent(), canonicalize_best_effort_path(), ceiling_directories_parse_like_git(), dangling_symlink_loose_ref_is_unavailable_not_absent(), dangling_symlink_through_file_is_unavailable_not_absent() (+60 more)
 
-### Community 107 - "cli.rs"
+### Community 102 - "observability_system.rs"
+Cohesion: 0.10
+Nodes (67): a_card_cut_by_the_page_bottom_shows_its_top_rows_instead_of_an_empty_frame(), alert_threshold_stepper_follows_its_ladder(), arrow_keys_on_a_selected_card_with_nothing_to_scroll_scroll_the_page(), audit_p1_monitor_alert_demand_tracks_rules_instead_of_hidden_cards(), audit_p1_monitor_classic_pause_keeps_sampling_and_inflight_dedup(), audit_p1_monitor_hidden_alerts_ignore_unknown_rules(), audit_p1_monitor_samples_only_visible_system_page_or_enabled_alerts(), blit_clamps_an_out_of_range_cursor_instead_of_dropping_it() (+59 more)
+
+### Community 103 - "cli.rs"
 Cohesion: 0.08
 Nodes (57): api_group(), channel_set(), channel_set_for_package(), channel_set_install_action(), channel_set_rejection(), ChannelSetInstallAction, CommandOutcome, config_check() (+49 more)
 
-### Community 108 - "raw_input.rs"
+### Community 104 - "linux.rs"
 Cohesion: 0.05
-Nodes (41): alt_utf8_char_drains_as_one_event_before_following_input(), bracketed_paste_scan_is_linear_across_lengths_and_chunk_sizes(), chunked_bracketed_paste_scan_preserves_utf8_and_cross_chunk_terminator(), extract_one_event(), ghostty_color_scheme_report_parser_is_exact(), holds_lone_escape_and_stitches_split_host_cell_size_reply(), host_reply_tail_discard_is_bounded_across_pushes(), invalid_bracketed_paste_does_not_poison_next_paste_scan() (+33 more)
+Nodes (45): bytes_match_image_signature(), clipboard_commands(), clipboard_commands_include_x11_fallbacks(), clipboard_commands_prefer_wayland_when_available(), desktop_notification_sets_app_name_and_separates_option_like_titles(), detach_clipboard_owner(), detect_running_inside_wsl(), env_lock() (+37 more)
 
-### Community 109 - "TerminalTheme"
-Cohesion: 0.06
-Nodes (53): CellBasicData, CellColor, CellStyle, CellWide, pane_default_theme(), Terminal, write_host_default_color(), write_host_terminal_theme() (+45 more)
-
-### Community 110 - "EndpointRegistry"
-Cohesion: 0.08
-Nodes (32): a_ready_endpoint_can_stay_connected_after_the_initial_deadline(), dropping_registry_detaches_every_connected_endpoint(), endpoint_failures_do_not_remove_other_connections(), EndpointConnection, EndpointNegotiation, EndpointRegistry, EndpointSendOutcome, EndpointTransport (+24 more)
-
-### Community 111 - "socket_paths.rs"
-Cohesion: 0.05
-Nodes (52): Formatter, Result, accept_pending_client_connections(), reject_pending_client_connections(), Arc, AtomicBool, JoinHandle, LocalListener (+44 more)
-
-### Community 112 - "Vec"
-Cohesion: 0.11
-Nodes (28): decode_win32_paste_payload(), decode_windows_terminal_paste_enters(), DefaultMouseCandidate, EscapeOrigin, is_oem_virtual_key(), matching_key_index(), parse_win32_input_mode_key_record(), parse_win32_paste_record() (+20 more)
-
-### Community 113 - "CellData"
-Cohesion: 0.08
-Nodes (60): apply_composed_surface_patch(), apply_patch_to_surface(), apply_row(), ClientComposedSurfacePatch, ClientPaneSurfacePatchOutcome, ClientShellState, fast_path_blocker(), pane_geometry_matches() (+52 more)
-
-### Community 114 - "Option"
+### Community 105 - "Option"
 Cohesion: 0.08
 Nodes (56): available_pane_shell(), available_pane_shell_from_snapshot(), canonical_decimal(), cmd_agent_command_encodes_edge_arguments_without_cmd_expansion(), cmd_encoded_powershell_command(), CurDir, environment_variable_from_utf16(), host_terminal_toasts_clipboard_writes() (+48 more)
 
-### Community 115 - "ProcessSessionMember"
-Cohesion: 0.08
-Nodes (37): advance(), advance_targets(), EmptyScan, FakeProcesses, PaneShutdownRequest, PlatformProcessControl, poll_interval(), prepare_targets() (+29 more)
-
-### Community 116 - "put_str"
+### Community 106 - "Palette"
 Cohesion: 0.07
-Nodes (60): active_segment_style(), draw_frame(), draw_frame_draws_only_the_outline(), ellipsis_width(), ellipsis_width_measures_exactly_what_put_str_ellipsis_writes(), emphasis_style(), centered(), cjk_text_is_centered_by_display_width_and_clipped() (+52 more)
+Nodes (30): built_in_active_rows_remain_visible_with_matching_terminal_backgrounds(), built_in_selection_rows_stay_distinct_from_background_and_active_rows(), built_in_themes_leave_sidebar_background_unset_except_solid_ones(), component_styles_apply_explicit_overrides(), component_styles_fall_back_to_semantic_palette_tokens(), component_styles_out_of_range_ratio_falls_back_to_default(), contrast_ratio(), custom_sidebar_colors_override_the_defaults() (+22 more)
 
-### Community 117 - "WindowsProcessEntry"
+### Community 107 - "ClientState"
+Cohesion: 0.06
+Nodes (33): ComposedFrame, Deref, From, Self, active_api_retirement_leaves_cleanup_to_composition(), ClientState, merge_presentation_graphics(), pending_cleanup_precedes_frame_graphics_and_drains_the_buffer() (+25 more)
+
+### Community 108 - "client_commands.rs"
+Cohesion: 0.07
+Nodes (46): Debug, advertised_client_shell_method_shapes_stay_at_the_v1_contract(), advertised_client_shell_methods_are_sorted_unique_and_in_schema(), client_shell_method_set(), collect_schema_refs(), correlate_response_id(), endpoint_method_shape_digests(), endpoint_response_uses_the_client_request_id() (+38 more)
+
+### Community 109 - "macos.rs"
+Cohesion: 0.07
+Nodes (54): gid_t, available_pane_shell(), bsdinfo_start_token(), build_procargs2(), clipboard_text_matches(), comm_from_bsdinfo(), comm_from_c_chars(), detected_terminal_bundle_identifier() (+46 more)
+
+### Community 110 - "processes.rs"
+Cohesion: 0.06
+Nodes (51): J, MonitoredProcess, ProcessActions, idle_monitor_loop_blocks_until_the_next_request_instead_of_ticking(), counter_rate(), host_placeholder_and_environment_follow_the_language_on_each_inventory(), percent(), process_filter_and_sort_are_stable_and_bounded() (+43 more)
+
+### Community 111 - "WindowsProcessEntry"
 Cohesion: 0.09
 Nodes (51): ForegroundJob, cached_foreground_processes(), CachedForegroundSelection, CachedProcessSnapshot, descendant_entries(), foreground_group_leader_job(), foreground_job(), foreground_job_from_entry() (+43 more)
 
-### Community 118 - "agent_activity.rs"
-Cohesion: 0.09
-Nodes (58): a_whole_tree_read_keeps_the_discovery_slot_and_outlives_an_older_discovery(), activity_refresh_only_touches_the_projection_until_it_reaches_clients(), activity_results_land_in_start_order_whatever_order_they_arrive_in(), api_request(), client_endpoint_activity_reads_bypass_the_command_lane(), client_endpoint_agent_prompt_cannot_answer_a_blocked_agent(), client_endpoint_agent_prompt_on_an_inactive_surface_cannot_answer_a_blocked_agent(), client_endpoint_agent_prompt_on_an_inactive_surface_retains_admission_guards() (+50 more)
+### Community 112 - "ResponseResult"
+Cohesion: 0.08
+Nodes (60): AgentSessionInfo, SplitDirection, LayoutApplyParams, LayoutDescription, LayoutExportParams, LayoutPane, LayoutSetSplitRatioParams, PaneClearAgentAuthorityParams (+52 more)
 
-### Community 119 - "sidebar.rs"
-Cohesion: 0.09
-Nodes (36): AgentSidebarRows, agent_token_name(), AgentSidebarToken, AgentsSidebarConfig, defaults_match_the_compact_agent_and_existing_space_layouts(), deserialize_rows_by_agent(), deserialize_sidebar_rows(), parse_sidebar_token() (+28 more)
-
-### Community 120 - "Input"
+### Community 113 - "ClientLoopEvent"
 Cohesion: 0.07
-Nodes (59): ReadFormat, agent_args(), AgentKindCodec, ansi(), Attach, clear_name(), command(), Explain (+51 more)
+Nodes (51): ClientLoopEvent, Box, Error, Option, Result, String, Vec, captured_mouse_report_split_after_csi_survives_idle_gap() (+43 more)
 
-### Community 121 - "endpoint_commands.rs"
-Cohesion: 0.10
-Nodes (46): agent_activity_reads_ride_the_background_lane(), cancelling_partial_responses_releases_bytes_and_resets_chunk_budget(), checked_response_budget(), chunked_response_completion_is_correlated_and_clears_the_lane(), commands_with_in_flight(), disconnect_returns_every_request_that_must_be_discarded(), empty_chunk_flood_fails_locally_in_every_response_lane(), endpoint() (+38 more)
-
-### Community 122 - "command_search.rs"
+### Community 114 - "command_search.rs"
 Cohesion: 0.09
 Nodes (52): bundled_command_dirs(), command_availability_fallback_platform(), command_file_candidates_in(), command_file_candidates_platform(), command_search_dirs_in(), command_search_dirs_platform(), CommandSearchEnvironment, current_environment() (+44 more)
 
-### Community 123 - "ResponseResult"
-Cohesion: 0.08
-Nodes (59): AgentSessionInfo, SplitDirection, LayoutApplyParams, LayoutDescription, LayoutExportParams, LayoutPane, LayoutSetSplitRatioParams, PaneClearAgentAuthorityParams (+51 more)
+### Community 115 - "kitty_graphics.rs"
+Cohesion: 0.09
+Nodes (55): placement(), append_placement_controls(), changed_image_without_data_keeps_the_previous_image(), clipped_placement(), clipped_placement_crops_negative_viewport_offsets(), clipped_placement_handles_positive_viewport_without_wrapping(), ClippedPlacement, collect_visible_placements() (+47 more)
 
-### Community 124 - "PopupSize"
-Cohesion: 0.06
-Nodes (44): App, app_with_popup(), close_popup_clears_direct_attach_resize_lock(), close_popup_uses_navigate_mode_without_active_workspace(), close_popup_uses_terminal_mode_with_active_workspace(), popup_close_api_closes_only_active_popup(), popup_rejects_known_small_terminal_area_before_spawning(), popup_survives_background_workspace_removal() (+36 more)
+### Community 116 - "endpoint_commands.rs"
+Cohesion: 0.10
+Nodes (46): agent_activity_reads_ride_the_background_lane(), cancelling_partial_responses_releases_bytes_and_resets_chunk_budget(), checked_response_budget(), chunked_response_completion_is_correlated_and_clears_the_lane(), commands_with_in_flight(), disconnect_returns_every_request_that_must_be_discarded(), empty_chunk_flood_fails_locally_in_every_response_lane(), endpoint() (+38 more)
 
-### Community 125 - "ClientShellState"
-Cohesion: 0.08
-Nodes (27): ClientMachinesOverlay, ClientMachinesView, ClientShellState, endpoint_for(), machine_list_rows(), machine_matches(), MachineListRow, machines_body() (+19 more)
+### Community 117 - "inspector.rs"
+Cohesion: 0.09
+Nodes (38): Action, add(), bounded(), cap_button(), cap_width(), ClientShellState, count_label(), count_rows() (+30 more)
 
-### Community 126 - "menus.rs"
+### Community 118 - "menus.rs"
 Cohesion: 0.10
 Nodes (61): arrange_mode_shows_the_title_chip_and_status_hints(), attention_chips_count_agents_by_bucket_and_open_the_navigator(), catalog_area(), catalog_category_submenu_groups_items_and_navigates_with_arrows(), catalog_main_menu_draws_submenu_arrows_badges_and_the_search_shortcut(), catalog_scroll_follows_the_keyboard_highlight(), catalog_text(), chinese_title_bar_items_are_measured_by_display_width() (+53 more)
 
-### Community 127 - "kitty_graphics.rs"
-Cohesion: 0.09
-Nodes (55): append_placement_controls(), changed_image_without_data_keeps_the_previous_image(), changing_first_source_does_not_starve_second_source(), clipped_placement(), clipped_placement_crops_negative_viewport_offsets(), clipped_placement_handles_positive_viewport_without_wrapping(), ClippedPlacement, collect_visible_placements() (+47 more)
+### Community 119 - "keybinds.rs"
+Cohesion: 0.04
+Nodes (21): back_and_forth_keybinds_are_unset_by_default(), copy_mode_uses_tmux_prefix_bracket_by_default(), default_keymap_is_prefix_first_and_tab_centered(), format_key_combo(), format_prefix_combos(), goto_defaults_to_prefix_g(), legacy_uppercase_key_event_does_not_match_unshifted_letter_binding(), legacy_uppercase_shift_fallback_is_limited_to_ascii_letters() (+13 more)
 
-### Community 128 - "machine.rs"
+### Community 120 - "String"
+Cohesion: 0.11
+Nodes (35): ActionKeybinds, append_custom_command_bindings(), append_legacy_indexed_bindings(), binding_triggers(), BindingConfig, BindingRegistry, BindingSource, BindingTrigger (+27 more)
+
+### Community 121 - "PaneSurfaceFrame"
+Cohesion: 0.12
+Nodes (55): DecodeError, accepts_max_spans_within_the_grid_cell_budget(), cell(), checked_grid_size(), CountOnly, decode(), decode_bounded_vec(), decode_bytes() (+47 more)
+
+### Community 122 - "ChromeContext"
+Cohesion: 0.12
+Nodes (56): BroadcastButton, render_broadcast_overlay(), Buffer, ChromeContext, ClientAuthGuideView, ClientHostKeyView, ClientMachineAuthOverlay, ClientMachineAuthView (+48 more)
+
+### Community 123 - "sessions.rs"
 Cohesion: 0.10
-Nodes (47): add(), add_parser_collects_profile_options(), add_parser_from_config_defaults_label_and_skips_target_requirement(), AddArgs, apply_add_option(), base_add_args(), find_profile(), forward() (+39 more)
+Nodes (48): left_truncation_keeps_the_tail_and_marks_the_cut(), left_truncation_never_splits_a_wide_character(), paint_spans(), Buffer, Cow, Into, Self, Style (+40 more)
 
-### Community 129 - "toast.rs"
+### Community 124 - "Result"
+Cohesion: 0.13
+Nodes (46): command_failed(), confirm_remote_install(), confirm_remote_install_with_running_server(), confirm_remote_server_stop(), detect_remote_platform(), detect_windows_remote_platform(), discover_remote_api_metadata(), ensure_remote_server_ready() (+38 more)
+
+### Community 125 - "Target"
+Cohesion: 0.09
+Nodes (29): Target, Action, bucket_label(), ClientShellState, Grouping, Layout, location_detail_area(), nav_row() (+21 more)
+
+### Community 126 - "Self"
 Cohesion: 0.07
-Nodes (48): Action, ActionKind, age_label(), Anchor, cx(), focus_emphasis_keeps_the_level_border(), level_colors_the_border_and_icon_and_focus_hit_matches_the_paint(), measure() (+40 more)
+Nodes (36): Config, default_update_channel(), default_update_channel_for_build(), effective_indexed_config(), ExperimentalConfig, ImeCursorShape, IndexedKeysConfig, KeysConfig (+28 more)
 
-### Community 130 - "io.rs"
+### Community 127 - "tests.rs"
+Cohesion: 0.09
+Nodes (47): explain(), explain_with_input(), reload_manifests(), bundled_version(), codex_startup_hooks_review_ignores_quoted_prompt(), codex_startup_hooks_review_is_blocked(), compiled_rules_are_shared_until_manifest_reload(), detect_and_explain_agree_on_detection_fields() (+39 more)
+
+### Community 128 - "io.rs"
 Cohesion: 0.10
 Nodes (54): Hook, assert_legacy_save_rejected(), check(), clear_history(), clear_path(), clear_path_ignores_missing_session_file(), clear_path_removes_existing_session_file(), concurrent_large_json_saves_only_expose_complete_versions() (+46 more)
 
-### Community 131 - "inspector.rs"
+### Community 129 - "machine.rs"
 Cohesion: 0.10
-Nodes (37): Action, add(), bounded(), cap_button(), cap_width(), ClientShellState, count_rows(), entry_row() (+29 more)
+Nodes (45): add(), add_parser_collects_profile_options(), add_parser_from_config_defaults_label_and_skips_target_requirement(), AddArgs, apply_add_option(), base_add_args(), find_profile(), forward() (+37 more)
 
-### Community 132 - "Target"
-Cohesion: 0.09
-Nodes (28): Target, Action, ClientShellState, Grouping, Layout, location_detail_area(), nav_row(), paint() (+20 more)
+### Community 130 - "push_endpoint_sessions"
+Cohesion: 0.10
+Nodes (43): ClientEndpointStatus, cached_endpoint_snapshots(), CachedEndpointSnapshot, Item, Iterator, attention_targets(), build_by_status(), build_by_workspace() (+35 more)
 
-### Community 133 - "PaneSurfaceFrame"
-Cohesion: 0.13
-Nodes (52): DecodeError, accepts_max_spans_within_the_grid_cell_budget(), checked_grid_size(), CountOnly, decode(), decode_bounded_vec(), decode_bytes(), decode_bytes_vec() (+44 more)
-
-### Community 134 - "logging.rs"
+### Community 131 - "logging.rs"
 Cohesion: 0.05
 Nodes (29): api_request_completed(), api_request_started(), api_wait_started(), help_log_paths_summary(), init_file_logging(), is_routine_api_method(), rotate_files_shifts_existing_generations(), rotated_log_path() (+21 more)
 
-### Community 135 - "SystemMetricsSnapshot"
-Cohesion: 0.07
-Nodes (47): ClientViewSpec, ClientViewsSetParams, CpuCoreMetric, default_interval(), default_limit(), DiskMetric, MemoryMetric, NetworkMetric (+39 more)
-
-### Community 136 - "monitoring.rs"
-Cohesion: 0.09
-Nodes (46): GpuMetric, PDH_HCOUNTER, PDH_HQUERY, adapter(), adapter_metric(), adapter_metric_labels_the_utilisation_source_and_keeps_nvml_sensors(), adapter_usage(), AdapterDescription (+38 more)
-
-### Community 137 - "session.rs"
+### Community 132 - "session.rs"
 Cohesion: 0.10
 Nodes (36): App, audit_add_authorized_test_tab(), audit_close_pane(), audit_interrupt_pane(), audit_layout_pane(), audit_p0_session_api_tab_create_retains_guarded_identities(), audit_p0_session_authorization_keeps_unidentified_layouts_protected(), audit_p0_session_create_does_not_authorize_prior_loss() (+28 more)
 
-### Community 138 - "ipc.rs"
+### Community 133 - "ClientAgentActivityOverlay"
+Cohesion: 0.14
+Nodes (55): AgentActivityButton, ClientAgentActivityOverlay, kind_label(), node_elapsed_ms(), Box, bucket_style(), columns_layout(), content_header_rows() (+47 more)
+
+### Community 134 - "surface_scroll.rs"
+Cohesion: 0.09
+Nodes (53): apply_composed_surface_patch(), apply_patch_to_surface(), apply_row(), ClientComposedSurfacePatch, ClientPaneSurfacePatchOutcome, ClientShellState, fast_path_blocker(), pane_geometry_matches() (+45 more)
+
+### Community 135 - "ipc.rs"
 Cohesion: 0.11
 Nodes (56): accept_pipe_ready(), bind_local_listener(), bind_private_local_listener(), bind_windows_pipe_listener(), connect_local_stream(), connect_local_stream_cancellable(), disconnected_named_pipe_peer_is_treated_as_closed(), disconnected_unix_peer_is_treated_as_closed() (+48 more)
 
-### Community 139 - "client_shell.rs"
+### Community 136 - "client_shell.rs"
 Cohesion: 0.10
 Nodes (51): HostCellSize, activity_projection(), app_with_panes(), bench_activity_tree(), child(), detect(), external_agents_projection(), measure_snapshot() (+43 more)
+
+### Community 137 - "ProfileId"
+Cohesion: 0.07
+Nodes (16): endpoint_storage_keys_do_not_contain_ssh_targets(), endpoint_storage_keys_round_trip_and_reject_junk(), profile_ids_are_opaque_and_stable_when_parsed(), ProfileId, Display, Formatter, Into, Option (+8 more)
+
+### Community 138 - ".spawn"
+Cohesion: 0.07
+Nodes (51): FILETIME, a_process_reported_gone_no_longer_holds_its_cwd(), announce_detached_server_daemon(), bridge_endpoint_path_sweeps_stale_endpoints_on_first_use(), busy_endpoint_connect_obeys_cancellation_and_deadline(), comspec(), configure_status_command(), creating_a_private_dir_sweeps_its_base_once() (+43 more)
+
+### Community 139 - "monitoring.rs"
+Cohesion: 0.09
+Nodes (45): PDH_HCOUNTER, PDH_HQUERY, adapter(), adapter_metric(), adapter_metric_labels_the_utilisation_source_and_keeps_nvml_sensors(), adapter_usage(), AdapterDescription, add_counter() (+37 more)
 
 ### Community 140 - "pi.rs"
 Cohesion: 0.11
 Nodes (52): a_cycle_is_cut_at_its_first_node_and_keeps_what_hangs_below(), bad_nodes_are_skipped_and_the_tree_is_repaired(), clean_line(), context(), cycle_head(), deep_nesting_keeps_every_level_parent_first(), discover(), discover_from_hint() (+44 more)
 
-### Community 141 - "tests.rs"
-Cohesion: 0.09
-Nodes (44): explain(), bundled_version(), codex_startup_hooks_review_ignores_quoted_prompt(), codex_startup_hooks_review_is_blocked(), compiled_rules_are_shared_until_manifest_reload(), detection_uses_cached_manifest_until_explicit_reload(), end_anchored_footer_gates_allow_only_auxiliary_tail(), explain_for_screen() (+36 more)
+### Community 141 - "tab_bar_status.rs"
+Cohesion: 0.08
+Nodes (42): App, command_output_text(), ControlSequenceState, datetime_refresh_updates_its_segment_once_per_deadline(), format_local_datetime(), in_flight_command_has_no_second_deadline(), is_unicode_format_control(), read_last_output_line() (+34 more)
 
-### Community 142 - ".spawn"
-Cohesion: 0.07
-Nodes (51): FILETIME, a_process_reported_gone_no_longer_holds_its_cwd(), announce_detached_server_daemon(), bridge_endpoint_path_sweeps_stale_endpoints_on_first_use(), busy_endpoint_connect_obeys_cancellation_and_deadline(), comspec(), configure_status_command(), creating_a_private_dir_sweeps_its_base_once() (+43 more)
-
-### Community 143 - "git_refresh.rs"
-Cohesion: 0.10
-Nodes (45): App, custom_named_linked_worktree_does_not_require_branch_refresh(), cwd_identity_refresh_runs_once_without_sidebar_git_tokens(), deduplicate_git_refresh_items(), disconnected_git_worker_keeps_identity_request_for_retry(), due_git_refresh_does_not_start_without_sidebar_consumer(), explicit_git_refresh_invalidates_cached_non_git_results(), failed_git_refresh_spawn_retries_after_interval() (+37 more)
-
-### Community 144 - "ParseError"
+### Community 142 - "ParseError"
 Cohesion: 0.09
 Nodes (48): args(), caller_target(), command(), direction(), finite(), last_index(), metadata(), move_pane() (+40 more)
 
-### Community 145 - "context_menu.rs"
-Cohesion: 0.10
-Nodes (34): context_action(), context_layout(), ContextKind, child_kit_index(), ClientContextMenuOverlay, ClientShellState, context_action_target(), context_kind() (+26 more)
+### Community 143 - "socket_paths.rs"
+Cohesion: 0.06
+Nodes (43): Formatter, Result, drain_pane_shutdowns_before_exit(), init_logging(), pane_shutdown_drain_timeout(), print_ready_message(), App, Duration (+35 more)
 
-### Community 146 - "SourceError"
+### Community 144 - "ClientShellInput"
 Cohesion: 0.10
-Nodes (29): InsightCache, agent_config_dir(), AuditFinishedTree, BlockingTree, ContentChunk, discover_nodes(), FakeExternal, FakeTree (+21 more)
+Nodes (15): ClientShellState, Option, String, ClientShellState, host_display(), parse_host_port(), Result, Self (+7 more)
 
-### Community 147 - "String"
+### Community 145 - "RawInputEvent"
+Cohesion: 0.06
+Nodes (44): mouse(), MouseEventKind, key(), mouse(), KeyCode, MouseEventKind, key_event(), mouse_event() (+36 more)
+
+### Community 146 - "SurfaceGraphicsScene"
 Cohesion: 0.08
-Nodes (42): current_version(), decode_windows_command(), decode_windows_remote_path(), deserialize_remote_manifest_releases(), parse_windows_remote_path(), posix_remote_output_command(), preview_assets_for_build(), remote_api_bridge_command() (+34 more)
+Nodes (31): FileStore, DeliveryCache, HashSet, SurfaceGraphicsAsset, SurfaceGraphicsScene, Fn, collect(), collect_retained() (+23 more)
 
-### Community 148 - "metadata.rs"
+### Community 147 - "metadata.rs"
 Cohesion: 0.12
 Nodes (30): AgentMetadata, AgentMetadataReport, custom_metadata_reanchors_sequence_after_process_restart(), EffectivePresentation, immediately_expired_visible_metadata_still_schedules_expiry_event(), late_metadata_expiry_reports_all_due_visible_changes(), metadata_clear_only_without_ttl_does_not_extend_old_ttl(), metadata_clear_plus_set_without_ttl_does_not_keep_old_ttl() (+22 more)
 
-### Community 149 - ".new"
+### Community 148 - ".new"
 Cohesion: 0.06
 Nodes (53): AgentClassificationCache, cached_agent_classification(), carries_pane_runtime_marker(), command_line_to_argv(), console_process_ids(), image_file_name_starts_with_herdr(), is_herdr_server_daemon(), is_legacy_server_daemon_command() (+45 more)
 
-### Community 150 - "tab_bar_status.rs"
-Cohesion: 0.08
-Nodes (41): App, command_output_text(), ControlSequenceState, datetime_refresh_updates_its_segment_once_per_deadline(), format_local_datetime(), in_flight_command_has_no_second_deadline(), is_unicode_format_control(), read_last_output_line() (+33 more)
+### Community 149 - "EndpointNegotiation"
+Cohesion: 0.09
+Nodes (29): a_ready_endpoint_can_stay_connected_after_the_initial_deadline(), dropping_registry_detaches_every_connected_endpoint(), endpoint_failures_do_not_remove_other_connections(), EndpointConnection, EndpointNegotiation, EndpointSendOutcome, EndpointTransport, EndpointTransportFailure (+21 more)
 
-### Community 151 - "agent_page.rs"
-Cohesion: 0.14
-Nodes (54): AgentActivityButton, kind_label(), node_elapsed_ms(), bucket_style(), columns_layout(), content_header_rows(), content_layout(), ContentPaint (+46 more)
+### Community 150 - "tr"
+Cohesion: 0.12
+Nodes (51): Style, status(), status_color(), card_stale(), CardScrollLimits, chart_area(), Chip, copy_cells() (+43 more)
 
-### Community 152 - "String"
+### Community 151 - "String"
 Cohesion: 0.14
 Nodes (47): apply_running_session_update_decisions(), check_latest(), client_protocol_server_is_running(), client_protocol_server_is_running_at(), confirm_running_server_update_action(), download_update(), download_windows_update(), errors() (+39 more)
 
-### Community 153 - "writer.rs"
+### Community 152 - "Input"
+Cohesion: 0.10
+Nodes (51): ReadFormat, ansi(), format(), source(), until(), attention_kind(), attention_option(), clear_token() (+43 more)
+
+### Community 153 - "git_refresh.rs"
+Cohesion: 0.10
+Nodes (43): App, custom_named_linked_worktree_does_not_require_branch_refresh(), cwd_identity_refresh_runs_once_without_sidebar_git_tokens(), deduplicate_git_refresh_items(), disconnected_git_worker_keeps_identity_request_for_retry(), due_git_refresh_does_not_start_without_sidebar_consumer(), explicit_git_refresh_invalidates_cached_non_git_results(), failed_git_refresh_spawn_retries_after_interval() (+35 more)
+
+### Community 154 - "writer.rs"
 Cohesion: 0.09
 Nodes (43): a_full_queue_is_a_connection_failure_not_silent_input_loss(), a_stalled_write_is_cancellable_without_peer_progress(), FrameBatch, later_frames_cannot_join_a_batch_before_a_flush(), native_endpoint_flush_drains_large_frames_before_detach(), native_endpoint_teardown_does_not_wait_for_a_stalled_peer(), native_endpoint_writer_delivers_megabyte_frames_to_a_blocking_reader(), native_endpoint_writer_delivers_ordered_protocol_frames() (+35 more)
 
-### Community 154 - "sessions.rs"
-Cohesion: 0.10
-Nodes (53): agent(), ages_change_at_most_once_per_minute(), assert_request_geometry(), attention_a_activates_remote_panes_and_ignores_offline_cached_agents(), authoritative_pane_focus_in_the_same_workspace_reveals_once_without_overriding_manual_scroll(), by_status_lists_sections_in_listing_order_and_hides_empty_ones(), by_workspace_lists_every_pane_under_its_workspace(), cache_invalidates_each_epoch_and_endpoint_identity_but_not_paint_inputs() (+45 more)
+### Community 155 - "context_menu.rs"
+Cohesion: 0.11
+Nodes (32): context_action(), ContextKind, child_kit_index(), ClientContextMenuOverlay, ClientShellState, context_action_target(), context_kind(), ContextMenuEnv (+24 more)
 
-### Community 155 - "discovery.rs"
-Cohesion: 0.13
-Nodes (53): absent_loose_ref_still_reads_packed_refs(), automatic_workspace_label(), bare_source_and_linked_checkout_share_repo_name_but_not_auto_label(), canonical_parent(), canonicalize_best_effort_path(), ceiling_directories_parse_like_git(), dangling_symlink_loose_ref_is_unavailable_not_absent(), dangling_symlink_through_file_is_unavailable_not_absent() (+45 more)
+### Community 156 - "system.rs"
+Cohesion: 0.14
+Nodes (51): buffer_text(), config(), paint_page(), preferences_footer_omits_the_refresh_hint(), row_has(), row_text(), alert_rows_name_metrics_in_english_too(), alerts_and_devices_get_their_own_cards() (+43 more)
 
-### Community 156 - "ApiRequestMessage"
+### Community 157 - "HostPowerEvent"
+Cohesion: 0.06
+Nodes (45): logind_loss_releases_suspend_once_without_initial_or_repeated_false_wakes(), LoginManager, monitor_host_power(), PrivateBus, report_power(), Arc, AtomicBool, Child (+37 more)
+
+### Community 158 - "ApiRequestMessage"
 Cohesion: 0.08
 Nodes (40): ApiRequestMessage, request_changes_ui(), Arc, AtomicBool, Mutex, Option, PathBuf, Receiver (+32 more)
 
-### Community 157 - "notifications.rs"
+### Community 159 - "notifications.rs"
 Cohesion: 0.09
 Nodes (45): Callback, LPARAM, LRESULT, Activation, activation_message(), ComApartment, create_window(), issue_activation() (+37 more)
 
-### Community 158 - "form_view.rs"
-Cohesion: 0.09
-Nodes (49): FieldGroup, FormPrompt, a_value_keeps_its_invalid_suffix_on_the_same_row(), bootstrap_step_label(), build_wrapped_span_line(), can_break_between(), char_display_width(), cjk_sentences_fill_rows_and_keep_punctuation_off_row_starts() (+41 more)
+### Community 160 - "DockLayout"
+Cohesion: 0.12
+Nodes (26): Axis, closing_a_panel_advances_the_revision(), corrupt_preferences_reject_duplicate_or_unowned_panels(), Divider, DockLayout, DockNode, Edge, Geometry (+18 more)
 
-### Community 159 - "handoff.rs"
+### Community 161 - "render.rs"
+Cohesion: 0.09
+Nodes (47): active_page_tab_sits_on_a_lighter_surface_with_a_readable_label(), age_text(), block(), buffer_has(), button(), bytes(), card_title_style(), chrome_context() (+39 more)
+
+### Community 162 - "sessions.rs"
+Cohesion: 0.10
+Nodes (52): agent(), ages_change_at_most_once_per_minute(), assert_request_geometry(), attention_a_activates_remote_panes_and_ignores_offline_cached_agents(), authoritative_pane_focus_in_the_same_workspace_reveals_once_without_overriding_manual_scroll(), by_status_lists_sections_in_listing_order_and_hides_empty_ones(), by_workspace_lists_every_pane_under_its_workspace(), classic_agent_navigation_reveals_session_rows_only_during_compute() (+44 more)
+
+### Community 163 - "handoff.rs"
 Cohesion: 0.10
 Nodes (48): HandoffRuntimeState, Option, Self, String, a_handoff_carries_an_announced_host_shutdown(), a_handoff_carries_an_api_set_window_title(), a_manifest_written_before_the_host_shutdown_field_still_loads(), a_manifest_written_before_the_title_field_still_loads() (+40 more)
 
-### Community 160 - "fallback.rs"
-Cohesion: 0.07
-Nodes (43): available_pane_shell(), clipboard_text_matches(), configure_status_command(), default_known_hosts_path(), detach_server_daemon_command(), detached_custom_command_process_platform(), foreground_group_leader_job(), foreground_job() (+35 more)
-
-### Community 161 - "HostPowerEvent"
-Cohesion: 0.06
-Nodes (41): logind_loss_releases_suspend_once_without_initial_or_repeated_false_wakes(), LoginManager, monitor_host_power(), PrivateBus, report_power(), Arc, AtomicBool, Child (+33 more)
-
-### Community 162 - "HeadlessServer"
+### Community 164 - "HeadlessServer"
 Cohesion: 0.12
 Nodes (14): classify_shell_focus_transition(), forward_proxied_api_response(), HeadlessServer, FocusEvent, HashMap, HashSet, Method, Option (+6 more)
 
-### Community 163 - "agent_view.rs"
-Cohesion: 0.09
-Nodes (37): AgentViewEntry, agent_filter_matches_custom_lifecycle_agent_label(), AppAgentViewEntry, apply_agent_view(), boolean_filter_and_custom_sort_define_canonical_entries(), current_workspace_filter_tracks_presented_workspace(), current_workspace_view(), evaluation_context() (+29 more)
+### Community 165 - "AgentStatus"
+Cohesion: 0.08
+Nodes (45): AgentStatus, agent_bucket(), agent_name(), session_summary(), contains(), agent(), Buffer, Rect (+37 more)
 
-### Community 164 - "App"
-Cohesion: 0.09
-Nodes (29): effective_platforms(), normalize_plugin_id(), App, invalid_plugin_id(), manifest_action_info(), manifest_actions(), normalize_optional_plugin_id(), pane_link_resolve_checks_staleness_without_side_effects() (+21 more)
-
-### Community 165 - "activation_tests.rs"
+### Community 166 - "activation_tests.rs"
 Cohesion: 0.12
 Nodes (49): activation_requires_an_exact_snapshot_surface_revision_pair(), active_source_requires_metadata_from_its_current_connection_generation(), endpoint(), failure(), FakeTransport, host_focus_change_restarts_an_issued_presentation_effects_fence(), latest_host_focus_is_replayed_to_the_eventual_target(), lease() (+41 more)
 
-### Community 166 - "settings.rs"
+### Community 167 - "settings.rs"
 Cohesion: 0.12
 Nodes (43): every_section_stays_reachable_down_to_sixty_columns(), footer_button_rects(), footer_hint_area(), header_rows(), hover_bg(), inner_for(), items(), list_body() (+35 more)
 
-### Community 167 - "herdr-agent-state.ts"
+### Community 168 - "ClientShellState"
+Cohesion: 0.09
+Nodes (17): ClientShellState, host_theme_update(), is_ctrl_bracket_key(), is_modal_paste_shortcut(), is_modal_paste_shortcut_for_platform(), is_retained_selection_copy_key(), push_host_theme_update(), FnOnce (+9 more)
+
+### Community 169 - "TerminalRuntimeRegistry"
+Cohesion: 0.09
+Nodes (37): CursorShapeParam, CursorState, From, HashMap, Item, Iterator, Self, TerminalRuntimeRegistry (+29 more)
+
+### Community 170 - "InsightScan"
+Cohesion: 0.09
+Nodes (24): a_new_prompt_or_a_later_reply_retires_the_previous_error(), an_empty_scan_has_no_insight(), InsightScan, OpenTool, Question, questions_follow_their_tool_call(), Option, String (+16 more)
+
+### Community 171 - "herdr-agent-state.ts"
 Cohesion: 0.07
 Nodes (45): ActivityNode, ActivityOutput, ActivitySession, ActivityStatus, activityUndelivered(), AgentState, agentTypeOf(), appendOutput() (+37 more)
 
-### Community 168 - "EndpointSupervisors"
+### Community 172 - "put_str"
 Cohesion: 0.09
-Nodes (32): accept_completion(), AttemptCompletion, complete_connection_attempt(), connect_once(), ConnectTarget, EndpointConnectOptions, EndpointSupervisorEvent, EndpointSupervisors (+24 more)
+Nodes (48): active_segment_style(), draw_frame(), draw_frame_draws_only_the_outline(), ellipsis_width_measures_exactly_what_put_str_ellipsis_writes(), emphasis_style(), fill_row(), cap_text(), cap_width() (+40 more)
 
-### Community 169 - "restore.rs"
+### Community 173 - "App"
 Cohesion: 0.10
-Nodes (46): AgentRestoreState, capture_and_restore_node_round_trip(), captured_sizes(), collect_ids_inner(), collect_layout_snapshot_pane_ids(), collect_pane_ids(), collect_snapshot_ids_inner(), collect_snapshot_pane_ids() (+38 more)
+Nodes (28): PaneLinkActivateParams, effective_platforms(), normalize_plugin_id(), App, invalid_plugin_id(), manifest_actions(), normalize_optional_plugin_id(), pane_link_resolve_checks_staleness_without_side_effects() (+20 more)
 
-### Community 170 - "unix_image_files.rs"
+### Community 174 - "form_view.rs"
+Cohesion: 0.09
+Nodes (47): FieldGroup, FormPrompt, a_value_keeps_its_invalid_suffix_on_the_same_row(), bootstrap_step_label(), build_wrapped_span_line(), can_break_between(), char_display_width(), cjk_sentences_fill_rows_and_keep_punctuation_off_row_starts() (+39 more)
+
+### Community 175 - "agent_detection.rs"
+Cohesion: 0.09
+Nodes (39): decide_detection_screen_read(), decide_detection_transition(), decide_screen_detection_publish(), detection_content_change_tracks_raw_nonempty_reads_for_scan_scheduling(), detection_update_for_publish(), detection_update_for_publish_with_osc(), DetectionPublishDecision, DetectionPublishState (+31 more)
+
+### Community 176 - "unix_image_files.rs"
 Cohesion: 0.12
 Nodes (37): byte_and_image_caps(), count_cap_and_terminal_consumption(), create_generation(), effective_uid(), existing_parent_must_be_owned_private_directory_not_symlink(), Generation, generation_cap_bounds_crash_leftovers_and_parent_lock_is_nonblocking(), Ledger (+29 more)
 
-### Community 171 - "temp_test_dir"
+### Community 177 - "agents.rs"
 Cohesion: 0.10
-Nodes (50): config_read_error_retries_next_refresh(), config_symlink_retarget_invalidates_context(), git_status_branch_config_reads_user_config_before_repo_config(), git_status_branch_config_repo_config_overrides_user_config(), git_status_fingerprint_accepts_git_boolean_worktree_config(), git_status_fingerprint_applies_repeated_includes_in_order(), git_status_fingerprint_clears_upstream_for_unmapped_refspec(), git_status_fingerprint_honors_negative_fetch_refspec() (+42 more)
+Nodes (37): AgentTarget, a_false_process_exit_makes_a_named_live_agent_unreachable_by_name(), agent_focus_marks_already_focused_done_agent_seen(), agent_not_found(), agent_not_ready(), agent_prompt_rejects_blocked_agent_without_writing(), agent_prompt_rejects_managed_agent_while_startup_is_pending(), agent_prompt_sends_text_then_delays_enter() (+29 more)
 
-### Community 173 - "TerminalId"
-Cohesion: 0.09
-Nodes (37): adversarial_pane(), claude_session(), claude_session_report(), claude_with_session(), detect(), detection_state(), exit_then_different_agent_relaunch_drops_previous_identity(), exited_pi_session_is_not_replayed_into_a_relaunched_pi() (+29 more)
-
-### Community 174 - "BroadcastSet"
-Cohesion: 0.12
-Nodes (36): add(), clear(), load_set(), machine_label(), remove(), Option, Result, String (+28 more)
-
-### Community 175 - "action_table.rs"
-Cohesion: 0.08
-Nodes (32): action_spec(), ActionCategory, ActionId, ActionSpec, ActionState, ActionTarget, ClientShellState, context_action_state() (+24 more)
-
-### Community 176 - "ShellRenderState"
-Cohesion: 0.07
-Nodes (39): canvas_with_cursor(), client_copy_surface_coherent(), ClientShellState, copy_feedback_toast(), dim_around(), emphasize_pane_border(), render_client_copy_search_highlights(), restore_cells_only_hides_a_cursor_inside_the_bar_columns() (+31 more)
-
-### Community 177 - "ClientShellState"
-Cohesion: 0.12
-Nodes (17): ClientAuthGuideView, ClientHostKeyView, ClientMachineAuthOverlay, ClientMachineAuthView, ClientPasswordView, ClientShellState, host_display(), host_key_lines() (+9 more)
-
-### Community 178 - "agent_detection.rs"
-Cohesion: 0.09
-Nodes (38): codex_prompt_ready(), decide_detection_screen_read(), decide_detection_transition(), decide_screen_detection_publish(), detection_content_change_tracks_raw_nonempty_reads_for_scan_scheduling(), detection_update_for_publish(), detection_update_for_publish_with_osc(), DetectionPublishDecision (+30 more)
-
-### Community 179 - "ServerEvent"
-Cohesion: 0.10
-Nodes (19): clamp_terminal_size(), client_read_loop_with_endpoint_controls(), client_shell_geometry_error(), ClientEventAcknowledgement, ClientEventSender, ClientTransportTestHandle, ClientWriteItem, ClientWriterQueue (+11 more)
-
-### Community 180 - "agent_resume.rs"
-Cohesion: 0.09
-Nodes (36): absolute_test_path(), AgentResumePlan, argv(), codex_reported_transcripts_keep_resume_ids_and_reject_unpaired_paths(), codex_reverted_rollout_paths_keep_the_stable_thread_id(), codex_rollout_session_id(), dedupe_key(), ids_are_data_not_shell_text() (+28 more)
-
-### Community 181 - "ApiClient"
+### Community 179 - "ApiClient"
 Cohesion: 0.10
 Nodes (34): ApiClient, ApiClientError, ConnectionTarget, DeadlineReader, local_session_target_resolves_named_session_socket(), parse_response_value(), read_json_line(), Box (+26 more)
 
-### Community 182 - "CustomCommandKeybind"
-Cohesion: 0.13
-Nodes (30): CommandInvokeParams, Option, String, App, binding(), command_ids_do_not_alias_across_endpoint_restarts(), EndpointCommand, EndpointCommandRegistry (+22 more)
-
-### Community 183 - "agents.rs"
-Cohesion: 0.10
-Nodes (36): AgentTarget, a_false_process_exit_makes_a_named_live_agent_unreachable_by_name(), agent_focus_marks_already_focused_done_agent_seen(), agent_not_found(), agent_not_ready(), agent_prompt_rejects_blocked_agent_without_writing(), agent_prompt_rejects_managed_agent_while_startup_is_pending(), agent_prompt_sends_text_then_delays_enter() (+28 more)
-
-### Community 184 - "autodetect.rs"
+### Community 180 - "autodetect.rs"
 Cohesion: 0.10
 Nodes (46): read_runtime_status_at(), Duration, Option, Path, Result, String, RuntimeStatus, auto_detect_launch() (+38 more)
 
-### Community 185 - "menu.rs"
-Cohesion: 0.11
-Nodes (39): catalog_page_step(), anchor_is_clamped_into_bounds(), ascii_degrades_the_check_and_arrow(), badge_draws_an_accent_dot_before_the_shortcut_column(), Columns, description_column_drops_before_shortcut_and_preserves_cjk_hits(), first_letter_matches_case_insensitively_and_cycles(), highlighted_danger_items_keep_red_text_and_hover_bg_can_be_overridden() (+31 more)
+### Community 181 - "supervisor.rs"
+Cohesion: 0.12
+Nodes (41): a_handshake_without_readiness_does_not_reset_backoff(), adopted_interactive_connection_keeps_its_cancel_and_teardown_barrier(), auth_kind(), brief_ssh_reconnections_do_not_reset_backoff(), cancelled_connection_completions_cannot_restore_diagnostics(), complete_connection_attempt(), completion_result(), connect_once() (+33 more)
 
-### Community 186 - "fs.rs"
-Cohesion: 0.10
-Nodes (29): entry_kind_label(), fs_error_kind(), is_fs_level_error(), LocalTempFile, long_listing_parses_openssh_lines(), long_listing_rejects_unparseable_output_only_when_nothing_parsed(), next_field(), one_off_sftp_channels_share_one_control_path_per_profile() (+21 more)
+### Community 182 - "agent_activity.rs"
+Cohesion: 0.12
+Nodes (48): a_whole_tree_read_keeps_the_discovery_slot_and_outlives_an_older_discovery(), activity_refresh_only_touches_the_projection_until_it_reaches_clients(), activity_results_land_in_start_order_whatever_order_they_arrive_in(), api_request(), client_endpoint_activity_reads_bypass_the_command_lane(), client_endpoint_agent_prompt_cannot_answer_a_blocked_agent(), client_endpoint_agent_prompt_on_an_inactive_surface_cannot_answer_a_blocked_agent(), client_endpoint_agent_prompt_on_an_inactive_surface_retains_admission_guards() (+40 more)
 
-### Community 187 - "shutdown.rs"
+### Community 183 - "mod.rs"
+Cohesion: 0.07
+Nodes (39): aggregate_demand(), api_replies_serialize_events_and_the_latest_slot_coalesces(), endpoint_queue_pressure_never_panics_in_async_server(), endpoint_replies_forward_observation_events_as_boot_scoped_control_frames(), is_background_method(), metrics_event(), now_ms(), only_live_consumers_contribute_to_sampling_demand() (+31 more)
+
+### Community 184 - "shutdown.rs"
 Cohesion: 0.08
 Nodes (35): c_ulong, DispatchQueue, copy_handler(), dispose_handler(), HandlerBlock, HandlerBlockDescriptor, Harness, invoke_handler() (+27 more)
 
-### Community 188 - "ChromeHover"
+### Community 185 - "agent_activity_overlay.rs"
+Cohesion: 0.09
+Nodes (28): AgentActivityContentView, AgentActivityFocus, AgentPageOwner, AgentPageSummary, AgentPageView, bucket_label(), ContentLine, display_line() (+20 more)
+
+### Community 186 - "retained_test_server_with_control"
 Cohesion: 0.10
-Nodes (25): PanelButton, ChromeBounds, ChromeContext<'a>, ChromeHover, ClientNotificationHistoryOverlay, ClientNotificationRecord, ClientNotificationTarget, ClientShellState (+17 more)
+Nodes (45): retained_test_server(), retained_test_server_with_control(), decode_batch(), dispatch_view_pty(), duplicate_tabs_and_stale_layouts_do_not_change_live_geometry(), multi_view_render_scaling_profile(), multi_view_without_a_writer_defers_instead_of_disconnecting(), popup_pty_tracks_its_owning_view_after_resize() (+37 more)
 
-### Community 189 - "ClientShellState"
-Cohesion: 0.10
-Nodes (13): ClientShellState, host_theme_update(), is_ctrl_bracket_key(), is_modal_paste_shortcut(), is_modal_paste_shortcut_for_platform(), is_retained_selection_copy_key(), push_host_theme_update(), FnOnce (+5 more)
+### Community 187 - "action_table.rs"
+Cohesion: 0.09
+Nodes (31): action_spec(), ActionCategory, ActionId, ActionSpec, ActionState, ActionTarget, ClientShellState, context_action_state() (+23 more)
 
-### Community 190 - "Source"
-Cohesion: 0.12
-Nodes (30): Context, consumed_grouped_physical_generated_text_reprocesses_repeats(), ConsumedInputLease, Context, duplicate_physical_press_normalizes_for_forwarded_and_consumed_leases(), forwarded_semantic_generated_text_has_no_release_lease(), ForwardedInputLease, InputLease (+22 more)
-
-### Community 191 - "String"
-Cohesion: 0.11
-Nodes (40): collapse(), agent_list(), agent_message_summary(), arguments_summary(), call_line(), CodexInsight, content_kind_lists_match_the_normal_renderers(), content_text() (+32 more)
-
-### Community 192 - "ClientMachineFilesOverlay"
+### Community 188 - "ClientMachineFilesOverlay"
 Cohesion: 0.13
 Nodes (21): ClientMachineFilesOverlay, ClientMachineFilesView, ClientShellState, FileRequest, machine_files_empty_kind(), machine_files_geometry(), MachineFilesEmpty, MachineFilesPrompt (+13 more)
 
-### Community 193 - "render_machine_detail"
-Cohesion: 0.09
-Nodes (39): dashboard_layout(), render_dashboard(), Buffer, HashMap, Option, Rect, Vec, hint_width() (+31 more)
-
-### Community 194 - "gpu_fdinfo.rs"
+### Community 189 - "gpu_fdinfo.rs"
 Cohesion: 0.15
 Nodes (36): Clients, Engines, arriving_departing_and_reset_clients_do_not_add_utilization(), assert_percentage(), ClientKey, clients_sum_per_engine_then_device_uses_maximum_with_capacity(), device_utilization(), devices() (+28 more)
 
-### Community 195 - "DeliveryCache"
-Cohesion: 0.09
-Nodes (23): FileStore, DeliveryCache, HashSet, Fn, AcknowledgedSlot, asset(), eligibility_is_decoded_rgba_terminal_only(), eligible() (+15 more)
+### Community 190 - "Source"
+Cohesion: 0.13
+Nodes (30): Context, consumed_grouped_physical_generated_text_reprocesses_repeats(), ConsumedInputLease, Context, duplicate_physical_press_normalizes_for_forwarded_and_consumed_leases(), forwarded_semantic_generated_text_has_no_release_lease(), ForwardedInputLease, InputLease (+22 more)
 
-### Community 196 - "claude.rs"
-Cohesion: 0.11
-Nodes (39): clip_bytes(), a_finished_workflow_names_its_group_and_settles_its_children(), a_half_written_tail_line_is_never_consumed(), a_journal_started_agent_goes_stale_when_its_transcript_stops(), a_malformed_workflow_state_falls_back_to_the_directory_name(), a_missing_session_directory_degrades_to_an_empty_tree(), a_missing_sidecar_falls_back_to_the_transcript(), a_path_reference_must_name_the_transcript_file() (+31 more)
+### Community 191 - "surface.rs"
+Cohesion: 0.19
+Nodes (37): asset(), boot_scope_cleanup_does_not_wait_for_a_coherent_surface(), client_encodes_final_main_origin_upload_once_and_replays_placement(), client_hides_and_restores_without_reuploading_pixels(), deferred_client_reuses_resident_arc_and_orders_cleanup_before_upload(), direct_asset_trusted_after_scene_arrival_is_immediately_placeable(), encode_with_cover(), graphics_occlusion_render_scale_profile() (+29 more)
 
-### Community 197 - "processes.rs"
-Cohesion: 0.09
-Nodes (38): J, ProcessActions, DropProbe, Job, process_action_expiry_and_identity_mismatch_drop_without_authorizing(), process_action_idle_wait_releases_all_expired_leases_without_requests(), process_errors_follow_the_interface_language(), ProcessSampler (+30 more)
-
-### Community 198 - "retained_test_server_with_control"
-Cohesion: 0.10
-Nodes (44): retained_test_server(), retained_test_server_with_control(), decode_batch(), dispatch_view_pty(), duplicate_tabs_and_stale_layouts_do_not_change_live_geometry(), multi_view_render_scaling_profile(), multi_view_without_a_writer_defers_instead_of_disconnecting(), popup_pty_tracks_its_owning_view_after_resize() (+36 more)
-
-### Community 199 - "mod.rs"
-Cohesion: 0.07
-Nodes (39): aggregate_demand(), api_replies_serialize_events_and_the_latest_slot_coalesces(), endpoint_replies_forward_observation_events_as_boot_scoped_control_frames(), idle_monitor_loop_blocks_until_the_next_request_instead_of_ticking(), is_background_method(), metrics_event(), now_ms(), only_live_consumers_contribute_to_sampling_demand() (+31 more)
-
-### Community 200 - "TurnTracker"
+### Community 192 - "TurnTracker"
 Cohesion: 0.10
 Nodes (15): a_failed_turn_is_announced_once_until_the_next_turn(), a_failure_after_the_completion_notice_latches_silently(), a_released_or_replaced_agent_does_not_inherit_the_announced_failure(), a_stale_error_from_an_earlier_turn_never_latches(), FailureLatch, insight_error_latches_once_per_turn_and_only_after_the_turn_started(), replacement_agent_drops_the_previous_agents_failure(), AgentState (+7 more)
 
-### Community 201 - "gauge.rs"
-Cohesion: 0.11
-Nodes (41): ascii_glyphs_degrade_every_symbol(), cells_for(), empty_and_narrow_areas_never_panic(), empty_track_stays_visible_on_every_builtin_theme(), fills_by_ratio_with_threshold_colors(), gauge_color(), GaugeSpec, GaugeThresholds (+33 more)
+### Community 193 - "menu.rs"
+Cohesion: 0.12
+Nodes (37): anchor_is_clamped_into_bounds(), ascii_degrades_the_check_and_arrow(), badge_draws_an_accent_dot_before_the_shortcut_column(), Columns, description_column_drops_before_shortcut_and_preserves_cjk_hits(), first_letter_matches_case_insensitively_and_cycles(), highlighted_danger_items_keep_red_text_and_hover_bg_can_be_overridden(), keyboard_highlight_is_always_drawn_and_hit_testable() (+29 more)
 
-### Community 202 - "SnippetLibrary"
+### Community 194 - "AgentSessionRef"
+Cohesion: 0.11
+Nodes (37): absolute_test_path(), AgentResumePlan, AgentSessionRef, AgentSessionRefKind, argv(), codex_reported_transcripts_keep_resume_ids_and_reject_unpaired_paths(), codex_reverted_rollout_paths_keep_the_stable_thread_id(), codex_rollout_session_id() (+29 more)
+
+### Community 195 - "SystemMetricsSnapshot"
+Cohesion: 0.09
+Nodes (39): ClientViewSpec, ClientViewsSetParams, CpuCoreMetric, default_interval(), default_limit(), DiskMetric, MemoryMetric, NetworkMetric (+31 more)
+
+### Community 196 - "RgbColor"
+Cohesion: 0.09
+Nodes (41): CellBasicData, CellColor, CellStyle, CellWide, blank_cell_data(), cell_data_from_style(), cursor_color_query_color(), ghostty_blank_symbol_for_width() (+33 more)
+
+### Community 197 - "SnippetLibrary"
 Cohesion: 0.13
 Nodes (28): history_is_capped_at_the_most_recent_records(), library_rejects_newer_versions_and_control_characters(), library_roundtrip_preserves_snippets_and_history(), path(), recorded_history_is_sanitized_to_survive_validation(), render_snippet_command(), render_substitutes_variables_and_rejects_leftovers(), resolve_matches_id_then_unique_label() (+20 more)
 
-### Community 203 - "frozen_selection.rs"
+### Community 198 - "ClientShellEndpointError"
+Cohesion: 0.12
+Nodes (10): AgentActivityRead, ClientShellState, method_unsupported(), Instant, KeyCode, KeyModifiers, MouseEvent, Rect (+2 more)
+
+### Community 199 - "command_palette.rs"
+Cohesion: 0.13
+Nodes (34): BrowserView, catalog_geometry(), catalog_item(), catalog_menu(), catalog_page_step(), catalog_scroll(), CatalogGeometry, CatalogMenu (+26 more)
+
+### Community 200 - "frozen_selection.rs"
 Cohesion: 0.12
 Nodes (45): auto_copied_codex_selection(), cancelled_capture_only_releases_late_token(), capture_id(), captured(), changed_capture_after_release_requires_explicit_copy(), codex_click_waits_for_release_then_preserves_native_click(), codex_copy_menu_mouse_activation_preserves_selection_until_response(), codex_copy_menu_remains_usable_after_auto_copy_response() (+37 more)
 
-### Community 204 - "io.rs"
+### Community 201 - "State"
+Cohesion: 0.09
+Nodes (21): body(), ClientShellState, content_area(), Presentation, Action, ClientShellConfig, ClientState, Drag (+13 more)
+
+### Community 202 - "io.rs"
 Cohesion: 0.07
 Nodes (34): assert_retired_account_usage_was_only_ignored(), assert_retired_agent_keys_were_only_ignored(), config_load_recovers_from_a_mid_file_bom(), is_keys_table_name(), is_top_level_keys_assignment(), language_top_level_key_is_not_flagged_unknown(), live_reload_ignores_retired_account_usage_section_with_one_notice(), live_reload_ignores_retired_agent_keys_without_rejecting_the_ui_section() (+26 more)
 
-### Community 205 - "PtyIoActorHandle"
+### Community 203 - "ClientPaneInputEvent"
+Cohesion: 0.09
+Nodes (36): AttachScrollDirection, AttachScrollSource, ClientMouseGeometry, ClientPaneInputEvent, classify_input_event_size(), InputEventLimit, pane_input_event_limit(), client_pane_input_has_interaction() (+28 more)
+
+### Community 204 - "clipboard_images.rs"
+Cohesion: 0.09
+Nodes (40): bracketed_paste_payload(), client_remote_image_paste_key(), endpoint_accepts_local_images(), image_path_from_drop_text(), image_path_from_terminal_drop(), normalized_terminal_drop_text(), read_image_file(), read_image_file_from_client_events() (+32 more)
+
+### Community 205 - "gallery.rs"
+Cohesion: 0.11
+Nodes (42): agent_page_nodes(), AgentPageScene, answer_agent_page(), classic_state(), escape(), frame_html(), gallery_dir(), gallery_snapshot() (+34 more)
+
+### Community 206 - "theme.rs"
+Cohesion: 0.09
+Nodes (30): color_depth_wrapper_is_a_leaf_for_docs_walk(), ColorDepth, ColorDepthConfig, From, canonical_theme_name(), component_color_fields(), custom_theme_color_fields(), CustomThemeColors (+22 more)
+
+### Community 207 - "ServerClientStream"
+Cohesion: 0.10
+Nodes (31): FILE_PIPE_LOCAL_INFORMATION, OVERLAPPED, client_stream_control(), client_transport_process_cpu_time(), client_transport_process_sample(), ClientStreamControl, event(), finish_client_stream() (+23 more)
+
+### Community 208 - "PtyIoActorHandle"
 Cohesion: 0.12
-Nodes (26): actor_completes_empty_submission_parts(), actor_delays_enter_from_completed_prompt_write(), actor_delivers_fd_reads_to_callback(), actor_reads_output_while_input_is_backpressured(), actor_rejects_submission_after_io_loop_exits(), actor_wakes_idle_poll_for_handoff_control(), actor_wakes_idle_poll_for_user_input(), actor_with_socket_pair() (+18 more)
+Nodes (27): ActiveSubmission, actor_completes_empty_submission_parts(), actor_delays_enter_from_completed_prompt_write(), actor_delivers_fd_reads_to_callback(), actor_fails_buffered_submissions_on_exit(), actor_reads_output_while_input_is_backpressured(), actor_reports_peer_closure_during_submission_delay(), actor_wakes_idle_poll_for_handoff_control() (+19 more)
 
-### Community 206 - "AgentInfo"
+### Community 209 - "AgentInfo"
 Cohesion: 0.15
-Nodes (44): AgentInfo, ErrorResponse, agent_from_response(), agent_get(), agent_get_for_prompt(), agent_prompt_success(), agent_wait_identity_matches(), agent_wait_matches() (+36 more)
+Nodes (43): AgentInfo, agent_from_response(), agent_get(), agent_get_for_prompt(), agent_prompt_success(), agent_wait_identity_matches(), agent_wait_matches(), agent_wait_not_running() (+35 more)
 
-### Community 207 - "keybindings_settings.rs"
-Cohesion: 0.07
-Nodes (40): assert_hits_on_drawn_rows(), assert_left_inset(), configured_prefix_is_client_owned_and_renders_its_bar(), custom_binding_invokes_only_the_endpoint_manifest_id(), custom_binding_missing_from_endpoint_manifest_is_not_forwarded(), endpoint_notice_dedupe_resets_for_a_new_server_boot(), endpoint_timeout_is_a_deduplicated_server_notice(), find_text() (+32 more)
+### Community 210 - "CustomCommandKeybind"
+Cohesion: 0.15
+Nodes (26): CommandInvokeParams, Option, String, App, binding(), command_ids_do_not_alias_across_endpoint_restarts(), EndpointCommand, EndpointCommandRegistry (+18 more)
 
-### Community 208 - "projection.rs"
+### Community 211 - "bindings.rs"
+Cohesion: 0.08
+Nodes (40): agent_args(), AgentKindCodec, Attach, clear_name(), command(), Explain, from_matches(), keys() (+32 more)
+
+### Community 212 - "projection.rs"
 Cohesion: 0.15
 Nodes (40): args(), command(), declared_option(), group_commands(), group_commands_are_derived_from_declarations(), group_request(), is_verbatim(), Label (+32 more)
 
-### Community 209 - "tests.rs"
+### Community 213 - "tests.rs"
 Cohesion: 0.10
 Nodes (43): now_ms(), acknowledgement_without_a_revision_change_refreshes_inspector_and_timeline(), arrange_mode_cycles_only_the_current_projection_without_destroying_hidden_panels(), cjk_wrapping_scroll_keys_and_mouse_are_bounded_and_cached(), click_hit(), closing_inspector_retires_the_pending_read_immediately(), compact_switcher_does_not_offer_an_automatically_hidden_inspector(), identical_full_tree_follow_response_does_not_repaint() (+35 more)
 
-### Community 210 - "command_palette.rs"
-Cohesion: 0.13
-Nodes (32): BrowserView, catalog_geometry(), catalog_item(), catalog_menu(), catalog_scroll(), CatalogGeometry, CatalogMenu, ClientCommandPaletteOverlay (+24 more)
-
-### Community 211 - "SemanticNotification"
-Cohesion: 0.08
-Nodes (20): ClientFeedbackToggles, ClientSpinnerStyle, ClientToastLevel, Color, Config, Default, Duration, Self (+12 more)
-
-### Community 212 - "import.rs"
+### Community 214 - "import.rs"
 Cohesion: 0.12
 Nodes (32): ClientImportOutcome, ClientImportResultRow, ClientImportStep, ClientMachineImportView, ClientShellState, discover_line(), discover_line_count(), discover_max_scroll() (+24 more)
 
-### Community 213 - "TextEditor"
+### Community 215 - "keybindings_settings.rs"
+Cohesion: 0.07
+Nodes (39): assert_hits_on_drawn_rows(), assert_left_inset(), configured_prefix_is_client_owned_and_renders_its_bar(), custom_binding_invokes_only_the_endpoint_manifest_id(), custom_binding_missing_from_endpoint_manifest_is_not_forwarded(), endpoint_timeout_is_a_deduplicated_server_notice(), find_text(), generic_endpoint_failures_and_control_errors_are_visible() (+31 more)
+
+### Community 216 - "mouse_selection.rs"
+Cohesion: 0.10
+Nodes (40): client_double_click_selects_word_and_copies_only_after_release(), command_palette_hover_does_not_move_the_keyboard_selection(), context_menu_hover_is_separate_from_the_keyboard_highlight(), context_menu_keyboard_and_outside_click_are_client_owned(), ctrl_click_routes_link_activation_through_endpoint_then_client_host(), ctrl_click_without_a_link_replays_the_original_gesture(), disabled_mouse_chrome_keeps_tab_wheel_but_removes_split_drag_hits(), double_click_drag_autoscroll_keeps_absolute_word_anchor() (+32 more)
+
+### Community 217 - "TextEditor"
 Cohesion: 0.10
 Nodes (25): accepting_trimmed_branch_preserves_cursor_and_local_kill_buffer(), char_index_cursor_round_trips_and_snaps_to_graphemes(), enter_and_escape_ignore_generated_text(), every_binding_edits_at_the_cursor(), insertion_normalizes_controls_and_respects_host_text(), key(), render(), Buffer (+17 more)
 
-### Community 214 - "ClientWriter"
-Cohesion: 0.07
-Nodes (15): ClientStreamControl, ClientCloseState, ClientTransportHandle, ClientWriter, ClientWriterCredits, ClientWriterQueueState, HandshakeReader, HandshakeReader<'a> (+7 more)
-
-### Community 215 - "ssh_agent.rs"
+### Community 218 - "ssh_agent.rs"
 Cohesion: 0.13
 Nodes (34): Fingerprint, accepted_connections(), agent_path_for(), apply_pane_env(), closed_agent_listener_does_not_block_a_live_replacement(), failed_publication_is_retried_by_remaining_leases(), fingerprint(), live_socket() (+26 more)
 
-### Community 216 - "launchd_spawn.rs"
+### Community 219 - "launchd_spawn.rs"
 Cohesion: 0.12
 Nodes (38): mode_t, a_detached_child_stays_in_the_callers_coalition(), current_umask(), detach_helper(), detached_server_outlives_its_launcher_job(), gui_domain_available(), job_is_running(), job_plist() (+30 more)
 
-### Community 217 - ".spawn"
-Cohesion: 0.09
-Nodes (26): agent_killed_while_suspended_reports_its_exit(), agent_only_clears_after_confirmation_misses(), AgentDetectionPresence, AgentProcessLiveness, apply_foreground_shell_agent_action(), FakeProcesses, focus_events_are_forwarded_when_enabled(), focus_events_are_suppressed_when_disabled() (+18 more)
-
-### Community 218 - ".push"
+### Community 220 - "RawInputByteFramer"
 Cohesion: 0.07
-Nodes (43): assert_fixture_extracts_whole_events(), assert_raw_key(), bare_csi_intro_reassembles_when_its_parameters_arrive_one_window_late(), byte_framer_does_not_hold_non_osc_default_color_text(), chunked_alt_utf8_waits_for_continuation_byte_after_escape(), chunked_bracketed_paste_waits_for_terminator(), chunked_cjk_utf8_waits_for_all_continuation_bytes(), chunked_four_byte_utf8_waits_for_all_continuation_bytes() (+35 more)
+Nodes (14): continues_escape_sequence(), discard_complete_orphaned_csi_tail(), FlushedCsiHead, incomplete_csi_tail_discard_is_bounded_by_time_and_by_byte_budget(), is_escape_key_prefix(), orphaned_csi_tail_recovery_expires_so_later_typing_is_not_eaten(), plausible_host_color_tail_byte(), RawInputByteFramer (+6 more)
 
-### Community 219 - "askpass.rs"
-Cohesion: 0.11
-Nodes (34): askpass_environment_points_ssh_at_the_channel(), askpass_roundtrip(), channel_delivers_prompts_and_returns_answers(), declined_prompts_and_missing_consumers_fail_the_helper(), dropping_the_channel_with_an_unanswered_prompt_is_bounded(), frames_round_trip_and_enforce_limits(), helper_entry_prints_the_answer_for_ssh(), read_frame() (+26 more)
+### Community 221 - "saved.rs"
+Cohesion: 0.10
+Nodes (33): Arc, AtomicBool, Drop, JoinHandle, SshAskpassChannel, bridge_paths_use_profile_identity_not_target_or_session(), classification_survives_wrapping(), classify_saved_ssh_error() (+25 more)
 
-### Community 220 - "ClientConnection"
-Cohesion: 0.09
-Nodes (21): RenderTarget, client_shell_key_press_id(), ClientConnection, ClientConnectionMode, ClientShellHeldInput, ClientShellInputTarget, ClientShellLocation, ClientShellPressId (+13 more)
+### Community 222 - "render_scale_benchmark.rs"
+Cohesion: 0.13
+Nodes (38): active_panes(), dirty_scroll_collection_profile(), history(), PipelineStats, print_profiles(), print_projection_restamp_profiles(), print_same_tab_fanout_profiles(), print_snapshot_encoding_profiles() (+30 more)
 
-### Community 221 - "common.rs"
-Cohesion: 0.08
-Nodes (31): body(), ClientShellSurfaceSetParams, ClientWindowTitleReason, EmptyParams, metadata_token_patch_schema(), metadata_token_values_schema(), NotificationShowSound, PaneAgentState (+23 more)
+### Community 223 - "PopupSize"
+Cohesion: 0.07
+Nodes (31): PopupPaneState, client_popup_size(), CommandKeybindConfig, CommandKeybindType, Default, JsonSchema, allows_full_terminal_outer_size(), centered_rect() (+23 more)
 
-### Community 222 - "title_bar.rs"
+### Community 224 - "SavedSshEndpoint"
+Cohesion: 0.14
+Nodes (37): SavedSshEndpoint, preview_lines(), append_reviewed_key(), effective_host_key_target(), effective_host_key_target_uses_resolved_port_alias_and_path(), EffectiveHostKeyTarget, fingerprint_for_key_blob(), fingerprint_matches_openssh_sha256_format() (+29 more)
+
+### Community 225 - "title_bar.rs"
 Cohesion: 0.12
 Nodes (39): breadcrumb_spans(), breadcrumb_styles_follow_the_refined_reference(), BreadcrumbInput, BreadcrumbModel, BreadcrumbModel<'a>, chip_label(), chips(), chips_follow_rollup_priority_and_skip_zero_and_idle() (+31 more)
 
-### Community 223 - "preferences.rs"
+### Community 226 - "preferences.rs"
 Cohesion: 0.10
 Nodes (36): InspectorVisibility, capture_logs(), ClientChromePreferences, ClientRemoteCollapsedGroups, concurrent_stores_leave_complete_preferences(), dropped_lenient_values_are_logged_with_key_and_value_type_only(), endpoint_paths_are_stable_and_distinct(), json_type_name() (+28 more)
 
-### Community 224 - "State"
-Cohesion: 0.09
-Nodes (20): body(), ClientShellState, content_area(), Presentation, Action, ClientShellConfig, ClientState, Drag (+12 more)
-
-### Community 225 - "bootstrap.rs"
+### Community 227 - "bootstrap.rs"
 Cohesion: 0.09
 Nodes (35): Deallocate, GetRoot, LookupUser, mach_port_t, adoption_transfers_user_right_and_releases_old_and_root_rights(), BootstrapApi, Calls, check() (+27 more)
 
-### Community 226 - "tail.rs"
+### Community 228 - "tail.rs"
 Cohesion: 0.10
 Nodes (31): DoubleEndedIterator, a_window_inside_the_file_drops_only_the_cut_line(), blank_lines_and_an_unfinished_last_line_are_handled(), cached(), CacheEntry, Fingerprint, lines(), Default (+23 more)
 
-### Community 227 - "ServerClientStream"
-Cohesion: 0.11
-Nodes (30): FILE_PIPE_LOCAL_INFORMATION, OVERLAPPED, client_stream_control(), client_transport_process_cpu_time(), client_transport_process_sample(), ClientStreamControl, event(), finish_client_stream() (+22 more)
-
-### Community 228 - "plugin_registry.rs"
+### Community 229 - "plugin_registry.rs"
 Cohesion: 0.13
 Nodes (39): corrupt_file_returns_empty_without_panic(), failed_save_preserves_previous_registry(), load(), load_from_path(), load_from_path_strict(), missing_file_returns_empty(), read(), registry_lock_path() (+31 more)
 
-### Community 229 - "transport_lifecycle.rs"
+### Community 230 - "transport_lifecycle.rs"
 Cohesion: 0.13
 Nodes (37): Pin, accepted_input_precedes_full_channel_detach_and_releases_held_key(), accepted_input_precedes_queued_detach_and_releases_held_key(), accepted_input_precedes_writer_failure_disconnect(), accepted_input_survives_failure_before_connected_dispatch(), EndpointTransport, fill_other_client_events(), input_before_disconnect() (+29 more)
 
-### Community 230 - "Option"
-Cohesion: 0.15
-Nodes (37): agent_id_from_file_name(), build_tree(), clip(), collect_subagent_files(), ensure_group(), find_subagent_file(), JournalRecord, JournalState (+29 more)
-
 ### Community 231 - "attention.rs"
 Cohesion: 0.13
-Nodes (33): a_failure_announced_at_blocked_keeps_the_rest_of_the_turn_silent(), a_failure_reported_before_idle_notifies_failed_once_per_turn(), agent_exiting_while_working_notifies_failed_instead_of_finished(), agent_info_exposes_attention_and_turn_timing(), an_agent_exiting_while_working_notifies_failed_once(), api_response(), assert_notified_once(), attention_report() (+25 more)
+Nodes (33): SemanticNotificationKind, a_failure_announced_at_blocked_keeps_the_rest_of_the_turn_silent(), a_failure_reported_before_idle_notifies_failed_once_per_turn(), agent_exiting_while_working_notifies_failed_instead_of_finished(), agent_info_exposes_attention_and_turn_timing(), an_agent_exiting_while_working_notifies_failed_once(), api_response(), assert_notified_once() (+25 more)
 
-### Community 232 - "layouts.rs"
+### Community 232 - "gpu.rs"
+Cohesion: 0.12
+Nodes (35): GpuMetric, active_sysfs_metrics_keep_units_and_missing_usage_warms_fdinfo(), bounded_output(), cached_model_survives_runtime_suspend(), card(), collector(), default_runner_uses_search_path_locale_and_optional_pci_filter(), empty_output_backs_off_then_success_clears_failure() (+27 more)
+
+### Community 233 - "layouts.rs"
 Cohesion: 0.13
 Nodes (28): LayoutNode, Box, App, app_with_workspace(), final_tile_layout(), first_layout_leaf(), layout_apply_new_tab_follows_cached_focused_pane_cwd_without_runtime(), layout_apply_rejects_invalid_deep_leaf_without_creating_tab() (+20 more)
 
-### Community 233 - "table.rs"
+### Community 234 - "table.rs"
 Cohesion: 0.12
 Nodes (38): C, ascii_sort_marks_and_left_aligned_marks_follow_the_title(), base_width(), Column, ColumnWidth, equal_priorities_drop_the_rightmost_and_min_columns_share_the_rest(), fill_columns_with_a_minimum_make_lower_priority_columns_drop_first(), fill_weight_of() (+30 more)
 
-### Community 234 - "opencode_config.rs"
+### Community 235 - "opencode_config.rs"
 Cohesion: 0.15
 Nodes (41): CstRootNode, add_and_remove_tui_plugin_preserves_jsonc_config(), add_cli_plugin(), add_plugin(), add_tui_plugin(), cli_migration_pending(), cli_plugin_is_configured(), cli_registration_creates_missing_config_when_no_migration_pending() (+33 more)
 
-### Community 235 - "linux.rs"
+### Community 236 - "cursor.rs"
+Cohesion: 0.13
+Nodes (31): assert_decscusr_matches_bytewise(), cursor(), cursor_settle_adopts_position_change_after_quiet_window(), cursor_settle_caps_continuous_position_changes_from_first_pending_time(), cursor_settle_caps_hold_even_without_another_observation(), cursor_settle_does_not_publish_a_jump_before_the_max_hold(), cursor_settle_hides_after_deadline_and_waits_to_reveal(), cursor_settle_hides_immediately_outside_stationary_caret() (+23 more)
+
+### Community 237 - "Vec"
 Cohesion: 0.07
-Nodes (21): detect_running_inside_wsl(), foreground_members_degrade_to_the_direct_group_leader(), foreground_members_follow_the_pane_tree_and_filter_by_process_group(), foreground_members_observe_new_children_without_a_snapshot_cache(), foreground_process_group_members_with(), foreground_tree_traversal_is_bounded_by_the_scan_limit(), foreground_tree_traversal_reserves_enumeration_budget_per_root(), foreground_tree_traversal_shares_the_scan_limit_between_roots() (+13 more)
+Nodes (41): bounded_child_list_read_drops_a_token_cut_off_by_the_byte_budget(), bounded_child_list_read_keeps_complete_tokens_at_eof(), bounded_child_list_read_stops_at_the_pid_budget(), child_groups_foreground_group_fails_closed_at_the_scan_limit(), child_groups_foreground_group_picks_the_newest_job(), child_groups_foreground_group_returns_to_the_shell_group(), child_groups_foreground_group_skips_the_shell_group(), child_groups_foreground_process_group_with() (+33 more)
 
-### Community 236 - "native_graphics.rs"
-Cohesion: 0.15
-Nodes (41): SurfaceGraphicsScene, ack_native(), add_client(), assert_native_disabled(), assert_retirement(), assert_source_upload_and_ack(), commit_scene(), delta_encoded_inline_commit_updates_next_native_bank() (+33 more)
+### Community 238 - "PtyIoActorRunner"
+Cohesion: 0.10
+Nodes (23): ActorState, PendingWrite, PtyIoActorConfig, PtyIoActorRunner, PtyReadResult, PtyResize, PtyResizeRequest, resize_writes_terminal_responses_after_applying_resize() (+15 more)
 
-### Community 237 - "agent.rs"
+### Community 239 - "common.rs"
+Cohesion: 0.08
+Nodes (29): body(), ClientShellSurfaceSetParams, ClientWindowTitleReason, EmptyParams, metadata_token_patch_schema(), metadata_token_values_schema(), NotificationShowSound, position() (+21 more)
+
+### Community 240 - "agent.rs"
 Cohesion: 0.12
 Nodes (40): agent_attach(), agent_explain(), agent_focus(), agent_get(), agent_get_request(), agent_list(), agent_name_lost_error(), agent_prompt() (+32 more)
 
-### Community 238 - "endpoint_agent_state.rs"
-Cohesion: 0.12
-Nodes (28): agent(), assert_idle_sequence(), clients_acknowledge_the_same_endpoint_completion_independently(), coherent_presented_surface_acknowledges_completion(), completion_guard_companion_is_scoped_to_boot_revision_and_connection(), completion_guard_distinguishes_coalesced_work_from_rebind(), completion_guard_initial_unknown_to_idle_does_not_project_done(), completion_guard_new_boot_baselines_existing_completions() (+20 more)
+### Community 241 - "toast.rs"
+Cohesion: 0.10
+Nodes (34): Action, ActionKind, age_label(), Anchor, cx(), focus_emphasis_keeps_the_level_border(), level_colors_the_border_and_icon_and_focus_hit_matches_the_paint(), measure() (+26 more)
 
-### Community 239 - "ClientShellState"
+### Community 242 - "ClientShellState"
 Cohesion: 0.14
 Nodes (10): ClientShellState, Duration, Instant, KeyModifiers, Method, MouseEvent, Option, Result (+2 more)
 
-### Community 240 - "kimi_audit_read"
+### Community 243 - "feedback.rs"
+Cohesion: 0.10
+Nodes (35): chrome_hover_bounds_short_circuit_pane_pointer_without_losing_chrome_hits(), chrome_hover_marks_the_tab_under_the_pointer(), chrome_hover_marks_workspace_rows(), chrome_hover_stays_off_when_hover_effects_are_disabled(), chrome_state(), components_status_input(), copy_feedback_stays_in_the_safe_area_and_avoids_toasts(), different_toast_anchors_do_not_overlap_in_narrow_layouts() (+27 more)
+
+### Community 244 - "kimi_audit_read"
 Cohesion: 0.10
 Nodes (38): assert_kimi_audit_config_rejected(), assert_kimi_audit_marker_rejection(), audit_p0_kimi_exclusive_probe_rejects_persistent_occupancy_and_other_errors(), audit_p0_kimi_exclusive_probe_waits_for_shared_reader_release(), audit_p0_kimi_install_rejects_conflicting_hook_shapes_before_assets(), audit_p0_kimi_install_rejects_damaged_markers_before_any_write(), audit_p0_kimi_snapshot_includes_persistent_tmp_in_comparison(), audit_p0_kimi_snapshot_lock_fixture_releases_during_unwind() (+30 more)
 
-### Community 241 - "cursor.rs"
-Cohesion: 0.13
-Nodes (30): assert_decscusr_matches_bytewise(), cursor(), cursor_settle_adopts_position_change_after_quiet_window(), cursor_settle_caps_continuous_position_changes_from_first_pending_time(), cursor_settle_caps_hold_even_without_another_observation(), cursor_settle_does_not_publish_a_jump_before_the_max_hold(), cursor_settle_hides_after_deadline_and_waits_to_reveal(), cursor_settle_hides_immediately_outside_stationary_caret() (+22 more)
-
-### Community 242 - "gpu.rs"
+### Community 245 - "askpass.rs"
 Cohesion: 0.12
-Nodes (34): active_sysfs_metrics_keep_units_and_missing_usage_warms_fdinfo(), bounded_output(), cached_model_survives_runtime_suspend(), card(), collector(), default_runner_uses_search_path_locale_and_optional_pci_filter(), empty_output_backs_off_then_success_clears_failure(), failures_back_off_and_keep_sysfs_cards() (+26 more)
+Nodes (31): askpass_environment_points_ssh_at_the_channel(), askpass_roundtrip(), AskpassEnvironment, channel_delivers_prompts_and_returns_answers(), declined_prompts_and_missing_consumers_fail_the_helper(), dropping_the_channel_with_an_unanswered_prompt_is_bounded(), frames_round_trip_and_enforce_limits(), helper_entry_prints_the_answer_for_ssh() (+23 more)
 
-### Community 243 - ".flush_timeout"
-Cohesion: 0.06
-Nodes (27): assert_escape_press_then_release(), captured_sgr_mouse_tail_after_second_idle_flush_is_discarded(), could_continue_as_mouse_report(), csi_and_ss3_introducers_without_expected_reply_are_alt_keys(), flushes_lone_escape_after_timeout(), is_alt_key_introducer(), is_escape_key_prefix(), is_incomplete_host_default_color_prefix() (+19 more)
-
-### Community 244 - "known_hosts.rs"
-Cohesion: 0.15
-Nodes (36): HostKeyFingerprint, append_reviewed_key(), effective_host_key_target(), effective_host_key_target_uses_resolved_port_alias_and_path(), EffectiveHostKeyTarget, fingerprint_for_key_blob(), fingerprint_matches_openssh_sha256_format(), host_key_patterns() (+28 more)
-
-### Community 245 - "Option"
-Cohesion: 0.13
-Nodes (39): build_tree(), day_dirs(), find_rollout(), floor_char_boundary(), is_plausible_thread_id(), label_for(), lifecycle_from_tail(), node_from_meta() (+31 more)
-
-### Community 246 - "render_scale_benchmark.rs"
-Cohesion: 0.15
-Nodes (35): active_panes(), dirty_scroll_collection_profile(), history(), PipelineStats, print_profiles(), print_projection_restamp_profiles(), print_same_tab_fanout_profiles(), print_snapshot_encoding_profiles() (+27 more)
-
-### Community 247 - "bindings.rs"
-Cohesion: 0.10
-Nodes (37): attention_kind(), attention_option(), clear_token(), command(), destination(), environment(), finite(), input_target() (+29 more)
-
-### Community 248 - "ClientShellState"
+### Community 246 - "status.rs"
 Cohesion: 0.12
-Nodes (16): broadcast_machine_candidates(), broadcast_pane_candidates(), broadcast_target_rows(), BroadcastButton, BroadcastTargetRow, ClientBroadcastOverlay, ClientBroadcastView, ClientShellState (+8 more)
+Nodes (36): RepoContext, deps_current(), branch_only_refresh_skips_ahead_behind_cache_work(), cached_repo_identity_clears_when_head_disappears(), expired_non_git_cache_detects_repository_created_in_place(), fingerprint(), git_ahead_behind_between(), git_status_cache_key() (+28 more)
 
-### Community 249 - "ClientMachineForm"
-Cohesion: 0.14
-Nodes (7): ClientMachineForm, ClientShellState, MachineField, QuickStatus, KeyCode, KeyModifiers, Rect
+### Community 247 - "Option"
+Cohesion: 0.15
+Nodes (35): agent_id_from_file_name(), an_exhausted_scan_budget_falls_back_to_the_head_and_file_time(), build_tree(), clip(), collect_subagent_files(), ensure_group(), find_subagent_file(), JournalRecord (+27 more)
 
-### Community 250 - "config_edit.rs"
+### Community 248 - "native_graphics.rs"
+Cohesion: 0.15
+Nodes (40): ack_native(), add_client(), assert_native_disabled(), assert_retirement(), assert_source_upload_and_ack(), commit_scene(), delta_encoded_inline_commit_updates_next_native_bank(), disconnect_unlinks_only_that_clients_native_export() (+32 more)
+
+### Community 249 - "schema.rs"
+Cohesion: 0.07
+Nodes (21): Request, Method, String, App, invalid_view_does_not_replace_active_view(), Option, String, set_and_source_guarded_clear_replace_transient_view() (+13 more)
+
+### Community 250 - "endpoint_agent_state.rs"
+Cohesion: 0.12
+Nodes (27): assert_idle_sequence(), clients_acknowledge_the_same_endpoint_completion_independently(), coherent_presented_surface_acknowledges_completion(), completion_guard_companion_is_scoped_to_boot_revision_and_connection(), completion_guard_distinguishes_coalesced_work_from_rebind(), completion_guard_initial_unknown_to_idle_does_not_project_done(), completion_guard_new_boot_baselines_existing_completions(), completion_guard_new_idle_agent_is_not_completed_work() (+19 more)
+
+### Community 251 - "config_edit.rs"
 Cohesion: 0.16
 Nodes (38): DocumentMut, Formatted, ImDocument, build_codex_config_with_hooks(), build_kimi_config_with_hooks(), codex_deprecated_flag_range(), ensure_command_hook(), ensure_hooks_object() (+30 more)
 
-### Community 251 - "endpoint.rs"
+### Community 252 - ".spawn"
+Cohesion: 0.11
+Nodes (24): agent_killed_while_suspended_reports_its_exit(), agent_only_clears_after_confirmation_misses(), AgentDetectionPresence, AgentProcessLiveness, apply_foreground_shell_agent_action(), FakeProcesses, focus_events_are_forwarded_when_enabled(), focus_events_are_suppressed_when_disabled() (+16 more)
+
+### Community 253 - "Option"
+Cohesion: 0.09
+Nodes (28): HostPowerMonitor, HostShutdownIntent, HostShutdownIntentCell, HostShutdownMonitor, InputSourceRestore, legacy_statusline_agent(), monitor_host_power(), monitor_host_shutdown() (+20 more)
+
+### Community 254 - "endpoint.rs"
 Cohesion: 0.09
 Nodes (29): agent_completions_message(), agent_view_projection_is_an_optional_revision_bound_control(), agent_view_projection_message(), compatible_server_advertises_endpoint_lifecycle_capabilities(), EndpointAgentViewProjection, EndpointClientHello, EndpointHandshakeError, EndpointServerWelcome (+21 more)
 
-### Community 252 - "saved.rs"
+### Community 255 - "String"
 Cohesion: 0.11
-Nodes (29): SshAuthApproval, bridge_paths_use_profile_identity_not_target_or_session(), classification_survives_wrapping(), classify_saved_ssh_error(), connect_saved_ssh(), connect_saved_ssh_authenticated(), connect_saved_ssh_interactive(), connect_saved_ssh_with() (+21 more)
+Nodes (29): cached_posix_api_command_forwards_payload_and_exit_status(), cached_posix_api_command_survives_a_double_quoting_login_shell(), cached_remote_api_command(), cached_windows_api_command_checks_before_starting_the_stream(), decode_windows_command(), managed_ssh_config_contents(), posix_base64_command(), remote_install_commit_script() (+21 more)
 
-### Community 253 - "agents.rs"
-Cohesion: 0.11
-Nodes (34): AgentViewContext, compare_entries(), compare_optional_values(), EvalValue, field_value(), is_id_field(), matches_filter(), operand_value() (+26 more)
-
-### Community 254 - "EventHub"
+### Community 256 - "EventHub"
 Cohesion: 0.11
 Nodes (22): event_hub_keeps_the_newest_events_and_drops_the_oldest(), EventHistoryError, EventHub, EventHubState, events_after_only_returns_events_newer_than_the_cursor(), retained_after_ignores_evictions_of_other_event_kinds(), retained_after_reports_no_gap_while_everything_is_still_retained(), retained_after_reports_the_gap_left_by_the_ring_buffer() (+14 more)
 
-### Community 255 - "status.rs"
+### Community 257 - "status.rs"
 Cohesion: 0.15
 Nodes (38): client_status_json(), ClientStatusJson, compatibility_label(), current_exe_label(), endpoint_compatibility_label(), FullStatusJson, option_label(), parse_status_args() (+30 more)
 
-### Community 256 - "status_bar.rs"
+### Community 258 - "EndpointSupervisors"
+Cohesion: 0.10
+Nodes (22): accept_completion(), AttemptCompletion, EndpointSupervisorEvent, EndpointSupervisors, lock_forwards(), PreparedEndpointConnection, ReconnectState, retry_delay() (+14 more)
+
+### Community 259 - "ClientShellConfig"
+Cohesion: 0.11
+Nodes (18): client_shell_keybinding_source(), ClientShellConfig, ClientShellState, initial_surface_size_uses_persisted_endpoint_chrome(), live_reload_applies_client_owned_sections(), live_reload_preserves_invalid_client_owned_sections(), merged_config_diagnostic(), Config (+10 more)
+
+### Community 260 - "ClientShellState"
+Cohesion: 0.12
+Nodes (15): broadcast_machine_candidates(), broadcast_pane_candidates(), broadcast_target_rows(), BroadcastTargetRow, ClientBroadcastOverlay, ClientBroadcastView, ClientShellState, endpoint_label_for() (+7 more)
+
+### Community 261 - "AgentBucket"
+Cohesion: 0.07
+Nodes (20): body_lines(), bucket(), message_wrap_is_bounded_and_cjk_safe(), String, Vec, bucket_label(), agent_attention(), AgentAttentionCache (+12 more)
+
+### Community 262 - "status_bar.rs"
 Cohesion: 0.15
 Nodes (33): broadcast_badge(), chip_style(), Hint, Hint<'a>, hints_report_hit_rects_and_errors_paint_red(), Middle, middle_layout(), mode_chip_tones_separate_terminal_from_the_loud_modes() (+25 more)
 
-### Community 257 - "ClientShellConfig"
-Cohesion: 0.11
-Nodes (17): ClientShellConfig, ClientShellState, initial_surface_size_uses_persisted_endpoint_chrome(), live_reload_applies_client_owned_sections(), live_reload_preserves_invalid_client_owned_sections(), merged_config_diagnostic(), Config, HashSet (+9 more)
-
-### Community 258 - "retained_surface.rs"
+### Community 263 - "retained_surface.rs"
 Cohesion: 0.12
 Nodes (32): PaneSurfacePane, Rect, SurfaceRect, cell(), changed_rows(), CollectedPanePatch, frame_hyperlink_index(), has_synchronized_pane() (+24 more)
 
-### Community 259 - "codex.rs"
-Cohesion: 0.14
-Nodes (33): a_pending_request_user_input_is_the_pending_question(), a_relocated_codex_home_is_followed_instead_of_home(), a_subagent_row_names_both_its_nickname_and_its_task(), active_and_plain_rollouts_win_duplicate_archived_compressed_copies(), archived_compressed_rollouts_discover_and_page_without_writing_the_library(), Codex, codex_reported_transcripts_locate_a_pane_specific_session_library(), compressed_pages_match_plain_and_storage_transition_keeps_offsets() (+25 more)
-
-### Community 260 - "schema.rs"
-Cohesion: 0.06
-Nodes (21): Request, Method, String, plugin_pane_protected_env_key(), agent_projection_rename_and_local_adapters(), params(), parse(), Result (+13 more)
-
-### Community 261 - "agent_resume.rs"
+### Community 264 - "agent_resume.rs"
 Cohesion: 0.13
 Nodes (28): App, codex_resume_shell_command_uses_launcher_without_changing_plan(), derived_pending_agent_resume_pane_infos(), failed_deferred_restore_keeps_session_reference_without_retrying_elsewhere(), long_running_test_argv(), marker_resume_test_argv(), pending_agent_resume_can_launch_after_theme_wait_expires(), pending_agent_resume_launches_hidden_panes_with_current_terminal_area() (+20 more)
 
-### Community 262 - "App"
-Cohesion: 0.14
-Nodes (15): pane_agent_status(), AgentState, tab_attention_priority(), App, launch_cwd_for_terminal(), resolve_new_terminal_cwd(), HashMap, Option (+7 more)
-
-### Community 263 - "manifest.rs"
+### Community 265 - "manifest.rs"
 Cohesion: 0.20
 Nodes (36): current_platform(), ensure_platform_supported(), non_empty_trimmed(), normalize_action_id(), normalize_command(), normalize_identifier(), normalize_local_identifier(), normalize_manifest_action() (+28 more)
 
-### Community 264 - "build_info.rs"
-Cohesion: 0.11
-Nodes (32): build_id(), channel(), format_version(), is_preview(), non_empty(), package_identity(), package_manager(), package_version_binds_manager_and_full_commit_independently_of_channel() (+24 more)
+### Community 266 - "ComponentStyles"
+Cohesion: 0.13
+Nodes (31): ComponentStyles, list_row_bg(), Color, entry_rows(), indicator_previews_paint_every_style_with_bucket_colors(), installed_count(), integration_lines(), integration_lines_trim_messages_before_wrapping() (+23 more)
 
-### Community 265 - "terminal_sessions.rs"
-Cohesion: 0.10
-Nodes (33): Result, write_attach_semantic_action(), Result, write_remote_image_to_server(), connect_terminal_session_stream(), Option, Result, String (+25 more)
-
-### Community 266 - "scenes.rs"
+### Community 267 - "scenes.rs"
 Cohesion: 0.21
 Nodes (35): emptying_the_scene_list_keeps_the_scroll_position(), frame_text(), held_enter_does_not_confirm_scene_restore(), key(), leaving_a_scene_subview_clears_the_click_trail(), palette_offers_scene_actions(), plain_enter_presses_never_confirm_scene_restore(), profile() (+27 more)
 
-### Community 267 - "config.rs"
-Cohesion: 0.19
-Nodes (35): ConfigCtx, FileDep, BranchConfig, collect_remote_urls(), ConfigReader, ConfigSection, extract_config_section(), FetchRefspecMatch (+27 more)
+### Community 268 - "Tab"
+Cohesion: 0.20
+Nodes (17): DetachedPane, PaneLaunchEnv, MovedPane, NewPane, Arc, Direction, HashMap, Notify (+9 more)
 
-### Community 268 - "targets.rs"
+### Community 269 - "targets.rs"
 Cohesion: 0.14
 Nodes (32): check_config_target(), check_config_targets(), reject_hard_links(), Replacement, resolve_target(), AsRef, Drop, Path (+24 more)
 
-### Community 269 - ".new"
+### Community 270 - "input.rs"
 Cohesion: 0.10
-Nodes (34): bridge_cancellation_releases_stalled_preamble_upload_and_download(), bridge_child(), bridge_drains_final_output_while_descendant_retains_pipes(), bridge_stream_delivers_large_frame_before_delayed_reply(), bridge_upload_cancel_before_wait_preserves_download(), bridge_upload_cancel_between_stop_check_and_wait_is_retained(), bridge_upload_cancellation_for_test(), bridge_upload_drains_input_before_peer_eof() (+26 more)
+Nodes (30): cell_center_px(), configure_key_encoder(), ghostty_key_event_from_terminal_key(), ghostty_key_from_char(), ghostty_key_from_key_code(), ghostty_mods_from_key_modifiers(), ghostty_mouse_encoder_for_terminal(), ghostty_mouse_event_from_button_kind() (+22 more)
 
-### Community 270 - "release_info_from_manifest"
+### Community 271 - "release_info_from_manifest"
 Cohesion: 0.09
 Nodes (33): check_homebrew_latest(), current_version_parses(), handle_manifest_announcement(), homebrew_formula_update_ignores_versions_that_are_not_newer(), homebrew_formula_update_uses_formula_stable_not_manifest_latest(), homebrew_release_notes_body(), homebrew_release_notes_body_from_manifest(), homebrew_release_notes_can_use_manifest_metadata() (+25 more)
 
-### Community 271 - "PluginInvocationContext"
+### Community 272 - "PluginInvocationContext"
 Cohesion: 0.14
 Nodes (21): PluginInvocationContext, Option, PaneInfo, String, Vec, SessionSnapshot, TabInfo, HashMap (+13 more)
 
-### Community 272 - "supervisor.rs"
-Cohesion: 0.16
-Nodes (31): a_handshake_without_readiness_does_not_reset_backoff(), adopted_interactive_connection_keeps_its_cancel_and_teardown_barrier(), auth_kind(), brief_ssh_reconnections_do_not_reset_backoff(), cancelled_connection_completions_cannot_restore_diagnostics(), completion_result(), connect_options(), connection_error_kind_is_exposed_until_online_or_retired() (+23 more)
+### Community 273 - "WindowsKeyRecord"
+Cohesion: 0.18
+Nodes (16): ctrl_key_code(), decode_win32_paste_payload(), EscapeOrigin, parse_win32_input_mode_key_record(), parse_win32_paste_record(), PlatformInputItem, resolve_ctrl_oem_char(), KeyModifiers (+8 more)
 
-### Community 273 - "widgets.rs"
-Cohesion: 0.12
-Nodes (33): Buffer, centered_popup_rect(), close_and_continue_rects_track_label_width(), close_button_rect(), continue_button_rect(), focused_input_field_is_distinct_and_legible_for_every_built_in_theme(), focused_input_field_picks_the_documented_marker_per_theme(), input_field_bg() (+25 more)
+### Community 274 - "Vec"
+Cohesion: 0.15
+Nodes (19): DefaultMouseCandidate, is_oem_virtual_key(), matching_key_index(), process_platform_input_items(), push_platform_input_events(), raw_console_reader_loop(), remove_matching_key(), AtomicBool (+11 more)
 
-### Community 274 - "feedback.rs"
-Cohesion: 0.11
-Nodes (31): chrome_hover_bounds_short_circuit_pane_pointer_without_losing_chrome_hits(), chrome_hover_marks_the_tab_under_the_pointer(), chrome_hover_marks_workspace_rows(), chrome_hover_stays_off_when_hover_effects_are_disabled(), chrome_state(), components_status_input(), copy_feedback_stays_in_the_safe_area_and_avoids_toasts(), moved_mouse() (+23 more)
-
-### Community 275 - "restore"
-Cohesion: 0.14
-Nodes (37): ImportedHandoffRuntime, RawFd, cold_restore_initial_spawn_app_uses_configured_headless_area(), cold_restore_initial_spawn_nested_background_zoom_chrome_and_tiny(), cold_restore_initial_spawn_uses_each_remapped_leaf(), cold_restore_native_conpty_reports_initial_leaf_sizes(), cold_restore_with_gapped_public_tab_numbers_drops_unmanaged_agent_name(), failed_cold_restore_preserves_panes_and_saved_directories() (+29 more)
-
-### Community 276 - "windows_recent_fallback.rs"
+### Community 275 - "windows_recent_fallback.rs"
 Cohesion: 0.10
 Nodes (27): assert_deferred_repaint_survives_real_scrollback_pruning(), at_bottom(), Cache, cache_text(), deferred_repaint_survives_real_scrollback_pruning(), deferred_repaint_survives_real_scrollback_pruning_resize_both_axes(), deferred_repaint_survives_real_scrollback_pruning_resize_rows(), merge_snapshot() (+19 more)
 
-### Community 277 - "unix_common.rs"
+### Community 276 - "unix_common.rs"
 Cohesion: 0.09
 Nodes (29): begin_cli_output(), classify_child_exit(), configure_status_command(), create_remote_ssh_config_dir(), current_uid(), default_known_hosts_path(), discard_signal(), end_cli_output() (+21 more)
 
-### Community 278 - "workspaces.rs"
+### Community 277 - "workspaces.rs"
 Cohesion: 0.12
 Nodes (24): WorkspaceTarget, api_workspace_close_closes_linked_worktree_workspace_only(), api_workspace_close_event_includes_final_worktree_snapshot(), api_workspace_close_noncontiguous_group_preserves_adversarial_identity_state(), api_workspace_close_parent_group_requires_explicit_group_intent(), api_workspace_move_block_reorders_atomically(), api_workspace_move_noop_does_not_emit_event(), api_workspace_move_reorders_workspaces() (+16 more)
+
+### Community 278 - "App"
+Cohesion: 0.15
+Nodes (13): pane_agent_status(), App, launch_cwd_for_terminal(), resolve_new_terminal_cwd(), HashMap, Option, PaneInfo, PathBuf (+5 more)
 
 ### Community 279 - "ClientNavigatorOverlay"
 Cohesion: 0.11
 Nodes (21): aggregate_agent_rows(), AggregateAgentRow, AggregateAgentTarget, ClientAgentViewEntry, ClientAgentViewEntry<'a>, navigator_rows(), navigator_selected_index(), online_agent_targets() (+13 more)
 
-### Community 280 - "Arc"
-Cohesion: 0.10
-Nodes (17): ClientTransportRegistry, ClientHandshakeLimiter, ClientHandshakePermit, ClientHandshakeTestPause, ClientTransportRegistration, HandshakeTestHook, HandshakeTestStage, Arc (+9 more)
-
-### Community 281 - "theme.rs"
+### Community 280 - "form_field.rs"
 Cohesion: 0.12
-Nodes (24): canonical_theme_name(), component_color_fields(), custom_theme_color_fields(), CustomThemeColors, degrade_color_to_256(), detect_host_color_depth_follows_colorterm_then_term(), detect_host_color_depth_with(), mode_theme_color_fields() (+16 more)
+Nodes (32): char_index_at_column(), char_width(), click_columns_map_back_to_what_kit_drew(), field_spec(), Option, spec_carries_the_cursor_only_while_focused(), field_height(), char_width() (+24 more)
 
-### Community 282 - "product_announcements.rs"
+### Community 281 - "product_announcements.rs"
 Cohesion: 0.17
 Nodes (31): announcement_from_manifest(), AnnouncementStore, clear_latest_for_version(), clearing_manifest_announcement_removes_matching_latest(), fake_announcement_body_env_creates_preview(), load_fake_for_current_version(), load_store_from_path(), load_unseen_for_current_version() (+23 more)
 
-### Community 283 - "endpoint_responses.rs"
-Cohesion: 0.16
-Nodes (33): EndpointResponseTicket, OwnedSemaphorePermit, admit_reading(), command_ticket(), dropped_unclaimed_ready_clears_command_on_one_prune(), endpoint_response_eight_mib_does_not_abort_a_paused_real_pipe(), endpoint_response_exact_sixty_four_mib_preserves_utf8_and_escapes(), endpoint_response_sixty_four_mib_plus_one_is_only_a_small_error() (+25 more)
-
-### Community 284 - "ComponentStyles"
+### Community 282 - "endpoint_responses.rs"
 Cohesion: 0.15
-Nodes (28): ComponentStyles, entry_rows(), indicator_previews_paint_every_style_with_bucket_colors(), installed_count(), integration_lines(), integration_lines_trim_messages_before_wrapping(), IntegrationLine, integrations_layout() (+20 more)
+Nodes (33): admit_reading(), command_ticket(), dropped_unclaimed_ready_clears_command_on_one_prune(), endpoint_response_eight_mib_does_not_abort_a_paused_real_pipe(), endpoint_response_exact_sixty_four_mib_preserves_utf8_and_escapes(), endpoint_response_sixty_four_mib_plus_one_is_only_a_small_error(), exact_response_body(), FairnessResponse (+25 more)
 
-### Community 285 - "ServerMessage"
-Cohesion: 0.10
-Nodes (26): accepts_endpoint_message(), is_presentation_effect(), I, framed_len(), allowed(), arbitrary_control_and_cross_boot_frames_are_rejected(), DecodedView, Decoder (+18 more)
+### Community 283 - "widgets.rs"
+Cohesion: 0.13
+Nodes (33): centered_popup_rect(), close_and_continue_rects_track_label_width(), close_button_rect(), continue_button_rect(), focused_input_field_is_distinct_and_legible_for_every_built_in_theme(), focused_input_field_picks_the_documented_marker_per_theme(), input_field_bg(), input_field_focused_bg() (+25 more)
 
-### Community 286 - "DockLayout"
-Cohesion: 0.16
-Nodes (21): Axis, closing_a_panel_advances_the_revision(), corrupt_preferences_reject_duplicate_or_unowned_panels(), Divider, DockLayout, Geometry, invalid_drop_and_stale_split_path_are_transactional(), layout_geometry_ignores_maximized_but_keeps_the_compact_projection() (+13 more)
+### Community 284 - "ClientShellState"
+Cohesion: 0.14
+Nodes (12): Capture, ClientShellState, CopiedSelection, Release, Box, Instant, MouseEvent, Option (+4 more)
 
-### Community 287 - "ClientShellState"
+### Community 285 - "ClientShellState"
 Cohesion: 0.12
 Nodes (17): arrow_moves_selection_normally_once_content_is_already_focused(), ClientShellState, first_arrow_after_entering_a_section_only_moves_focus_not_selection(), indicator_index(), integration_needs_install(), normalized_theme_name(), open_indicators_settings(), prepare_theme_swatches() (+9 more)
 
-### Community 288 - "snippets.rs"
+### Community 286 - "snippets.rs"
 Cohesion: 0.21
 Nodes (33): click_snippet_point(), composing_twice_leaves_the_list_scroll_untouched(), concurrent_snippet_runs_keep_their_own_pending_state(), ctrl_enter_executes_snippet_run(), deleting_a_snippet_invalidates_the_click_trace_for_that_row(), endpoint_projection_reset_finishes_in_flight_snippet_runs(), frame_text(), held_enter_does_not_walk_the_snippet_run_flow() (+25 more)
 
-### Community 289 - "WidePane"
+### Community 287 - "terminal_geometry.rs"
+Cohesion: 0.12
+Nodes (34): cell_size_fallback(), current_terminal_geometry(), current_terminal_geometry_with(), host_cell_size_query_required(), initial_terminal_geometry(), ioctl_cell_size(), ioctl_terminal_geometry(), pack_cell_size() (+26 more)
+
+### Community 288 - "CellData"
+Cohesion: 0.14
+Nodes (34): Clone, cells_equal(), apply_rows(), CellSpan, changed_rows(), decode_for(), encoded_size(), framed_len() (+26 more)
+
+### Community 289 - "config.rs"
+Cohesion: 0.13
+Nodes (26): global_test_env_lock_keeps_std_mutex_call_sites_working(), Holder, is_config_load_failure(), is_keybinding_config_diagnostic(), leaked_test_env_lock(), lock_on_other_thread(), Condvar, Drop (+18 more)
+
+### Community 290 - "config.rs"
+Cohesion: 0.21
+Nodes (32): FileDep, BranchConfig, collect_remote_urls(), ConfigReader, ConfigSection, extract_config_section(), FetchRefspecMatch, git_user_config_paths() (+24 more)
+
+### Community 291 - "WidePane"
 Cohesion: 0.19
 Nodes (21): alt_screen_shrink_that_cuts_a_wide_char_draws_a_blank_at_the_edge(), assert_no_wide_glyph_past_right_edge(), autowrap_moves_a_wide_char_that_misses_the_last_column_whole_to_the_next_row(), cells(), drawable_area_narrower_than_the_grid_blanks_only_a_cut_wide_char(), first_patch_in_area(), halfwidth_katakana_voiced_grapheme_is_blank_only_when_cut(), inline_redraw_of_cjk_lines_that_fill_the_width_leaves_no_residue() (+13 more)
 
-### Community 290 - "RawInputByteFramer"
-Cohesion: 0.09
-Nodes (14): BracketedPasteScan, classify_sgr_mouse_continuation(), continues_escape_sequence(), discard_complete_orphaned_csi_tail(), FlushedCsiHead, incomplete_csi_tail_discard_is_bounded_by_time_and_by_byte_budget(), orphaned_csi_tail_recovery_expires_so_later_typing_is_not_eaten(), plausible_host_color_tail_byte() (+6 more)
+### Community 292 - "Option"
+Cohesion: 0.10
+Nodes (35): available_pane_shell(), child_groups_foreground_process_group(), clipboard_text_matches(), foreground_group_leader_job(), foreground_job(), foreground_job_does_not_read_remote_memory_for_uninterruptible_members(), foreground_job_for_group(), foreground_job_from_members() (+27 more)
 
-### Community 291 - "status.rs"
-Cohesion: 0.15
-Nodes (30): RepoContext, deps_current(), cached_repo_identity_clears_when_head_disappears(), expired_non_git_cache_detects_repository_created_in_place(), fingerprint(), git_ahead_behind_between(), git_status_cache_key(), git_status_cache_key_for_space() (+22 more)
+### Community 293 - "ConnectionErrorKind"
+Cohesion: 0.12
+Nodes (24): failure_kind_has_review(), failure_kind_presentation(), ClassifiedConnectionError, classify(), classify_and_wrap(), classify_connection_error(), classify_message(), ConnectionErrorKind (+16 more)
 
-### Community 292 - "AgentInsight"
-Cohesion: 0.17
-Nodes (17): AgentInsight, a_new_prompt_or_a_later_reply_retires_the_previous_error(), an_empty_scan_has_no_insight(), InsightScan, OpenTool, Question, questions_follow_their_tool_call(), Option (+9 more)
-
-### Community 293 - "ClientShellState"
+### Community 294 - "ClientShellState"
 Cohesion: 0.11
 Nodes (4): ClientShellState, Option, Rect, String
 
-### Community 294 - "tool_display.rs"
+### Community 295 - "write_fake_tracked_repo"
+Cohesion: 0.16
+Nodes (33): ConfigCtx, read_config(), read_config_with_user_paths(), config_read_error_retries_next_refresh(), config_symlink_retarget_invalidates_context(), git_status_branch_config_reads_user_config_before_repo_config(), git_status_branch_config_repo_config_overrides_user_config(), git_status_fingerprint_accepts_git_boolean_worktree_config() (+25 more)
+
+### Community 296 - "tool_display.rs"
 Cohesion: 0.14
 Nodes (22): agent_summary(), display(), file_path(), humanize(), line(), multi_agent_controls_keep_their_own_verbs(), patch_paths(), plan_summary() (+14 more)
 
-### Community 295 - "Admission"
+### Community 297 - "process_lineage.rs"
+Cohesion: 0.16
+Nodes (29): cycles_and_depth_limit_stop_as_incomplete(), detached_process_is_not_a_descendant_of_the_pane_shell(), entry(), is_descendant_of(), kill(), lineage_walks_to_the_root_and_is_complete(), Multiplexer, multiplexer_client() (+21 more)
+
+### Community 298 - "api_helpers.rs"
 Cohesion: 0.13
-Nodes (22): Permit, Admission, AdmittedBytes, byte_limit_rejection_rolls_back_item_reservation(), cloned_payload_keeps_item_and_bytes_until_last_owner_drops(), empty_enter_keeps_submission_permit_during_delay(), Lease, Permit (+14 more)
+Nodes (30): PaneAgentState, PaneAgentAttentionKind, attention_report_from_params(), attention_text_is_trimmed_sanitized_and_bounded(), detect_state_from_api(), encode_api_input(), encode_api_keys(), encode_api_submission() (+22 more)
 
-### Community 296 - "PtyIoActorRunner"
-Cohesion: 0.12
-Nodes (17): ActorState, input_byte_limit_preserves_rejected_payload_and_submission_budget(), input_submission_closed_error(), PendingWrite, PtyIoActorConfig, PtyIoActorRunner, Arc, Error (+9 more)
+### Community 299 - "plugins.rs"
+Cohesion: 0.14
+Nodes (29): has_windows_reserved_stem_for_path_component(), plugin_managed_path_component(), plugin_managed_path_component_is_windows_safe_and_collision_free(), plugin_managed_path_component_keeps_readable_slug(), PluginActionContext, PluginActionInfo, PluginCommandLogInfo, PluginCommandStatus (+21 more)
 
-### Community 297 - "ProcessLineage"
-Cohesion: 0.12
-Nodes (25): detached(), inside_pane(), lineage(), multiplexer_bridge_requires_a_client_in_the_target_pane(), only_bundled_integration_reports_are_targets(), origin(), report_target(), ReportOrigin (+17 more)
+### Community 300 - "agent_view.rs"
+Cohesion: 0.16
+Nodes (31): agent_filter_matches_custom_lifecycle_agent_label(), apply_agent_view(), boolean_filter_and_custom_sort_define_canonical_entries(), current_workspace_filter_tracks_presented_workspace(), current_workspace_view(), evaluation_context(), launch_sort_orders_entries_by_server_launch_seq(), normalize_label() (+23 more)
 
-### Community 298 - "bindings.rs"
+### Community 301 - "Self"
+Cohesion: 0.14
+Nodes (14): pane_choices_cover_every_api_value(), assert_choices_cover_api_enum(), boolean(), Choice, Choice<T>, choices_where(), Field<T>, Input<T> (+6 more)
+
+### Community 302 - "bindings.rs"
 Cohesion: 0.12
 Nodes (30): command(), direction(), environment(), from_matches(), group(), height(), id(), invocation_context() (+22 more)
 
-### Community 299 - "form_field.rs"
-Cohesion: 0.13
-Nodes (29): char_index_at_column(), char_width(), click_columns_map_back_to_what_kit_drew(), field_spec(), Option, spec_carries_the_cursor_only_while_focused(), char_width(), cursor_columns() (+21 more)
-
-### Community 300 - "ConnectionErrorKind"
+### Community 303 - "put_right_text"
 Cohesion: 0.12
-Nodes (23): failure_kind_has_review(), failure_kind_presentation(), ClassifiedConnectionError, classify(), classify_and_wrap(), classify_connection_error(), classify_message(), ConnectionErrorKind (+15 more)
+Nodes (30): footer_menu_slot(), render_collapsed(), render_expanded(), Buffer, ClientShellConfig, Option, Rect, ShellHitMap (+22 more)
 
-### Community 301 - "render_machine_forwards"
+### Community 304 - "render_machine_forwards"
 Cohesion: 0.12
 Nodes (18): ClientForwardRuleForm, ClientForwardRulesView, ClientShellState, forward_rule_display(), forwards_stack(), forwards_text(), PendingForwardRemoval, render_machine_forwards() (+10 more)
 
-### Community 302 - "RawInputEvent"
-Cohesion: 0.09
-Nodes (25): mouse(), MouseEventKind, moved(), key(), mouse(), KeyCode, MouseEventKind, key_event() (+17 more)
+### Community 305 - ".local_keybindings_profile_toml"
+Cohesion: 0.11
+Nodes (22): Config, config_diagnostic_summary_without_keybindings(), env_var(), keybindings_from_profile_toml(), local_keybindings_profile_includes_defaults_and_excludes_commands(), local_keybindings_profile_keeps_default_displaced_by_omitted_command_disabled(), local_keybindings_profile_keeps_invalid_legacy_indexed_default_disabled(), local_keybindings_profile_omits_default_displaced_by_user_prefix() (+14 more)
 
-### Community 303 - "PathBuf"
-Cohesion: 0.13
-Nodes (31): config_diagnostic_summary_without_keybindings(), app_dir_name(), config_diagnostic_summary(), config_dir(), config_path(), config_path_from_env(), confine(), confine_config_path() (+23 more)
+### Community 306 - "keybind_help.rs"
+Cohesion: 0.12
+Nodes (24): binding_key(), binding_label(), direct(), entry(), filter_keybind_help_groups(), filter_matches_labels_and_shortcuts_case_insensitively(), groups(), help_lists_every_configured_prefix() (+16 more)
 
-### Community 304 - "codex_launch.rs"
+### Community 307 - "codex_launch.rs"
 Cohesion: 0.11
 Nodes (28): apply_pane_env(), dispatch(), help_has_flag(), in_pane(), interactive(), launch(), managed_argv(), path_without_shims() (+20 more)
 
-### Community 305 - "process_lineage.rs"
-Cohesion: 0.16
-Nodes (28): cycles_and_depth_limit_stop_as_incomplete(), detached_process_is_not_a_descendant_of_the_pane_shell(), entry(), is_descendant_of(), kill(), lineage_walks_to_the_root_and_is_complete(), Multiplexer, multiplexer_client() (+20 more)
-
-### Community 306 - "clipboard_image.rs"
+### Community 308 - "clipboard_image.rs"
 Cohesion: 0.15
 Nodes (23): ChannelMask, converts_bottom_up_24_bit_dib_to_png(), decode_rgba(), Dib, Dib<'a>, dib_to_png(), info_header(), LimitedWriter (+15 more)
 
-### Community 307 - "EndpointResponseIdentity"
-Cohesion: 0.11
-Nodes (21): endpoint_responses_are_handed_off_once_without_truncation(), EndpointControlResponse, EndpointResponseIdentity, EndpointResponseSender, EndpointResponseTarget, response_matrix_small_control_response_has_an_enforced_byte_boundary(), response_matrix_waiting_event_future_keeps_64mib_permit_after_cancel(), Arc (+13 more)
+### Community 309 - ".forward_reported_transition_notifications"
+Cohesion: 0.13
+Nodes (19): NotifyKind, non_empty_body(), HeadlessServer, AgentState, AsRef, Into, NotificationShowParams, Option (+11 more)
 
-### Community 308 - "sound.rs"
+### Community 310 - "write_shared_test_pane"
+Cohesion: 0.19
+Nodes (33): a_stale_sole_baseline_arms_a_full_render_instead_of_stalling(), coincident_output_follows_the_restamp_as_a_retained_patch(), external_refresh_pairs_the_advanced_snapshot_with_a_surface(), projection_only_tick_keeps_a_coincident_full_render(), recv_surface_within(), restamp_without_a_baseline_falls_back_to_a_full_render(), backpressured_shell_does_not_disable_retained_patches_for_responsive_peer(), chrome_only_change_streams_the_projection_without_a_pane_surface() (+25 more)
+
+### Community 311 - "FrozenText"
+Cohesion: 0.12
+Nodes (20): Entry, handles(), HashMap, Instant, Method, Option, Result, String (+12 more)
+
+### Community 312 - "sound.rs"
 Cohesion: 0.17
 Nodes (29): AudioPlayer, linux_audio_player_does_not_wait_forever(), linux_audio_player_preserves_completed_output(), linux_audio_players(), linux_audio_players_are_mp3_capable(), play(), play_bytes(), play_file() (+21 more)
 
-### Community 309 - "events.rs"
-Cohesion: 0.12
-Nodes (29): ReadSource, EventData, EventMatch, EventsSubscribeParams, EventStreamNotice, EventsWaitParams, known_event_names(), known_event_names_stay_in_sync_with_event_kind() (+21 more)
-
-### Community 310 - "run_client_with_mode"
-Cohesion: 0.13
-Nodes (30): bracketed_paste_payload(), client_remote_image_paste_key(), endpoint_accepts_local_images(), image_path_from_drop_text(), image_path_from_terminal_drop(), normalized_terminal_drop_text(), read_image_file(), read_image_file_from_client_events() (+22 more)
-
-### Community 311 - "ResponseMatcher"
+### Community 313 - "ResponseMatcher"
 Cohesion: 0.14
 Nodes (15): attempted_output_failure_retires_response_without_forwarding_it(), explicit_error_is_reported_and_malformed_responses_are_ignored(), fragmented_response_is_held_before_generic_input_timeout(), InputFilter, matches_only_the_armed_image_and_preserves_unrelated_input(), matching_response_controls(), Response, ResponseMatcher (+7 more)
 
-### Community 312 - "input.rs"
-Cohesion: 0.09
-Nodes (21): captured_mouse_report_split_after_csi_survives_idle_gap(), clamp_flush_timeout_ms(), confirmed_disambiguation_framer(), confirmed_disambiguation_joins_escape_binding_split_before_wait_ends(), confirmed_disambiguation_keeps_escape_prefixed_bindings_intact(), confirmed_disambiguation_keeps_kitty_escape_immediate(), confirmed_disambiguation_keeps_mouse_report_split_by_delayed_tail(), confirmed_disambiguation_keeps_osc_reply_split_after_escape_whole() (+13 more)
-
-### Community 313 - ".forward_reported_transition_notifications"
-Cohesion: 0.14
-Nodes (18): ToastDelivery, HeadlessServer, AgentState, AsRef, Into, NotificationShowParams, Option, String (+10 more)
-
-### Community 314 - "keybind_help.rs"
-Cohesion: 0.13
-Nodes (24): binding_key(), binding_label(), direct(), entry(), filter_keybind_help_groups(), filter_matches_labels_and_shortcuts_case_insensitively(), groups(), help_lists_every_configured_prefix() (+16 more)
-
-### Community 315 - "codex_trust.rs"
+### Community 314 - "codex_trust.rs"
 Cohesion: 0.16
 Nodes (31): async_hook_hash_keeps_the_configured_value_in_the_identity(), classify(), codex_event_key_label(), codex_hook_identity(), codex_hook_trust_hash(), codex_hooks_trust_summary(), CodexHooksTrustSummary, CodexHookTrust (+23 more)
 
-### Community 316 - "main.rs"
+### Community 315 - "main.rs"
 Cohesion: 0.09
 Nodes (20): args_as_utf8(), exit_if_nested_disabled(), finish_cli(), invalid_utf8_arg(), main(), random_nested_message(), random_nested_message_comes_from_known_set(), Config (+12 more)
 
-### Community 317 - ".new"
+### Community 316 - ".new"
 Cohesion: 0.15
 Nodes (24): capture_bounded_migration_observations(), complete_history_replay_supports_plain_append(), dirty_collection_beyond_area_height_keeps_deeper_rows_dirty(), dirty_patch_exposes_hyperlink_uri_table_instead_of_falling_back(), dirty_patch_fallback_keeps_previously_collected_rows_dirty(), Effects, empty_patch_with_deeper_dirty_rows_keeps_partial_dirty(), erase_display_preserves_screen_and_history_boundaries() (+16 more)
 
-### Community 318 - "Result"
+### Community 317 - "Result"
 Cohesion: 0.10
 Nodes (23): ChildPipe, ClientStreamReader, copy_flush(), finish_client_stream(), forward_remote_bridge_stdio(), forward_remote_bridge_stdio_with_timeout(), peek_unix_stream(), poll_fd_readable() (+15 more)
 
-### Community 319 - "release_notes.rs"
+### Community 318 - "release_notes.rs"
 Cohesion: 0.18
 Nodes (28): clear_pending_at(), extract_version_section(), legacy_notes_without_show_on_startup_remain_available_as_latest(), load_latest(), load_latest_does_not_mark_older_saved_version_as_preview(), load_latest_for_package(), load_latest_from_path(), load_latest_keeps_future_version_previewable_before_restart() (+20 more)
 
-### Community 320 - "plugins.rs"
-Cohesion: 0.15
-Nodes (27): has_windows_reserved_stem_for_path_component(), plugin_managed_path_component(), plugin_managed_path_component_is_windows_safe_and_collision_free(), plugin_managed_path_component_keeps_readable_slug(), PluginActionContext, PluginActionInfo, PluginCommandLogInfo, PluginCommandStatus (+19 more)
+### Community 319 - ".new"
+Cohesion: 0.10
+Nodes (29): bridge_upload_cancel_before_wait_preserves_download(), bridge_upload_cancel_between_stop_check_and_wait_is_retained(), bridge_upload_cancellation_for_test(), bridge_upload_drains_input_before_peer_eof(), bridge_upload_idle_waits_without_repeated_reads_and_cancels(), BridgeUploadStop, capture_ssh_stderr(), copy_local_stream_to_writer() (+21 more)
 
-### Community 321 - "target.rs"
+### Community 320 - "Path"
+Cohesion: 0.15
+Nodes (29): build_tree(), Codex, day_dirs(), find_rollout(), floor_char_boundary(), insight_follows_a_reported_rollout_path_and_degrades_without_one(), insight_home(), lifecycle_from_tail() (+21 more)
+
+### Community 321 - "design.rs"
+Cohesion: 0.11
+Nodes (27): activity_bucket(), ago_label(), body(), compact_age(), duration_label(), frame(), graphite_glyphs_are_single_width_and_distinct(), key_cap() (+19 more)
+
+### Community 322 - "target.rs"
 Cohesion: 0.13
 Nodes (27): api_client(), args(), caller_pane_id(), is_remote(), machine_commands_reject_local_side_effects_and_tui_attach(), machine_prefix_rejects_missing_target_and_conflicting_global_options(), machine_prefix_routes_without_consuming_command_payload(), MachineTarget (+19 more)
 
-### Community 322 - "LiveKeybindConfig"
-Cohesion: 0.16
-Nodes (28): NotificationContext, VecDeque, help_key_after_prefix(), keys(), keys_width(), live_keybinds(), narrow_which_key_marks_hidden_groups(), paint_keys() (+20 more)
+### Community 323 - "fs.rs"
+Cohesion: 0.10
+Nodes (22): entry_kind_label(), entry(), fs_error_kind(), is_fs_level_error(), LocalTempFile, long_listing_parses_openssh_lines(), long_listing_rejects_unparseable_output_only_when_nothing_parsed(), next_field() (+14 more)
 
-### Community 323 - "selection.rs"
+### Community 324 - "endpoint_requests.rs"
+Cohesion: 0.13
+Nodes (28): add_remote(), another_machine_disconnect_does_not_cancel_active_popup(), cancelled_integration_install_does_not_queue_a_refresh(), cancelled_link_activation_does_not_replay_mouse_input(), cancelling_popup_request_unblocks_input_and_ignores_late_success(), disconnect_cancels_worktree_dialog_before_same_server_reconnect(), dispatch_one(), dispatcher_cancels_worktree_requests_on_frozen_surface_or_failed_send() (+20 more)
+
+### Community 325 - "Admission"
+Cohesion: 0.15
+Nodes (19): Permit, Admission, AdmittedBytes, byte_limit_rejection_rolls_back_item_reservation(), cloned_payload_keeps_item_and_bytes_until_last_owner_drops(), empty_enter_keeps_submission_permit_during_delay(), Lease, Permit (+11 more)
+
+### Community 326 - "remote.rs"
+Cohesion: 0.10
+Nodes (21): is_remote_auth_error(), is_remote_host_key_error(), print_remote_error_hint(), print_saved_ssh_error_hint(), dangling_proxy_jump_profile_reference_is_an_error(), profile_with(), profile_without_connection_options_resolves_to_none(), ProfileSshOptions (+13 more)
+
+### Community 327 - "selection.rs"
 Cohesion: 0.10
 Nodes (20): clamp_to_pane(), clamp_to_pane_bounds(), clipboard_write_uses_host_terminal(), contains_tracks_current_viewport_after_scroll(), host_terminal_announces_clipboard_writes(), is_wsl(), is_wsl_for_env(), make_sel() (+12 more)
 
-### Community 324 - "tokens.rs"
+### Community 328 - "apply_client_pane_input_events"
+Cohesion: 0.09
+Nodes (30): apply_terminal_attach_page_up(), client_page_key(), client_page_keys_forward_when_modified_or_owned_by_application(), client_pane_cell_mouse_uses_pixel_units_when_sgr_pixels_is_set(), client_pane_pixel_mouse_falls_back_to_canonical_cell_position(), client_pane_pixel_mouse_stays_pixel_scaled_when_sgr_is_reasserted(), client_pane_pixel_mouse_uses_runtime_pixel_encoding(), client_pane_wheel_input_accumulates_scrollback_offset() (+22 more)
+
+### Community 329 - "tokens.rs"
 Cohesion: 0.17
 Nodes (25): entry(), agent_rows(), AgentTokenContext, conditional_hide_preserves_first_match_wins(), conditional_hide_removes_tokens_and_empty_rows(), conditional_style_survives_truncation_and_removes_theme_modifiers(), conditional_styles_merge_first_match_and_keep_missing_values_absent(), context() (+17 more)
 
-### Community 325 - "workspace_bindings.rs"
+### Community 330 - "report_origin.rs"
+Cohesion: 0.12
+Nodes (22): detached(), inside_pane(), lineage(), multiplexer_bridge_requires_a_client_in_the_target_pane(), only_bundled_integration_reports_are_targets(), origin(), report_target(), ReportOrigin (+14 more)
+
+### Community 331 - "workspace_bindings.rs"
 Cohesion: 0.12
 Nodes (25): clear_token(), command(), environment(), label(), Leaf, request(), Arg, ArgMatches (+17 more)
 
-### Community 326 - "machine_auth.rs"
+### Community 332 - "machine_auth.rs"
 Cohesion: 0.20
 Nodes (28): auth_copy_actions_report_toasts_without_overwriting_the_guide(), auth_guide_starts_interactive_auth_only_on_approval(), auth_overlay(), changed_dialog_rows(), changed_host_key_dialog_is_a_hard_blocker_with_mitm_wording(), compact_frame_text(), declining_a_password_cancels_the_session(), detail_card_shows_structured_failure_and_review_entry() (+20 more)
 
-### Community 327 - "input.rs"
+### Community 333 - "ProcessSessionId"
+Cohesion: 0.11
+Nodes (15): PaneShutdownRequest, PlatformProcessControl, RetainedResourcesScope, Arc, AtomicBool, Drop, FnOnce, Option (+7 more)
+
+### Community 334 - ".read"
 Cohesion: 0.14
-Nodes (29): cell_center_px(), configure_key_encoder(), ghostty_key_event_from_terminal_key(), ghostty_key_from_char(), ghostty_key_from_key_code(), ghostty_mods_from_key_modifiers(), ghostty_mouse_encoder_for_terminal(), ghostty_mouse_event_from_button_kind() (+21 more)
+Nodes (29): a_relocated_codex_home_is_followed_instead_of_home(), a_subagent_row_names_both_its_nickname_and_its_task(), active_and_plain_rollouts_win_duplicate_archived_compressed_copies(), archived_compressed_rollouts_discover_and_page_without_writing_the_library(), codex_reported_transcripts_locate_a_pane_specific_session_library(), compressed_pages_match_plain_and_storage_transition_keeps_offsets(), context(), copy_tree() (+21 more)
 
-### Community 328 - "unix.rs"
+### Community 335 - ".set_agent_session_ref_for_session_start"
+Cohesion: 0.15
+Nodes (19): different_session_after_process_exit_waits_for_fresh_process_evidence(), fresh_detected_process_keeps_old_session_suppressed_after_process_exit(), full_lifecycle_hook_authority_ignores_detected_agent_clear_without_process_exit(), interrupt_marker_only_covers_the_completion_right_after_it(), kimi_reacquires_full_lifecycle_hook_after_process_exit_with_fresh_process_and_session_ref(), late_full_lifecycle_hook_with_same_session_after_process_exit_does_not_reacquire_authority(), missing_session_after_process_exit_waits_for_fresh_process_evidence(), pi_resume_reactivates_a_previously_stale_session() (+11 more)
+
+### Community 336 - "card.rs"
 Cohesion: 0.14
-Nodes (24): ActiveSubmission, actor_ignores_empty_user_input_write(), actor_preserves_input_capacity_while_peer_is_not_reading(), actor_runner_for_unit_test(), actor_runner_with_handle_for_unit_test(), appearance_transition_report_precedes_query_of_new_scheme(), begin_handoff_drains_user_writes_already_in_command_queue(), handoff_control_is_not_blocked_by_full_data_queue() (+16 more)
+Nodes (28): border_color(), CardSpec, draws_the_frame_with_title_and_badge_and_returns_the_inner_rect(), focus_hover_and_dim_change_the_border_and_title_colors(), framed_label_width(), narrow_cards_truncate_the_cjk_title_and_keep_the_badge(), put_framed_label(), render() (+20 more)
 
-### Community 329 - "client_commands.rs"
-Cohesion: 0.13
-Nodes (23): advertised_client_shell_method_shapes_stay_at_the_v1_contract(), advertised_client_shell_methods_are_sorted_unique_and_in_schema(), client_shell_method_set(), collect_schema_refs(), correlate_response_id(), endpoint_method_shape_digests(), endpoint_response_uses_the_client_request_id(), error_message() (+15 more)
+### Community 337 - "events.rs"
+Cohesion: 0.14
+Nodes (26): EventData, EventMatch, EventsSubscribeParams, EventStreamNotice, EventsWaitParams, known_event_names(), known_event_names_stay_in_sync_with_event_kind(), OutputMatch (+18 more)
 
-### Community 330 - "write_shared_test_pane"
-Cohesion: 0.20
-Nodes (30): a_stale_sole_baseline_arms_a_full_render_instead_of_stalling(), projection_only_tick_keeps_a_coincident_full_render(), restamp_without_a_baseline_falls_back_to_a_full_render(), backpressured_shell_does_not_disable_retained_patches_for_responsive_peer(), chrome_only_change_streams_the_projection_without_a_pane_surface(), client_shell_split_echo_bypasses_cadence_with_bounded_visible_burst(), connect_matching_test_shell(), different_size_shells_receive_geometry_specific_patches_from_one_dirty_collection() (+22 more)
-
-### Community 331 - "api_helpers.rs"
+### Community 338 - "ClientShellState"
 Cohesion: 0.16
-Nodes (26): PaneAgentAttentionKind, attention_report_from_params(), attention_text_is_trimmed_sanitized_and_bounded(), encode_api_input(), encode_api_keys(), encode_api_submission(), encode_api_submission_parts(), encode_api_text() (+18 more)
+Nodes (4): PaneCopyMotion, ClientShellState, Option, String
 
-### Community 332 - "behaviour.rs"
+### Community 339 - "attach.rs"
+Cohesion: 0.13
+Nodes (19): attach_escape_does_not_interpret_bracketed_paste_contents(), attach_escape_forwards_kitty_encoded_literal_prefix(), attach_escape_forwards_modified_page_key(), attach_escape_forwards_prefix_before_non_escape_key(), attach_escape_sends_literal_prefix_on_double_prefix(), attach_escape_turns_plain_page_keys_into_scroll_actions(), attach_escape_turns_wheel_into_scroll_action(), attach_scroll_action() (+11 more)
+
+### Community 340 - "ServerMessage"
+Cohesion: 0.13
+Nodes (22): accepts_endpoint_message(), is_presentation_effect(), allowed(), arbitrary_control_and_cross_boot_frames_are_rejected(), DecodedView, Decoder, frame(), invalid_future_envelope_does_not_retire_current_views() (+14 more)
+
+### Community 341 - "behaviour.rs"
 Cohesion: 0.12
 Nodes (24): failed_preview_preserves_both_received_error_and_old_question(), groups_fold_more_search_all_tokens_and_enter_activates_selected_identity(), local_timeout_duplicate_send_and_late_old_epoch_keep_retry_draft(), manual_marks_restore_per_endpoint_then_clear_on_new_turn_launch_and_boot(), narrow_cjk_preview_and_editor_resize_are_safe_and_no_keys_leak(), offline_target_and_unknown_prompt_capability_never_send(), overview_and_global_unread_share_capacity_gate_but_read_and_existing_marks_still_work(), prompt_response_from_old_boot_and_replacement_cannot_mutate_current_draft() (+16 more)
 
-### Community 333 - "BucketCounts"
-Cohesion: 0.08
-Nodes (12): agent_attention(), AgentAttentionCache, AgentAttentionKey, Vec, EndpointAttentionKey, FromIterator, BucketCounts, listing_puts_actionable_buckets_first() (+4 more)
+### Community 342 - "panel_header.rs"
+Cohesion: 0.17
+Nodes (28): control_color(), header_hover(), HeaderFrame, HeaderHover, HeaderOutputs, headers_sit_on_the_panel_background_with_dim_controls(), paint(), paint_switcher() (+20 more)
 
-### Community 334 - "subprocess.rs"
+### Community 343 - "subprocess.rs"
 Cohesion: 0.12
 Nodes (26): Collected, a_hung_process_is_killed_at_the_deadline(), collect(), Limits, Output, output_and_exit_status_come_back(), Child, Command (+18 more)
 
-### Community 335 - "Self"
+### Community 344 - "String"
+Cohesion: 0.14
+Nodes (28): Config, config_key_path(), config_loaders_report_unreadable_path(), ConfigKeyPathSegment, deserialize_with_ignored(), format_config_key_path(), load_live_config(), load_live_section() (+20 more)
+
+### Community 345 - "Self"
 Cohesion: 0.08
 Nodes (18): InputSourceRestore, ClipboardGuard, enter_non_killing_job(), ime_open(), InputSourceRestore, ProcessHandle, read_ime_open_status(), resume_suspended_process() (+10 more)
 
-### Community 336 - "surface_delta.rs"
-Cohesion: 0.17
-Nodes (28): CellSpan, changed_rows(), decode_for(), encoded_size(), GridUpdate, GridUpdateRef, message(), reconstruct() (+20 more)
+### Community 346 - "Bytes"
+Cohesion: 0.12
+Nodes (19): DefaultColorQuery, OscTerminator, apply_cached_host_default_color(), default_color_event_response(), default_color_query_response(), expected_osc_rgb_response(), is_matching_libghostty_color_reply(), mark_child_default_color_changed() (+11 more)
 
-### Community 337 - "EndpointResponses"
-Cohesion: 0.13
-Nodes (13): RenderEncoding, EndpointResponses, EndpointResponseSlot, response_matrix_cancelled_preparing_tickets_still_charge_client_and_server(), Arc, Default, Drop, Option (+5 more)
+### Community 347 - "Option"
+Cohesion: 0.14
+Nodes (28): BracketedPasteScan, complete_escape_sequence_len(), complete_text_bracketed_paste(), control_string(), control_string_terminator_for_family(), ControlString, ControlStringFamily, extract_one_event_with_bracketed_paste_end() (+20 more)
 
-### Community 338 - "App"
+### Community 348 - "App"
 Cohesion: 0.17
 Nodes (12): AgentRenameError, AgentStartError, App, available_shell_name(), live_runtime_agent(), AgentStartParams, Option, Result (+4 more)
 
-### Community 339 - "Self"
-Cohesion: 0.17
-Nodes (9): boolean(), Choice<T>, Field<T>, Input<T>, FnOnce, Self, T, Update (+1 more)
-
-### Community 340 - "server.rs"
+### Community 349 - "server.rs"
 Cohesion: 0.16
 Nodes (26): agent_manifest_update_error_response(), live_handoff_command(), live_handoff_params_parse_remote_update_fields(), parse_live_handoff_params(), print_agent_manifest_status(), print_server_help(), Command, FnMut (+18 more)
 
-### Community 341 - "panel_header.rs"
-Cohesion: 0.18
-Nodes (27): control_color(), header_hover(), HeaderFrame, HeaderHover, HeaderOutputs, headers_sit_on_the_panel_background_with_dim_controls(), paint(), paint_switcher() (+19 more)
+### Community 350 - "notifications.rs"
+Cohesion: 0.12
+Nodes (21): delayed_permission_card_rechecks_state_and_external_delivery_keeps_the_body(), failed_custom_notification_is_not_a_permission_request(), mobile_notification_banner_prefers_the_pane_display_agent(), mobile_notification_is_a_bottom_banner_with_released_title(), new_boot_retires_visible_pending_and_queued_notifications(), notification(), notification_agent_label(), notification_agent_label_prefers_the_pane_display_chain() (+13 more)
 
-### Community 342 - "ComposeCanvas"
+### Community 351 - "ComposeCanvas"
 Cohesion: 0.15
 Nodes (14): canvas_clear_links_in_drops_covered_entries(), canvas_links_attach_only_when_symbol_survives(), canvas_preserves_underline_style_extension_bits(), canvas_reuse_keeps_allocation_across_frames(), ComposeCanvas, Buffer, Cell, CompactString (+6 more)
 
-### Community 343 - "GraphicsOutput"
-Cohesion: 0.11
-Nodes (11): ClientGraphicsCheckpoint, ClientShellState, ClientState, Vec, GraphicsOperation, GraphicsOutput, inline_fallback_preserves_order_and_chunk_encoding(), Arc (+3 more)
+### Community 352 - "which_key.rs"
+Cohesion: 0.18
+Nodes (25): help_key_after_prefix(), keys(), keys_width(), live_keybinds(), narrow_which_key_marks_hidden_groups(), paint_keys(), render(), render_which_key() (+17 more)
 
-### Community 344 - "registry.rs"
+### Community 353 - "registry.rs"
 Cohesion: 0.13
 Nodes (20): by_id(), config_dir(), discovery_lane(), DiscoveryLane, expand_tilde(), HarnessSpec, has_full_lifecycle_authority(), HookAuthority (+12 more)
 
-### Community 345 - "herdr-agent-state.test.ts"
+### Community 354 - "herdr-agent-state.test.ts"
 Cohesion: 0.10
 Nodes (20): assistant(), CLI_RECORDER, configureIntegrationEnvironment(), createExtensionHarness(), delegated(), Handler, importFresh(), integrations (+12 more)
 
-### Community 346 - "Option"
-Cohesion: 0.15
-Nodes (27): complete_escape_sequence_len(), complete_text_bracketed_paste(), control_string(), control_string_terminator_for_family(), ControlString, ControlStringFamily, extract_one_event_with_bracketed_paste_end(), find_csi_final() (+19 more)
+### Community 355 - "RemotePlatform"
+Cohesion: 0.12
+Nodes (19): DetectedRemotePlatform, download_release_asset(), install_source_cleanup_removes_temporary_directory(), install_source_description(), install_source_description_for(), install_source_description_uses_local_binary_when_allowed(), install_source_description_uses_release_asset_when_local_binary_cannot_seed_remote(), InstallSource (+11 more)
 
-### Community 347 - "ClientShellEndpointError"
-Cohesion: 0.20
-Nodes (6): ClientShellState, MouseEvent, Option, Result, Vec, ClientShellEndpointError
+### Community 356 - "gauge.rs"
+Cohesion: 0.17
+Nodes (24): ascii_glyphs_degrade_every_symbol(), cells_for(), empty_and_narrow_areas_never_panic(), empty_track_stays_visible_on_every_builtin_theme(), fills_by_ratio_with_threshold_colors(), gauge_color(), GaugeSpec, GaugeThresholds (+16 more)
 
-### Community 348 - "quick.rs"
+### Community 357 - "agent_suspend_tests.rs"
+Cohesion: 0.23
+Nodes (26): adversarial_pane(), claude_session(), claude_session_report(), claude_with_session(), detect(), detection_state(), exit_then_different_agent_relaunch_drops_previous_identity(), exited_pi_session_is_not_replayed_into_a_relaunched_pi() (+18 more)
+
+### Community 358 - "App"
+Cohesion: 0.12
+Nodes (8): App, hidden_render_attempt_keeps_presentation_cadence_available(), retain_detached_process_after_wait(), ExitStatus, Instant, Option, Result, test_app_with_pane()
+
+### Community 359 - "tree.rs"
+Cohesion: 0.14
+Nodes (24): build_rows_where(), HashSet, status_rows(), K, Cursor, depth_saturates_at_the_mask_width(), draw(), fill_last_child_masks() (+16 more)
+
+### Community 360 - "quick.rs"
 Cohesion: 0.19
 Nodes (25): apply_config_option(), apply_option(), first_value_wins_like_openssh(), flatten_pasted_command(), getopt_forms_and_unrelated_options_are_handled(), is_ssh_program(), parse(), parse_destination() (+17 more)
 
-### Community 349 - "endpoint_requests.rs"
-Cohesion: 0.16
-Nodes (25): add_remote(), another_machine_disconnect_does_not_cancel_active_popup(), cancelled_integration_install_does_not_queue_a_refresh(), cancelled_link_activation_does_not_replay_mouse_input(), cancelling_popup_request_unblocks_input_and_ignores_late_success(), disconnect_cancels_worktree_dialog_before_same_server_reconnect(), dispatch_one(), dispatcher_cancels_worktree_requests_on_frozen_surface_or_failed_send() (+17 more)
+### Community 361 - "unix.rs"
+Cohesion: 0.14
+Nodes (21): actor_ignores_empty_user_input_write(), actor_preserves_input_capacity_while_peer_is_not_reading(), actor_rejects_submission_after_io_loop_exits(), actor_runner_for_unit_test(), actor_runner_with_handle_for_unit_test(), appearance_transition_report_precedes_query_of_new_scheme(), begin_handoff_drains_user_writes_already_in_command_queue(), handoff_control_is_not_blocked_by_full_data_queue() (+13 more)
 
-### Community 350 - "ClientState"
-Cohesion: 0.10
-Nodes (11): ClientState, RetiredDirectGraphicsMatch, Arc, Child, ClientShellState, Drop, HashMap, KeyCode (+3 more)
+### Community 362 - "claude.rs"
+Cohesion: 0.15
+Nodes (23): a_finished_workflow_names_its_group_and_settles_its_children(), a_journal_started_agent_goes_stale_when_its_transcript_stops(), a_malformed_workflow_state_falls_back_to_the_directory_name(), a_missing_sidecar_falls_back_to_the_transcript(), an_open_ask_user_question_is_the_pending_question(), an_unknown_journal_type_is_ignored_without_losing_the_agent(), async_subagents_settle_from_their_task_notifications(), broken_json_lines_and_missing_fields_never_drop_the_tree() (+15 more)
 
-### Community 351 - "peripherals.rs"
+### Community 363 - "peripherals.rs"
 Cohesion: 0.12
 Nodes (18): disk_inventory_ttl_is_longer_than_numeric_sample_ttl(), pseudo_filesystem(), Arc, AtomicBool, Duration, FnMut, FnOnce, Instant (+10 more)
 
-### Community 352 - "footer_hints.rs"
+### Community 364 - "footer_hints.rs"
 Cohesion: 0.23
 Nodes (24): cjk_labels_use_display_width_and_empty_input_is_a_no_op(), FooterHint, FooterHint<'a>, FooterHintStyles, hint(), hint_styles(), hint_width(), hints_lay_out_with_keycaps_and_return_hit_rects() (+16 more)
 
-### Community 353 - "catalog_reload.rs"
+### Community 365 - "catalog_reload.rs"
 Cohesion: 0.14
 Nodes (23): apply_profiles(), broadcast_watcher_notifies_on_external_change_only(), catalog_poll_interval(), live_catalog_add_and_rename_keep_local_connection_and_selection(), live_catalog_remove_or_disable_active_machine_selects_local_without_input(), Arc, AtomicBool, AtomicUsize (+15 more)
 
-### Community 354 - "handshake.rs"
+### Community 366 - "handshake.rs"
 Cohesion: 0.16
 Nodes (25): cancelled_fragmented_handshake_returns_without_waiting_for_peer(), client_ssh_auth_sock_env(), direct_graphics_capability(), direct_graphics_profile_allowed(), direct_graphics_profile_values(), direct_graphics_requires_local_transport_even_on_supported_host_terminal(), do_handshake(), handshake_preserves_welcome_rejection_close_and_frame_limit() (+17 more)
 
-### Community 355 - "persist_files.rs"
+### Community 367 - "braille_chart.rs"
+Cohesion: 0.18
+Nodes (23): samples_per_column(), area_chart_colors_each_cell_by_its_top_series(), area_chart_handles_missing_colors_and_auto_scale(), auto_max(), auto_scale_uses_the_visible_maximum_and_empty_input_draws_nothing(), blocks_scale_to_eight_levels_per_row(), braille_char(), braille_packs_two_samples_per_cell() (+15 more)
+
+### Community 368 - "persist_files.rs"
 Cohesion: 0.25
 Nodes (24): check_persist_source(), create_persist_temporary(), discard_persist_temporary(), persist_acl(), persist_identity_distinguishes_equal_bytes_after_replacement(), persist_macos_private_creation_blocks_inherited_grants(), persist_macos_replacement_keeps_explicit_and_inherited_aces(), persist_macos_replacement_keeps_nonempty_acl_no_inherit() (+16 more)
 
-### Community 356 - "plugin_installations.rs"
+### Community 369 - "plugin_installations.rs"
 Cohesion: 0.20
 Nodes (25): cleanup(), cleanup_continues_past_installations_it_cannot_remove(), cleanup_waits_for_all_servers_and_command_references_and_preserves_current_paths(), command_lease(), create_lease(), installation(), installations(), lease_path() (+17 more)
 
-### Community 357 - ".host_color_query_sent"
-Cohesion: 0.10
-Nodes (19): complete_unsupported_default_color_osc_is_consumed(), flush_pending(), gives_up_holding_lone_escape_after_one_idle_flush(), holds_lone_escape_and_stitches_split_host_color_reply(), host_color_reply_split_within_idle_limit_assembles(), host_reply_burst_keeps_split_protection_alive(), idle_flush_drops_host_color_reply_after_idle_limit(), input_after_dropped_host_color_reply_is_intact_at_every_split() (+11 more)
+### Community 370 - "sidebar.rs"
+Cohesion: 0.11
+Nodes (13): AgentSidebarRows, agent_token_name(), AgentsSidebarConfig, RawSidebarToken, RawStyledSidebarToken, BTreeMap, Default, String (+5 more)
 
-### Community 358 - "BorderGlyphs"
-Cohesion: 0.14
-Nodes (19): Set, border_set_carries_block_compatible_symbols(), BorderGlyphs, border_color(), CardSpec, draws_the_frame_with_title_and_badge_and_returns_the_inner_rect(), focus_hover_and_dim_change_the_border_and_title_colors(), framed_label_width() (+11 more)
+### Community 371 - "PanelId"
+Cohesion: 0.18
+Nodes (12): PanelId, Action, ClientShellState, Drag, drop_edge(), preview(), MouseEvent, Option (+4 more)
 
-### Community 359 - "App"
-Cohesion: 0.13
-Nodes (8): App, hidden_render_attempt_keeps_presentation_cadence_available(), retain_detached_process_after_wait(), ExitStatus, Instant, Option, Result, test_app_with_pane()
-
-### Community 360 - "herdr-agent-state.js"
+### Community 372 - "herdr-agent-state.js"
 Cohesion: 0.16
 Nodes (23): ACTIVITY_EVENTS, CHILD_EVENT_STATES, childSessions, clip(), handleActivityEvent(), handleEvent(), HerdrAgentStatePlugin(), isChildInfo() (+15 more)
 
-### Community 361 - "Bytes"
+### Community 373 - "Value"
 Cohesion: 0.14
-Nodes (18): DefaultColorQuery, OscTerminator, append_upper_hex(), apply_cached_host_default_color(), default_color_event_response(), default_color_fallback_follows_host_appearance_when_host_theme_is_empty(), default_color_query_response(), expected_osc_rgb_response() (+10 more)
+Nodes (15): classify_user_text(), InsightReader, non_negative(), read_insight(), render_block(), render_transcript_line(), Rendered, Value (+7 more)
 
-### Community 362 - "RemotePlatform"
-Cohesion: 0.13
-Nodes (19): DetectedRemotePlatform, download_release_asset(), install_source_description(), install_source_description_for(), install_source_description_uses_local_binary_when_allowed(), install_source_description_uses_release_asset_when_local_binary_cannot_seed_remote(), InstallSource, local_binary_can_seed_remote() (+11 more)
-
-### Community 363 - "HeadlessServer"
+### Community 374 - "HeadlessServer"
 Cohesion: 0.15
 Nodes (5): HeadlessServer, HashSet, Instant, Option, Vec
 
-### Community 364 - "braille_chart.rs"
-Cohesion: 0.19
-Nodes (22): area_chart_colors_each_cell_by_its_top_series(), area_chart_handles_missing_colors_and_auto_scale(), auto_max(), auto_scale_uses_the_visible_maximum_and_empty_input_draws_nothing(), blocks_scale_to_eight_levels_per_row(), braille_char(), braille_packs_two_samples_per_cell(), ChartGlyphs (+14 more)
-
-### Community 365 - "Option"
+### Community 375 - "Option"
 Cohesion: 0.17
 Nodes (24): DownloadedUpdate, DownloadedWindowsUpdate, homebrew_cellar_keg_root(), is_homebrew_managed_exe_path(), is_homebrew_managed_exe_path_following_links(), is_mise_managed_exe_path(), is_mise_managed_exe_path_following_links(), is_nix_store_exe_path() (+16 more)
 
-### Community 366 - ".start_plugin_command"
+### Community 376 - "agents.rs"
+Cohesion: 0.14
+Nodes (20): AgentViewContext, AgentActivityContent, AgentActivityReadParams, AgentAttention, AgentAttentionKind, AgentViewBuiltinField, AgentViewBuiltinSortField, AgentViewClearParams (+12 more)
+
+### Community 377 - "TextCell"
+Cohesion: 0.15
+Nodes (22): byte_index_after_cell(), byte_index_for_cell(), cell_index_at_column(), CellSpan, is_escaped(), is_leading_token_wrapper(), is_trailing_token_wrapper(), is_word_separator() (+14 more)
+
+### Community 378 - ".start_plugin_command"
 Cohesion: 0.14
 Nodes (19): plugin_command_output_reader_caps_and_marks_truncation(), App, current_unix_ms(), finish_plugin_child(), plugin_finish_time_is_taken_when_the_command_exits(), plugin_output_reader_spawn_failure_stops_the_command(), plugin_second_output_reader_spawn_failure_stops_the_command(), plugin_subscribes_to_event() (+11 more)
 
-### Community 367 - "machine_fs.rs"
+### Community 379 - "release_notes.rs"
+Cohesion: 0.18
+Nodes (23): ReleaseNotesState, display_lines_scroll_metrics(), line_text(), product_announcement_display_lines(), release_notes_close_button_rect(), release_notes_config_inline_code_uses_nonbreaking_spaces(), release_notes_display_lines(), release_notes_fenced_code_blocks_preserve_blank_lines() (+15 more)
+
+### Community 380 - "machine_fs.rs"
 Cohesion: 0.29
 Nodes (22): cat(), fail(), FsListRow, FsStatRow, get(), list(), mkdir(), mode_text() (+14 more)
 
-### Community 368 - "snippet.rs"
+### Community 381 - "snippet.rs"
 Cohesion: 0.24
 Nodes (21): add(), add_parser_collects_every_field(), AddArgs, args(), execute_target(), list(), parse_add_args(), parse_run_args() (+13 more)
 
-### Community 369 - "ClientShellState"
+### Community 382 - "ClientShellState"
 Cohesion: 0.19
 Nodes (7): ClientShellState, Into, Method, Option, Result, String, Vec
 
-### Community 370 - ".workbench_mouse"
-Cohesion: 0.18
-Nodes (12): Edge, Action, ClientShellState, Drag, drop_edge(), preview(), MouseEvent, Option (+4 more)
-
-### Community 371 - "machine_files.rs"
-Cohesion: 0.26
-Nodes (22): cell_at(), closing_files_cancels_owned_worker_and_reopening_rejects_old_result(), crossterm_key(), empty_directory_and_filter_without_matches_are_distinct(), entry(), file_failures_split_between_toasts_and_the_page_error_state(), files_overlay(), machine_files_filter_count_caches_and_clamps_with_query() (+14 more)
-
-### Community 372 - "tree.rs"
+### Community 383 - "PathBuf"
 Cohesion: 0.16
-Nodes (21): K, Cursor, depth_saturates_at_the_mask_width(), draw(), fill_last_child_masks(), Glyphs, low_bits(), masks_and_prefixes_draw_a_connected_tree() (+13 more)
+Nodes (24): app_dir_name(), config_dir(), confine(), confine_config_path(), confinement_keeps_temp_paths_and_sandboxes_everything_else(), explicit_overrides_are_kept_but_only_temp_ones_count_as_isolated(), home_dir(), is_under_temp_root() (+16 more)
 
-### Community 373 - "metadata_tokens.rs"
+### Community 384 - "metadata_tokens.rs"
 Cohesion: 0.20
 Nodes (17): accept_sequence(), delayed_expiry_sweep_removes_every_token_due_at_now(), MetadataToken, MetadataTokens, patch(), patches_and_clears_individual_keys(), Duration, HashMap (+9 more)
 
-### Community 374 - ".scroll_metrics"
-Cohesion: 0.12
-Nodes (13): detection_text_stays_at_bottom_when_viewport_is_scrolled(), empty_or_short_resize_keeps_following_bottom_when_output_creates_scrollback(), extract_selection_reads_screen_rows_not_current_viewport(), ghostty_set_scroll_offset_from_bottom(), pane_scrollback_controls_round_trip_and_clamp_without_ui_interference(), PanePresentationMetadata, recent_rows_preserve_combining_text_and_hide_image_placeholders(), resize_recovery_does_not_replay_scrolled_history_over_blank_bottom() (+5 more)
-
-### Community 375 - "ScrollMetrics"
+### Community 385 - "ScrollMetrics"
 Cohesion: 0.23
 Nodes (23): ScrollMetrics, palette_default_components_preserve_the_legacy_focus_colors(), pane_scrollbar_rect(), release_notes_scrollbar_rect(), render_pane_scrollbar(), render_pane_scrollbar_buffer_styled(), render_scrollbar_buffer(), AppState (+15 more)
 
-### Community 376 - "shutdown.rs"
+### Community 386 - "shutdown.rs"
 Cohesion: 0.16
 Nodes (20): LoginManager, monitor_host_shutdown(), PrivateBus, Arc, AtomicBool, Child, Connection, Drop (+12 more)
 
-### Community 377 - "Activity"
+### Community 387 - "Activity"
 Cohesion: 0.16
 Nodes (16): Activity, idle_deadline_counts_elapsed_sleep_and_only_positive_io_renews_it(), idle_expired(), now(), Arc, AtomicU64, Duration, Option (+8 more)
 
-### Community 378 - "tests_0163.rs"
-Cohesion: 0.14
-Nodes (17): apply_lifecycle(), Lifecycle, lifecycle_from_reader(), Read, Seek, call(), completed_and_running_summaries_are_bounded_and_reset_on_a_new_turn(), lifecycle() (+9 more)
-
-### Community 379 - "report_origin.rs"
+### Community 388 - "report_origin.rs"
 Cohesion: 0.21
 Nodes (19): attention_reports_go_through_the_same_origin_check(), detached(), inside_pane(), lineage(), origin(), report_from_a_detached_process_is_dropped_silently(), report_from_inside_the_pane_process_tree_is_applied(), ReportFixture (+11 more)
 
-### Community 380 - "attention.rs"
+### Community 389 - "attention.rs"
 Cohesion: 0.19
 Nodes (17): sound_for_toast_kind(), toast_event_text(), ToastKind, AttentionDecision, AttentionInput, AttentionKind, body_is_a_single_line_summary_only_when_notifying(), classify() (+9 more)
 
-### Community 381 - "unix_stdin_reader_loop"
-Cohesion: 0.19
-Nodes (23): classify_unix_input(), filter_direct_input(), flush_unix_palette_input(), idle_flush_timeout_ms(), pixel_mouse_classification_is_narrow_and_uses_read_geometry(), poll_read_ready(), retain_geometry(), Arc (+15 more)
-
-### Community 382 - "mod.rs"
-Cohesion: 0.17
-Nodes (18): bar_hint_label(), bar_key_cap(), bar_surface(), left_truncation_keeps_the_tail_and_marks_the_cut(), left_truncation_never_splits_a_wide_character(), readable_on(), Buffer, Color (+10 more)
-
-### Community 383 - "ClientShellState"
+### Community 390 - "ClientShellState"
 Cohesion: 0.19
 Nodes (8): ClientPaletteAction, ClientShellState, command_search_lists_real_workspaces_and_keeps_target_out_of_catalog(), machine_item_id(), HashMap, MouseEvent, String, Vec
 
-### Community 384 - "form.rs"
-Cohesion: 0.25
-Nodes (11): invalid_value(), parse_port_field(), parse_proxy_jump(), parse_u16_field(), parse_u64_field(), Result, String, Vec (+3 more)
+### Community 391 - "ClientShellLayout"
+Cohesion: 0.18
+Nodes (14): canvas_with_cursor(), client_copy_surface_coherent(), ClientShellState, copy_feedback_toast(), dim_around(), emphasize_pane_border(), render_client_copy_search_highlights(), restore_cells_only_hides_a_cursor_inside_the_bar_columns() (+6 more)
 
-### Community 385 - "state.rs"
+### Community 392 - "LinkHoverTarget"
 Cohesion: 0.17
-Nodes (15): active_api_retirement_leaves_cleanup_to_composition(), merge_presentation_graphics(), pending_cleanup_precedes_frame_graphics_and_drains_the_buffer(), pending_none_native_retirement_does_not_touch_cleanup_or_shell_cache(), queued_cleanup_is_synchronized_and_respects_graphics_capability(), replacement_generation_resets_bounded_graphics_guards(), retired_graphics_tombstone_overflow_fails_closed_until_generation_reset(), retired_graphics_tombstones_survive_handoff_and_only_exact_files_consume_them() (+7 more)
+Nodes (11): ClientShellState, LinkHover, LinkHoverTarget, region_contains(), MouseEvent, Option, Rect, Result (+3 more)
 
-### Community 386 - "IsolatedDirs"
-Cohesion: 0.11
-Nodes (16): IsolatedDirs, remove_dir_eventually(), resolve_config_relative_path(), Deref, Drop, Path, PhantomData, RefCell (+8 more)
+### Community 393 - "machine_files.rs"
+Cohesion: 0.27
+Nodes (21): cell_at(), closing_files_cancels_owned_worker_and_reopening_rejects_old_result(), crossterm_key(), empty_directory_and_filter_without_matches_are_distinct(), file_failures_split_between_toasts_and_the_page_error_state(), files_overlay(), machine_files_filter_count_caches_and_clamps_with_query(), machine_files_viewer_slices_lines_and_clamps_scroll() (+13 more)
 
-### Community 387 - "AppEvent"
+### Community 394 - "time.rs"
+Cohesion: 0.14
+Nodes (16): ClientLoopTimer, earlier_client_work_can_pull_the_timer_deadline_forward(), incoming_events_do_not_postpone_timer_deadline(), Duration, Instant, Option, Self, modified_ms() (+8 more)
+
+### Community 395 - "AppEvent"
 Cohesion: 0.21
 Nodes (22): ApiWorktreeAddRequest, ApiWorktreeRemoveRequest, AppEvent, AgentState, Arc, AtomicBool, Box, Duration (+14 more)
 
-### Community 388 - "install_target_inner"
+### Community 396 - "install_target_inner"
 Cohesion: 0.15
 Nodes (21): install_target(), install_target_inner(), Result, String, Vec, uninstall_target(), retired_integration_error(), Error (+13 more)
 
-### Community 389 - "background_agent.rs"
+### Community 397 - "background_agent.rs"
 Cohesion: 0.20
 Nodes (17): acquired(), agent_in_the_shell_group_is_never_held(), agent_still_in_the_foreground_group_is_not_held(), agent_that_exited_in_front_is_unknown(), agent_without_a_start_token_is_never_held(), AgentJobStatus, AgentJobTracker, AgentProcess (+9 more)
 
-### Community 390 - "ShellInputHarness"
+### Community 398 - "ShellInputHarness"
 Cohesion: 0.18
 Nodes (14): ambiguous_text_and_ime_never_synthesize_server_releases(), native_text_keys_keep_server_cleanup_leases(), reported_key_repeats_and_cleanup_survive_ambiguous_text(), Bytes, ClientShellState, Drop, HeadlessServer, Option (+6 more)
 
-### Community 391 - "release_notes.rs"
-Cohesion: 0.19
-Nodes (22): display_lines_scroll_metrics(), line_text(), product_announcement_display_lines(), release_notes_close_button_rect(), release_notes_config_inline_code_uses_nonbreaking_spaces(), release_notes_display_lines(), release_notes_fenced_code_blocks_preserve_blank_lines(), release_notes_fenced_code_blocks_render_as_preformatted_lines() (+14 more)
-
-### Community 392 - "App"
+### Community 399 - "App"
 Cohesion: 0.18
 Nodes (11): App, Duration, Option, Path, Request, Sender, String, Vec (+3 more)
 
-### Community 393 - "api.rs"
+### Community 400 - ".spawn_popup_command"
+Cohesion: 0.21
+Nodes (16): App, app_with_popup(), close_popup_clears_direct_attach_resize_lock(), close_popup_uses_navigate_mode_without_active_workspace(), close_popup_uses_terminal_mode_with_active_workspace(), popup_close_api_closes_only_active_popup(), popup_rejects_known_small_terminal_area_before_spawning(), popup_survives_background_workspace_removal() (+8 more)
+
+### Community 401 - "api.rs"
 Cohesion: 0.23
 Nodes (21): activity_read_args_mirror_the_method_params(), activity_read_request(), ActivityReadArgs, ActivityReadTarget, api_activity_read(), api_schema(), api_snapshot(), args() (+13 more)
 
-### Community 394 - "LinkHoverTarget"
-Cohesion: 0.18
-Nodes (11): ClientShellState, LinkHover, LinkHoverTarget, region_contains(), MouseEvent, Option, Rect, Result (+3 more)
+### Community 402 - "gallery_tools.rs"
+Cohesion: 0.21
+Nodes (21): key(), open_worktrees(), profile(), profiles(), remove_worktree(), ClientShellConfig, ClientShellState, KeyCode (+13 more)
 
-### Community 395 - "link_hover.rs"
+### Community 403 - "link_hover.rs"
 Cohesion: 0.25
 Nodes (21): ctrl_hover_clears_on_release_content_change_and_focus_loss(), ctrl_hover_coalesces_motion_and_ignores_old_replies(), ctrl_hover_content_patch_removes_all_old_underlines(), ctrl_hover_explicit_wide_label_includes_the_spacer_cell(), ctrl_hover_groups_contiguous_same_destination_cells_without_server_query(), ctrl_hover_ignores_late_reply_after_pointer_leaves(), ctrl_hover_is_silent_when_unsupported_or_rejected(), ctrl_hover_pending_request_does_not_block_another_endpoint_with_the_same_boot_id() (+13 more)
 
-### Community 396 - "window_title.rs"
+### Community 404 - "SidebarTokenStyle"
+Cohesion: 0.18
+Nodes (14): AgentSidebarToken, defaults_match_the_compact_agent_and_existing_space_layouts(), parses_occurrence_styles_without_changing_plain_tokens(), Box, Color, Deserialize, From, Option (+6 more)
+
+### Community 405 - "SoundConfig"
+Cohesion: 0.14
+Nodes (10): AgentSoundOverrides, AgentSoundSetting, Default, Option, PathBuf, Self, String, Vec (+2 more)
+
+### Community 406 - "window_title.rs"
 Cohesion: 0.16
 Nodes (13): default_window_title(), parses_tokens_literals_and_escapes(), Option, Result, Self, String, Vec, sanitize_window_title_text() (+5 more)
 
-### Community 397 - "env.rs"
+### Community 407 - "env.rs"
 Cohesion: 0.25
 Nodes (21): apply_pane_base_env(), claude_dir(), codex_dir(), config_dir_from_env_or_home(), expand_tilde_path(), home_dir(), home_dir_from_env(), kimi_dir() (+13 more)
 
-### Community 398 - "Option"
-Cohesion: 0.14
-Nodes (22): available_pane_shell(), child_groups_foreground_process_group(), clipboard_text_matches(), foreground_job(), foreground_process_group_id(), foreground_process_group_id_for_tty_fd(), host_terminal_toasts_clipboard_writes(), live_pane_process_group() (+14 more)
+### Community 408 - "SurfaceGraphicsAssetKey"
+Cohesion: 0.18
+Nodes (18): asset_key(), asset_key_from_descriptor(), ClientState, collect_scene(), direct_upload_control(), format_code(), host_image_id(), image_signature_from_asset() (+10 more)
 
-### Community 399 - "monitoring.rs"
+### Community 409 - ".scroll_metrics"
+Cohesion: 0.13
+Nodes (11): detection_text_stays_at_bottom_when_viewport_is_scrolled(), extract_selection_reads_screen_rows_not_current_viewport(), ghostty_set_scroll_offset_from_bottom(), pane_scrollback_controls_round_trip_and_clamp_without_ui_interference(), PanePresentationMetadata, recent_rows_preserve_combining_text_and_hide_image_placeholders(), resize_recovery_does_not_replay_scrolled_history_over_blank_bottom(), resize_reflow_keeps_scrolled_viewport_and_bottom_detection_sane() (+3 more)
+
+### Community 410 - "monitoring.rs"
 Cohesion: 0.17
 Nodes (17): current_process_identity_is_stable_and_cannot_be_terminated(), environment_and_stat_errors_follow_the_interface_language(), HelperProcessGuard, monitor_cpu_inventory(), monitor_environment(), MonitoredProcess, process_instance_token(), Child (+9 more)
 
-### Community 400 - "monitoring_fallback.rs"
+### Community 411 - "monitoring_fallback.rs"
 Cohesion: 0.15
 Nodes (16): configure_helper_process_command(), HelperProcessGuard, monitor_cpu_inventory(), monitor_environment(), MonitoredProcess, NativeGpuCollector, process_instance_token(), Child (+8 more)
 
-### Community 401 - "tab_surface.rs"
-Cohesion: 0.22
-Nodes (20): cjk_ime_reveal(), compute_tab_surface(), compute_tab_surface_for(), explicit_surface_layout_drives_render_cursor_and_hyperlinks(), pane_host_cursor(), PaneHostCursorInputs, render_tab_surface(), resize_tab_surface() (+12 more)
+### Community 412 - "context"
+Cohesion: 0.21
+Nodes (18): a_half_written_tail_line_is_never_consumed(), a_missing_session_directory_degrades_to_an_empty_tree(), a_path_reference_must_name_the_transcript_file(), a_relocated_config_dir_is_followed_instead_of_home(), a_title_beyond_the_tail_window_is_read_from_the_head_and_cached(), Claude, context(), copy_tree() (+10 more)
 
-### Community 402 - "integration.rs"
+### Community 413 - "tests_0163.rs"
+Cohesion: 0.15
+Nodes (15): lifecycle_from_reader(), Read, Seek, call(), completed_and_running_summaries_are_bounded_and_reset_on_a_new_turn(), lifecycle(), lifecycle_summary_preserves_failures_and_falls_back_when_content_is_missing(), marker_free_tail_only_uses_tools_inside_the_same_read_window() (+7 more)
+
+### Community 414 - "TerminalId"
+Cohesion: 0.13
+Nodes (11): Borrow, PaneState, Self, Display, Formatter, Result, Self, String (+3 more)
+
+### Community 415 - "integration.rs"
 Cohesion: 0.22
 Nodes (19): cli_reports_retired_targets_instead_of_installing_them(), describe_integration_note(), describe_integration_state(), errors(), integration_install(), integration_status(), integration_uninstall(), IntegrationTargetName (+11 more)
 
-### Community 403 - "SshMachineMetadata"
+### Community 416 - "SshMachineMetadata"
 Cohesion: 0.17
-Nodes (13): load_metadata(), metadata_does_not_follow_symlinks(), metadata_is_disposable_fingerprinted_and_independent_per_profile(), Option, Path, PathBuf, Result, Self (+5 more)
+Nodes (14): load_metadata(), metadata_does_not_follow_symlinks(), metadata_is_disposable_fingerprinted_and_independent_per_profile(), Option, Path, PathBuf, Result, Self (+6 more)
 
-### Community 404 - "raw_console_reader_loop"
-Cohesion: 0.14
-Nodes (18): console_input_handle(), process_platform_input_items(), push_platform_input_events(), raw_console_reader_loop(), Arc, AtomicBool, HANDLE, Result (+10 more)
+### Community 417 - "settings.rs"
+Cohesion: 0.24
+Nodes (19): alert_metric_label(), build_cards(), Card, Control, draw_row(), Row, Action, Buffer (+11 more)
 
-### Community 405 - "isolate_dirs"
+### Community 418 - "color.rs"
+Cohesion: 0.20
+Nodes (18): Group, color_to_rgb(), contrast_fg(), contrast_fg_never_returns_a_color_that_vanishes_on_the_background(), contrast_ratio(), contrast_ratio_matches_the_wcag_extremes(), indexed_to_rgb(), mix() (+10 more)
+
+### Community 419 - "isolate_dirs"
 Cohesion: 0.21
 Nodes (19): isolate_dirs(), configure(), dispatch(), environment(), extraction_command(), install(), matches(), plain() (+11 more)
 
-### Community 406 - "text.rs"
-Cohesion: 0.13
-Nodes (10): clean_output(), compact_count(), compact_count_rounded(), fit_chars(), keep_line_breaks(), parse_offset(), String, strip_inline_markdown() (+2 more)
-
-### Community 407 - "env_lock"
-Cohesion: 0.13
-Nodes (21): clipboard_commands(), clipboard_commands_include_x11_fallbacks(), clipboard_commands_prefer_wayland_when_available(), desktop_notification_sets_app_name_and_separates_option_like_titles(), detach_clipboard_owner(), env_lock(), failed_wl_copy_uses_x11_fallback(), open_url() (+13 more)
-
-### Community 408 - "plugin_command.rs"
+### Community 420 - "plugin_command.rs"
 Cohesion: 0.20
 Nodes (17): command_for_argv_in_dir(), command_for_program(), has_path_separator(), is_windows_batch_file_name(), is_windows_batch_path(), program_for_cwd(), resolve_windows_program(), Command (+9 more)
 
-### Community 409 - "render_prof.rs"
+### Community 421 - "render_prof.rs"
 Cohesion: 0.17
 Nodes (16): counter(), duration(), duration_since(), DurationStats, enabled(), event(), flush_if_due(), RenderProfiler (+8 more)
 
-### Community 410 - "event_fairness.rs"
+### Community 422 - ".new"
+Cohesion: 0.15
+Nodes (17): a_completed_tail_line_is_picked_up_by_the_eof_cursor(), collect_notifications(), is_after_restart(), Notification, notification_carrier(), notification_text_parsing_stays_total_on_odd_input(), notifications_sent_after_a_restart_are_recognized_by_their_summary(), NotifiedStatus (+9 more)
+
+### Community 423 - "event_fairness.rs"
 Cohesion: 0.20
 Nodes (20): api_request_preflight_preserves_query_boundary_and_leaves_late_events(), external_api_batch_stops_immediately_when_shutdown_is_requested(), external_api_batches_preserve_fifo_and_leave_work_for_the_next_turn(), external_api_burst_profile(), external_server_events_yield_with_backlog_and_preserve_fifo(), fill_server_event_channel(), handled_server_events(), queue_requests() (+12 more)
 
-### Community 411 - "TerminalTargetError"
+### Community 424 - "TerminalTargetError"
 Cohesion: 0.29
 Nodes (12): App, name_lookup_keeps_pane_order_and_ignores_detached_terminals(), named_targets_follow_terminal_identity_after_pane_and_tab_reordering(), Option, Result, String, Vec, terminal_target_lookup_profile() (+4 more)
 
-### Community 412 - "auto_update_for_package"
+### Community 425 - "auto_update_for_package"
 Cohesion: 0.14
 Nodes (18): PackageManager, auto_update(), auto_update_for_package(), auto_update_homebrew(), is_homebrew_managed_install(), is_mise_managed_install(), is_nix_managed_install(), package_auto_update_ignores_fake_updates_and_preserves_cache() (+10 more)
 
-### Community 413 - "SavedSshEndpoint"
-Cohesion: 0.24
-Nodes (17): SavedSshEndpoint, endpoint(), files_entries(), fleet(), machine(), machine_form(), open_files(), open_import() (+9 more)
+### Community 426 - "link_hints.rs"
+Cohesion: 0.17
+Nodes (12): cell(), ClientLinkHint, ClientLinkHints, ClientShellState, hint_label(), row(), row_spans_find_http_and_trim_trailing_punctuation(), row_text_url_spans() (+4 more)
 
-### Community 414 - "handle_notify_with_notifiers"
-Cohesion: 0.19
-Nodes (19): handle_notify(), handle_notify_with_notifiers(), handle_shell_notification_effects(), native_delivery_keeps_client_responsive_and_preserves_replacement_order(), queue_system_notification(), FnMut, FnOnce, Option (+11 more)
-
-### Community 415 - "Option"
-Cohesion: 0.14
-Nodes (8): ClientMachineBootstrap, Drop, Option, Self, test_recovery(), TestRecovery, TriChoice, recovery_label()
-
-### Community 416 - "settings.rs"
-Cohesion: 0.26
-Nodes (18): alert_metric_label(), build_cards(), Card, Control, draw_row(), Row, Action, Buffer (+10 more)
-
-### Community 417 - "broadcast.rs"
-Cohesion: 0.28
-Nodes (19): broadcast_indicator_renders_in_terminal_mode_bar_only_when_live(), broadcast_key_fans_out_named_keys_and_skips_releases(), broadcast_mirror_follows_external_file_changes(), broadcast_mirror_refresh_keeps_overlay_editing_state_and_local_writes_win(), broadcast_overlay_defaults_to_disabled_empty_and_gate_persists(), broadcast_picker_registers_one_pane_per_endpoint(), broadcast_send_failures_dedupe_per_endpoint_and_success_rearms(), broadcast_set() (+11 more)
-
-### Community 418 - "time.rs"
-Cohesion: 0.15
-Nodes (13): ClientLoopTimer, earlier_client_work_can_pull_the_timer_deadline_forward(), incoming_events_do_not_postpone_timer_deadline(), Duration, Instant, Option, Self, rfc3339_ms() (+5 more)
-
-### Community 419 - "String"
+### Community 427 - "SemanticNotification"
 Cohesion: 0.21
-Nodes (20): config_key_path(), ConfigKeyPathSegment, deserialize_with_ignored(), format_config_key_path(), load_live_section(), D, Error, FnOnce (+12 more)
+Nodes (8): ClientShellState, notification_duration(), NotificationValidation, Duration, Instant, Vec, semantic_notification_roundtrip(), SemanticNotification
 
-### Community 420 - ".new"
+### Community 428 - ".new"
+Cohesion: 0.14
+Nodes (14): claim_temp_dir(), claim_temp_dir_creates_first_available_candidate(), claim_temp_dir_preserves_existing_candidate_and_sentinel(), claim_temp_dir_propagates_other_errors_without_retry(), remove_dir_eventually(), resolve_config_relative_path(), Deref, Drop (+6 more)
+
+### Community 429 - "region"
+Cohesion: 0.18
+Nodes (20): above_prompt_box(), after_current_prompt_block_marker(), after_last_horizontal_rule(), after_last_prompt_marker(), before_current_prompt_marker(), bottom_lines(), bottom_non_empty_lines(), codex_block_marker_line() (+12 more)
+
+### Community 430 - ".new"
 Cohesion: 0.15
 Nodes (15): abandoned_and_failed_publication_leave_config_unchanged(), config_publication_keeps_old_content_until_commit(), Directory, existing_permissions_and_new_file_defaults_are_preserved(), hard_links_are_rejected_before_staging_and_rechecked_before_commit(), partial_write_errors_preserve_files_and_do_not_remove_collisions(), Drop, PathBuf (+7 more)
 
-### Community 421 - "xtgettcap.rs"
+### Community 431 - "xtgettcap.rs"
 Cohesion: 0.23
 Nodes (15): OrderedColorOrC1Event, append_upper_hex(), assert_chunk_equivalence(), build_xtgettcap_response(), C1XtgettcapQueryTracker, C1XtgettcapResponse, C1XtgettcapTrackerState, ignored_string_bulk_matches_single_bytes() (+7 more)
 
-### Community 422 - "String"
+### Community 432 - "Result"
 Cohesion: 0.15
-Nodes (20): foreground_group_leader_job(), foreground_job_does_not_read_remote_memory_for_uninterruptible_members(), foreground_job_for_group(), foreground_job_from_members(), foreground_job_on_wsl_skips_known_agents_but_reads_wrappers(), foreground_process_group_members(), interactive_shell_command(), live_process_group_member() (+12 more)
+Nodes (20): check_config_write_target(), config_file_link_count(), copy_config_xattrs(), create_config_temporary(), launch_executable(), parse_process_detection_mode(), prepare_config_metadata(), process_cwd() (+12 more)
 
-### Community 423 - "plugin_paths.rs"
+### Community 433 - "plugin_paths.rs"
 Cohesion: 0.24
 Nodes (18): copy_dir_all(), create_managed_installation(), ensure_plugin_config_dir(), ensure_plugin_user_dirs(), installations_never_reuse_or_move_existing_files(), legacy_plugin_config_dirs(), managed_checkout_lock_path(), managed_checkout_path() (+10 more)
 
-### Community 424 - "Selection<P>"
+### Community 434 - "Selection<P>"
 Cohesion: 0.19
 Nodes (8): absolute_row_for_viewport(), absolute_row_for_viewport_row(), contains_wsl_marker(), Option, Rect, Selection<P>, viewport_row_for_absolute_row(), viewport_top_row()
 
-### Community 425 - "parse_notification_text"
-Cohesion: 0.13
-Nodes (17): a_completed_tail_line_is_picked_up_by_the_eof_cursor(), classify_user_text(), collect_notifications(), is_after_restart(), Notification, notification_carrier(), notification_text_parsing_stays_total_on_odd_input(), notifications_sent_after_a_restart_are_recognized_by_their_summary() (+9 more)
+### Community 435 - "AppAgentViewEntry"
+Cohesion: 0.16
+Nodes (6): AgentViewEntry, AppAgentViewEntry, AgentState, Cow, Option, status_name()
 
-### Community 426 - "Value"
-Cohesion: 0.19
-Nodes (10): InsightReader, non_negative(), read_insight(), render_block(), render_transcript_line(), Rendered, Value, settling_prefers_the_latest_run_and_its_first_notification() (+2 more)
-
-### Community 427 - "TerminalRuntimeRegistry"
-Cohesion: 0.22
-Nodes (13): From, HashMap, Self, TerminalRuntimeRegistry, compute_view_internal(), compute_view_with_cell_size(), compute_view_with_runtime_registry(), compute_view_without_resizing_panes() (+5 more)
-
-### Community 428 - "PluginManifestPane"
+### Community 436 - "PluginManifestPane"
 Cohesion: 0.27
 Nodes (11): PluginManifestPane, PluginPanePlacement, App, HashMap, Option, Path, PathBuf, PluginPaneOpenParams (+3 more)
 
-### Community 429 - "ServerStop"
-Cohesion: 0.15
-Nodes (12): server_stop_control_bypasses_app_channel(), first_stop_reason_wins(), Arc, AtomicBool, Display, Formatter, Mutex, Option (+4 more)
-
-### Community 430 - "map_server_not_running_or_io"
+### Community 437 - "map_server_not_running_or_io"
 Cohesion: 0.15
 Nodes (19): api_client_error_to_io(), classifier_ignores_unrelated_io_kinds(), map_server_not_running_or_io(), maps_dead_server_connect_failure_to_friendly_error(), print_clap_error(), print_read_response(), print_response(), protocol_mismatch_was_reported() (+11 more)
 
-### Community 431 - "frame_output.rs"
-Cohesion: 0.21
-Nodes (17): clear_received_kitty_graphics(), contains_kitty_graphics_bytes(), find_subslice(), frame_graphics_land_between_the_frame_sync_markers(), kitty_graphics_command_image_id(), kitty_graphics_image_ids(), record_received_kitty_graphics(), Option (+9 more)
+### Community 438 - "handle_notify_with_notifiers"
+Cohesion: 0.20
+Nodes (18): handle_notify(), handle_notify_with_notifiers(), handle_shell_notification_effects(), native_delivery_keeps_client_responsive_and_preserves_replacement_order(), queue_system_notification(), FnMut, FnOnce, Option (+10 more)
 
-### Community 432 - "Keybinds"
+### Community 439 - "Keybinds"
 Cohesion: 0.28
 Nodes (15): ActionBinding, Keybinds, NavigateKeybinds, action_matches(), generated_character_key(), KeybindAction, KeybindDispatch, KeybindMatch (+7 more)
 
-### Community 433 - "PanelId"
-Cohesion: 0.27
-Nodes (5): DockNode, migration_preserves_a_valid_v1_tree_at_its_depth_limit(), PanelId, Box, Self
+### Community 440 - "Option"
+Cohesion: 0.21
+Nodes (15): key_codes_match(), key_event_matches_combo(), key_parts_match_combo(), legacy_shifted_ascii_letter_matches(), parse_key_combo(), parse_modifier_combo(), parse_modifier_token(), parse_range_modifiers() (+7 more)
 
-### Community 434 - "start_word_drag"
-Cohesion: 0.30
-Nodes (19): client_double_click_selects_word_and_copies_only_after_release(), double_click_drag_autoscroll_keeps_absolute_word_anchor(), double_click_drag_ignores_row_reply_after_typing_or_new_click(), double_click_drag_invalidates_cached_boundaries_outside_selected_cells(), double_click_drag_resize_cancels_pending_word_lookup(), double_click_drag_selects_whole_words_in_both_directions(), double_click_drag_survives_focus_lag_after_anchor_reply(), double_click_drag_waits_for_latest_row_before_copying() (+11 more)
+### Community 441 - "ServerStop"
+Cohesion: 0.16
+Nodes (12): ServerQuitSignal, first_stop_reason_wins(), Arc, AtomicBool, Display, Formatter, Mutex, Option (+4 more)
 
-### Community 435 - ".new"
-Cohesion: 0.15
-Nodes (17): claim_temp_dir(), claim_temp_dir_creates_first_available_candidate(), claim_temp_dir_preserves_existing_candidate_and_sentinel(), claim_temp_dir_propagates_other_errors_without_retry(), Config, config_loaders_report_unreadable_path(), load_live_config(), normalize_utf8_bom() (+9 more)
+### Community 442 - "RemoteFs"
+Cohesion: 0.31
+Nodes (8): RemoteFs, Error, Output, Result, Self, Vec, too_large(), validate_remote_path()
 
-### Community 436 - "SoundConfig"
-Cohesion: 0.17
-Nodes (8): AgentSoundOverrides, AgentSoundSetting, Default, Option, PathBuf, Self, sound_path_resolution_prefers_specific_over_global(), SoundConfig
-
-### Community 437 - "child_groups_foreground_process_group_with"
-Cohesion: 0.15
-Nodes (18): bounded_child_list_read_drops_a_token_cut_off_by_the_byte_budget(), bounded_child_list_read_keeps_complete_tokens_at_eof(), bounded_child_list_read_stops_at_the_pid_budget(), child_groups_foreground_group_fails_closed_at_the_scan_limit(), child_groups_foreground_group_picks_the_newest_job(), child_groups_foreground_group_returns_to_the_shell_group(), child_groups_foreground_group_skips_the_shell_group(), child_groups_foreground_process_group_with() (+10 more)
-
-### Community 438 - "input_tests.rs"
-Cohesion: 0.23
-Nodes (18): app_with_actor(), canonical_api_rejection_writes_nothing_and_allows_same_name_retry(), canonical_multiline_submission_preserves_each_line(), canonical_preflight_respects_quoted_and_translated_delimiters(), input_admission_does_not_wait_for_actor_and_raw_input_stays_intact(), input_guard_does_not_keep_the_master_open(), pane_request(), pty_pair() (+10 more)
-
-### Community 439 - "ssh_agent.rs"
+### Community 443 - "ssh_agent.rs"
 Cohesion: 0.19
 Nodes (15): connect(), isolated_api_socket(), Registration, registration_retries_when_the_api_is_initially_missing(), registration_stops_when_the_server_rejects_the_agent(), Arc, AtomicBool, Drop (+7 more)
 
-### Community 440 - "terminal_notify.rs"
+### Community 444 - "terminal_notify.rs"
 Cohesion: 0.19
 Nodes (15): build_osc99_notification(), build_osc9_notification(), detect_backend(), kitty_notification_uses_structured_title_and_body(), AsRef, Option, Result, String (+7 more)
 
-### Community 441 - "aggregate.rs"
+### Community 445 - "meter_row.rs"
+Cohesion: 0.27
+Nodes (17): aligned_rows_share_the_gauge_column(), ascii_and_empty_area_are_handled(), budget(), cjk_label_and_value_budget_by_display_width(), MeterColumns, MeterRow, narrowing_drops_detail_then_gauge_then_label_but_never_the_value(), render() (+9 more)
+
+### Community 446 - "aggregate.rs"
 Cohesion: 0.23
 Nodes (15): aggregate_state_all_unknown(), aggregate_state_done_unseen_beats_working(), aggregate_state_priority(), pane_attention_priority(), pane_details_use_tab_vector_index_not_stable_public_tab_number(), PaneDetail, AgentState, HashMap (+7 more)
 
-### Community 442 - "completion.rs"
+### Community 447 - "completion.rs"
 Cohesion: 0.20
 Nodes (15): completion_command(), completions_hide_private_commands_arguments_and_values(), parse_shell(), print_completion_help(), projection_preserves_completion_metadata_without_execution_relations(), Command, Option, Result (+7 more)
 
-### Community 443 - "control.rs"
+### Community 448 - "control.rs"
 Cohesion: 0.18
 Nodes (13): agent_view_projection_decodes_and_validates_the_view(), completion_guard_optional_control_round_trips_without_changing_snapshot_codec(), decode_endpoint_control(), DecodedAgentViewProjection, EndpointControlMessage, observation_events_decode_into_typed_frames_and_unknown_kinds_are_ignored(), protocol_failure_is_fatal(), Box (+5 more)
 
-### Community 444 - "health.rs"
+### Community 449 - "health.rs"
 Cohesion: 0.27
 Nodes (11): any_incoming_message_satisfies_an_outstanding_probe(), delayed_registration_can_reply_after_the_normal_probe_deadline(), EndpointHealth, HealthAction, pause_reprobes_without_extending_initial_readiness_budget(), quiet_connection_is_probed_then_expires_without_a_reply(), responding_startup_gets_time_for_its_snapshot_but_cannot_wait_forever(), Instant (+3 more)
 
-### Community 445 - "key_labels.rs"
+### Community 450 - "key_labels.rs"
 Cohesion: 0.22
 Nodes (14): key_sequence(), Option, String, canonical_modifier(), caret_key(), display_key(), needs_rewrite(), push_step() (+6 more)
 
-### Community 446 - "link_hints.rs"
-Cohesion: 0.20
-Nodes (11): cell(), ClientLinkHint, ClientLinkHints, ClientShellState, hint_label(), row(), row_spans_find_http_and_trim_trailing_punctuation(), row_text_url_spans() (+3 more)
-
-### Community 447 - "write.rs"
+### Community 451 - "write.rs"
 Cohesion: 0.22
 Nodes (14): ConfigEdit, create_temporary(), resolve_target(), File, FnOnce, Path, PathBuf, Result (+6 more)
 
-### Community 448 - "shell"
+### Community 452 - "shell"
 Cohesion: 0.32
 Nodes (17): all_naming_targets_preserve_submission_and_empty_semantics(), all_ten_fields_route_shared_text_editing(), busy_worktree_inputs_ignore_edits_paste_and_cancel(), copy_search_owns_prefix_but_parked_prompt_does_not_steal_input(), cursor_movement_preserves_filter_selection_scroll_and_branch_error(), editor(), enter_and_escape_preserve_overlay_actions_with_generated_text(), every_field_renders_long_unicode_across_resize_without_mutation() (+9 more)
 
-### Community 449 - "ClientShellState"
+### Community 453 - "ClientShellState"
 Cohesion: 0.20
 Nodes (5): checkout_path_preview(), ClientShellState, Option, Result, String
 
-### Community 450 - "SidebarTokenRule"
+### Community 454 - "IsolatedDirs"
+Cohesion: 0.18
+Nodes (15): config_diagnostic_summary(), config_path(), config_path_from_env(), isolated_state_dir(), IsolatedDirs, Option, OsString, PhantomData (+7 more)
+
+### Community 455 - "Ok"
+Cohesion: 0.36
+Nodes (11): deserialize_rows_by_agent(), deserialize_sidebar_rows(), parse_sidebar_token(), D, Error, Ok, Result, S (+3 more)
+
+### Community 456 - "SidebarTokenRule"
 Cohesion: 0.18
 Nodes (12): Condition, matching_style(), RawRule, Eq, Error, From, Option, Result (+4 more)
 
-### Community 451 - "herdr-agent-state.test.ts"
+### Community 457 - "herdr-agent-state.test.ts"
 Cohesion: 0.16
 Nodes (12): activityHints(), clients, FakeClient, isRecord(), lifecycle(), requestMethod(), requestParam(), requests (+4 more)
 
-### Community 452 - "Result"
-Cohesion: 0.21
-Nodes (15): create_remote_private_dir(), create_remote_ssh_config_dir(), create_remote_ssh_config_file(), forward_remote_bridge_stdio(), open_url(), read_terminal_grid_size(), reusable_remote_ssh_config_dir(), Child (+7 more)
-
-### Community 453 - "Result"
-Cohesion: 0.18
-Nodes (18): check_config_write_target(), config_file_link_count(), copy_config_xattrs(), create_config_temporary(), launch_executable(), prepare_config_metadata(), process_cwd(), File (+10 more)
-
-### Community 454 - "CellBaseline"
+### Community 458 - "CellBaseline"
 Cohesion: 0.24
 Nodes (12): CellBaseline, Decoder, message(), popup_baseline(), PopupBaseline, Option, Result, S (+4 more)
 
-### Community 455 - "text_snapshots.rs"
-Cohesion: 0.23
-Nodes (13): Entry, handles(), HashMap, Instant, Method, Option, Result, String (+5 more)
+### Community 459 - "RemoteAssetRef"
+Cohesion: 0.21
+Nodes (15): deserialize_remote_manifest_releases(), preview_assets_for_build(), remote_asset_info(), remote_preview_manifest_falls_back_to_archived_exact_build_assets(), remote_release_asset(), remote_update_manifest_uses_root_assets_for_latest_version(), RemoteAssetRef, RemoteManifestReleaseRef (+7 more)
 
-### Community 456 - ".floating_page_rect"
+### Community 460 - "build_info.rs"
+Cohesion: 0.25
+Nodes (14): build_id(), channel(), format_version(), is_preview(), non_empty(), package_identity(), package_manager(), package_version_binds_manager_and_full_commit_independently_of_channel() (+6 more)
+
+### Community 461 - ".floating_page_rect"
 Cohesion: 0.22
 Nodes (9): ClientShellState, Drag, MouseEvent, Option, Rect, Self, String, Window (+1 more)
 
-### Community 457 - ".new"
-Cohesion: 0.19
-Nodes (15): rfc3339_value_ms(), find_session_dir_by_id(), find_transcript_by_id(), insight_home(), locate_session(), locate_transcript(), Located, projects_root() (+7 more)
+### Community 462 - "ui_gallery_machines"
+Cohesion: 0.29
+Nodes (16): endpoint(), files_entries(), fleet(), machine(), machine_form(), open_files(), open_import(), plain() (+8 more)
 
-### Community 458 - "HostGeometry"
+### Community 463 - "HostGeometry"
 Cohesion: 0.26
 Nodes (12): boundary(), geometry_rejects_outside_pixels_and_maps_cells(), grid_cell(), grid_extent(), HostGeometry, HostPixels, integer_cell_pitch_ignores_trailing_pixel_remainder(), map_axis_within_cell() (+4 more)
 
-### Community 459 - "herdr-tui-session.test.ts"
+### Community 464 - "herdr-tui-session.test.ts"
 Cohesion: 0.14
 Nodes (10): activeDisposers, connections, fakeApi(), familyApi(), isRecord(), requestParam(), requests, requestWaiters (+2 more)
 
-### Community 460 - "GpuWorker"
+### Community 465 - "GpuWorker"
 Cohesion: 0.16
 Nodes (13): Nvml, gpu_sample_due(), GpuWorker, nvidia_metrics(), Arc, Instant, Mutex, Option (+5 more)
 
-### Community 461 - "clipboard_image.rs"
+### Community 466 - "clipboard_image.rs"
 Cohesion: 0.22
 Nodes (15): OpenOptions, cleanup_stale(), ensure_staging_dir(), remove_files(), restrict_dir_permissions(), restrict_file_options(), Path, PathBuf (+7 more)
 
-### Community 462 - "KittyKeyboardTracker"
+### Community 467 - "KittyKeyboardTracker"
 Cohesion: 0.21
 Nodes (9): buffers_split_csi_sequences(), KittyKeyboardTracker, modify_other_keys_disable_clears_state_across_chunks(), parse_kitty_keyboard_flags(), ris_clears_kitty_flags_stack_and_modify_other_keys(), Option, String, Vec (+1 more)
 
-### Community 463 - "Vec"
-Cohesion: 0.16
-Nodes (17): bytes_match_image_signature(), detached_custom_command_process_platform(), numeric_file_name(), pane_custom_command_pty_builder_platform(), process_parent_entries(), process_task_ids(), raw_command_argv(), read_clipboard_image_with_command() (+9 more)
-
-### Community 464 - "Bridge"
+### Community 468 - "Bridge"
 Cohesion: 0.17
 Nodes (11): Bridge, bridge_expires_when_silent_or_stdout_is_blocked(), bridge_preserves_one_way_progress_and_drains_after_stdin_eof(), legacy_bridge_has_no_idle_deadline(), Child, Drop, ExitStatus, PathBuf (+3 more)
 
-### Community 465 - "unix.rs"
+### Community 469 - "unix.rs"
 Cohesion: 0.16
 Nodes (16): parent_pty_fd_count(), parent_pty_fd_targets(), portable_pty_setup_leaves_one_parent_pty_fd(), pty_fd_test_lock(), Box, Child, CommandBuilder, Mutex (+8 more)
 
-### Community 466 - "fd.rs"
+### Community 470 - "fd.rs"
 Cohesion: 0.28
 Nodes (15): create_wake_pipe(), drain_wake_fd(), duplicate_cloexec_fd(), duplicate_fd(), poll_pty_and_wake(), PtyWakeReadiness, resize_pty_fd(), Arc (+7 more)
 
-### Community 467 - ".try_send"
-Cohesion: 0.28
-Nodes (9): SendError, ClientControlWriter, ClientRenderWriter, ordered_direct_follows_older_render_and_stays_bounded(), response_fairness_credit_reasons_merge_without_duplicate_acknowledgement(), Result, SyncSender, TrySendError (+1 more)
+### Community 471 - "agent_view_eval.rs"
+Cohesion: 0.32
+Nodes (15): AgentViewContext, compare_entries(), compare_optional_values(), EvalValue, field_value(), is_id_field(), matches_filter(), operand_value() (+7 more)
 
-### Community 468 - ".handle_client_shell_endpoint_request"
-Cohesion: 0.21
-Nodes (9): EndpointResponseKind, HeadlessServer, Arc, Box, Option, Reply, Request, Result (+1 more)
+### Community 472 - "paint"
+Cohesion: 0.18
+Nodes (11): Action, ClientShellState, narrow_content_stacks_complete_action_names_and_live_key_hints(), paint(), Buffer, ClientShellConfig, MouseEvent, Option (+3 more)
 
-### Community 469 - "ClientKeyCode"
-Cohesion: 0.15
-Nodes (12): ctrl_key_code(), KeyModifiers, windows_virtual_key_to_char_code(), windows_virtual_key_to_key_code(), pane_key_events(), pane_text_commits(), String, Vec (+4 more)
-
-### Community 470 - "graphics.rs"
-Cohesion: 0.21
-Nodes (14): add_main_image(), assert_graphics_cover(), endpoint_notice_and_multiline_diagnostic_cover_the_actual_rows(), every_dialog_and_menu_occludes_its_panel_not_the_whole_screen(), failed_direct_ack_composition_restores_graphics_for_inline_retry(), image(), mobile_switcher_still_hides_the_entire_underlying_surface(), notifications_and_clipboard_feedback_only_cover_their_drawn_corners() (+6 more)
-
-### Community 471 - "WorkspaceNavigationTarget"
+### Community 473 - "WorkspaceNavigationTarget"
 Cohesion: 0.23
 Nodes (6): ClientShellState, PendingWorkspaceHighlight, Instant, Option, String, WorkspaceNavigationTarget
 
-### Community 472 - "spawn_server_signal_monitor"
+### Community 474 - "Occlusion"
+Cohesion: 0.28
+Nodes (10): client_host_piece(), client_placement_origin(), GridPiece, Occlusion, piece_source_span(), Option, Self, Vec (+2 more)
+
+### Community 475 - "RetainedInputSource"
+Cohesion: 0.17
+Nodes (11): OsStatus, InputSourceRestore, RetainedInputSource, Drop, NonNull, Self, run_clipboard_command(), switch_to_ascii_input_source() (+3 more)
+
+### Community 476 - "spawn_server_signal_monitor"
 Cohesion: 0.17
 Nodes (10): Child, Fn, Into, OwnedFd, Self, Send, Sync, server_signal_monitor_survives_hangup_and_reports_terminate() (+2 more)
 
-### Community 473 - ".new"
+### Community 477 - ".new"
 Cohesion: 0.18
 Nodes (13): create_remote_private_dir(), create_remote_ssh_config_file(), pinned_ssh_socket_connects_old_listener_after_original_is_replaced(), PinnedSshControlSocket, plugin_pane_pwd_defaults_to_cwd_without_overriding_explicit_env(), Drop, File, Path (+5 more)
 
-### Community 474 - "remote.rs"
-Cohesion: 0.20
-Nodes (10): is_remote_auth_error(), is_remote_host_key_error(), print_remote_error_hint(), print_saved_ssh_error_hint(), Error, Result, String, run_remote_api_bridge() (+2 more)
+### Community 478 - "Path"
+Cohesion: 0.17
+Nodes (13): RemoteKeybindings, RemoteLaunch, Result, Self, String, validate_remote_target(), configure_remote_client_environment(), fits_unix_socket_path() (+5 more)
 
-### Community 475 - "thread_spawn.rs"
+### Community 479 - ".handle_client_shell_endpoint_request"
+Cohesion: 0.23
+Nodes (8): HeadlessServer, Arc, Box, Option, Reply, Request, Result, String
+
+### Community 480 - "thread_spawn.rs"
 Cohesion: 0.21
 Nodes (15): fail_next_spawns(), fail_spawns_after(), injected_failure_returns_payload(), Error, F, JoinHandle, Mutex, Option (+7 more)
 
-### Community 476 - "AgentActivityStatus"
-Cohesion: 0.29
-Nodes (12): AgentActivityStatus, canonical(), normalize(), Normalized, Option, String, Rule, status_or_unknown() (+4 more)
-
-### Community 477 - "machine_status.rs"
+### Community 481 - "machine_status.rs"
 Cohesion: 0.25
 Nodes (12): disabled_machine_reports_without_a_probe(), print_report(), probe(), resolve_for_status(), Option, Result, String, Vec (+4 more)
 
-### Community 478 - "protocol_guard.rs"
+### Community 482 - "protocol_guard.rs"
 Cohesion: 0.17
 Nodes (11): mismatch_response(), newer_server_error_tells_user_to_upgrade_client(), older_server_error_preserves_request_id_and_guidance(), ProtocolMismatchReported, reported_error(), Display, Error, Formatter (+3 more)
 
-### Community 479 - "server_not_running.rs"
+### Community 483 - "server_not_running.rs"
 Cohesion: 0.19
 Nodes (13): reported_error(), response(), reported_response(), was_reported(), Display, Error, Formatter, Option (+5 more)
 
-### Community 480 - "endpoint.rs"
-Cohesion: 0.17
-Nodes (9): endpoint_storage_keys_do_not_contain_ssh_targets(), endpoint_storage_keys_round_trip_and_reject_junk(), profile_ids_are_opaque_and_stable_when_parsed(), Formatter, Into, Option, Result, Self (+1 more)
-
-### Community 481 - "ComposedFrame"
-Cohesion: 0.21
-Nodes (7): ComposedFrame, Deref, From, Self, Into, Result, Write
-
-### Community 482 - "frame_output_tests.rs"
-Cohesion: 0.27
-Nodes (11): command_path(), deferred_inline_output_matches_existing_frame_envelope(), files_begin_only_after_probe_consumption_and_keep_order(), native_swap_cleanup_and_placements_share_the_frame_sync_envelope(), output(), Drop, PathBuf, Self (+3 more)
-
-### Community 483 - "FileTransport"
+### Community 484 - "FileTransport"
 Cohesion: 0.23
 Nodes (8): allowed(), environment_allows(), FileTransport, Fn, Option, OsString, PathBuf, Self
 
-### Community 484 - "close_pane.rs"
+### Community 485 - "ClientShellState"
+Cohesion: 0.22
+Nodes (3): ClientShellState, ClientShellState, Self
+
+### Community 486 - "close_pane.rs"
 Cohesion: 0.41
 Nodes (14): assert_no_close(), assert_pane_close(), click(), close_state(), last_pane_close_confirmation_can_be_cancelled(), last_pane_close_preserves_parent_group_and_linked_workspace_scope(), last_pane_close_waits_for_keyboard_or_mouse_confirmation(), last_pane_confirmation_preserves_target_across_focus_changes_and_new_tabs() (+6 more)
 
-### Community 485 - ".new"
+### Community 487 - "graphics.rs"
+Cohesion: 0.23
+Nodes (13): add_main_image(), assert_graphics_cover(), endpoint_notice_and_multiline_diagnostic_cover_the_actual_rows(), every_dialog_and_menu_occludes_its_panel_not_the_whole_screen(), failed_direct_ack_composition_restores_graphics_for_inline_retry(), image(), mobile_switcher_still_hides_the_entire_underlying_surface(), notifications_and_clipboard_feedback_only_cover_their_drawn_corners() (+5 more)
+
+### Community 488 - ".new"
 Cohesion: 0.20
 Nodes (12): longest_canonical_line(), PtyInputGuard, Arc, File, Item, Iterator, RawFd, Result (+4 more)
 
-### Community 486 - "HostShutdownIntentCell"
-Cohesion: 0.27
-Nodes (11): HostShutdownIntent, HostShutdownIntentCell, monitor_host_shutdown(), Arc, AtomicBool, Fn, Mutex, MutexGuard (+3 more)
-
-### Community 487 - "String"
+### Community 489 - "String"
 Cohesion: 0.21
 Nodes (15): datetime_from_tm(), hostname(), local_datetime(), local_stream_peer_description(), remote_reattach_argument(), remote_reattach_program(), Option, PrimitiveDateTime (+7 more)
 
-### Community 488 - "power.rs"
-Cohesion: 0.21
-Nodes (12): monitor_host_power(), native_registration_distinguishes_user_wake_and_releases_receiver(), notify(), Registration, c_void, Drop, JoinHandle, Option (+4 more)
-
-### Community 489 - "terminal_modes.rs"
+### Community 490 - "terminal_modes.rs"
 Cohesion: 0.26
 Nodes (14): clear_host_mouse_reporting(), clears_all_known_host_mouse_modes(), direct_keyboard_protocol_owns_exactly_one_stack_entry_and_modify_other_keys(), direct_legacy_keyboard_mode_does_not_pop_the_host_stack(), direct_modify_other_keys_works_without_kitty_flags(), DirectHostKeyboardState, host_keyboard_report_all_replaces_the_current_herdr_stack_entry(), Option (+6 more)
 
-### Community 490 - "test_support.rs"
+### Community 491 - "test_support.rs"
 Cohesion: 0.30
 Nodes (13): create_bare_repo_with_linked_worktree(), create_repo_with_linked_worktree(), git_at_least(), git_version(), init_repo_on_branch(), init_repo_with_commit(), parse_git_version(), Option (+5 more)
 
-### Community 491 - "HeadSeed"
-Cohesion: 0.16
-Nodes (11): A, DeserializeSeed, HeadLevel, HeadSeed, record_heads_are_sniffed_up_to_the_cut(), RecordHead, D, Error (+3 more)
+### Community 492 - "AgentActivityStatus"
+Cohesion: 0.32
+Nodes (11): AgentActivityStatus, canonical(), normalize(), Normalized, Option, String, Rule, status_or_unknown() (+3 more)
 
-### Community 492 - "App"
+### Community 493 - "App"
 Cohesion: 0.37
 Nodes (4): App, Option, String, Vec
 
-### Community 493 - "tone.rs"
+### Community 494 - ".push"
+Cohesion: 0.16
+Nodes (12): console_input_handle(), HANDLE, Result, vti_synthetic_shift_enter_inside_paste_stays_in_paste_payload(), vti_vk_return_inside_paste_stays_in_paste_payload(), windows_console_input_items(), windows_console_input_record_from_os(), windows_input_handoff_keeps_input_while_the_client_queue_is_full() (+4 more)
+
+### Community 495 - "ClientShellState"
+Cohesion: 0.15
+Nodes (4): ClientGraphicsCheckpoint, ClientShellState, ClientState, Vec
+
+### Community 496 - "tone.rs"
 Cohesion: 0.32
 Nodes (4): Neutral, Color, Tone, tones_are_distinct_readable_and_never_alias_severity_colors()
 
-### Community 494 - "close_tab.rs"
+### Community 497 - "close_tab.rs"
 Cohesion: 0.43
 Nodes (13): assert_no_close(), assert_tab_close(), click(), close_state(), last_tab_close_confirmation_can_be_cancelled(), last_tab_close_preserves_parent_group_and_linked_workspace_scope(), last_tab_close_waits_for_keyboard_or_mouse_confirmation(), last_tab_confirmation_preserves_target_across_focus_changes_and_new_tabs() (+5 more)
 
-### Community 495 - "RetainedInputSource"
-Cohesion: 0.21
-Nodes (9): OsStatus, InputSourceRestore, RetainedInputSource, Drop, NonNull, Self, switch_to_ascii_input_source(), TisInputSource (+1 more)
+### Community 498 - "GraphicsOutput"
+Cohesion: 0.29
+Nodes (7): GraphicsOperation, GraphicsOutput, inline_fallback_preserves_order_and_chunk_encoding(), Arc, Self, String, Vec
 
-### Community 496 - "observation_entry"
+### Community 499 - "Command"
+Cohesion: 0.29
+Nodes (14): build_terminal_notifier_command(), bundle_identifier_available(), desktop_notification_falls_back_to_osascript_when_terminal_notifier_fails(), Command, FnMut, run_notification_command(), show_desktop_notification(), show_desktop_notification_with_command() (+6 more)
+
+### Community 500 - "Result"
+Cohesion: 0.22
+Nodes (14): check_config_write_target(), config_file_link_count(), create_config_temporary(), open_url(), prepare_config_metadata(), Child, File, Path (+6 more)
+
+### Community 501 - "observation_entry"
 Cohesion: 0.18
 Nodes (14): observation_entry(), test_entry(), test_entry_with_creation_time(), test_entry_without_cmdline(), windows_agent_classification_is_cached_per_process_instance(), windows_agent_classification_retries_unreadable_command_lines(), windows_held_agent_liveness_uses_pinned_observations_at_scale(), windows_observation_identity_command_cannot_replace_instance() (+6 more)
 
-### Community 497 - ".anchor"
+### Community 502 - ".anchor"
 Cohesion: 0.19
 Nodes (9): anchor_screen_pos_adds_pane_origin(), anchor_screen_pos_same_cell_as_mouse_with_offset(), anchored_not_visible(), click_without_drag(), drag_then_finish(), drag_uses_buffer_rows_when_scrolled(), P, Self (+1 more)
 
-### Community 498 - "two_headless_servers_drive_atomic_endpoint_handoff"
+### Community 503 - "two_headless_servers_drive_atomic_endpoint_handoff"
 Cohesion: 0.23
 Nodes (13): background_surface_activation_preserves_focused_viewer_geometry(), CapturingEndpointTransport, dispatch_lifecycle_messages(), focused_surface_reassertion_reclaims_tab_geometry(), lifecycle_negotiation(), lifecycle_resize(), request_active_surface(), Arc (+5 more)
 
-### Community 499 - "FrozenText"
-Cohesion: 0.26
-Nodes (7): FrozenCell, FrozenRow, FrozenText, Option, Self, String, Vec
+### Community 504 - "AttentionReport"
+Cohesion: 0.18
+Nodes (7): AttentionReport, failed_latch_is_set_by_reports_and_cleared_by_working_ack_and_clear(), failed_report(), failure_reported_while_working_waits_for_the_turn_to_end(), released_or_replaced_agents_drop_their_failure(), Self, Vec
 
-### Community 500 - "machine_log.rs"
+### Community 505 - "machine_log.rs"
 Cohesion: 0.38
 Nodes (11): dump(), LogConfigRow, parse_on_args(), profile_not_found(), Option, Result, String, run_log_command() (+3 more)
 
-### Community 501 - "command.rs"
+### Community 506 - "command.rs"
 Cohesion: 0.28
 Nodes (12): category_description(), description(), item_description(), paint_row(), Buffer, Option, Rect, Vec (+4 more)
 
-### Community 502 - ".compose_workbench"
+### Community 507 - ".compose_workbench"
 Cohesion: 0.28
 Nodes (11): pane_surface_topology_signature(), borderless_pane_handle(), ClientShellState, pane_hit(), put(), Action, Buffer, Option (+3 more)
 
-### Community 503 - "MonitorConfig"
+### Community 508 - "gallery_overlays.rs"
+Cohesion: 0.22
+Nodes (12): config(), help(), notifications(), open_navigator(), push_custom_command(), ClientShellConfig, ClientShellState, Option (+4 more)
+
+### Community 509 - "terminal_sessions.rs"
+Cohesion: 0.33
+Nodes (12): connect_terminal_session_stream(), Option, Result, String, run_terminal_session_control(), run_terminal_session_observe(), TerminalControlCommand, TerminalControlMouseAction (+4 more)
+
+### Community 510 - "MonitorConfig"
 Cohesion: 0.32
 Nodes (8): diagnostics(), diagnostics_follow_the_interface_language(), MonitorAlertRule, MonitorConfig, Default, Self, String, Vec
 
-### Community 504 - "tab_bar.rs"
-Cohesion: 0.23
-Nodes (9): default_datetime_format(), diagnostics_reject_invalid_datetime_and_command_schedules(), parse_tab_bar_datetime_format(), OwnedFormatItem, Result, String, Vec, tab_bar_right_diagnostics() (+1 more)
-
-### Community 505 - "restart_policy.rs"
+### Community 511 - "restart_policy.rs"
 Cohesion: 0.22
 Nodes (5): remote_install_running_server_plan(), remote_server_restart_reason(), RemoteInstallRunningServerPlan, RemoteServerRestartReason, Option
 
-### Community 506 - "surface_delta.rs"
+### Community 512 - "ClientShellState"
 Cohesion: 0.29
-Nodes (12): decode_surface_message(), enable_delta(), fill_render_lane(), receive_message(), Decoder, HeadlessServer, Receiver, Vec (+4 more)
+Nodes (3): ClientShellState, Result, Vec
 
-### Community 507 - ".handle_agent_view_set"
-Cohesion: 0.33
-Nodes (7): App, invalid_view_does_not_replace_active_view(), Option, String, set_and_source_guarded_clear_replace_transient_view(), test_app(), working_view()
+### Community 513 - "tab_bar.rs"
+Cohesion: 0.23
+Nodes (8): default_datetime_format(), diagnostics_reject_invalid_datetime_and_command_schedules(), parse_tab_bar_datetime_format(), OwnedFormatItem, Result, String, Vec, tab_bar_right_diagnostics()
 
-### Community 508 - "legacy_statusline.rs"
+### Community 514 - "legacy_statusline.rs"
 Cohesion: 0.36
 Nodes (11): content_without_a_recognized_wrapper_is_returned_unchanged(), parse(), Path, String, Value, settings_path(), settings_with_command(), standalone_callback_is_removed_but_user_statusline_keys_stay() (+3 more)
 
-### Community 509 - "UpdateManifest"
+### Community 515 - "Vec"
+Cohesion: 0.23
+Nodes (12): pid_t, all_pids(), collect_positive_pids(), detached_custom_command_process_platform(), pane_custom_command_pty_builder_platform(), process_group_pids(), process_parent_entries(), raw_command_argv() (+4 more)
+
+### Community 516 - ".for_host_input"
+Cohesion: 0.21
+Nodes (7): captured_sgr_mouse_tail_after_second_idle_flush_is_discarded(), non_macos_host_input_splits_lone_escape_from_arrow(), Duration, Self, timed_out_sgr_mouse_completion_survives_read_splits_and_idle(), windows_expired_host_color_reply_tail_does_not_reach_pane(), windows_host_color_prefix_respects_query_deadline()
+
+### Community 517 - "surface_delta.rs"
+Cohesion: 0.33
+Nodes (11): decode_surface_message(), enable_delta(), fill_render_lane(), receive_message(), Decoder, HeadlessServer, Receiver, Vec (+3 more)
+
+### Community 518 - "UpdateManifest"
 Cohesion: 0.26
 Nodes (10): AssetRef, deserialize_manifest_releases(), first_windows_stable_is_pending(), PreviewBuildMetadata, PreviewManifest, BTreeMap, D, Deserialize (+2 more)
 
-### Community 510 - "machine_exec.rs"
+### Community 519 - "HeadSeed"
+Cohesion: 0.20
+Nodes (8): A, DeserializeSeed, HeadLevel, HeadSeed, D, Error, Formatter, Visitor
+
+### Community 520 - "bindings_tests.rs"
+Cohesion: 0.22
+Nodes (6): agent_projection_rename_and_local_adapters(), params(), parse(), Result, Value, Operation
+
+### Community 521 - "machine_exec.rs"
 Cohesion: 0.36
 Nodes (10): args(), exec_parser_passes_the_command_through_verbatim(), exec_parser_requires_the_separator_and_a_command(), ExecArgs, parse_exec_args(), Result, String, Vec (+2 more)
 
-### Community 511 - "worktree.rs"
+### Community 522 - "worktree.rs"
 Cohesion: 0.24
 Nodes (6): args(), normalize_path_arg(), Result, String, Vec, run_worktree_command()
 
-### Community 512 - "worktree_bindings.rs"
+### Community 523 - "worktree_bindings.rs"
 Cohesion: 0.27
 Nodes (8): command(), parse(), path(), request(), Option, Result, String, worktree_projection_preserves_literal_requests_and_hidden_json()
 
-### Community 513 - "page.rs"
+### Community 524 - "page.rs"
 Cohesion: 0.42
 Nodes (7): list_start(), list_window(), ListWindow, PageFocus, PageLayout, Rect, Self
 
-### Community 514 - "agent_tree_seam.rs"
+### Community 525 - "agent_tree_seam.rs"
 Cohesion: 0.33
 Nodes (9): agent(), agent_activity_window_opens_from_the_menu_and_closes_on_esc_or_outside_click(), agent_row_context_menu_lists_seam_items_and_routes_stub_actions(), chrome_hover_resolves_agent_activity_window_hits_when_the_overlay_is_open(), chrome_hover_resolves_agent_tree_hit_vectors_with_toggles_before_rows(), collapse_state_writes_change_the_agent_rows_cache_key(), rows_key(), ClientShellState (+1 more)
 
-### Community 515 - "local_socket.rs"
+### Community 526 - "local_socket.rs"
 Cohesion: 0.31
 Nodes (10): canonical_names_never_leave_the_local_pipe_namespace(), connect_local_pipe(), names_preserve_existing_lossy_path_identity(), Instant, Option, Path, Result, windows_pipe_names() (+2 more)
 
-### Community 516 - ".enable_host_appearance_query_on_focus"
+### Community 527 - ".enable_host_appearance_query_on_focus"
 Cohesion: 0.22
 Nodes (9): disabled_focus_query_does_not_rearm_byte_framer(), focus_query_policy_does_not_delay_plain_escape_without_focus(), focus_query_without_reply_holds_escape_for_only_one_flush(), opt_in_does_not_delay_plain_escape_without_color_scheme_report(), opted_in_byte_framer_rearms_after_color_scheme_report(), opted_in_byte_framer_rearms_after_outer_focus_gained(), opted_in_byte_framer_reassembles_appearance_reply_split_after_csi(), opted_in_byte_framer_reassembles_delayed_appearance_reply() (+1 more)
 
-### Community 517 - "App"
-Cohesion: 0.36
-Nodes (5): App, app_with_two_tabs(), SessionSnapshot, String, session_snapshot_bootstraps_runtime_resources()
-
-### Community 518 - "agent_row"
-Cohesion: 0.29
-Nodes (9): agent_row(), group_key_workspace(), launch_order_key(), ordered_agent_pane_ids(), ClientShellConfig, Option, String, Vec (+1 more)
-
-### Community 519 - "paint"
+### Community 528 - "PathBuf"
 Cohesion: 0.27
-Nodes (9): Action, narrow_content_stacks_complete_action_names_and_live_key_hints(), paint(), Buffer, ClientShellConfig, Option, Rect, Vec (+1 more)
+Nodes (10): find_session_dir_by_id(), find_transcript_by_id(), locate_session(), locate_transcript(), Located, projects_root(), Drop, PathBuf (+2 more)
 
-### Community 520 - "ClientShellState"
+### Community 529 - "ClientShellState"
 Cohesion: 0.56
 Nodes (3): ClientShellState, Option, Rect
 
-### Community 521 - "put_right_text"
-Cohesion: 0.42
-Nodes (9): put_right_text(), put_segment(), put_text(), render_mode_bar(), render_sidebar_background(), Buffer, Option, Rect (+1 more)
-
-### Community 522 - "scroll.rs"
+### Community 530 - "scroll.rs"
 Cohesion: 0.27
 Nodes (8): list_metrics_preserve_variable_rows_and_caller_owned_gap_policy(), list_scroll_metrics(), list_scroll_start_to_reveal(), render_list_scrollbar(), Buffer, Rect, uniform_scroll_metrics(), uniform_scroll_start_to_reveal()
 
-### Community 523 - "json.rs"
+### Community 531 - "detect_with_osc"
+Cohesion: 0.29
+Nodes (9): detect(), detect_with_osc(), DetectionInput, AgentDetection, AgentDetection, AgentState, detect_agent(), detect_agent_with_osc() (+1 more)
+
+### Community 532 - "json.rs"
 Cohesion: 0.33
 Nodes (6): non_negative_integer(), Option, String, Value, text_content(), trimmed()
 
-### Community 524 - "MacosAclAllocation"
+### Community 533 - "MacosAclAllocation"
 Cohesion: 0.20
 Nodes (7): Directory, MacosAclAllocation, c_void, Drop, NonNull, PathBuf, Self
 
-### Community 525 - "SpawnedPty"
+### Community 534 - "SpawnedPty"
 Cohesion: 0.22
 Nodes (9): Box, Child, CommandBuilder, MasterPty, Result, Send, Sync, spawn_with_portable_pty() (+1 more)
 
-### Community 526 - "terminal_effects.rs"
+### Community 535 - "spawn_windows_client_accept_thread"
+Cohesion: 0.38
+Nodes (9): accept_pending_client_connections(), reject_pending_client_connections(), Arc, AtomicBool, JoinHandle, LocalListener, Result, Sender (+1 more)
+
+### Community 536 - "terminal_effects.rs"
 Cohesion: 0.38
 Nodes (9): Option, Result, W, terminal_cwd_writes_osc7_with_st_and_none_writes_nothing(), window_title_strips_terminators_and_defaults_to_herdr(), write_terminal_bells(), write_terminal_cwd(), write_window_title() (+1 more)
 
-### Community 527 - ".handle_integration_install"
+### Community 537 - ".handle_integration_install"
 Cohesion: 0.39
 Nodes (5): App, encode_retired_integration(), retired_target_from_an_old_client_gets_a_retired_error_not_a_parse_failure(), String, test_app()
 
-### Community 528 - "plugin_path_env"
+### Community 538 - "plugin_path_env"
 Cohesion: 0.31
 Nodes (8): ensure_plugin_user_dirs(), plugin_config_dir(), plugin_path_env(), plugin_state_dir(), PathBuf, Result, String, Vec
 
-### Community 529 - "title.rs"
+### Community 539 - "notification_bindings.rs"
+Cohesion: 0.33
+Nodes (6): command(), notification_projection_preserves_all_cli_enum_values(), parse(), request(), Result, String
+
+### Community 540 - "title.rs"
 Cohesion: 0.33
 Nodes (8): command(), request(), ArgMatches, Result, String, run(), title_binding_help_and_invalid_arity_stop_before_transport(), title_binding_preserves_literal_requests()
 
-### Community 530 - "request"
+### Community 541 - "restore_plan"
+Cohesion: 0.31
+Nodes (9): env_key(), EnvChange, restorable(), restore_env(), restore_plan(), Item, Iterator, OsStr (+1 more)
+
+### Community 542 - "request"
 Cohesion: 0.31
 Nodes (9): activityRequests(), isRecord(), reportKinds(), requestSessionPath(), requestState(), requestStates(), nextReportSeq(), request() (+1 more)
 
-### Community 531 - "public_move"
+### Community 543 - "public_move"
 Cohesion: 0.42
 Nodes (8): pane_move_server(), public_move(), public_pane_move_focus_follows_the_moved_pane(), public_pane_move_focus_handles_source_removal_and_unchanged_server_target(), public_pane_move_without_effective_focus_preserves_client_views(), HeadlessServer, PaneMoveParams, Result
 
-### Community 532 - "sidebar.rs"
+### Community 544 - "sidebar.rs"
 Cohesion: 0.36
 Nodes (8): agent_panel_entries_from(), apply_token_style(), fixed_token_width(), flexible_token_width(), resolved_token_spans(), AppState, Style, Vec
 
-### Community 533 - "normalize_launch_env"
+### Community 545 - "normalize_launch_env"
 Cohesion: 0.29
 Nodes (5): normalize_launch_env(), HashMap, Result, String, Vec
 
-### Community 534 - "file_sha256"
+### Community 546 - "file_sha256"
 Cohesion: 0.46
 Nodes (7): file_sha256(), Path, Result, String, to_lower_hex(), verifies_matching_sha256(), verify_sha256()
 
-### Community 535 - "tab_bindings.rs"
+### Community 547 - "tab_bindings.rs"
 Cohesion: 0.43
 Nodes (6): command(), parse(), request(), Result, String, tab_projection_clap_grammar_and_ordered_focus()
 
-### Community 536 - "ClientLoopEvent"
-Cohesion: 0.25
-Nodes (7): ClientLoopEvent, Box, Error, Option, Result, String, Vec
-
-### Community 537 - "render_mobile_header"
+### Community 548 - "render_mobile_header"
 Cohesion: 0.36
 Nodes (7): render_mobile_header(), render_mobile_switcher(), Buffer, ClientShellConfig, Option, Rect, ShellHitMap
 
-### Community 538 - "mouse"
+### Community 549 - "mouse"
 Cohesion: 0.50
 Nodes (7): dragged_pages_remain_inside_every_terminal_size(), mouse(), page_header_drag_and_edge_resize_preserve_terminal_and_page_state(), ready(), ClientShellState, MouseEventKind, visible_launcher_opens_menu_without_dropping_settings()
 
-### Community 539 - "copy_mode.rs"
-Cohesion: 0.43
-Nodes (6): char_cell_width(), copy_mode_command_char(), first_non_blank_col(), last_character_col(), Option, shifted_ascii_char()
+### Community 550 - "ClientKeyKind"
+Cohesion: 0.29
+Nodes (6): pane_key_events(), pane_text_commits(), String, Vec, ClientKeyKind, KeyEventKind
 
-### Community 540 - "herdr-agent-state.test.ts"
+### Community 551 - "herdr-agent-state.test.ts"
 Cohesion: 0.25
 Nodes (3): HOOK_EVENTS_AT_MIN_VERSION, Request, script
 
-### Community 541 - "attribute"
+### Community 552 - "attribute"
 Cohesion: 0.39
 Nodes (7): attribute(), config_metadata_preserves_ownership_and_acl_without_inheriting_extra_access(), CStr, File, Option, Vec, set_attribute()
 
-### Community 542 - "decode_endpoint_request"
-Cohesion: 0.25
-Nodes (8): ClientShellHelloOptions, decode_endpoint_request(), DecodedEndpointRequest, EndpointRequestHead, malformed_known_endpoint_method_returns_correlated_error(), Request, String, unknown_endpoint_method_returns_correlated_error()
-
-### Community 543 - ".restamp_client_shell_surface"
+### Community 553 - ".restamp_client_shell_surface"
 Cohesion: 0.36
 Nodes (5): HeadlessServer, restamp_baseline(), RestampBaseline, RestampOutcome, Box
 
-### Community 544 - "title.rs"
+### Community 554 - "title.rs"
 Cohesion: 0.25
 Nodes (3): Option, String, stripped_terminal_title()
 
-### Community 545 - "operations.rs"
+### Community 555 - "operations.rs"
 Cohesion: 0.29
 Nodes (3): Operation, Value, sample_value()
 
-### Community 546 - "protocol_schema_document"
+### Community 556 - "protocol_schema_document"
 Cohesion: 0.33
 Nodes (7): bundled_protocol_schema_refs_resolve_inside_bundle(), protocol_schema_document(), protocol_schema_entry(), protocol_schema_entry_set_is_a_contract(), protocol_schema_registers_observation_events(), rewrite_schema_refs(), Value
 
-### Community 548 - "client_state.rs"
+### Community 558 - "ui_gallery_layout"
+Cohesion: 0.48
+Nodes (6): first_terminal(), focus_pane(), reseed(), ClientShellState, Option, ui_gallery_layout()
+
+### Community 559 - "ui_gallery_toast"
+Cohesion: 0.38
+Nodes (5): Option, toast_event(), toast_notice(), ui_gallery_toast(), SemanticNotificationSound
+
+### Community 560 - "client_state.rs"
 Cohesion: 0.52
 Nodes (6): create_private_state_file(), replace_file(), File, Path, Result, sync_parent_directory()
 
-### Community 549 - "collect"
-Cohesion: 0.48
-Nodes (6): collect(), collect_retained(), App, Option, PaneInfo, SourceFiles
-
-### Community 550 - "AttentionReport"
-Cohesion: 0.43
-Nodes (5): AttentionReport, failed_latch_is_set_by_reports_and_cleared_by_working_ack_and_clear(), failed_report(), failure_reported_while_working_waits_for_the_turn_to_end(), released_or_replaced_agents_drop_their_failure()
-
-### Community 551 - "tabs.rs"
+### Community 561 - "tabs.rs"
 Cohesion: 0.47
 Nodes (5): Option, String, tab_id(), TabMoveParams, workspace_option()
 
-### Community 552 - "text_snapshot.rs"
+### Community 562 - "text_snapshot.rs"
 Cohesion: 0.53
 Nodes (5): String, TextSnapshotCaptureParams, TextSnapshotReadParams, TextSnapshotSelectionParams, TextSnapshotTarget
 
-### Community 553 - "EndpointResponseReady"
-Cohesion: 0.33
-Nodes (5): Debug, EndpointResponseReady, Box, Formatter, Result
-
-### Community 555 - "read_output"
+### Community 564 - "read_output"
 Cohesion: 0.47
 Nodes (6): IoResult, finish_output(), read_output(), JoinHandle, R, Vec
 
-### Community 556 - "client_stream_control"
+### Community 565 - "client_stream_control"
 Cohesion: 0.33
 Nodes (5): client_stream_control(), ClientStreamControl, read_client_handshake(), Arc, Instant
 
-### Community 559 - "herdr-agent-state.ps1"
+### Community 567 - "vti_raw_win32_paste_keeps_decoded_controls_as_text_and_surrogates_local"
+Cohesion: 0.40
+Nodes (5): decode_windows_terminal_paste_enters(), String, serialized_paste_text(), vti_encoded_paste_preserves_reports_then_raw_paste_decodes(), vti_raw_win32_paste_keeps_decoded_controls_as_text_and_surrogates_local()
+
+### Community 569 - "AgentState"
+Cohesion: 0.50
+Nodes (4): agent_state_label(), AgentState, ManifestState, From
+
+### Community 570 - "herdr-agent-state.ps1"
 Cohesion: 0.60
 Nodes (3): ConvertTo-HerdrText(), Get-NotificationReport(), Get-PermissionReport()
 
-### Community 560 - "command"
+### Community 571 - "command"
 Cohesion: 0.50
 Nodes (4): command(), curl_command(), AsRef, OsStr
 
-### Community 561 - "run_remote_client_bridge"
+### Community 572 - "run_remote_client_bridge"
 Cohesion: 0.60
 Nodes (4): ensure_remote_server_running(), Result, String, run_remote_client_bridge()
 
-### Community 562 - "server.rs"
+### Community 573 - "server.rs"
 Cohesion: 0.50
 Nodes (3): PingParams, String, ServerSshAgentRegisterParams
 
-### Community 563 - "run_notification_command"
+### Community 574 - "run_notification_command"
 Cohesion: 0.50
 Nodes (3): Result, String, run_notification_command()
 
-### Community 566 - "process_session_id"
-Cohesion: 0.67
-Nodes (4): process_session_id(), process_session_id_raw(), session_processes_batch(), session_processes_batch_buckets_every_session_in_one_scan()
-
-### Community 568 - "chrome_context"
+### Community 578 - "chrome_context"
 Cohesion: 0.67
 Nodes (3): chrome_context(), observability_paint_keeps_the_pane_cursor_outside_the_page_rect(), ClientShellConfig
-
-### Community 569 - "pane_input_event_limit"
-Cohesion: 1.00
-Nodes (3): classify_input_event_size(), InputEventLimit, pane_input_event_limit()
-
-### Community 571 - "SurfaceEncodingClient"
-Cohesion: 0.67
-Nodes (3): Decoder, Option, SurfaceEncodingClient
 
 ## Knowledge Gaps
 - **71 isolated node(s):** `AgentViewContext`, `EmptyParams`, `ClientShellSurfaceSetParams`, `ReadIntent`, `Operation` (+66 more)
@@ -2897,12 +2937,12 @@ Nodes (3): Decoder, Option, SurfaceEncodingClient
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `PaneId` connect `PaneId` to `PaneRuntime`, `terminal.rs`, `AppEvent`, `agent_activity.rs`, `agent_resume.rs`, `actions.rs`, `App`, `App`, `session.rs`, `AgentActivityNode`, `worktrees.rs`, `pane.rs`, `client_shell.rs`, `PluginInvocationContext`, `mod.rs`, `tab_surface.rs`, `TerminalRuntime`, `restore`, `retained_surface.rs`, `HeadlessServer`, `TerminalTargetError`, `mod.rs`, `handoff.rs`, `osc.rs`, `HeadlessServer`, `App`, `agent_view.rs`, `Workspace`, `restore.rs`, `TerminalId`, `panes.rs`, `App`, `layout.rs`, `surface.rs`, `api.rs`, `agents.rs`, `encode_success`, `.forward_reported_transition_notifications`, `panes.rs`, `aggregate.rs`, `GhosttyPaneTerminal`, `DeliveryCache`, `retained_test_server_with_control`, `HostAppearance`, `write_shared_test_pane`, `App`, `shutdown.rs`, `.spawn`, `App`, `App`, `layouts.rs`, `Bytes`, `attention.rs`, `HeadlessServer`, `App`, `native_graphics.rs`, `ProcessSessionMember`, `agent_activity.rs`, `PopupSize`, `kitty_graphics.rs`?**
-  _High betweenness centrality (0.094) - this node is a cross-community bridge._
-- **Why does `ClientShellInput` connect `ClientShellInput` to `ClientShellConfig`, `inspector.rs`, `Target`, `LinkHoverTarget`, `link_hover.rs`, `machines.rs`, `sessions.rs`, `context_menu.rs`, `ClientShellState`, `mouse`, `sessions.rs`, `SavedSshEndpoint`, `ClientShellState`, `ClientShellState`, `ClientAgentActivityOverlay`, `ClientMessage`, `render_machine_forwards`, `action_table.rs`, `ClientShellState`, `start_word_drag`, `ClientShellEndpoint`, `workspace_navigation.rs`, `ChromeHover`, `ClientShellState`, `link_hints.rs`, `write.rs`, `ClientMachineFilesOverlay`, `run_client_loop`, `agent_activity_window.rs`, `shell`, `ClientShellState`, `State`, `.floating_page_rect`, `frozen_selection.rs`, `input_conformance.rs`, `agent_tree.rs`, `ClientPaneInputEvent`, `command_palette.rs`, `SemanticNotification`, `import.rs`, `scenes_overlay.rs`, `ClientKeyCode`, `WorkspaceNavigationTarget`, `ClientShellEndpointError`, `State`, `close_pane.rs`, `TerminalKey`, `observability_system.rs`, `close_tab.rs`, `ClientShellState`, `ClientShellState`, `.workbench_mouse`, `machine_files.rs`, `ClientShellState`, `ClientMachineForm`, `ClientShellState`, `ClientShellState`?**
-  _High betweenness centrality (0.054) - this node is a cross-community bridge._
-- **Why does `Palette` connect `Palette` to `status_bar.rs`, `toast.rs`, `inspector.rs`, `release_notes.rs`, `build_info.rs`, `put_right_text`, `AgentActivityNode`, `scroll.rs`, `sessions.rs`, `ClientShellState`, `widgets.rs`, `sidebar.rs`, `agent_page.rs`, `ComponentStyles`, `form_view.rs`, `ClientShellState`, `settings.rs`, `settings.rs`, `ChromeContext`, `ClientEndpointId`, `form_field.rs`, `render.rs`, `gallery.rs`, `ShellRenderState`, `ClientShellEndpoint`, `menu.rs`, `panes.rs`, `render_machine_detail`, `system.rs`, `gauge.rs`, `import.rs`, `panel_header.rs`, `title_bar.rs`, `footer_hints.rs`, `AgentStatus`, `App`, `BorderGlyphs`, `table.rs`, `tone.rs`, `put_str`, `mod.rs`?**
-  _High betweenness centrality (0.053) - this node is a cross-community bridge._
+- **Why does `PaneId` connect `PaneId` to `terminal.rs`, `agent_activity.rs`, `session.rs`, `PaneRuntime`, `pane.rs`, `TerminalRuntime`, `agent_resume.rs`, `worktrees.rs`, `GhosttyPaneTerminal`, `AppEvent`, `client_shell.rs`, `retained_surface.rs`, `Tab`, `App`, `PluginInvocationContext`, `actions.rs`, `.spawn_popup_command`, `SurfaceGraphicsScene`, `HeadlessServer`, `mod.rs`, `App`, `SurfaceGraphicsAssetKey`, `Workspace`, `osc.rs`, `shutdown.rs`, `handoff.rs`, `HeadlessServer`, `mod.rs`, `layout.rs`, `TerminalTargetError`, `TerminalRuntimeRegistry`, `agent_view.rs`, `App`, `encode_success`, `agents.rs`, `api.rs`, `.forward_reported_transition_notifications`, `App`, `mod.rs`, `restore.rs`, `Option`, `agent_activity.rs`, `write_shared_test_pane`, `retained_test_server_with_control`, `panes.rs`, `surface.rs`, `aggregate.rs`, `ProcessSessionId`, `AppState`, `Bytes`, `App`, `PopupSize`, `App`, `agent_suspend_tests.rs`, `App`, `attention.rs`, `layouts.rs`, `App`, `kitty_graphics.rs`, `HeadlessServer`, `native_graphics.rs`, `.spawn`?**
+  _High betweenness centrality (0.088) - this node is a cross-community bridge._
+- **Why does `Palette` connect `Palette` to `ClientAgentActivityOverlay`, `status_bar.rs`, `ClientShellLayout`, `ComponentStyles`, `PaneId`, `scroll.rs`, `tr`, `form_field.rs`, `widgets.rs`, `ClientShellState`, `sidebar.rs`, `render.rs`, `settings.rs`, `color.rs`, `AgentStatus`, `settings.rs`, `put_str`, `form_view.rs`, `put_right_text`, `ClientShellEndpoint`, `meter_row.rs`, `panes.rs`, `design.rs`, `model.rs`, `menu.rs`, `gallery.rs`, `render_machine_detail`, `card.rs`, `panel_header.rs`, `import.rs`, `overlays.rs`, `notifications.rs`, `SavedSshEndpoint`, `App`, `title_bar.rs`, `gauge.rs`, `table.rs`, `footer_hints.rs`, `tone.rs`, `toast.rs`, `release_notes.rs`, `inspector.rs`, `ChromeContext`, `sessions.rs`?**
+  _High betweenness centrality (0.063) - this node is a cross-community bridge._
+- **Why does `ClientShellInput` connect `ClientShellInput` to `ClientShellState`, `ClientShellConfig`, `ClientShellState`, `ClientShellState`, `LinkHoverTarget`, `ProfileId`, `machine_files.rs`, `machines.rs`, `link_hover.rs`, `ClientShellState`, `context_menu.rs`, `ClientShellState`, `ClientShellState`, `sessions.rs`, `mouse`, `ClientShellState`, `ClientKeyKind`, `ClientShellState`, `run_client_loop`, `link_hints.rs`, `SemanticNotification`, `EndpointRegistry`, `render_machine_forwards`, `ClientShellEndpoint`, `workspace_navigation.rs`, `action_table.rs`, `ClientMachineFilesOverlay`, `agent_activity_window.rs`, `ClientMachineForm`, `write.rs`, `shell`, `ClientShellState`, `ClientShellEndpointError`, `command_palette.rs`, `State`, `frozen_selection.rs`, `agent_tree.rs`, `TerminalKey`, `input_conformance.rs`, `.floating_page_rect`, `ui_gallery_machines`, `State`, `ClientShellState`, `import.rs`, `paint`, `mouse_selection.rs`, `WorkspaceNavigationTarget`, `scenes_overlay.rs`, `ChromeHover`, `ClientShellState`, `close_pane.rs`, `observability_system.rs`, `close_tab.rs`, `ClientShellState`, `PanelId`, `inspector.rs`, `Target`, `ClientShellState`?**
+  _High betweenness centrality (0.062) - this node is a cross-community bridge._
 - **Are the 360 inferred relationships involving `snapshot()` (e.g. with `failed_preview_preserves_both_received_error_and_old_question()` and `groups_fold_more_search_all_tokens_and_enter_activates_selected_identity()`) actually correct?**
   _`snapshot()` has 360 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 314 inferred relationships involving `surface()` (e.g. with `state_named()` and `agent_leaf_rows_are_readable_and_blocked_is_not_color_only()`) actually correct?**
@@ -2910,4 +2950,4 @@ _Questions this graph is uniquely positioned to answer:_
 - **What connects `AgentViewContext`, `EmptyParams`, `ClientShellSurfaceSetParams` to the rest of the system?**
   _71 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `snapshot` be split into smaller, more focused modules?**
-  _Cohesion score 0.020976626933491022 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.023125118663375736 - nodes in this community are weakly interconnected._
