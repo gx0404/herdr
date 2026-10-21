@@ -29,6 +29,16 @@ const TREE_NODES: usize = 512;
 // Per-target retained node text, not a bound on the complete client allocation.
 const TREE_BYTES: usize = 128 * 1024;
 const FOLLOW: Duration = super::super::agent_activity_overlay::FOLLOW_INTERVAL;
+/// 「子智能体」小节最多列出的条目行数。
+const SUBAGENT_ENTRIES: usize = 3;
+/// 计数行的桶顺序：需要输入、失败、运行中、已完成、等待（未知不计入）。
+const COUNT_ORDER: [AgentBucket; 5] = [
+    AgentBucket::NeedsInput,
+    AgentBucket::Failed,
+    AgentBucket::Working,
+    AgentBucket::Review,
+    AgentBucket::Idle,
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(in crate::client::shell) struct Target {
@@ -72,7 +82,6 @@ pub(in crate::client::shell) enum Action {
     Jump,
     Activity(Option<String>),
     Refresh,
-    Collapse(String),
 }
 
 #[derive(Clone, Debug)]
@@ -89,7 +98,6 @@ struct Tree {
     unsupported: bool,
     not_reported: bool,
     error: Option<String>,
-    collapsed: HashSet<String>,
     next_read: Option<Instant>,
 }
 
@@ -104,11 +112,39 @@ enum Tone {
     Failed,
 }
 
+/// 行内附加段。行模型在计算阶段建好，绘制只读。
+#[derive(Default)]
+enum Extra {
+    #[default]
+    None,
+    /// 行首键帽（键名两侧各留一格空格），其后空一格接文字。
+    KeyLead(&'static str),
+    /// 文字后空一格接键帽。
+    KeyTrail(&'static str),
+    /// 右对齐的元信息（耗时）。
+    Meta(String),
+    /// 计数行：每段为状态字形 + 文字，段间两个空格；行的 `text` 留空。
+    Counts(Vec<(AgentBucket, String)>),
+}
+
 struct Row {
     text: String,
     tone: Tone,
     bucket: Option<AgentBucket>,
     action: Option<Action>,
+    extra: Extra,
+}
+
+impl Row {
+    fn new(text: String, tone: Tone) -> Self {
+        Self {
+            text,
+            tone,
+            bucket: None,
+            action: None,
+            extra: Extra::None,
+        }
+    }
 }
 
 type ViewKey = (Option<Target>, u64, u16, u64, u64, u64);
@@ -256,8 +292,6 @@ impl State {
             bytes += size;
             kept.push(node);
         }
-        tree.collapsed
-            .retain(|id| kept.iter().any(|node| &node.id == id));
         let changed = !tree.loaded
             || tree.nodes != kept
             || tree.truncated != truncated
@@ -301,8 +335,69 @@ fn label(bucket: AgentBucket) -> &'static str {
     }
 }
 
-fn activity_bucket(status: AgentActivityStatus) -> AgentBucket {
-    design::activity_bucket(status)
+/// 计数行的桶标签（活动节点语义：已完成 / 等待，而非 agent 的待查看 / 空闲）。
+fn count_label(bucket: AgentBucket) -> &'static str {
+    use super::super::observability::tr;
+    match bucket {
+        AgentBucket::NeedsInput => tr("Needs input", "需要输入"),
+        AgentBucket::Failed => tr("Failed", "失败"),
+        AgentBucket::Working => tr("Running", "运行中"),
+        AgentBucket::Review => tr("Done", "已完成"),
+        AgentBucket::Idle => tr("Pending", "等待"),
+        AgentBucket::None => tr("Unknown", "未知"),
+    }
+}
+
+/// 运行中的计时按分钟取整，不随秒变化而重建行（`<1m` / `3m` / `2h`）。
+fn running_label(elapsed: u64) -> String {
+    if elapsed < 60_000 {
+        "<1m".to_owned()
+    } else {
+        design::compact_age(elapsed / 60_000 * 60_000)
+    }
+}
+
+/// 节点耗时：已结束为起止差，运行中为到现在的分钟取整，其余不显示。
+fn node_elapsed(node: &AgentActivityNode, now: u64) -> Option<String> {
+    let start = node.started_at_ms?;
+    match node.ended_at_ms {
+        Some(end) => Some(design::duration_label(end.saturating_sub(start))),
+        None if node.status == AgentActivityStatus::Running => {
+            Some(running_label(now.saturating_sub(start)))
+        }
+        None => None,
+    }
+}
+
+/// 条目挑选：需要输入 → 失败 → 运行中，同类按开始时间从新到旧（没有时间的排后）；
+/// 不足时用最新的已完成节点补，再用其他节点补。排序稳定，同键保留来源顺序。
+fn pick_entries(nodes: &[AgentActivityNode]) -> Vec<usize> {
+    let rank = |node: &AgentActivityNode| match design::activity_bucket(node.status) {
+        AgentBucket::NeedsInput => 0u8,
+        AgentBucket::Failed => 1,
+        AgentBucket::Working => 2,
+        AgentBucket::Review => 3,
+        AgentBucket::Idle | AgentBucket::None => 4,
+    };
+    let time = |node: &AgentActivityNode| {
+        if rank(node) == 3 {
+            node.ended_at_ms.or(node.started_at_ms)
+        } else {
+            node.started_at_ms
+        }
+    };
+    let mut order = (0..nodes.len()).collect::<Vec<_>>();
+    order.sort_by(|a, b| {
+        let (a, b) = (&nodes[*a], &nodes[*b]);
+        rank(a).cmp(&rank(b)).then_with(|| time(b).cmp(&time(a)))
+    });
+    order.truncate(SUBAGENT_ENTRIES);
+    order
+}
+
+/// 键帽占的列数：键名两侧各留一格空格。
+fn cap_width(key: &str) -> u16 {
+    crate::ui::display_width_u16(key).saturating_add(2)
 }
 
 fn add(rows: &mut Vec<Row>, text: &str, tone: Tone, width: u16) {
@@ -316,42 +411,115 @@ fn add(rows: &mut Vec<Row>, text: &str, tone: Tone, width: u16) {
                 continue;
             }
             if used.saturating_add(cell) > width {
-                rows.push(Row {
-                    text: std::mem::take(&mut wrapped),
-                    tone,
-                    bucket: None,
-                    action: None,
-                });
+                rows.push(Row::new(std::mem::take(&mut wrapped), tone));
                 used = 0;
             }
             wrapped.push_str(grapheme);
             used += cell;
         }
-        rows.push(Row {
-            text: wrapped,
-            tone,
-            bucket: None,
-            action: None,
-        });
+        rows.push(Row::new(wrapped, tone));
     }
 }
 
 fn section(rows: &mut Vec<Row>, text: &str, width: u16) {
-    rows.push(Row {
-        text: String::new(),
-        tone: Tone::Body,
-        bucket: None,
-        action: None,
-    });
+    rows.push(Row::new(String::new(), Tone::Body));
     add(rows, text, Tone::Section, width);
 }
 
-fn button(rows: &mut Vec<Row>, text: &str, action: Action, width: u16) {
+/// 带键帽的操作行。键帽连同一格间隔放不下且还剩两列给标签时才画，否则只留标签。
+fn cap_button(rows: &mut Vec<Row>, text: &str, extra: Extra, action: Action, width: u16) {
+    let cap = match extra {
+        Extra::KeyLead(key) | Extra::KeyTrail(key) => cap_width(key).saturating_add(1),
+        _ => 0,
+    };
+    let (room, extra) = if width >= cap.saturating_add(2) {
+        (width - cap, extra)
+    } else {
+        (width, Extra::None)
+    };
     rows.push(Row {
-        text: crate::ui::truncate_end(text, usize::from(width)),
-        tone: Tone::Body,
-        bucket: None,
         action: Some(action),
+        extra,
+        ..Row::new(crate::ui::truncate_end(text, usize::from(room)), Tone::Body)
+    });
+}
+
+/// 键帽在前的操作行：` d ` + 空格 + 标签。
+fn key_button(rows: &mut Vec<Row>, key: &'static str, text: &str, action: Action, width: u16) {
+    cap_button(rows, text, Extra::KeyLead(key), action, width);
+}
+
+/// 标签在前、键帽在后的操作行（「查看全部 › d」）。
+fn trail_button(rows: &mut Vec<Row>, text: &str, key: &'static str, action: Action, width: u16) {
+    cap_button(rows, text, Extra::KeyTrail(key), action, width);
+}
+
+/// 计数行：只列数量非零的桶，每项 `{字形} {数量} {标签}`，项间两个空格；放不下时
+/// 折到下一行，单项超宽时截断标签，不拆开 CJK。
+fn count_rows(rows: &mut Vec<Row>, nodes: &[AgentActivityNode], width: u16) {
+    // 字形加间隔后至少要留两列给数字。
+    if width < 4 {
+        return;
+    }
+    let mut counts = [0usize; COUNT_ORDER.len()];
+    for node in nodes {
+        let bucket = design::activity_bucket(node.status);
+        if let Some(slot) = COUNT_ORDER.iter().position(|wanted| *wanted == bucket) {
+            counts[slot] += 1;
+        }
+    }
+    let mut line = Vec::new();
+    let mut used = 0u16;
+    for (bucket, count) in COUNT_ORDER.into_iter().zip(counts) {
+        if count == 0 {
+            continue;
+        }
+        let text = format!("{count} {}", count_label(bucket));
+        let item = crate::ui::display_width_u16(&text).saturating_add(2);
+        if !line.is_empty() && used.saturating_add(2).saturating_add(item) > width {
+            rows.push(Row {
+                extra: Extra::Counts(std::mem::take(&mut line)),
+                ..Row::new(String::new(), Tone::Muted)
+            });
+            used = 0;
+        }
+        let text = crate::ui::truncate_end(&text, usize::from(width.saturating_sub(2)));
+        let gap = if line.is_empty() { 0 } else { 2 };
+        used = used
+            .saturating_add(gap)
+            .saturating_add(crate::ui::display_width_u16(&text).saturating_add(2));
+        line.push((bucket, text));
+    }
+    if !line.is_empty() {
+        rows.push(Row {
+            extra: Extra::Counts(line),
+            ..Row::new(String::new(), Tone::Muted)
+        });
+    }
+}
+
+/// 条目行：状态字形 + 标签（首行）+ 右对齐的耗时；点击或 Enter 打开子智能体页面
+/// 并选中该节点。宽度不足以同时放下耗时与几个字时省掉耗时。
+fn entry_row(rows: &mut Vec<Row>, node: &AgentActivityNode, width: u16, now: u64) {
+    let room = width.saturating_sub(2);
+    let elapsed = node_elapsed(node, now)
+        .filter(|text| crate::ui::display_width_u16(text).saturating_add(5) <= room);
+    let meta = elapsed.as_deref().map_or(0, |text| {
+        crate::ui::display_width_u16(text).saturating_add(1)
+    });
+    let label = node
+        .label
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(node.id.as_str());
+    rows.push(Row {
+        bucket: Some(design::activity_bucket(node.status)),
+        action: Some(Action::Activity(Some(node.id.clone()))),
+        extra: elapsed.map_or(Extra::None, Extra::Meta),
+        ..Row::new(
+            crate::ui::truncate_end(label, usize::from(room.saturating_sub(meta))),
+            Tone::Body,
+        )
     });
 }
 
@@ -628,7 +796,9 @@ impl ClientShellState {
                 );
             }
             self.inspector.animated = rows.iter().any(|row| {
-                row.bucket == Some(AgentBucket::Working) && !matches!(row.tone, Tone::Meta)
+                (row.bucket == Some(AgentBucket::Working) && !matches!(row.tone, Tone::Meta))
+                    || matches!(&row.extra, Extra::Counts(items)
+                        if items.iter().any(|(bucket, _)| *bucket == AgentBucket::Working))
             });
             self.inspector.rows = rows;
             self.inspector.key = Some(key);
@@ -687,11 +857,7 @@ impl ClientShellState {
                     "{} · {}",
                     label(bucket),
                     if bucket == AgentBucket::Working {
-                        if elapsed < 60_000 {
-                            "<1m".to_owned()
-                        } else {
-                            design::compact_age(elapsed / 60_000 * 60_000)
-                        }
+                        running_label(elapsed)
                     } else {
                         design::duration_label(elapsed)
                     }
@@ -699,10 +865,11 @@ impl ClientShellState {
             },
         );
         rows.push(Row {
-            text: crate::ui::truncate_end(&status, usize::from(width.saturating_sub(2))),
-            tone: Tone::Body,
             bucket: Some(bucket),
-            action: None,
+            ..Row::new(
+                crate::ui::truncate_end(&status, usize::from(width.saturating_sub(2))),
+                Tone::Body,
+            )
         });
         let workspace = snapshot
             .workspaces
@@ -762,9 +929,10 @@ impl ClientShellState {
             for option in options.iter().take(16) {
                 add(rows, &format!("· {option}"), Tone::Muted, width);
             }
-            button(
+            key_button(
                 rows,
-                tr("↵ Jump and answer", "↵ 跳转并回答"),
+                "↵",
+                tr("Jump and answer", "跳转并回答"),
                 Action::Jump,
                 width,
             );
@@ -797,111 +965,96 @@ impl ClientShellState {
             section(rows, tr("Last prompt", "最近提示"), width);
             add(rows, prompt, Tone::Muted, width);
         }
-        section(rows, tr("Activity tree", "活动树"), width);
-        if let Some(tree) = self.inspector.trees.get(target) {
-            if tree.not_reported {
-                add(
-                    rows,
-                    crate::i18n::texts().agent_activity.not_reported,
-                    Tone::Meta,
-                    width,
-                );
-            } else if tree.unsupported {
-                add(
-                    rows,
-                    crate::i18n::texts().agent_activity.unsupported,
-                    Tone::Meta,
-                    width,
-                );
-            } else {
-                if let Some(error) = tree.error.as_deref() {
-                    add(rows, error, Tone::Failed, width);
-                }
-                if !tree.loaded {
-                    add(
-                        rows,
-                        crate::i18n::texts().agent_activity.loading,
-                        Tone::Meta,
-                        width,
-                    );
-                } else if tree.nodes.is_empty() {
-                    add(
-                        rows,
-                        crate::i18n::texts().agent_activity.empty_tree,
-                        Tone::Meta,
-                        width,
-                    );
-                }
-                for entry in
-                    super::super::agent_activity_overlay::build_rows(&tree.nodes, &tree.collapsed)
-                {
-                    let node = &tree.nodes[entry.kind];
-                    let indent = "  ".repeat(usize::from(entry.depth).min(8));
-                    let toggle = if entry.has_children {
-                        if entry.collapsed {
-                            "▸"
-                        } else {
-                            "▾"
-                        }
-                    } else {
-                        " "
-                    };
-                    let text = format!("{indent}{toggle} {}", node.label);
-                    rows.push(Row {
-                        text: crate::ui::truncate_end(&text, usize::from(width.saturating_sub(2))),
-                        tone: Tone::Body,
-                        bucket: Some(activity_bucket(node.status)),
-                        action: Some(if entry.has_children {
-                            Action::Collapse(node.id.clone())
-                        } else {
-                            Action::Activity(Some(node.id.clone()))
-                        }),
-                    });
-                }
-                if tree.truncated {
-                    add(
-                        rows,
-                        crate::i18n::texts().agent_activity.truncated,
-                        Tone::Meta,
-                        width,
-                    );
-                }
-            }
-        }
+        self.subagent_section(rows, target, width, now);
         section(rows, tr("State timeline", "状态时间线"), width);
         if let Some(timeline) = self.inspector.timelines.get(target) {
             for entry in timeline.iter().rev() {
                 let age = design::compact_age(now.saturating_sub(entry.at) / 60_000 * 60_000);
                 rows.push(Row {
-                    text: crate::ui::truncate_end(
-                        &format!("{}  {age}", label(entry.bucket)),
-                        usize::from(width.saturating_sub(2)),
-                    ),
-                    tone: Tone::Meta,
                     bucket: Some(entry.bucket),
-                    action: None,
+                    ..Row::new(
+                        crate::ui::truncate_end(
+                            &format!("{}  {age}", label(entry.bucket)),
+                            usize::from(width.saturating_sub(2)),
+                        ),
+                        Tone::Meta,
+                    )
                 });
             }
         }
         section(rows, tr("Actions", "快捷操作"), width);
-        button(
+        key_button(
             rows,
-            tr("↵ Jump to terminal", "↵ 跳转到终端"),
+            "↵",
+            tr("Jump to terminal", "跳转到终端"),
             Action::Jump,
             width,
         );
-        button(
+        key_button(
             rows,
-            tr("d  Detailed activity", "d  详细活动"),
+            "d",
+            tr("Sub-agents page", "子智能体页面"),
             Action::Activity(None),
             width,
         );
-        button(
+        key_button(
             rows,
-            tr("r  Refresh activity", "r  刷新活动"),
+            "r",
+            tr("Refresh activity", "刷新活动"),
             Action::Refresh,
             width,
         );
+    }
+
+    /// 「子智能体」小节：计数行、至多 [`SUBAGENT_ENTRIES`] 行条目与「查看全部」。
+    /// 整棵树只在子智能体页面里画；这里只读缓存，不发起读取。
+    fn subagent_section(&self, rows: &mut Vec<Row>, target: &Target, width: u16, now: u64) {
+        use super::super::observability::tr;
+        let heading = tr("Sub-agents", "子智能体");
+        let tree = self.inspector.trees.get(target);
+        match tree.filter(|tree| tree.loaded && !tree.unsupported) {
+            Some(tree) => section(rows, &format!("{heading} {}", tree.nodes.len()), width),
+            None => section(rows, heading, width),
+        }
+        let Some(tree) = tree else {
+            return;
+        };
+        let texts = &crate::i18n::texts().agent_activity;
+        if tree.not_reported {
+            add(rows, texts.not_reported, Tone::Meta, width);
+            return;
+        }
+        if tree.unsupported {
+            add(rows, texts.unsupported, Tone::Meta, width);
+            return;
+        }
+        if let Some(error) = tree.error.as_deref() {
+            add(rows, error, Tone::Failed, width);
+        }
+        if !tree.loaded {
+            add(rows, texts.loading, Tone::Meta, width);
+            return;
+        }
+        if tree.nodes.is_empty() {
+            add(rows, texts.empty_tree, Tone::Meta, width);
+        } else {
+            count_rows(rows, &tree.nodes, width);
+            for index in pick_entries(&tree.nodes) {
+                entry_row(rows, &tree.nodes[index], width, now);
+            }
+        }
+        if tree.truncated {
+            add(rows, texts.truncated, Tone::Meta, width);
+        }
+        if !tree.nodes.is_empty() {
+            trail_button(
+                rows,
+                tr("View all ›", "查看全部 ›"),
+                "d",
+                Action::Activity(None),
+                width,
+            );
+        }
     }
 
     pub(in crate::client::shell) fn activate_inspector(
@@ -948,14 +1101,6 @@ impl ClientShellState {
                     }
                 }
                 self.tick_inspector(Instant::now(), outcome);
-            }
-            Action::Collapse(id) => {
-                if let Some(tree) = self.inspector.trees.get_mut(&target) {
-                    if !tree.collapsed.remove(&id) {
-                        tree.collapsed.insert(id);
-                    }
-                    self.inspector.version = self.inspector.version.saturating_add(1);
-                }
             }
         }
         outcome.repaint = true;
@@ -1076,6 +1221,30 @@ impl ClientShellState {
     }
 }
 
+/// 键帽：` 键 `，text 前景 + surface1 底色；返回键帽之后的列。放不下时不画。
+fn paint_cap(
+    buffer: &mut Buffer,
+    x: u16,
+    y: u16,
+    right: u16,
+    key: &str,
+    palette: &crate::app::state::Palette,
+) -> u16 {
+    let width = cap_width(key);
+    if x.saturating_add(width) > right {
+        return x;
+    }
+    super::super::render::put_text(
+        buffer,
+        x,
+        y,
+        width,
+        &format!(" {key} "),
+        design::key_cap(palette),
+    );
+    x.saturating_add(width)
+}
+
 pub(in crate::client::shell) fn paint(
     buffer: &mut Buffer,
     state: &State,
@@ -1138,6 +1307,37 @@ pub(in crate::client::shell) fn paint(
             );
             x = x.saturating_add(2);
         }
+        match &row.extra {
+            Extra::KeyLead(key) => {
+                x = paint_cap(buffer, x, y, rect.right(), key, palette).saturating_add(1);
+            }
+            Extra::Counts(items) => {
+                for (index, (bucket, text)) in items.iter().enumerate() {
+                    if index > 0 {
+                        x = x.saturating_add(2);
+                    }
+                    super::super::render::put_text(
+                        buffer,
+                        x,
+                        y,
+                        rect.right().saturating_sub(x).min(1),
+                        glyphs.bucket(*bucket),
+                        design::status_style(*bucket, palette, &config.components),
+                    );
+                    x = x.saturating_add(2);
+                    super::super::render::put_text(
+                        buffer,
+                        x,
+                        y,
+                        rect.right().saturating_sub(x),
+                        text,
+                        style,
+                    );
+                    x = x.saturating_add(crate::ui::display_width_u16(text));
+                }
+            }
+            Extra::None | Extra::KeyTrail(_) | Extra::Meta(_) => {}
+        }
         super::super::render::put_text(
             buffer,
             x,
@@ -1146,6 +1346,29 @@ pub(in crate::client::shell) fn paint(
             &row.text,
             style,
         );
+        let end = x
+            .saturating_add(crate::ui::display_width_u16(&row.text))
+            .min(rect.right());
+        match &row.extra {
+            Extra::KeyTrail(key) => {
+                paint_cap(buffer, end.saturating_add(1), y, rect.right(), key, palette);
+            }
+            Extra::Meta(meta) => {
+                let width = crate::ui::display_width_u16(meta);
+                let start = rect.right().saturating_sub(width);
+                if start > end {
+                    super::super::render::put_text(
+                        buffer,
+                        start,
+                        y,
+                        width,
+                        meta,
+                        style.patch(design::meta(palette)),
+                    );
+                }
+            }
+            Extra::None | Extra::KeyLead(_) | Extra::Counts(_) => {}
+        }
         if let Some(action) = &row.action {
             hits.inspector_actions.push((rect, action.clone()));
         }

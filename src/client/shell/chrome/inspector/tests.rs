@@ -564,8 +564,7 @@ fn cjk_wrapping_scroll_keys_and_mouse_are_bounded_and_cached() {
             .inspector
             .rows
             .iter()
-            .all(|row| crate::ui::display_width(&row.text)
-                <= usize::from(width.saturating_sub(3).max(1))));
+            .all(|row| row_width(row) <= usize::from(width.saturating_sub(3).max(1))));
     }
 }
 
@@ -612,4 +611,299 @@ fn v1_layout_toast_only_once_and_migrated_layout_is_saved() {
         ..ClientShellConfig::from_config(&Config::default())
     };
     assert!(workbench::State::new(&config).migrated.is_empty());
+}
+
+/// 一行实际占用的列数：状态字形、键帽、计数片段与右对齐耗时都算在内。
+fn row_width(row: &Row) -> usize {
+    // 行首状态字形由绘制按矩形裁剪，与改动前的口径一致不计入。
+    crate::ui::display_width(&row.text)
+        + match &row.extra {
+            Extra::None => 0,
+            Extra::KeyLead(key) | Extra::KeyTrail(key) => usize::from(cap_width(key)) + 1,
+            Extra::Meta(meta) => crate::ui::display_width(meta) + 1,
+            Extra::Counts(items) => items
+                .iter()
+                .enumerate()
+                .map(|(index, (_, text))| {
+                    usize::from(index > 0) * 2 + 2 + crate::ui::display_width(text)
+                })
+                .sum(),
+        }
+}
+
+fn node(
+    id: &str,
+    status: AgentActivityStatus,
+    started: Option<u64>,
+    ended: Option<u64>,
+) -> AgentActivityNode {
+    AgentActivityNode {
+        id: id.into(),
+        label: format!("task {id}"),
+        status,
+        started_at_ms: started,
+        ended_at_ms: ended,
+        ..Default::default()
+    }
+}
+
+fn load(state: &mut ClientShellState, nodes: Vec<AgentActivityNode>, rows: u16) {
+    let (boot, request) = read(state);
+    assert!(
+        state
+            .handle_endpoint_result(
+                &boot,
+                &request,
+                Ok(ResponseResult::AgentActivity {
+                    nodes,
+                    content: None
+                })
+            )
+            .0
+    );
+    state.compose(160, rows).expect("sub-agents");
+}
+
+/// 子智能体页面是否打开及其选中节点。D3 把浮窗换成全屏页面后只需改这一处。
+fn opened_page(state: &ClientShellState) -> Option<Option<String>> {
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::AgentActivity(page)) => Some(page.selected_node.clone()),
+        _ => None,
+    }
+}
+
+fn click_hit(state: &mut ClientShellState, rect: Rect) {
+    let mut outcome = ClientShellInput::default();
+    assert!(state.workbench_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: crossterm::event::KeyModifiers::NONE
+        },
+        &mut outcome
+    ));
+}
+
+fn mixed_nodes(now: u64) -> Vec<AgentActivityNode> {
+    use AgentActivityStatus::*;
+    vec![
+        node("done-old", Done, Some(now - 600_000), Some(now - 480_000)),
+        node("run-old", Running, Some(now - 90_000), None),
+        node("failed", Failed, Some(now - 300_000), Some(now - 290_000)),
+        node("done-new", Done, Some(now - 200_000), Some(now - 100_000)),
+        node("pending", Pending, None, None),
+        node("run-new", Running, Some(now - 30_000), None),
+        node("blocked", Blocked, None, None),
+        node("unknown", Unknown, None, None),
+    ]
+}
+
+#[test]
+fn subagent_section_counts_buckets_in_order_and_lists_urgent_entries() {
+    use super::super::super::observability::tr;
+    let mut state = ready(160);
+    let now = now_ms();
+    load(&mut state, mixed_nodes(now), 60);
+    let rows = &state.inspector.rows;
+    let heading = format!("{} 8", tr("Sub-agents", "子智能体"));
+    let start = rows
+        .iter()
+        .position(|row| row.text == heading)
+        .expect("section heading");
+    assert!(!rows
+        .iter()
+        .any(|row| row.text.contains("Activity tree") || row.text.contains("活动树")));
+    let counts = rows[start + 1..]
+        .iter()
+        .take_while(|row| matches!(row.extra, Extra::Counts(_)))
+        .flat_map(|row| match &row.extra {
+            Extra::Counts(items) => items.clone(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let expected = [
+        (AgentBucket::NeedsInput, 1),
+        (AgentBucket::Failed, 1),
+        (AgentBucket::Working, 2),
+        (AgentBucket::Review, 2),
+        (AgentBucket::Idle, 1),
+    ]
+    .map(|(bucket, count)| (bucket, format!("{count} {}", count_label(bucket))));
+    assert_eq!(counts, expected);
+    let width = usize::from(state.inspector.area.width.saturating_sub(3));
+    assert!(rows.iter().all(|row| row_width(row) <= width));
+
+    let entries = rows
+        .iter()
+        .filter_map(|row| match &row.action {
+            Some(Action::Activity(Some(id))) => Some((id.as_str(), row)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        ["blocked", "failed", "run-new"]
+    );
+    assert_eq!(entries[1].1.bucket, Some(AgentBucket::Failed));
+    assert!(matches!(&entries[1].1.extra, Extra::Meta(meta) if meta == "10s"));
+    assert!(matches!(&entries[2].1.extra, Extra::Meta(meta) if meta == "<1m"));
+    assert!(matches!(entries[0].1.extra, Extra::None));
+    assert!(state.inspector.animated());
+
+    let view_all = rows
+        .iter()
+        .position(|row| matches!(row.extra, Extra::KeyTrail("d")))
+        .expect("view all");
+    assert_eq!(rows[view_all].action, Some(Action::Activity(None)));
+    assert_eq!(rows[view_all].text, tr("View all ›", "查看全部 ›"));
+    assert!(view_all > start);
+}
+
+#[test]
+fn subagent_entries_fill_with_newest_done_then_other_nodes() {
+    use AgentActivityStatus::*;
+    let picked = |nodes: &[AgentActivityNode]| {
+        pick_entries(nodes)
+            .into_iter()
+            .map(|index| nodes[index].id.clone())
+            .collect::<Vec<_>>()
+    };
+    let nodes = vec![
+        node("done-old", Done, Some(10), Some(200)),
+        node("pending", Pending, Some(500), None),
+        node("done-new", Done, Some(50), Some(300)),
+        node("run", Running, None, None),
+        node("run-timed", Running, Some(5), None),
+    ];
+    assert_eq!(picked(&nodes), ["run-timed", "run", "done-new"]);
+    let nodes = vec![
+        node("unknown", Unknown, None, None),
+        node("pending-old", Pending, Some(100), None),
+        node("done", Done, Some(1), Some(2)),
+        node("pending-new", Pending, Some(900), None),
+    ];
+    assert_eq!(picked(&nodes), ["done", "pending-new", "pending-old"]);
+    assert!(picked(&[]).is_empty());
+}
+
+#[test]
+fn subagent_section_keeps_status_hints_and_omits_the_view_all_row_when_empty() {
+    use super::super::super::observability::tr;
+    let mut state = ready(160);
+    state.compose(160, 45).expect("loading");
+    let texts = crate::i18n::texts();
+    let has = |state: &ClientShellState, text: &str| {
+        state.inspector.rows.iter().any(|row| row.text == text)
+    };
+    assert!(has(&state, tr("Sub-agents", "子智能体")));
+    assert!(has(&state, texts.agent_activity.loading));
+    load(&mut state, Vec::new(), 45);
+    assert!(has(&state, &format!("{} 0", tr("Sub-agents", "子智能体"))));
+    assert!(has(&state, texts.agent_activity.empty_tree));
+    assert!(!state
+        .inspector
+        .rows
+        .iter()
+        .any(|row| matches!(row.extra, Extra::KeyTrail(_) | Extra::Counts(_))));
+}
+
+#[test]
+fn quick_actions_paint_key_caps_before_their_labels() {
+    use super::super::super::observability::tr;
+    let mut state = ready(160);
+    state.compose(160, 60).expect("actions");
+    for (key, label, action) in [
+        ("↵", tr("Jump to terminal", "跳转到终端"), Action::Jump),
+        (
+            "d",
+            tr("Sub-agents page", "子智能体页面"),
+            Action::Activity(None),
+        ),
+        ("r", tr("Refresh activity", "刷新活动"), Action::Refresh),
+    ] {
+        let row = state
+            .inspector
+            .rows
+            .iter()
+            .find(|row| matches!(row.extra, Extra::KeyLead(lead) if lead == key))
+            .expect("key cap row");
+        assert_eq!(row.text, label);
+        assert_eq!(row.action.as_ref(), Some(&action));
+    }
+    let rect = state
+        .hits
+        .inspector_actions
+        .iter()
+        .find(|(_, action)| *action == Action::Refresh)
+        .expect("refresh hit")
+        .0;
+    let buffer = state.compose_buffer.as_ref().expect("frame");
+    let palette = &state.config.palette;
+    let cells = (rect.x..rect.x + 4)
+        .map(|x| buffer[(x, rect.y)].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cells.iter().map(|cell| cell.symbol()).collect::<String>(),
+        " r  "
+    );
+    for cell in &cells[..3] {
+        assert_eq!((cell.fg, cell.bg), (palette.text, palette.surface1));
+    }
+    assert_ne!(cells[3].bg, palette.surface1);
+    let label = tr("Refresh activity", "刷新活动");
+    let first = label.chars().next().expect("label").to_string();
+    assert_eq!(buffer[(rect.x + 4, rect.y)].symbol(), first);
+}
+
+#[test]
+fn view_all_and_entries_open_the_sub_agent_page() {
+    let mut state = ready(160);
+    load(&mut state, mixed_nodes(now_ms()), 60);
+    let view_all = state
+        .inspector
+        .rows
+        .iter()
+        .position(|row| matches!(row.extra, Extra::KeyTrail("d")))
+        .expect("view all row");
+    let y = state.inspector.area.y + (view_all - state.inspector.scroll) as u16;
+    let rect = state
+        .hits
+        .inspector_actions
+        .iter()
+        .find(|(rect, _)| rect.y == y)
+        .expect("view all hit")
+        .0;
+    let buffer = state.compose_buffer.as_ref().expect("frame");
+    let line = (rect.x..rect.right())
+        .map(|x| buffer[(x, y)].symbol())
+        .collect::<String>();
+    // 宽字符的续格读作空格；「›」后一格间隔，再接自带两侧空格的键帽 ` d `。
+    assert!(line.trim_end().ends_with("›  d"), "{line:?}");
+    let cap = line.trim_end().chars().count() as u16 - 1 + rect.x;
+    assert_eq!(buffer[(cap, y)].bg, state.config.palette.surface1);
+    assert_eq!(buffer[(cap - 1, y)].bg, state.config.palette.surface1);
+    click_hit(&mut state, rect);
+    assert_eq!(opened_page(&state), Some(None));
+
+    let mut state = ready(160);
+    load(&mut state, mixed_nodes(now_ms()), 60);
+    let rect = state
+        .hits
+        .inspector_actions
+        .iter()
+        .find(|(_, action)| *action == Action::Activity(Some("failed".into())))
+        .expect("failed entry")
+        .0;
+    click_hit(&mut state, rect);
+    assert_eq!(opened_page(&state), Some(Some("failed".into())));
+
+    let mut state = ready(160);
+    state.workbench.dock.focused = PanelId::Agents;
+    let mut outcome = ClientShellInput::default();
+    assert!(state.inspector_key(
+        &crate::input::TerminalKey::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::NONE),
+        &mut outcome
+    ));
+    assert_eq!(opened_page(&state), Some(None));
 }
