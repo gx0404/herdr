@@ -52,6 +52,10 @@ const CJK: &[&str] = &[
     "[task complete] 全部完成，中文折行正常",
 ];
 
+fn wide(ch: char) -> bool {
+    unicode_width::UnicodeWidthChar::width(ch) == Some(2)
+}
+
 fn zh() -> crate::i18n::LangGuard {
     lang_guard(Lang::ZhCn)
 }
@@ -245,7 +249,7 @@ fn cjk_text_wraps_within_the_width_without_splitting_characters() {
     let _lang = zh();
     let source: usize = CJK
         .iter()
-        .map(|line| line.chars().filter(|ch| char_width(*ch) == 2).count())
+        .map(|line| line.chars().filter(|ch| wide(*ch)).count())
         .sum();
     for width in 2..=40 {
         let mut view = transcript(CJK, width);
@@ -258,7 +262,7 @@ fn cjk_text_wraps_within_the_width_without_splitting_characters() {
             // 宽度够放下前缀时，折行不丢字：展开后所有宽字符都还在。
             let shown: usize = texts(&view)
                 .iter()
-                .map(|row| row.chars().filter(|ch| char_width(*ch) == 2).count())
+                .map(|row| row.chars().filter(|ch| wide(*ch)).count())
                 .sum();
             assert!(shown >= source, "宽 {width}: {shown} < {source}");
         }
@@ -593,4 +597,50 @@ fn latin_words_still_wrap_at_spaces_and_long_words_hard_break() {
     assert_eq!(wrapped("abcdefghijkl", 5), ["abcde", "fghij", "kl"]);
     assert_eq!(wrapped("", 5), [""]);
     assert_eq!(wrapped("a\nb", 5), ["a", "b"]);
+}
+
+/// 折行以字素为单位：emoji 连接序列与组合字符不会被拆到两行。
+#[test]
+fn wrapping_and_truncation_keep_graphemes_whole() {
+    let family = "👩\u{200d}💻";
+    for width in 2..=6 {
+        let rows = wrapped(&format!("a {family} b"), width);
+        assert!(
+            rows.iter().any(|row| row.contains(family)),
+            "宽 {width}: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| !row.ends_with('\u{200d}')),
+            "宽 {width}: {rows:?}"
+        );
+    }
+    let accented = "e\u{301}";
+    let rows = wrapped(&format!("abcd{accented}fg"), 5);
+    assert!(rows.iter().any(|row| row.contains(accented)), "{rows:?}");
+    // 截断同样不拆字素。
+    let row = fit_row(
+        vec![(format!("ab{family}{family}{family}"), Tone::Body)],
+        5,
+        None,
+    );
+    let text: String = row
+        .segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect();
+    assert!(
+        !text.contains('\u{200d}') || text.contains(family),
+        "{text:?}"
+    );
+    assert!(text.ends_with('…'), "{text:?}");
+}
+
+/// 只有空格的行首不是断点：缩进不会自成一行。
+#[test]
+fn leading_indentation_is_not_a_break_point() {
+    assert_eq!(wrapped(" abcdef", 6), [" abcde", "f"]);
+    assert_eq!(
+        wrapped("    缩进的中文正文需要折行", 12),
+        ["    缩进的中", "文正文需要折", "行"]
+    );
 }

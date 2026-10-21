@@ -25,7 +25,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::super::observability::tr;
 
@@ -1297,10 +1297,6 @@ fn expand_tabs(text: &str) -> String {
     }
 }
 
-fn char_width(ch: char) -> usize {
-    UnicodeWidthChar::width(ch).unwrap_or(0)
-}
-
 fn spans_width<T: AsRef<str>>(spans: &[(T, Tone)]) -> usize {
     spans
         .iter()
@@ -1343,7 +1339,7 @@ fn to_segments(spans: impl IntoIterator<Item = (String, Tone)>) -> Vec<Segment> 
         .collect()
 }
 
-/// 截到 `width` 列并在末尾补 `…`；调用方保证原文超宽。
+/// 截到 `width` 列并在末尾补 `…`（按字素，不拆组合字符）；调用方保证原文超宽。
 fn truncate_spans(spans: Vec<(String, Tone)>, width: usize) -> Vec<Segment> {
     let budget = width.saturating_sub(1);
     let mut used = 0usize;
@@ -1352,8 +1348,8 @@ fn truncate_spans(spans: Vec<(String, Tone)>, width: usize) -> Vec<Segment> {
     'spans: for (text, tone) in spans {
         cut_tone = tone;
         let mut kept = String::new();
-        for ch in text.chars() {
-            let cell = char_width(ch);
+        for grapheme in text.graphemes(true) {
+            let cell = crate::ui::display_width(grapheme);
             if used + cell > budget {
                 if !kept.is_empty() {
                     segments.push(Segment { text: kept, tone });
@@ -1361,7 +1357,7 @@ fn truncate_spans(spans: Vec<(String, Tone)>, width: usize) -> Vec<Segment> {
                 break 'spans;
             }
             used += cell;
-            kept.push(ch);
+            kept.push_str(grapheme);
         }
         if !kept.is_empty() {
             segments.push(Segment { text: kept, tone });
@@ -1446,9 +1442,11 @@ fn push_wrapped(
 }
 
 /// 按显示宽度折行，逐行回调字节区间 `[start, end)`：首行宽 `first` 列、续行宽 `rest` 列。
-/// 断点取空格之后，以及宽字符（中日韩文字）前后——中文没有空格，只在空格处断会在
-/// 混排的句子里留下很短的行；行首不放闭合标点、行尾不放开括号。没有断点时按列硬断，
-/// 在空格处断开时下一行行首的空格跳过。换行符强制断行，空文字也占一行。
+/// 以字素（grapheme）为单位，不拆开组合字符与 emoji 连接序列。断点取空格之后，以及
+/// 宽字符（中日韩文字等）前后——中文没有空格，只在空格处断会在混排的句子里留下很短
+/// 的行；行首不放闭合标点、行尾不放开括号；只有空格的行首不是断点（缩进不自成一行）。
+/// 没有断点时按列硬断，在空格处断开时下一行行首的空格跳过。换行符强制断行，空文字
+/// 也占一行。
 pub(in crate::client::shell) fn wrap_cjk(
     text: &str,
     first: usize,
@@ -1461,71 +1459,82 @@ pub(in crate::client::shell) fn wrap_cjk(
     // 本行最近一个断点（字节位置）及断点之前占用的列数。
     let mut soft: Option<(usize, usize)> = None;
     let mut skip_spaces = false;
-    let mut previous: Option<char> = None;
-    for (offset, ch) in text.char_indices() {
-        if ch == '\n' {
+    // 本行已有非空格内容。
+    let mut content = false;
+    let mut previous: Option<&str> = None;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        if grapheme == "\n" || grapheme == "\r\n" {
             emit(start, offset);
-            start = offset + ch.len_utf8();
+            start = offset + grapheme.len();
             used = 0;
             soft = None;
             width = rest.max(1);
             skip_spaces = false;
+            content = false;
             previous = None;
             continue;
         }
-        if ch == ' ' && skip_spaces {
-            start = offset + ch.len_utf8();
+        if grapheme == " " && skip_spaces {
+            start = offset + grapheme.len();
             continue;
         }
         skip_spaces = false;
-        if offset > start && previous.is_some_and(|before| breakable(before, ch)) {
+        if content && offset > start && previous.is_some_and(|before| breakable(before, grapheme)) {
             soft = Some((offset, used));
         }
-        let cell = char_width(ch);
-        if ch == ' ' && used + cell > width && offset > start {
+        let cell = crate::ui::display_width(grapheme);
+        if grapheme == " " && used + cell > width && offset > start {
             emit(start, offset);
-            start = offset + ch.len_utf8();
+            start = offset + grapheme.len();
             used = 0;
             soft = None;
             width = rest.max(1);
             skip_spaces = true;
-            previous = Some(ch);
+            content = false;
+            previous = Some(grapheme);
             continue;
         }
         while used + cell > width && offset > start {
             match soft.take().filter(|(at, _)| *at > start && *at <= offset) {
                 Some((at, used_at)) => {
+                    // 断点总在非空格字素之前，挪到下一行的部分有内容。
                     emit(start, at);
                     start = at;
                     used -= used_at;
+                    content = true;
                 }
                 None => {
                     emit(start, offset);
                     start = offset;
                     used = 0;
+                    content = false;
                 }
             }
             width = rest.max(1);
         }
         used += cell;
-        previous = Some(ch);
+        content |= grapheme != " ";
+        previous = Some(grapheme);
     }
     emit(start, text.len());
 }
 
-/// `before` 与 `after` 之间能否断行：空格之后（连续空格取最后一个之后），或任一侧是
-/// 宽字符；闭合标点不放行首、开括号不放行尾，零宽字符不与前一个字分开。
-fn breakable(before: char, after: char) -> bool {
-    if char_width(after) == 0 {
+/// 字素 `before` 与 `after` 之间能否断行：空格之后可断、空格之前不断；闭合标点不放
+/// 行首、开括号不放行尾；其余只在任一侧是宽字素时可断。
+fn breakable(before: &str, after: &str) -> bool {
+    if after == " " || crate::ui::display_width(after) == 0 {
         return false;
     }
-    if before == ' ' {
-        return after != ' ';
+    if before == " " {
+        return true;
     }
-    if NO_LINE_START.contains(after) || NO_LINE_END.contains(before) {
+    let (Some(head), Some(tail)) = (after.chars().next(), before.chars().next_back()) else {
+        return false;
+    };
+    if NO_LINE_START.contains(head) || NO_LINE_END.contains(tail) {
         return false;
     }
-    char_width(before) == 2 || char_width(after) == 2
+    crate::ui::display_width(before) >= 2 || crate::ui::display_width(after) >= 2
 }
 
 fn prefix_segments(prefix: &[(&str, Tone)]) -> Vec<Segment> {
