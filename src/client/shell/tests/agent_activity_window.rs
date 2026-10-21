@@ -372,8 +372,8 @@ fn texts() -> &'static crate::i18n::AgentActivityTexts {
 #[test]
 fn elapsed_is_compact() {
     assert_eq!(format_elapsed(12_000), "12s");
-    assert_eq!(format_elapsed(65_000), "1m05s");
-    assert_eq!(format_elapsed(3_900_000), "1h05m");
+    assert_eq!(format_elapsed(65_000), "1m 05s");
+    assert_eq!(format_elapsed(3_900_000), "1h 05m");
 }
 
 /// 活跃后代带上祖先排到前面；结束节点按时间倒序，相同时间保持来源顺序。
@@ -491,7 +491,7 @@ fn wide_page_renders_header_list_transcript_and_footer() {
         assert!(text.contains('▾'), "{cols}x{rows} 折叠开关:\n{text}");
         assert!(text.contains("12s"), "{cols}x{rows} 耗时:\n{text}");
         assert!(
-            text.contains("1m05s"),
+            text.contains("1m 05s"),
             "{cols}x{rows} 失败节点耗时:\n{text}"
         );
         assert!(text.contains("Explore"), "{cols}x{rows} 角色:\n{text}");
@@ -1696,7 +1696,9 @@ fn slow_tree_reads_do_not_starve_content_follow_reads() {
 #[test]
 fn content_header_meta_is_dropped_whole_never_cut() {
     let elapsed = format_elapsed(725_000);
-    assert_eq!(elapsed, "12m05s");
+    assert_eq!(elapsed, "12m 05s");
+    // 下面按去掉空格的头行比对，耗时也去掉空格。
+    let elapsed = elapsed.replace(' ', "");
     let labels = [
         "cargo test suite",
         "cargo test suite!",

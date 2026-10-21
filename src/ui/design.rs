@@ -205,6 +205,25 @@ pub fn compact_age(elapsed_ms: u64) -> String {
     }
 }
 
+/// 本地化的「多久以前」：`刚刚` / `3 分钟前` / `2 小时前` / `4 天前`（英文 `just now` /
+/// `3m ago` …）。通知历史、通知卡片与片段历史共用；紧凑的列表右侧时间用
+/// [`compact_age`]。按分钟取整，不随秒变化。
+pub fn ago_label(elapsed_secs: u64) -> String {
+    let t = &crate::i18n::texts().history;
+    if elapsed_secs < 60 {
+        return t.just_now.to_owned();
+    }
+    let minutes = elapsed_secs / 60;
+    if minutes < 60 {
+        return crate::i18n::fill(t.minutes_ago_fmt, &[("n", minutes.to_string().as_str())]);
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return crate::i18n::fill(t.hours_ago_fmt, &[("n", hours.to_string().as_str())]);
+    }
+    crate::i18n::fill(t.days_ago_fmt, &[("n", (hours / 24).to_string().as_str())])
+}
+
 /// 计时（运行时长）：`42s` / `3m 05s` / `1h 12m`。
 pub fn duration_label(elapsed_ms: u64) -> String {
     let seconds = elapsed_ms / 1_000;
@@ -316,5 +335,25 @@ mod tests {
         assert_eq!(duration_label(42_000), "42s");
         assert_eq!(duration_label(185_000), "3m 05s");
         assert_eq!(duration_label(4_320_000), "1h 12m");
+    }
+
+    #[test]
+    fn ago_labels_round_to_minutes_and_localize() {
+        let _guard = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+        let t = &crate::i18n::texts().history;
+        assert_eq!(ago_label(0), t.just_now);
+        assert_eq!(ago_label(59), t.just_now);
+        assert_eq!(
+            ago_label(3 * 60 + 59),
+            crate::i18n::fill(t.minutes_ago_fmt, &[("n", "3")])
+        );
+        assert_eq!(
+            ago_label(2 * 3_600),
+            crate::i18n::fill(t.hours_ago_fmt, &[("n", "2")])
+        );
+        assert_eq!(
+            ago_label(4 * 86_400),
+            crate::i18n::fill(t.days_ago_fmt, &[("n", "4")])
+        );
     }
 }

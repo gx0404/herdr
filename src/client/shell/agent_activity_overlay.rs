@@ -1260,16 +1260,10 @@ pub(super) fn node_elapsed_ms(node: &AgentActivityNode, now_ms: u64) -> Option<u
     ended.checked_sub(started)
 }
 
-/// 紧凑耗时：`45s`、`12m05s`、`1h05m`。
+/// 耗时：`45s`、`12m 05s`、`1h 05m`——与 Inspector、子智能体页同一个计时格式
+/// （`design::duration_label`）。
 pub(super) fn format_elapsed(ms: u64) -> String {
-    let seconds = ms / 1000;
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m{:02}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
-    }
+    crate::ui::design::duration_label(ms)
 }
 
 pub(super) fn kind_label(kind: AgentActivityKind) -> &'static str {

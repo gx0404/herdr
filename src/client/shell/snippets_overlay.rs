@@ -253,24 +253,11 @@ fn machine_default_pane(endpoint: &ClientShellEndpoint) -> Option<String> {
 }
 
 fn relative_epoch_ago(executed_at: u64) -> String {
-    let t = &crate::i18n::texts().history;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let seconds = now.saturating_sub(executed_at);
-    if seconds < 60 {
-        return t.just_now.to_owned();
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return crate::i18n::fill(t.minutes_ago_fmt, &[("n", &minutes.to_string())]);
-    }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return crate::i18n::fill(t.hours_ago_fmt, &[("n", &hours.to_string())]);
-    }
-    crate::i18n::fill(t.days_ago_fmt, &[("n", &(hours / 24).to_string())])
+    crate::ui::design::ago_label(now.saturating_sub(executed_at))
 }
 
 impl ClientSnippetRunDraft {

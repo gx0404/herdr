@@ -14,8 +14,8 @@ use crate::ui::key_labels::display_key;
 /// 自带底色，两格足以分开）。
 pub(crate) const HINT_GAP: u16 = 2;
 
-/// 常驻的栏（状态栏）与吐司里提示项之间的空格数：多留一格更松。
-pub(crate) const BAR_HINT_GAP: u16 = 3;
+/// 常驻的栏（状态栏）里提示项之间的空格数：栏是整屏宽，项间留 4 格。
+pub(crate) const BAR_HINT_GAP: u16 = 4;
 
 /// 键帽上实际显示的按键文字（规范写法；已规范时借用）。
 pub(crate) fn cap_text(key: &str) -> Cow<'_, str> {

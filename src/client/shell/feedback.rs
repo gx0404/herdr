@@ -296,20 +296,7 @@ pub(super) struct ClientNotificationHistoryOverlay {
 
 /// Relative "n units ago" label for history rows.
 pub(super) fn relative_time_ago(at: std::time::Instant, now: std::time::Instant) -> String {
-    let t = &crate::i18n::texts().history;
-    let seconds = now.saturating_duration_since(at).as_secs();
-    if seconds < 60 {
-        return t.just_now.to_owned();
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return crate::i18n::fill(t.minutes_ago_fmt, &[("n", minutes.to_string().as_str())]);
-    }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return crate::i18n::fill(t.hours_ago_fmt, &[("n", hours.to_string().as_str())]);
-    }
-    crate::i18n::fill(t.days_ago_fmt, &[("n", (hours / 24).to_string().as_str())])
+    crate::ui::design::ago_label(now.saturating_duration_since(at).as_secs())
 }
 
 fn thumb_contains(
