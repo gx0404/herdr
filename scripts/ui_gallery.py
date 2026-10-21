@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,8 @@ def run_gallery_test() -> int:
 def screenshot(browser: str, html: Path, profile: Path) -> bool:
     width, height = window_size(html)
     png = html.with_suffix(".png")
+    # An old PNG must not make a browser that exits without capturing look successful.
+    before = png.stat().st_mtime_ns if png.is_file() else None
     command = [
         browser,
         "--headless=new",
@@ -82,7 +85,11 @@ def screenshot(browser: str, html: Path, profile: Path) -> bool:
         html.resolve().as_uri(),
     ]
     result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=120)
-    return result.returncode == 0 and png.is_file()
+    return (
+        result.returncode == 0
+        and png.is_file()
+        and (before is None or png.stat().st_mtime_ns != before)
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-test", action="store_true", help="reuse existing HTML frames")
     parser.add_argument("--no-png", action="store_true", help="only render HTML frames")
     parser.add_argument("--filter", default="", help="only screenshot frames whose name contains this text")
+    parser.add_argument("--browser", help="use an explicit Chrome/Chromium/Edge executable")
     args = parser.parse_args(argv)
 
     if not args.skip_test:
@@ -106,13 +114,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"gallery: {directory / 'gallery.html'} ({len(frames)} frames)")
     if args.no_png:
         return 0
-    browser = find_browser()
+    browser = args.browser or find_browser()
     if browser is None:
         print("no Chrome/Edge found; HTML frames only", file=sys.stderr)
         return 0
-    profile = ROOT / "target" / "ui-gallery-browser-profile"
-    profile.mkdir(parents=True, exist_ok=True)
-    failed = [frame.name for frame in frames if not screenshot(browser, frame, profile)]
+    profile_root = ROOT / "target" / "ui-gallery-browser-profile"
+    profile_root.mkdir(parents=True, exist_ok=True)
+    # Independent runs must not reuse a profile held by an interrupted browser.
+    with tempfile.TemporaryDirectory(prefix="run-", dir=profile_root) as raw_profile:
+        profile = Path(raw_profile)
+        failed = [frame.name for frame in frames if not screenshot(browser, frame, profile)]
     for name in failed:
         print(f"screenshot failed: {name}", file=sys.stderr)
     print(f"png: {len(frames) - len(failed)}/{len(frames)}")

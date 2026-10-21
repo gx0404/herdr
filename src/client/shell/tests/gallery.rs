@@ -2244,7 +2244,7 @@ mod layout;
 mod machines;
 #[path = "gallery_overlays.rs"]
 mod overlays;
-#[path = "gallery_toast.rs"]
-mod toast;
 #[path = "gallery_settings.rs"]
 mod settings;
+#[path = "gallery_toast.rs"]
+mod toast;

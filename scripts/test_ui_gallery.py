@@ -47,6 +47,28 @@ class BrowserDiscoveryTests(unittest.TestCase):
             self.assertEqual(ui_gallery.find_browser(), "/usr/bin/chromium")
 
 
+class ScreenshotTests(unittest.TestCase):
+    def test_old_image_does_not_count_as_a_successful_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            html = Path(raw, "frame-80x24.html")
+            html.write_text("<h2>frame — 80×24</h2>", encoding="utf-8")
+            html.with_suffix(".png").write_bytes(b"old screenshot")
+            with mock.patch.object(ui_gallery.subprocess, "run", return_value=mock.Mock(returncode=0)):
+                self.assertFalse(ui_gallery.screenshot("chromium", html, Path(raw, "profile")))
+
+    def test_new_capture_counts_as_success(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            html = Path(raw, "frame-80x24.html")
+            html.write_text("<h2>frame — 80×24</h2>", encoding="utf-8")
+
+            def capture(*args: object, **kwargs: object) -> object:
+                html.with_suffix(".png").write_bytes(b"new screenshot")
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(ui_gallery.subprocess, "run", side_effect=capture):
+                self.assertTrue(ui_gallery.screenshot("chromium", html, Path(raw, "profile")))
+
+
 class MainTests(unittest.TestCase):
     def test_missing_frames_fail_without_running_cargo(self) -> None:
         with tempfile.TemporaryDirectory() as raw, mock.patch.dict(
