@@ -1400,7 +1400,7 @@ pub(crate) fn render_command_palette(
     let p = cx.palette;
     let t = &crate::i18n::texts().global_menu;
     let rows = palette_rows(palette);
-    let (outer, inner) = modal_panel(b, super::chrome::command::SIZE, p.accent, cx)?;
+    let (outer, inner) = modal_panel(b, super::chrome::command::SIZE, cx)?;
     let searching = palette.view == BrowserView::Search || !palette.query.as_str().is_empty();
     let layout = PageLayout::new(inner, 0, searching, false);
     let title = match palette.view {
@@ -1537,7 +1537,7 @@ pub(crate) fn render_command_palette(
         }
         .into(),
     ));
-    render_key_hints(b, layout.footer, &hints, p, cx.components);
+    render_key_hints(b, layout.footer, &hints, p);
     Some(OverlayRender {
         area: outer,
         menu_popup: outer,

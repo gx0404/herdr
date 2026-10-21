@@ -1462,10 +1462,11 @@ fn pointer_opened_menus_start_without_a_keyboard_selection() {
     let t = &crate::i18n::texts().menu;
     let mut state = workbench_state();
     state.config.mouse_capture = true;
+    // 键盘选中行在首列画 `▌`（悬浮行只换底色、没有竖条）。
     let selected_rows = |state: &ClientShellState, area: Rect| {
         let buffer = state.compose_buffer.as_ref().expect("保留帧缓冲");
         (area.y + 1..area.bottom().saturating_sub(1))
-            .filter(|y| buffer[(area.x + 2, *y)].bg == state.config.palette.surface1)
+            .filter(|y| buffer[(area.x + 1, *y)].symbol() == crate::ui::design::SELECTION_MARK)
             .collect::<Vec<_>>()
     };
 

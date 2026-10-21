@@ -1408,12 +1408,7 @@ fn render_scene_restore_confirm(
     let height = content_rows
         .saturating_add(8)
         .clamp(MIN_CONFIRM_HEIGHT, MAX_CONFIRM_HEIGHT);
-    let (popup, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Medium.with_height(height),
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(height), cx)?;
     if inner.width < 20 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -1583,7 +1578,7 @@ fn render_scene_list(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().scenes;
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(22), p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(22), cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -1734,7 +1729,6 @@ fn render_scene_list(
                     ("esc".to_owned(), t.hint_close.to_owned()),
                 ],
                 p,
-                cx.components,
             );
         }
     }
@@ -1832,12 +1826,7 @@ fn render_scene_save_form(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().scenes;
-    let (popup, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Medium.with_height(13),
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(13), cx)?;
     if inner.width < 20 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -1900,7 +1889,6 @@ fn render_scene_save_form(
                     ("esc".to_owned(), t.hint_back.to_owned()),
                 ],
                 p,
-                cx.components,
             );
         }
     }
@@ -1960,12 +1948,7 @@ fn render_scene_rename_form(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().scenes;
-    let (popup, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Medium.with_height(10),
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(10), cx)?;
     if inner.width < 20 || inner.height < 6 {
         return Some(OverlayRender {
             area: popup,
@@ -2011,7 +1994,6 @@ fn render_scene_rename_form(
                     ("esc".to_owned(), t.hint_back.to_owned()),
                 ],
                 p,
-                cx.components,
             );
         }
     }
@@ -2068,12 +2050,7 @@ fn render_scene_delete_confirm(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().scenes;
-    let (popup, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Medium.with_height(10),
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(10), cx)?;
     if inner.width < 20 || inner.height < 6 {
         return Some(OverlayRender {
             area: popup,

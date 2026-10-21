@@ -226,11 +226,13 @@ pub(in crate::client::shell) fn paint(
                     primary: hint.primary,
                 })
                 .collect::<Vec<_>>();
-            // 常驻的栏用低一档的键帽：说明色字叠在最浅一档的底上，标签退到元信息色。
+            // 常驻的栏：与页面页脚同一套键帽与说明色标签（按栏面挑可辨的底与字色），
+            // 栏够宽，项间多留一格。
             let styles = FooterHintStyles {
                 key: super::bar_key_cap(palette, bg),
                 label: super::bar_hint_label(palette, bg),
                 hover_bg: palette.hover_row_bg(),
+                gap: crate::ui::kit::key_cap::BAR_HINT_GAP,
             };
             hits.hints =
                 render_footer_hints_styled(buffer, middle, &footer, view.hovered, palette, styles);
@@ -840,14 +842,17 @@ mod tests {
         assert_eq!(key.symbol(), "c");
         assert_eq!(Some(key.bg), cap.bg, "栏内键帽的底色");
         assert_eq!(Some(key.fg), cap.fg);
-        assert_ne!(key.bg, palette.surface1, "比页面页脚的键帽低一档");
+        let page = crate::ui::design::key_cap(&palette);
+        assert_eq!(Some(key.bg), page.bg, "与页面页脚同一套键帽");
+        assert_eq!(Some(key.fg), page.fg);
         let label = &buffer[(first.x + 9, 0)];
         assert_eq!(label.symbol(), "前");
         assert_eq!(
             Some(label.fg),
             super::super::bar_hint_label(&palette, bg).fg,
-            "标签元信息色"
+            "标签说明色"
         );
+        assert_eq!(Some(label.fg), crate::ui::design::key_label(&palette).fg);
     }
 
     #[test]

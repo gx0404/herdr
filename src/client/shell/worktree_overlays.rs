@@ -12,7 +12,6 @@ pub(super) fn render_worktree_create_overlay(
             width: 68,
             height: 12,
         },
-        p.accent,
         cx,
     )?;
     let stack = crate::ui::modal_stack_areas(inner, 1, 0, 1, 1);
@@ -148,7 +147,6 @@ pub(super) fn render_worktree_open_overlay(
             width: 96,
             height: popup_height,
         },
-        p.accent,
         cx,
     )?;
     let stack = crate::ui::modal_stack_areas(inner, 2, 1, 1, 1);
@@ -345,7 +343,6 @@ pub(super) fn render_worktree_remove_overlay(
             width: 72,
             height: 10,
         },
-        p.red,
         cx,
     )?;
     let stack = crate::ui::modal_stack_areas(inner, 1, 0, 1, 0);

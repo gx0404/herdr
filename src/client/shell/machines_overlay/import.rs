@@ -620,12 +620,7 @@ pub(super) fn render_machine_import(
     let t = &crate::i18n::texts().machines;
     // 与机器列表页同一档尺寸（L19）：宽屏同 dashboard，窄屏同朴素列表，从机器
     // 页按 `i` 打开导入时浮层宽高都不跳变；视图计算（`machines_body`）同口径。
-    let (popup, inner) = modal_panel(
-        b,
-        super::machines_page_size(b.area, cx.page_bounds),
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, super::machines_page_size(b.area, cx.page_bounds), cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,

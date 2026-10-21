@@ -53,14 +53,13 @@ impl<'a> MachineHint<'a> {
     }
 }
 
-/// 与 kit 同口径的单项宽度（` key ` 键帽 + 空格 + 标签）与项间距。
+/// 单项宽度与项间距直接取 kit 的口径（键帽文字先规范成小写写法再量宽），分行与
+/// 绘制因此永远一致。
 fn hint_width(hint: &MachineHint<'_>) -> u16 {
-    display_width(hint.key)
-        .saturating_add(3)
-        .saturating_add(display_width(hint.label))
+    crate::ui::kit::key_cap::hint_width(hint.key, hint.label)
 }
 
-const GAP: u16 = 2;
+const GAP: u16 = crate::ui::kit::key_cap::HINT_GAP;
 
 /// 贪心分行：按顺序往当前行里放，放不下就换行，最多 `max_rows` 行；最后一行
 /// 收下剩余全部，由 kit 从尾部丢（primary 最后丢）。返回每行的起止下标。

@@ -2,7 +2,8 @@
 //!
 //! 规则（详见 `docs/AGENT_RULES/app-render.md` 的「设计语言」）：
 //! - 颜色只用于表达状态；结构面用中性色阶（`sidebar_bg` < `panel_bg` < `surface0` <
-//!   `surface1`），选中靠底色与粗细，不靠彩色。
+//!   `surface1`），选中靠底色、粗细与首列 accent 竖条，不靠彩色反色；浮层边框同样走
+//!   中性色（[`frame`]），状态色描边只留给吐司。
 //! - 状态一律经 [`AgentBucket`] 取字形与颜色，所有界面同一套映射。
 //! - 文字四级：标题（粗体 `text`）、正文（`text`）、说明（`subtext0`）、元信息
 //!   （`overlay1`）。
@@ -135,6 +136,11 @@ pub fn key_cap(palette: &Palette) -> Style {
     Style::default().fg(palette.text).bg(palette.surface1)
 }
 
+/// 键帽旁的标签（页脚、提示条、吐司里「键帽 + 说明」的说明）：说明色。
+pub fn key_label(palette: &Palette) -> Style {
+    muted(palette)
+}
+
 /// 主要键帽（每个提示条最多一个）：反色。
 pub fn key_cap_primary(palette: &Palette) -> Style {
     Style::default()
@@ -148,6 +154,42 @@ pub fn selected_row(palette: &Palette) -> Style {
     Style::default()
         .bg(palette.selection_row_bg())
         .add_modifier(Modifier::BOLD)
+}
+
+/// 选中行整行文字的基础样式：在 [`selected_row`] 上补读得清的正文前景。列表先用它
+/// 铺整行，再按需叠状态色 / 说明色；首列另画 [`SELECTION_MARK`]。
+pub fn selected_row_text(palette: &Palette) -> Style {
+    selected_row(palette).fg(readable_text_on(palette, palette.selection_row_bg()))
+}
+
+/// 选中标记：键盘选中行首列的 accent 竖条（侧栏、浮层列表、菜单共用）。悬浮行的
+/// 底色与选中行几乎相同但没有这道竖条，选中与悬浮因此始终可辨（MENU-01）。
+pub const SELECTION_MARK: &str = "▌";
+
+/// [`SELECTION_MARK`] 的样式：只给 accent 前景，底色沿用所在行。
+pub fn selection_mark(palette: &Palette) -> Style {
+    Style::default().fg(palette.accent)
+}
+
+/// 叠在 `bg` 上读得清的正文色：正文色够 4.5:1 就用正文色，否则按对比度挑
+/// （`crate::ui::color::contrast_fg`；`bg` 无从换算时也走它）。
+pub fn readable_text_on(palette: &Palette, bg: Color) -> Color {
+    if crate::ui::color::contrast_ratio(palette.text, bg).is_some_and(|ratio| ratio >= 4.5) {
+        palette.text
+    } else {
+        crate::ui::color::contrast_fg(palette, bg)
+    }
+}
+
+/// 浮层、弹窗与菜单的结构边框色：中性色阶，不随主题 accent 变彩色——危险语义放在
+/// 正文与按钮上，状态色描边只留给吐司。`surface1` 与面板底分不开（16 色或自定义
+/// 主题）时退到 `overlay0`。
+pub fn frame(palette: &Palette) -> Color {
+    if Palette::row_bg_is_distinct(palette.panel_bg, palette.surface1) {
+        palette.surface1
+    } else {
+        palette.overlay0
+    }
 }
 
 /// 紧凑相对时间：`now` / `12s` / `3m` / `2h` / `3d` / `5w`。
@@ -239,6 +281,28 @@ mod tests {
                 AgentBucket::None,
             ]
         );
+    }
+
+    #[test]
+    fn selection_and_frame_stay_readable_and_neutral_for_every_theme() {
+        for name in crate::config::THEME_NAMES {
+            let palette = Palette::from_name(name).expect("built-in theme");
+            let selected = selected_row_text(&palette);
+            assert_eq!(selected.bg, Some(palette.selection_row_bg()), "{name}");
+            assert!(selected.add_modifier.contains(Modifier::BOLD), "{name}");
+            let fg = selected.fg.expect("fg");
+            if let Some(ratio) = crate::ui::color::contrast_ratio(fg, palette.selection_row_bg()) {
+                assert!(ratio >= 4.5, "选中行文字读不清：{name} {ratio:.2}:1");
+            }
+            let border = frame(&palette);
+            assert_ne!(border, palette.panel_bg, "边框与面板底同色：{name}");
+            assert_ne!(border, Color::Reset, "边框落回 Reset：{name}");
+        }
+        let graphite = Palette::graphite_dark();
+        assert_eq!(frame(&graphite), graphite.surface1, "Graphite 用中性结构色");
+        assert_eq!(selection_mark(&graphite).fg, Some(graphite.accent));
+        assert_eq!(selection_mark(&graphite).bg, None, "竖条沿用所在行的底色");
+        assert_eq!(crate::ui::display_width(SELECTION_MARK), 1);
     }
 
     #[test]

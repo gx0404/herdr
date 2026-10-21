@@ -114,7 +114,7 @@ pub(super) fn render_which_key(
     let Some(inner) = panel(
         buffer,
         panel_area,
-        p.accent,
+        crate::ui::design::frame(p),
         p.panel_bg,
         crate::ui::BorderGlyphs::ROUNDED,
     ) else {

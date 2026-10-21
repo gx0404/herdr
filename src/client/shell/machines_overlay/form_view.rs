@@ -919,7 +919,7 @@ pub(super) fn render_machine_form(
     let p = cx.palette;
     let t = &crate::i18n::texts().machines;
     let f = &crate::i18n::texts().machine_form;
-    let (popup, inner) = modal_panel(b, FORM_SIZE, p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, FORM_SIZE, cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,

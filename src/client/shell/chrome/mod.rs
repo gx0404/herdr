@@ -63,27 +63,25 @@ pub(super) fn readable_on(palette: &Palette, bg: Color, candidates: &[Color]) ->
     best.map_or(first, |(color, _)| color)
 }
 
-/// 栏内键帽（标题栏的命令提示、状态栏的键位提示）：比页面页脚的键帽低一档——说明色
-/// 字叠在最浅一档的底上，常驻在屏幕边缘也不抢眼。`surface0` 与栏面分不开时退到
-/// `surface1`，字色按对比度挑。
+/// 栏内键帽（标题栏的命令提示、状态栏的键位提示）：与页面页脚同一套键帽
+/// （`design::key_cap`：正文色叠在 `surface1` 上）。`surface1` 与栏面分不开时依次退到
+/// `surface0`、选中底色，字色按对比度挑。
 pub(super) fn bar_key_cap(palette: &Palette, bar: Color) -> Style {
-    let cap = if Palette::row_bg_is_distinct(bar, palette.surface0) {
+    let cap = if Palette::row_bg_is_distinct(bar, palette.surface1) {
+        palette.surface1
+    } else if Palette::row_bg_is_distinct(bar, palette.surface0) {
         palette.surface0
     } else {
-        palette.surface1
+        palette.selection_row_bg()
     };
     Style::default()
-        .fg(readable_on(palette, cap, &[palette.subtext0, palette.text]))
+        .fg(readable_on(palette, cap, &[palette.text, palette.subtext0]))
         .bg(cap)
 }
 
-/// 栏内键位提示的标签：元信息色，栏面上读不清时退到说明色。
+/// 栏内键位提示的标签：说明色（与页面页脚一致），栏面上读不清时退到正文色。
 pub(super) fn bar_hint_label(palette: &Palette, bar: Color) -> Style {
-    Style::default().fg(readable_on(
-        palette,
-        bar,
-        &[palette.overlay1, palette.subtext0, palette.text],
-    ))
+    Style::default().fg(readable_on(palette, bar, &[palette.subtext0, palette.text]))
 }
 
 /// 一段带样式的文字。
@@ -180,20 +178,23 @@ pub(super) fn truncate_spans_left<'a>(
 }
 
 /// 一个动作键位的完整按键序列（键帽上的文字）：前缀键位写成「ctrl+b /」，直接
-/// 键位原样；配了多个时取第一个。没配就是 `None`。
+/// 键位原样；配了多个时取第一个。按键文字统一规范成小写口径
+/// （`ui::key_labels::display_key`）。没配就是 `None`。
 pub(super) fn key_sequence(
     keybinds: &LiveKeybindConfig,
     action: &ActionKeybinds,
 ) -> Option<String> {
+    use crate::ui::key_labels::{display_key, with_prefix};
     let binding = action.bindings.first()?;
     if binding.trigger.is_prefix() {
-        let key = binding
-            .label
-            .strip_prefix("prefix+")
-            .unwrap_or(&binding.label);
-        Some(format!("{} {key}", keybinds.primary_prefix_label()))
+        let prefix = keybinds.primary_prefix_label();
+        Some(if binding.label.starts_with("prefix+") {
+            with_prefix(&binding.label, &prefix)
+        } else {
+            format!("{} {}", display_key(&prefix), display_key(&binding.label))
+        })
     } else {
-        Some(binding.label.clone())
+        Some(display_key(&binding.label).into_owned())
     }
 }
 

@@ -277,10 +277,11 @@ fn status_color(
     crate::ui::design::status_color(agent_bucket(status), palette, components)
 }
 
-/// 浮层列表行的底色，三态优先级：键盘选中（accent 反色）> 指针悬浮
-/// （`components.hover_bg` 弱色）> 常态。hover 与 selected 分离之后两者必须
-/// 视觉可辨，否则「鼠标路过」看起来就是「键盘选中」，回车激活的却是另一项
-/// （MENU-01）。纯函数、无分配，供行循环按行调用。
+/// 浮层列表行的底色，三态优先级：键盘选中（中性选中底色）> 指针悬浮
+/// （`components.hover_bg`）> 常态。Graphite 里选中与悬浮的底色几乎相同，选中行
+/// 另在首列画 accent `▌`（`kit::paint_selection_mark`）并加粗，两者始终可辨——否则
+/// 「鼠标路过」看起来就是「键盘选中」，回车激活的却是另一项（MENU-01）。纯函数、
+/// 无分配，供行循环按行调用。
 fn list_row_bg(
     palette: &Palette,
     components: &crate::app::state::ComponentStyles,
@@ -288,7 +289,7 @@ fn list_row_bg(
     hovered: bool,
 ) -> ratatui::style::Color {
     if selected {
-        palette.accent
+        palette.selection_row_bg()
     } else if hovered {
         components.hover_bg
     } else {
@@ -296,21 +297,20 @@ fn list_row_bg(
     }
 }
 
-/// `list_row_bg` 对应的整行样式：选中行反色加粗，悬浮行只换底色。
+/// `list_row_bg` 对应的整行样式：选中行是设计语言的选中行文字
+/// （`design::selected_row_text`：选中底色 + 读得清的正文 + 粗体），悬浮行只换底色。
 fn list_row_style(
     palette: &Palette,
     components: &crate::app::state::ComponentStyles,
     selected: bool,
     hovered: bool,
 ) -> Style {
-    let style = Style::default().bg(list_row_bg(palette, components, selected, hovered));
     if selected {
-        style
-            .fg(panel_contrast_fg(palette))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        style.fg(palette.text)
+        return crate::ui::design::selected_row_text(palette);
     }
+    Style::default()
+        .bg(list_row_bg(palette, components, selected, hovered))
+        .fg(palette.text)
 }
 
 #[cfg(test)]

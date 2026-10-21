@@ -1219,12 +1219,7 @@ fn render_host_key_unknown(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machine_auth;
-    let (popup, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Medium.with_height(12),
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(12), cx)?;
     if inner.width < 20 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -1286,7 +1281,7 @@ fn render_host_key_unknown(
             hints.push(("o".to_owned(), t.hint_trust_once.to_owned()));
         }
         hints.push(("esc".to_owned(), t.hint_abort.to_owned()));
-        render_key_hints(b, footer, &hints, p, cx.components);
+        render_key_hints(b, footer, &hints, p);
     }
 
     let mut action_hits = Vec::new();
@@ -1356,7 +1351,7 @@ fn render_host_key_changed(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machine_auth;
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(11), p.red, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(11), cx)?;
     if inner.width < 20 || inner.height < 7 {
         return Some(OverlayRender {
             area: popup,
@@ -1434,7 +1429,6 @@ fn render_host_key_changed(
                 ("esc".to_owned(), t.hint_abort.to_owned()),
             ],
             p,
-            cx.components,
         );
     }
 
@@ -1491,12 +1485,7 @@ fn render_auth_guide(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machine_auth;
-    let (popup, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Medium.with_height(12),
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(12), cx)?;
     if inner.width < 20 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -1579,7 +1568,6 @@ fn render_auth_guide(
                 ("esc".to_owned(), t.hint_close.to_owned()),
             ],
             p,
-            cx.components,
         );
     }
 
@@ -1651,7 +1639,7 @@ fn render_ssh_host_prompt(
     use ratatui::widgets::{Paragraph, Widget, Wrap};
     let p = cx.palette;
     let t = &crate::i18n::texts().machine_auth;
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large, p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large, cx)?;
     let layout = super::page::PageLayout::new(inner, 0, false, true);
     put_text(
         b,
@@ -1713,7 +1701,6 @@ fn render_ssh_host_prompt(
             ("Esc".into(), t.hint_abort.into()),
         ],
         p,
-        cx.components,
     );
     Some(OverlayRender {
         area: popup,
@@ -1734,12 +1721,7 @@ fn render_password_prompt(
     }
     let p = cx.palette;
     let t = &crate::i18n::texts().machine_auth;
-    let (popup, inner) = modal_panel(
-        b,
-        crate::ui::ModalSize::Medium.with_height(10),
-        p.accent,
-        cx,
-    )?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(10), cx)?;
     if inner.width < 20 || inner.height < 7 {
         return Some(OverlayRender {
             area: popup,

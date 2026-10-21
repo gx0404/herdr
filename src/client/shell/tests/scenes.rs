@@ -984,7 +984,7 @@ fn scene_hover_does_not_move_the_keyboard_selection() {
     assert_eq!(overlay.hovered, Some(1));
     assert_eq!(overlay.selected, 0, "指针不改写键盘选中");
 
-    // 悬浮行用弱色，选中行仍是 accent 反色。
+    // 悬浮行只换底色；选中行是中性选中底色，首列另画 accent `▌`。
     let frame = state.compose(106, 32).expect("hovered scenes overlay");
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     let (first, _) = state
@@ -998,7 +998,10 @@ fn scene_hover_does_not_move_the_keyboard_selection() {
         buffer[(second.x, second.y)].bg,
         state.config.components.hover_bg
     );
-    assert_eq!(buffer[(first.x, first.y)].bg, state.config.palette.accent);
+    assert_eq!(
+        buffer[(first.x, first.y)].bg,
+        state.config.palette.selection_row_bg()
+    );
 
     // 指针移出行区域：hover 清空，键盘选中不动，回车恢复的仍是第 0 条。
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {

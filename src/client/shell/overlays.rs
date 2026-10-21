@@ -422,11 +422,11 @@ pub(in crate::client::shell) fn wrap_text(
 }
 
 /// Centered modal of a size tier plus its painted panel: the shared frame
-/// every overlay starts from.
+/// every overlay starts from. 边框一律是中性结构色（`design::frame`）：危险操作的
+/// 语义放在正文与按钮上，不再把整圈边框染红或随主题 accent 变彩色。
 pub(in crate::client::shell) fn modal_panel(
     b: &mut Buffer,
     size: crate::ui::ModalSize,
-    border: ratatui::style::Color,
     cx: &ChromeContext<'_>,
 ) -> Option<(Rect, Rect)> {
     let outer = cx
@@ -436,7 +436,7 @@ pub(in crate::client::shell) fn modal_panel(
     let inner = panel(
         b,
         outer,
-        border,
+        crate::ui::design::frame(cx.palette),
         cx.palette.panel_bg,
         crate::ui::BorderGlyphs::ROUNDED,
     )?;
@@ -630,7 +630,7 @@ fn render_scrollback_overlay(
     cx: &ChromeContext<'_>,
 ) -> Option<ScrollbackOverlayRender> {
     let p = cx.palette;
-    let (outer, _inner) = modal_panel(b, size, p.accent, cx)?;
+    let (outer, _inner) = modal_panel(b, size, cx)?;
     let Some(layout) = scrollback_overlay_layout(outer) else {
         return Some(ScrollbackOverlayRender {
             area: outer,
@@ -714,7 +714,6 @@ fn render_scrollback_overlay(
                 ("esc / enter".to_owned(), t.footer_close.to_owned()),
             ],
             p,
-            cx.components,
         );
     }
 
@@ -799,7 +798,7 @@ fn render_onboarding_overlay(
     // 上游 dbdb8dc8：欢迎页展示「配置的」前缀而不是静态默认键。
     let prefix_label = k.primary_prefix_label();
     let size = onboarding_modal_size(b.area, &prefix_label);
-    let (outer, inner) = modal_panel(b, size, p.accent, cx)?;
+    let (outer, inner) = modal_panel(b, size, cx)?;
     if inner.height < 11 {
         return Some(OverlayRender {
             area: outer,
@@ -1064,7 +1063,7 @@ fn render_rename_overlay(
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     let p = cx.palette;
-    let (q, i) = modal_panel(b, crate::ui::ModalSize::Small, p.accent, cx)?;
+    let (q, i) = modal_panel(b, crate::ui::ModalSize::Small, cx)?;
     let stack = crate::ui::modal_stack_areas(i, 1, 0, 1, 1);
     let title = text_inset(stack.header);
     put_text(
@@ -1590,7 +1589,7 @@ fn render_help_overlay(
     use ratatui::widgets::{Paragraph, Widget, Wrap};
 
     let p = cx.palette;
-    let (q, i) = modal_panel(b, crate::ui::ModalSize::Large, p.accent, cx)?;
+    let (q, i) = modal_panel(b, crate::ui::ModalSize::Large, cx)?;
     if i.width < 20 || i.height < 6 {
         return None;
     }
@@ -1703,7 +1702,7 @@ fn render_confirm_close_overlay(
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     let p = cx.palette;
-    let (q, i) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), p.red, cx)?;
+    let (q, i) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), cx)?;
     let stack = crate::ui::modal_stack_areas(i, 2, 0, 1, 0);
     put_text(
         b,
@@ -1783,7 +1782,7 @@ fn render_notification_history_overlay(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().history;
-    let (q, i) = modal_panel(b, crate::ui::ModalSize::Large, p.accent, cx)?;
+    let (q, i) = modal_panel(b, crate::ui::ModalSize::Large, cx)?;
     let stack = crate::ui::modal_stack_areas(i, 1, 1, 0, 1);
     let base = Style::default()
         .bg(p.panel_bg)
@@ -2104,19 +2103,14 @@ mod tests {
         let components = crate::app::state::ComponentStyles::from_palette(&palette);
         let cx = test_cx(&palette, &components);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 106, 30));
-        let (outer, inner) = modal_panel(
-            &mut buffer,
-            crate::ui::ModalSize::Medium,
-            palette.accent,
-            &cx,
-        )
-        .expect("medium modal");
+        let (outer, inner) =
+            modal_panel(&mut buffer, crate::ui::ModalSize::Medium, &cx).expect("medium modal");
         assert_eq!(outer, Rect::new(21, 7, 64, 16));
         assert_eq!(inner, Rect::new(22, 8, 62, 14));
         assert_eq!(buffer[(21, 7)].symbol(), "╭");
 
         let mut tiny = Buffer::empty(Rect::new(0, 0, 8, 5));
-        assert!(modal_panel(&mut tiny, crate::ui::ModalSize::Small, palette.accent, &cx).is_none());
+        assert!(modal_panel(&mut tiny, crate::ui::ModalSize::Small, &cx).is_none());
     }
 
     #[test]

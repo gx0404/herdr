@@ -1705,7 +1705,8 @@ fn context_menu_hover_is_separate_from_the_keyboard_highlight() {
     assert_eq!(menu.hovered, Some(1));
     assert_eq!(menu.highlighted, 0, "指针不改写键盘选中");
 
-    // 悬浮行与选中行必须视觉可辨：hover 用 components.hover_bg，选中用 accent。
+    // 悬浮行与选中行必须视觉可辨：hover 只换成 components.hover_bg；选中用选中底色、
+    // 粗体，并在首列画 accent `▌`——Graphite 里两种底色几乎相同，竖条才是区分。
     let frame = state.compose(106, 20).expect("hovered context menu");
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     let first_row = state.hits.context_menu_rows[0].0;
@@ -1714,14 +1715,15 @@ fn context_menu_hover_is_separate_from_the_keyboard_highlight() {
         buffer[(hovered_row.x, hovered_row.y)].bg,
         state.config.components.hover_bg
     );
-    assert_eq!(
-        buffer[(first_row.x, first_row.y)].bg,
-        state.config.palette.surface1
-    );
     assert_ne!(
-        state.config.components.hover_bg,
-        state.config.palette.accent
+        buffer[(hovered_row.x, hovered_row.y)].symbol(),
+        crate::ui::design::SELECTION_MARK,
+        "悬浮行没有选中竖条"
     );
+    let selected = &buffer[(first_row.x, first_row.y)];
+    assert_eq!(selected.bg, state.config.palette.selection_row_bg());
+    assert_eq!(selected.symbol(), crate::ui::design::SELECTION_MARK);
+    assert_eq!(selected.fg, state.config.palette.accent);
 
     // 指针移出菜单：hover 清空，键盘选中不动。
     let left = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {

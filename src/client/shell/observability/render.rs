@@ -246,6 +246,7 @@ fn footer_hints(
         key: super::super::chrome::bar_key_cap(palette, palette.panel_bg),
         label: super::super::chrome::bar_hint_label(palette, palette.panel_bg),
         hover_bg: palette.hover_row_bg(),
+        gap: crate::ui::kit::key_cap::HINT_GAP,
     };
     for (rect, index) in render_footer_hints_styled(buffer, area, &hints, None, palette, styles) {
         if let Some(action) = actions.get(index).cloned().flatten() {
@@ -972,7 +973,7 @@ mod tests {
         let state = plain_state();
         let (buffer, output) = paint_page(&state, Page::Settings, 133, 32);
         let footer = row_text(&buffer, 31);
-        assert!(row_has(&buffer, 31, "Esc关闭"), "{footer}");
+        assert!(row_has(&buffer, 31, "esc关闭"), "{footer}");
         assert!(
             !row_has(&buffer, 31, "刷新"),
             "偏好页页脚不提示刷新：{footer}"

@@ -720,7 +720,7 @@ pub(super) fn render_broadcast_overlay(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().broadcast;
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(18), p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(18), cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -884,7 +884,7 @@ pub(super) fn render_broadcast_overlay(
                     ("esc".to_owned(), t.hint_back.to_owned()),
                 ],
             };
-            render_key_hints(b, footer, &hints, p, cx.components);
+            render_key_hints(b, footer, &hints, p);
         }
     }
 

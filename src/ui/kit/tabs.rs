@@ -113,7 +113,7 @@ pub(crate) fn render_segmented(
     let thumb = if Palette::row_bg_is_distinct(palette.surface0, palette.hover_row_bg()) {
         active_tab_style(palette)
     } else {
-        super::selected_style(palette)
+        super::emphasis_style(palette)
     };
     let mut x = area.x;
     for (index, option) in options.iter().enumerate() {

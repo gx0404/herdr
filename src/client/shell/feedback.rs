@@ -82,11 +82,16 @@ impl Default for ClientFeedbackToggles {
 }
 
 /// Severity of a toast or history entry. Drives the leading icon and the
-/// `toast_border_*` component token used for the border color.
+/// border color: `toast_border_*` component tokens for info / success / error,
+/// and the shared "needs input" status token for warnings, so a toast that asks
+/// the user to act reads the same as the agent state it reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientToastLevel {
     Info,
     Success,
+    /// 需要你处理（agent 等待输入、资源告警等）：琥珀色 `◆`，与「需要输入」状态同色，
+    /// 不与执行失败共用红色。
+    Warning,
     Error,
 }
 
@@ -95,6 +100,7 @@ impl ClientToastLevel {
         match self {
             Self::Info => "●",
             Self::Success => "✓",
+            Self::Warning => "◆",
             Self::Error => "✕",
         }
     }
@@ -106,13 +112,14 @@ impl ClientToastLevel {
         match self {
             Self::Info => components.toast_border_info,
             Self::Success => components.toast_border_success,
+            Self::Warning => components.status_input,
             Self::Error => components.toast_border_error,
         }
     }
 
     pub(super) fn from_notification_kind(kind: SemanticNotificationKind) -> Self {
         match kind {
-            SemanticNotificationKind::NeedsAttention => Self::Error,
+            SemanticNotificationKind::NeedsAttention => Self::Warning,
             SemanticNotificationKind::Finished => Self::Success,
             SemanticNotificationKind::UpdateInstalled | SemanticNotificationKind::Custom => {
                 Self::Info
@@ -122,11 +129,11 @@ impl ClientToastLevel {
 
     pub(super) fn from_notice_kind(kind: ClientEndpointNoticeKind) -> Self {
         match kind {
-            // There is no warning level: warnings ask the user to act, so they
-            // borrow the error style instead of blending in as info.
-            ClientEndpointNoticeKind::Unsupported
-            | ClientEndpointNoticeKind::Rejected
-            | ClientEndpointNoticeKind::Warning => Self::Error,
+            // 警告请你处理，用琥珀色；被拒绝 / 不支持是请求失败，用错误色。
+            ClientEndpointNoticeKind::Warning => Self::Warning,
+            ClientEndpointNoticeKind::Unsupported | ClientEndpointNoticeKind::Rejected => {
+                Self::Error
+            }
             ClientEndpointNoticeKind::Timeout | ClientEndpointNoticeKind::Unavailable => Self::Info,
             ClientEndpointNoticeKind::Success => Self::Success,
         }

@@ -198,6 +198,15 @@ fn toast_levels_map_kinds_to_icons_and_border_tokens() {
     let components = ClientShellConfig::from_config(&Config::default()).components;
     assert_eq!(
         ClientToastLevel::from_notification_kind(SemanticNotificationKind::NeedsAttention),
+        ClientToastLevel::Warning,
+        "需要你处理：琥珀色警告，不与执行失败共用红色"
+    );
+    assert_eq!(
+        ClientToastLevel::from_notice_kind(ClientEndpointNoticeKind::Warning),
+        ClientToastLevel::Warning
+    );
+    assert_eq!(
+        ClientToastLevel::from_notice_kind(ClientEndpointNoticeKind::Rejected),
         ClientToastLevel::Error
     );
     assert_eq!(
@@ -224,6 +233,12 @@ fn toast_levels_map_kinds_to_icons_and_border_tokens() {
         ClientToastLevel::Error.color(&components),
         components.toast_border_error
     );
+    assert_eq!(
+        ClientToastLevel::Warning.color(&components),
+        components.status_input,
+        "警告与「需要输入」状态同色"
+    );
+    assert_eq!(ClientToastLevel::Warning.icon(), "◆");
     assert!(!ClientToastLevel::Info.icon().is_empty());
 }
 

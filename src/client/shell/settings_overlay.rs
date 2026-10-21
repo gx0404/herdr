@@ -169,7 +169,7 @@ pub(super) fn render_settings_overlay(
 ) -> Option<OverlayRender> {
     let palette = cx.palette;
     let t = &crate::i18n::texts().settings;
-    let (popup, inner) = modal_panel(buffer, chrome::modal_size(buffer.area), palette.accent, cx)?;
+    let (popup, inner) = modal_panel(buffer, chrome::modal_size(buffer.area), cx)?;
     let nav = navigation(settings, integration_updates_available);
     let layout = chrome::settings_layout(inner, &nav)?;
     let focus = settings.focus;
@@ -304,7 +304,6 @@ pub(super) fn render_settings_overlay(
         chrome::footer_hint_area(&layout, &buttons),
         &hints,
         palette,
-        cx.components,
     );
 
     Some(OverlayRender {

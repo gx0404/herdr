@@ -1585,7 +1585,7 @@ pub(in crate::client::shell) fn paint(
     super::super::render::panel(
         buffer,
         geometry.popup,
-        palette.accent,
+        crate::ui::design::frame(palette),
         palette.panel_bg,
         cx.glyphs,
     )?;

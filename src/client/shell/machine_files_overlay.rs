@@ -1017,7 +1017,7 @@ pub(super) fn render_machine_files_overlay(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machine_files;
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(22), p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(22), cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -1089,7 +1089,6 @@ pub(super) fn render_machine_files_overlay(
                         ("esc".to_owned(), t.hint_back.to_owned()),
                     ],
                     p,
-                    cx.components,
                 );
             }
             let back_label = crate::i18n::texts().overlays.back_button;
@@ -1262,7 +1261,6 @@ pub(super) fn render_machine_files_overlay(
                         ("esc".to_owned(), t.hint_back.to_owned()),
                     ],
                     p,
-                    cx.components,
                 );
             }
         }
@@ -1388,7 +1386,6 @@ pub(super) fn render_machine_files_overlay(
                         ("esc".to_owned(), t.hint_back.to_owned()),
                     ],
                     p,
-                    cx.components,
                 );
             }
             let labels = [

@@ -55,7 +55,7 @@ pub(super) fn render_dashboard(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machines;
-    let (popup, inner) = modal_panel(b, super::DASHBOARD_MODAL_SIZE, p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, super::DASHBOARD_MODAL_SIZE, cx)?;
     if inner.height < 8 || inner.width < 32 {
         return Some(OverlayRender {
             area: popup,

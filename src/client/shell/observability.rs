@@ -1069,7 +1069,7 @@ impl ClientShellState {
             }
         }
         // 告警只在越过规则阈值时触发，即系统页条形转红的那一档：通知走警告类，
-        // 与其它需要你处理的通知同一套严重色（`ClientToastLevel::Error`）。
+        // 与其它需要你处理的通知同一套琥珀色（`ClientToastLevel::Warning`）。
         if let Some(body) = self.observability.alert() {
             outcome.repaint |= self.push_endpoint_notice(
                 ClientEndpointNoticeKind::Warning,

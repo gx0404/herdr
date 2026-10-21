@@ -1700,12 +1700,7 @@ fn snippets_panel(
     height: u16,
     cx: &super::feedback::ChromeContext<'_>,
 ) -> Option<(Rect, Rect)> {
-    modal_panel(
-        b,
-        crate::ui::ModalSize::Large.with_height(height),
-        cx.palette.accent,
-        cx,
-    )
+    modal_panel(b, crate::ui::ModalSize::Large.with_height(height), cx)
 }
 
 fn snippet_footer_hints(
@@ -1715,7 +1710,7 @@ fn snippet_footer_hints(
     cx: &super::feedback::ChromeContext<'_>,
 ) {
     if let Some(footer) = footer {
-        render_key_hints(b, footer, hints, cx.palette, cx.components);
+        render_key_hints(b, footer, hints, cx.palette);
     }
 }
 
@@ -2120,7 +2115,7 @@ fn render_snippet_delete_confirm(
         .find(|snippet| &snippet.id == snippet_id)
         .map(|snippet| snippet.label.clone())
         .unwrap_or_else(|| snippet_id.to_string());
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), p.red, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), cx)?;
     let stack = crate::ui::modal_stack_areas(inner, 2, 0, 1, 0);
     put_text(
         b,

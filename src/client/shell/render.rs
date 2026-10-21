@@ -74,70 +74,33 @@ pub(in crate::client::shell) fn readable_muted_fg(
     best.map_or(palette.overlay0, |(color, _)| color)
 }
 
-/// 一段键提示在 `render_key_hints` 里占用的列宽：键帽（左右各一个空格）+
-/// 一个间隔 + 文案，非末项再加两列分隔。页脚要在绘制前判断能否放下时必须
-/// 用这个函数，避免两处各写一份宽度公式。
-fn key_hint_segment_width(key: &str, label: &str, last: bool) -> u16 {
-    display_width(key)
-        .saturating_add(2)
-        .saturating_add(1)
-        .saturating_add(display_width(label))
-        .saturating_add(if last { 0 } else { 2 })
-}
-
-/// Keycap-style shortcut footer: each hint renders as a padded key cap
-/// (accent on surface0) followed by its description in the muted base color.
-/// 放不下的提示整项换行；`area` 的行用完后剩余项整项丢弃，并在末尾画省略号
-/// 标记截断。Callers pass hints resolved from the live keybind config so
-/// the footer stays documentation generated from bindings.
+/// 键帽式页脚（旧调用面的适配层）：与 `kit::footer_hints` 同一套键帽、说明色标签与
+/// 项间隔，按键文字统一规范成小写口径。放不下的提示整项换行；`area` 的行用完后剩余
+/// 项整项丢弃，并在末尾画 `…` 标记截断。调用方传入按实时键位配置解析出的按键，
+/// 页脚因此始终与绑定一致。新代码直接用 `kit::footer_hints`（可点、带命中区）。
 pub(super) fn render_key_hints(
     buffer: &mut Buffer,
     area: Rect,
     hints: &[(String, String)],
     palette: &Palette,
-    components: &crate::app::state::ComponentStyles,
 ) {
-    if area.is_empty() {
+    use crate::ui::kit::footer_hints::{render_footer_hints_wrapped, FooterHint, FooterHintStyles};
+    if area.is_empty() || hints.is_empty() {
         return;
     }
-    let base = Style::default().fg(palette.overlay0).bg(palette.panel_bg);
-    let cap = Style::default()
-        .fg(components.mode_bar_accent)
-        .bg(palette.surface0)
-        .add_modifier(Modifier::BOLD);
-    let mut x = area.x;
-    let mut y = area.y;
-    let end = area.right();
-    let bottom = area.bottom();
-    let mut truncated = false;
-    for (index, (key, label)) in hints.iter().enumerate() {
-        let cap_width = display_width(key).saturating_add(2);
-        let label_width = display_width(label);
-        let separator = if index + 1 == hints.len() { 0 } else { 2 };
-        let segment = key_hint_segment_width(key, label, index + 1 == hints.len());
-        if x.saturating_add(segment) > end {
-            // 多行页脚（`area.height > 1`）先换行再放弃；单行页脚行为不变。
-            if x > area.x && y.saturating_add(1) < bottom {
-                y = y.saturating_add(1);
-                x = area.x;
-            } else {
-                truncated = true;
-                break;
-            }
-        }
-        if x.saturating_add(segment) > end {
-            truncated = true;
-            break;
-        }
-        let cap_text = format!(" {key} ");
-        put_text(buffer, x, y, cap_width.min(end - x), &cap_text, cap);
-        x = x.saturating_add(cap_width).saturating_add(1);
-        put_text(buffer, x, y, label_width.min(end - x), label, base);
-        x = x.saturating_add(label_width).saturating_add(separator);
-    }
-    if truncated && x < end {
-        put_text(buffer, x, y, end - x, "…", base);
-    }
+    let footer = hints
+        .iter()
+        .map(|(key, label)| FooterHint::new(key, label))
+        .collect::<Vec<_>>();
+    render_footer_hints_wrapped(
+        buffer,
+        area,
+        &footer,
+        None,
+        palette,
+        FooterHintStyles::page(palette),
+        true,
+    );
 }
 
 /// 经典布局的模式条：与工作台状态栏同一个组件（`chrome::status_bar`），只在非终端

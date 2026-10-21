@@ -27,6 +27,7 @@ pub(crate) mod empty_state;
 pub(crate) mod footer_hints;
 pub(crate) mod form_field;
 pub(crate) mod gauge;
+pub(crate) mod key_cap;
 pub(crate) mod menu;
 pub(crate) mod meter_row;
 pub(crate) mod table;
@@ -39,12 +40,31 @@ fn char_width(ch: char) -> usize {
     display_width(ch.encode_utf8(&mut bytes))
 }
 
-/// 键盘选中 / 活动项：accent 反色 + 加粗，与浮层列表 `list_row_style` 同口径。
+/// 键盘选中 / 活动项：选中底色 + 读得清的正文 + 加粗（`design::selected_row_text`），
+/// 与浮层列表 `list_row_style` 同口径；首列竖条由 [`paint_selection_mark`] 画。
 fn selected_style(palette: &Palette) -> Style {
+    super::design::selected_row_text(palette)
+}
+
+/// 强调块（accent 反色 + 加粗）：只给「结构面色阶分不开时」的分段控件滑块兜底，
+/// 列表与菜单的选中一律用 [`selected_style`]。
+fn emphasis_style(palette: &Palette) -> Style {
     Style::default()
         .bg(palette.accent)
         .fg(super::panel_contrast_fg(palette))
         .add_modifier(Modifier::BOLD)
+}
+
+/// 在 `(x, y)` 画选中标记 `▌`（accent 前景、沿用该格底色）：键盘选中行的首列。
+pub(crate) fn paint_selection_mark(buffer: &mut Buffer, x: u16, y: u16, palette: &Palette) {
+    put_str(
+        buffer,
+        x,
+        y,
+        1,
+        super::design::SELECTION_MARK,
+        super::design::selection_mark(palette),
+    );
 }
 
 /// 叠在 `bg` 上读得清的字色：正文色够 4.5:1 就用正文色，否则按对比度挑
@@ -67,13 +87,10 @@ fn active_segment_style(palette: &Palette) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// 表格 / 列表的选中行：`selection_bg` 底上的粗体正文（Graphite：不反色）。
+/// 表格 / 列表的选中行：`selection_bg` 底上的粗体正文（Graphite：不反色），与
+/// [`selected_style`] 同一真源。
 fn selected_row_style(palette: &Palette) -> Style {
-    let bg = palette.selection_row_bg();
-    Style::default()
-        .bg(bg)
-        .fg(readable_fg(palette, bg))
-        .add_modifier(Modifier::BOLD)
+    selected_style(palette)
 }
 
 /// 从 `(x, y)` 起写文本，最多占 `max_width` 列；起点落在缓冲区外或零宽直接
@@ -207,13 +224,36 @@ mod tests {
     }
 
     #[test]
-    fn selected_style_inverts_on_accent_with_a_readable_foreground() {
+    fn selected_style_uses_the_neutral_selection_surface_with_a_readable_foreground() {
+        for palette in [
+            Palette::catppuccin(),
+            Palette::graphite_dark(),
+            Palette::graphite_light(),
+        ] {
+            let style = selected_style(&palette);
+            assert_eq!(style.bg, Some(palette.selection_row_bg()));
+            assert_ne!(style.bg, Some(palette.accent), "不再 accent 反色");
+            assert!(style.add_modifier.contains(Modifier::BOLD));
+            let fg = style.fg.expect("fg");
+            assert!(
+                crate::ui::color::contrast_ratio(fg, palette.selection_row_bg()).expect("可比较")
+                    >= 4.5
+            );
+            assert_eq!(selected_row_style(&palette), style, "表格与列表同一真源");
+        }
         let palette = Palette::catppuccin();
-        let style = selected_style(&palette);
-        assert_eq!(style.bg, Some(palette.accent));
-        assert!(style.add_modifier.contains(Modifier::BOLD));
-        let fg = style.fg.expect("fg");
-        assert!(crate::ui::color::contrast_ratio(fg, palette.accent).expect("可比较") >= 4.5);
+        let emphasis = emphasis_style(&palette);
+        assert_eq!(emphasis.bg, Some(palette.accent));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+        fill_row(&mut buffer, 0, 0, 3, " ", selected_style(&palette));
+        paint_selection_mark(&mut buffer, 0, 0, &palette);
+        assert_eq!(buffer[(0, 0)].symbol(), "▌");
+        assert_eq!(buffer[(0, 0)].style().fg, Some(palette.accent));
+        assert_eq!(
+            buffer[(0, 0)].style().bg,
+            Some(palette.selection_row_bg()),
+            "沿用行底"
+        );
     }
 
     #[test]

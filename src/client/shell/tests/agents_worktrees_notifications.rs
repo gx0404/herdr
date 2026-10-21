@@ -1855,7 +1855,7 @@ fn worktree_remove_with_leftover_folder_warns_with_its_path() {
         let record = state.notification_history.back().expect("history entry");
         assert_eq!(
             record.level,
-            super::super::feedback::ClientToastLevel::Error
+            super::super::feedback::ClientToastLevel::Warning
         );
         assert_eq!(record.title, t.removed_with_leftovers);
         assert_eq!(record.body.as_deref(), Some(body.as_str()));

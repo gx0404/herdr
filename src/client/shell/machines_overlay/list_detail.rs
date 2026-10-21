@@ -163,7 +163,7 @@ pub(super) fn render_machine_list(
 ) -> Option<OverlayRender> {
     let p = cx.palette;
     let t = &crate::i18n::texts().machines;
-    let (popup, inner) = modal_panel(b, super::NARROW_LIST_MODAL_SIZE, p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, super::NARROW_LIST_MODAL_SIZE, cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -493,7 +493,7 @@ pub(super) fn render_machine_detail(
         |endpoint| endpoint.status,
     );
     let error_kind = connection_errors.get(&ClientEndpointId::Ssh(profile_id.clone()));
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(26), p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(26), cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
@@ -638,7 +638,7 @@ pub(super) fn render_machine_confirm_remove(
         .find(|profile| &profile.id == profile_id)
         .map(|profile| profile.label.clone())
         .unwrap_or_else(|| profile_id.to_string());
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), p.red, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Medium.with_height(6), cx)?;
     let stack = crate::ui::modal_stack_areas(inner, 2, 1, 0, 0);
     put_text(
         b,

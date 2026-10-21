@@ -16,7 +16,6 @@ use ratatui::{
 
 use super::{draw_frame, ellipsis_width, fill_row, put_str, put_str_ellipsis, selected_style};
 use crate::app::state::Palette;
-use crate::ui::color::contrast_fg;
 use crate::ui::{display_width_u16, BorderGlyphs};
 
 /// 菜单项种类。只有启用的 `Action` / `Submenu` 可激活（可高亮、可点、进命中表）。
@@ -195,15 +194,10 @@ fn row_styles(
         return (style, style);
     }
     if highlighted {
+        // 键盘选中：中性选中底色 + 粗体（首列另画 `▌`）；危险项只把字换成红色，
+        // 不整行红底反色——危险语义在文字上。
         let style = if item.danger {
-            Style::default()
-                .bg(palette.red)
-                .fg(contrast_fg(palette, palette.red))
-                .add_modifier(Modifier::BOLD)
-        } else if !item.description.is_empty() {
-            base.fg(palette.text)
-                .bg(palette.surface1)
-                .add_modifier(Modifier::BOLD)
+            selected_style(palette).fg(palette.red)
         } else {
             selected_style(palette)
         };
@@ -293,7 +287,7 @@ pub(crate) fn render_menu(
         .bg(palette.panel_bg)
         .fg(palette.text)
         .remove_modifier(Modifier::all());
-    let border = base.fg(palette.accent);
+    let border = base.fg(crate::ui::design::frame(palette));
     for row in area.y..area.bottom() {
         fill_row(buffer, area.x, row, area.width, " ", base);
     }
@@ -380,6 +374,9 @@ pub(crate) fn render_menu(
                 let (label_style, aside_style) =
                     row_styles(item, highlighted, hovered, hover_bg, palette);
                 fill_row(buffer, inner.x, row_y, inner.width, " ", label_style);
+                if highlighted {
+                    super::paint_selection_mark(buffer, inner.x, row_y, palette);
+                }
                 let mut cursor = inner.x + 1;
                 if columns.check > 0 {
                     if item.checked == Some(true) {
@@ -425,7 +422,7 @@ pub(crate) fn render_menu(
                     end -= columns.shortcut_span();
                 }
                 if columns.badge > 0 && item.badge {
-                    // 高亮行随整行反色、禁用行随整行置灰，其余用 accent 点出来。
+                    // 高亮行随整行样式、禁用行随整行置灰，其余用 accent 点出来。
                     let style = if highlighted || !item.enabled {
                         aside_style
                     } else {
@@ -592,7 +589,7 @@ mod tests {
             vec![
                 "┌─────────────────┐ ",
                 "│ Pane            │ ",
-                "│   Focus    ^F   │ ",
+                "│▌  Focus    ^F   │ ",
                 "│ ✓ Follow        │ ",
                 "│   Move to     ▸ │ ",
                 "│   Rename        │ ",
@@ -617,13 +614,20 @@ mod tests {
         assert_eq!(header.fg, Some(palette.overlay1));
         assert!(header.add_modifier.contains(Modifier::BOLD));
         let focus = buffer[(4, 2)].style();
-        assert_eq!(focus.bg, Some(palette.accent), "键盘高亮 accent 反色");
+        assert_eq!(
+            focus.bg,
+            Some(palette.selection_row_bg()),
+            "键盘高亮：中性选中底色，不 accent 反色"
+        );
         assert!(focus.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(1, 2)].symbol(), "▌", "首列选中竖条");
+        assert_eq!(buffer[(1, 2)].style().fg, Some(palette.accent));
         assert_eq!(
             buffer[(13, 2)].style().bg,
-            Some(palette.accent),
-            "快捷键同行反色"
+            Some(palette.selection_row_bg()),
+            "快捷键同行底色"
         );
+        assert_ne!(buffer[(1, 4)].symbol(), "▌", "悬浮行没有竖条");
         assert_eq!(buffer[(4, 3)].style().bg, Some(palette.panel_bg));
         assert_eq!(
             buffer[(4, 4)].style().bg,
@@ -640,8 +644,8 @@ mod tests {
         );
         assert_eq!(
             buffer[(0, 6)].style().fg,
-            Some(palette.accent),
-            "分隔线接边框"
+            Some(crate::ui::design::frame(&palette)),
+            "分隔线接边框（中性结构色）"
         );
     }
 
@@ -690,7 +694,7 @@ mod tests {
         let focus = buffer[(4, 2)].style();
         assert!(focus.add_modifier.contains(Modifier::BOLD));
         assert!(!focus.add_modifier.contains(Modifier::DIM));
-        assert_eq!(focus.bg, Some(palette.accent));
+        assert_eq!(focus.bg, Some(palette.selection_row_bg()));
         // 分组标题行同样清干净（只保留自己的 BOLD）。
         let header = buffer[(2, 1)].style();
         assert!(header.add_modifier.contains(Modifier::BOLD));
@@ -698,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn highlighted_danger_items_invert_on_red_and_hover_bg_can_be_overridden() {
+    fn highlighted_danger_items_keep_red_text_and_hover_bg_can_be_overridden() {
         let override_bg = Color::Rgb(1, 2, 3);
         let (buffer, _, palette) = paint(
             20,
@@ -714,8 +718,9 @@ mod tests {
             false,
         );
         let close = buffer[(4, 7)].style();
-        assert_eq!(close.bg, Some(palette.red));
-        assert_eq!(close.fg, Some(contrast_fg(&palette, palette.red)));
+        assert_eq!(close.bg, Some(palette.selection_row_bg()), "不整行红底反色");
+        assert_eq!(close.fg, Some(palette.red), "危险语义在文字上");
+        assert!(close.add_modifier.contains(Modifier::BOLD));
         assert_eq!(buffer[(4, 3)].style().bg, Some(override_bg));
         // 高亮 / 悬浮落在禁用项上不画。
         let (buffer, _, palette) = paint(
@@ -769,11 +774,11 @@ mod tests {
         let (buffer, _, _) = paint(26, 4, (0, 0), &items, MenuState::default(), false);
         // 内容 22 列：标签 12 + 间隔 2 + 快捷键 12 放不下，但标签还能保 8 列 → 截断
         // 标签（「前」放不下，写「关闭当…」7 列），快捷键仍在。
-        assert_eq!(row_text(&buffer, 1), "│ 关闭当…   ctrl+shift+w │");
+        assert_eq!(row_text(&buffer, 1), "│▌关闭当…   ctrl+shift+w │");
         let (buffer, _, _) = paint(20, 4, (0, 0), &items, MenuState::default(), false);
         assert_eq!(
             row_text(&buffer, 1),
-            "│ 关闭当前窗格     │",
+            "│▌关闭当前窗格     │",
             "标签保不住 8 列时丢快捷键列"
         );
         let (_, render, _) = paint(20, 3, (0, 0), &items, MenuState::default(), false);
@@ -825,7 +830,7 @@ mod tests {
                 "┌──────▲─────┐",
                 "├────────────┤",
                 "│ b1         │",
-                "│ b2         │",
+                "│▌b2         │",
                 "└──────▼─────┘",
             ]
         );
@@ -840,12 +845,12 @@ mod tests {
         );
         assert_eq!(
             buffer[(2, 3)].style().bg,
-            Some(palette.accent),
+            Some(palette.selection_row_bg()),
             "高亮在窗口内"
         );
         assert_eq!(
             buffer[(7, 0)].style().fg,
-            Some(palette.accent),
+            Some(crate::ui::design::frame(&palette)),
             "滚动提示随边框色"
         );
 
@@ -911,9 +916,10 @@ mod tests {
                 };
                 assert_eq!(
                     buffer[(rect.x + 1, rect.y)].style().bg,
-                    Some(palette.accent),
+                    Some(palette.selection_row_bg()),
                     "高亮 {highlighted} / scroll {scroll}"
                 );
+                assert_eq!(buffer[(rect.x, rect.y)].symbol(), "▌");
             }
         }
     }
@@ -942,7 +948,7 @@ mod tests {
         };
         let (buffer, _, palette) = paint(18, 5, (0, 0), &items, state, false);
         assert_eq!(row_text(&buffer, 1), "│ Updates  ●  ^U │");
-        assert_eq!(row_text(&buffer, 2), "│ Settings       │");
+        assert_eq!(row_text(&buffer, 2), "│▌Settings       │");
         assert_eq!(row_text(&buffer, 3), "│ Plugins  ●     │");
         let dot = buffer[(11, 1)].style();
         assert_eq!(dot.fg, Some(palette.accent), "徽标 accent");
@@ -957,9 +963,9 @@ mod tests {
         assert_eq!(
             buffer[(11, 1)].style(),
             buffer[(3, 1)].style(),
-            "高亮行的徽标随整行反色"
+            "高亮行的徽标随整行样式"
         );
-        assert_eq!(buffer[(11, 1)].style().bg, Some(palette.accent));
+        assert_eq!(buffer[(11, 1)].style().bg, Some(palette.selection_row_bg()));
 
         let (buffer, _, _) = paint(18, 5, (0, 0), &items, state, true);
         assert_eq!(row_text(&buffer, 1), "│ Updates  o  ^U │", "ascii 降级");

@@ -494,7 +494,7 @@ pub(super) fn render_machine_forwards(
     let profile = saved_profiles
         .iter()
         .find(|profile| profile.id == view.profile_id)?;
-    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(20), p.accent, cx)?;
+    let (popup, inner) = modal_panel(b, crate::ui::ModalSize::Large.with_height(20), cx)?;
     if inner.width < 24 || inner.height < 8 {
         return Some(OverlayRender {
             area: popup,
