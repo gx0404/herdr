@@ -141,6 +141,8 @@ Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude c
 
 ## Codex
 
+Installing hooks preserves existing comments and LF, CRLF, or mixed line endings in `config.toml`; only the required feature flag is inserted or updated. Invalid TOML or edits that would rewrite unrelated settings are rejected before the file is changed.
+
 Install the Codex hook (requires Codex `0.150.0` or newer):
 
 ```bash

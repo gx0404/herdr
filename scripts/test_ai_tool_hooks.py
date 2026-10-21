@@ -65,7 +65,8 @@ class DangerousPatternConfTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(gate)
         patterns = gate.load_patterns()
-        self.assertGreaterEqual(len(patterns), 10)
+        # 2026-10 用户授权「最小核心防线」：conf 收敛为四类五条 deny。
+        self.assertEqual(len(patterns), 5)
         for _section, pattern, reason, level in patterns:
             self.assertTrue(reason.strip())
             self.assertIn(level, {"deny", "ask"})
@@ -75,34 +76,21 @@ class PreToolUseGateTests(unittest.TestCase):
     DENY_COMMANDS = [
         "git push origin master --force",
         "git push -f origin master",
-        "git commit -m x --no-verify",
-        "git commit -n -m x",
-        "git add -f .claude/secrets",
-        "gh pr merge 12",
-        "gh release create v9.9.9",
-        "cargo publish --dry-run",
-        "echo '{}' > distribution/latest.json",
-        "sed -i s/x/y/ distribution/preview.json",
         "cat ~/.ssh/id_rsa",
+        # 2026-10 起仅拦根/家目录本身的递归删除，其余 rm 放行。
+        "rm -rf /",
+        "sudo rm -rf /",
+        "rm -fr ~",
+        "rm -rf ~/*",
+        "rm -r $HOME",
+        "rm --recursive -f /",
         # 命令位置的各种真执行形态都必须拦住
         "just check && git push origin master --force",
         "git -C /tmp/x push -f origin master",
-        "bash -c 'gh pr merge 12'",
-        "GH_TOKEN=x gh release create v9.9.9",
-        "bash <<'EOF'\ncargo publish\nEOF",
-        "echo '{}' | sudo tee distribution/latest.json",
-        "if true; then git commit -m x --no-verify; fi",
-    ]
-    ASK_COMMANDS = [
-        "git push origin feature/x --force-with-lease",
-        "pkill -9 herdr",
-        "cargo build && pkill herdr",
-        "sudo killall herdr",
-        "pgrep herdr | xargs -r pkill -f",
-        "bash <<'EOF'\npkill herdr\nEOF",
-        "bash -c 'pkill herdr'",
-        "HERDR_SESSION=x pkill herdr",
-        "if true; then git push origin x --force-with-lease; fi",
+        "bash -c 'rm -rf /'",
+        "bash <<'EOF'\nrm -rf ~\nEOF",
+        "cd /tmp; rm -rf /; echo done",
+        "if true; then git push origin master --force; fi",
     ]
     ALLOW_COMMANDS = [
         "cargo nextest run --locked",
@@ -116,7 +104,31 @@ class PreToolUseGateTests(unittest.TestCase):
         "cd /tmp && git add -A",
         "python3 -m unittest scripts.test_changelog",
         "rg 'fn main' src/",
-        # 文本提及不是执行：ask 级模式只在命令位置命中。
+        # 2026-10 用户授权放开最小核心防线外的策略：原 deny/ask 命令全部放行。
+        "git commit -m x --no-verify",
+        "git commit -n -m x",
+        "git add -f .claude/secrets",
+        "gh pr merge 12",
+        "gh release create v9.9.9",
+        "cargo publish --dry-run",
+        "echo '{}' > distribution/latest.json",
+        "sed -i s/x/y/ distribution/preview.json",
+        "echo '{}' | sudo tee distribution/latest.json",
+        "GH_TOKEN=x gh release create v9.9.9",
+        "bash -c 'gh pr merge 12'",
+        "bash <<'EOF'\ncargo publish\nEOF",
+        "if true; then git commit -m x --no-verify; fi",
+        "git push origin feature/x --force-with-lease",
+        "pkill -9 herdr",
+        "sudo killall herdr",
+        "pgrep herdr | xargs -r pkill -f",
+        # rm 只拦根/家目录本身：子目录与普通删除放行。
+        "rm -rf /tmp/herdr-repro",
+        "rm -rf ~/projects/herdr-build",
+        "rm -rf target/debug",
+        "rm notes.txt",
+        "git rm -r src/legacy",
+        # 文本提及不是执行：模式只在命令位置命中。
         "rg pkill docs/",
         "python3 - <<'PYEOF'\ntext = '禁 pkill/猜 PID'\nprint(len(text))\nPYEOF",
         "python3 - <<'PYEOF'\ntext = '只精确暂存，禁 git add -A'\nPYEOF",
@@ -128,22 +140,26 @@ class PreToolUseGateTests(unittest.TestCase):
         "git commit -m 'docs: 解释为何禁止 git push --force 与 gh release create'",
     ]
     DENY_FILES = [
-        "distribution/latest.json",
-        "distribution/preview.json",
-        "docs/versions/0.9.0/website/src/content/docs/index.mdx",
-        "docs/preview/website/src/content/docs/index.mdx",
-        "docs/next/CHANGELOG.md",
-        "CHANGELOG.md",
-        "vendor/libghostty-vt/src/main.zig",
-        ".github/MAINTAINERS",
         ".env",
         "config/.env.local",
+        ".ssh/id_rsa",
+        "keys/id_ed25519",
+        "secrets/server.pem",
     ]
     ALLOW_FILES = [
         "src/app/state.rs",
         "docs/AGENT_RULES/routes.toml",
         "docs/next/website/src/content/docs/index.mdx",
         "distribution/agent-detection/index.toml",
+        # 2026-10 用户授权放开：发布/渠道/CHANGELOG/vendor/治理名单不再拦截。
+        "CHANGELOG.md",
+        "docs/next/CHANGELOG.md",
+        "distribution/latest.json",
+        "distribution/preview.json",
+        "docs/versions/0.9.0/website/src/content/docs/index.mdx",
+        "docs/preview/website/src/content/docs/index.mdx",
+        "vendor/libghostty-vt/src/main.zig",
+        ".github/MAINTAINERS",
     ]
 
     def test_deny_commands_blocked(self) -> None:
@@ -151,12 +167,6 @@ class PreToolUseGateTests(unittest.TestCase):
             with self.subTest(command=command):
                 decision, reason = _decision(_run_gate("Bash", {"command": command}))
                 self.assertEqual("deny", decision, f"{command}: {reason}")
-
-    def test_ask_commands_escalate(self) -> None:
-        for command in self.ASK_COMMANDS:
-            with self.subTest(command=command):
-                decision, _ = _decision(_run_gate("Bash", {"command": command}))
-                self.assertEqual("ask", decision)
 
     def test_allow_commands_pass(self) -> None:
         for command in self.ALLOW_COMMANDS:
@@ -205,7 +215,7 @@ class PreToolUseGateTests(unittest.TestCase):
         # System32\bash.exe（WSL 启动器，CI runner 无发行版），而不是 Git Bash。
         bash = shutil.which("bash")
         self.assertIsNotNone(bash, "bash is required to exercise the hook wrapper")
-        stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "gh pr merge 1"}})
+        stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push origin master --force"}})
         result = subprocess.run(
             [bash, str(GATE_SH)], input=stdin.encode("utf-8"), capture_output=True, check=False
         )
@@ -216,7 +226,7 @@ class PreToolUseGateTests(unittest.TestCase):
         )
 
     def test_codex_protocol_shape(self) -> None:
-        stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "gh pr merge 1"}})
+        stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push origin master --force"}})
         result = subprocess.run(
             [sys.executable, str(GATE), "--protocol", "codex"],
             input=stdin.encode("utf-8"),
@@ -241,10 +251,10 @@ class PreToolUseGateTests(unittest.TestCase):
         self.assertEqual("deny", payload["hookSpecificOutput"]["permissionDecision"])
 
     def test_codex_never_emits_unsupported_ask_decision(self) -> None:
-        stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git push --force-with-lease"}})
-        result = subprocess.run([sys.executable, str(GATE), "--protocol", "codex"], input=stdin.encode(), capture_output=True, check=False)
-        self.assertEqual(0, result.returncode)
-        decision = json.loads(result.stdout)["hookSpecificOutput"]
+        # 2026-10 起 conf 不登记 ask 模式；协议分叉逻辑改为直调锁定。
+        gate = _gate_module()
+        payload = gate._decision_payload("ask", "需人工确认", "codex")
+        decision = payload["hookSpecificOutput"]
         self.assertEqual("deny", decision["permissionDecision"])
         self.assertIn("不支持 ask", decision["permissionDecisionReason"])
 
@@ -353,8 +363,8 @@ class RegisteredEntryProbeTests(unittest.TestCase):
     def test_pre_tool_use_entries_gate_as_configured(self) -> None:
         # 危险字面量拆分构造：宿主会话可能挂着同一安全门，命令文本不得整串出现。
         probes = [
-            ("Bash", {"command": "gh pr mer" + "ge 12"}, "deny"),
-            ("Edit", {"file_path": str(PROJECT_ROOT / "CHANGELOG.md")}, "deny"),
+            ("Bash", {"command": "git push origin master --fo" + "rce"}, "deny"),
+            ("Edit", {"file_path": str(PROJECT_ROOT / ".env")}, "deny"),
             ("Edit", {"file_path": str(PROJECT_ROOT / "src" / "app" / "state.rs")}, "allow"),
         ]
         entries = [(tool, command) for tool, event, command in _registered_hook_commands() if event == "PreToolUse"]

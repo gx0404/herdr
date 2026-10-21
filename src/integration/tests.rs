@@ -1856,6 +1856,33 @@ fn build_codex_config_with_hooks_preserves_comments_and_migrates_deprecated_flag
 }
 
 #[cfg(test)]
+#[test]
+fn codex_hook_insertion_preserves_windows_and_mixed_newlines() {
+    use super::config_edit::build_codex_config_with_hooks;
+    for config in [
+        "# 用户配置\r\nmodel = 'keep'\r\n",
+        "# 用户配置\nmodel = 'keep'\r\n",
+        "# 用户配置\r\n[features]\r\nother = true\r\n",
+        "# 用户配置\n[features]\nother = true\r\n",
+        "instructions = '''first\r\nsecond'''\r\n[features]\r\nother = true\r\n",
+    ] {
+        let edited = build_codex_config_with_hooks(config).expect("valid Windows TOML");
+        assert!(
+            edited.starts_with(config),
+            "original bytes must be preserved: {edited:?}"
+        );
+        let mut expected: toml::Table = toml::from_str(config).unwrap();
+        expected
+            .entry("features".to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .unwrap()
+            .insert("hooks".into(), toml::Value::Boolean(true));
+        assert_eq!(toml::from_str::<toml::Table>(&edited).unwrap(), expected);
+        assert_eq!(build_codex_config_with_hooks(&edited).unwrap(), edited);
+    }
+}
+
 fn assert_codex_install_rejection_preserves_files(
     config: Option<&str>,
     hooks: Option<&str>,

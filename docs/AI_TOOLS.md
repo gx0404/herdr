@@ -19,11 +19,17 @@ herdr 的 AI 协作面是「共享真源 + 薄适配器」：规则真源在 `do
 2026-10-18 本轮重新运行配置解析、决策矩阵与原样注册命令探针；这些是受控子进程
 证据，不代表已在 ZCode、Claude Code 或 Codex 客户端内开启新会话并验证自动触发。
 
+2026-10-21 按用户授权收敛为「最小核心防线」：`dangerous_patterns.conf` 仅保留
+force push、根/家目录 rm、凭据/私钥读取与写入四类 deny（根/家目录 rm 为本次新增，
+原仓库未登记）；`.claude/settings.json` 的白名单、ask 级规则与 `Read(./.git/**)`
+deny 已移除。本轮同步重跑探针（`python3 -m unittest scripts.test_ai_tool_hooks`），
+仍属受控子进程证据，真实客户端会话内的触发状态不变。
+
 | 检查 | ZCode | Claude Code | Codex |
 |---|---|---|---|
 | 配置文件可解析 | PASS（本轮 JSON 探针加载） | PASS（本轮 settings.json JSON 解析） | PASS（本轮 TOML 与数组表形状探针；2026-09 的 v0.154.0 启动为历史证据） |
 | 规则加载（客户端新会话自动读取） | PENDING（历史会话记录不代证本轮） | PENDING | PENDING |
-| PreToolUse 拒绝（`gh pr merge` 等） | PASS（探针 + bash wrapper 实测） | PASS（同一 wrapper） | PASS（codex 适配器实测） |
+| PreToolUse 拒绝（`git push --force` 等） | PASS（探针 + bash wrapper 实测） | PASS（同一 wrapper） | PASS（codex 适配器实测） |
 | PreToolUse 放行（常规命令/编辑） | PASS（探针矩阵） | PASS（同上） | PASS |
 | PostToolUse 记录 / Stop 信号 | PASS（临时仓库实测） | PASS（同脚本） | PASS |
 | 真实客户端会话内 hook 触发 | PENDING：使用下述隔离探针补验 | PENDING | PENDING：真实会话自动触发待补验 |
@@ -68,8 +74,9 @@ Codex 项目配置以 `.codex/config.toml` 为准：当前设置 `approval_polic
 参见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
 Codex 的 PreToolUse 响应采用 `hookSpecificOutput.permissionDecision`。
-当前官方协议不支持 `ask`，因此共享策略里的 ask 模式在 Codex 适配中转为
-带原因的拒绝，防止无效响应被忽略后继续执行；Claude/ZCode 仍保持原协议。
+当前官方协议不支持 `ask`，因此共享策略里的 ask 模式（2026-10 起未登记，分叉
+逻辑保留）在 Codex 适配中转为带原因的拒绝，防止无效响应被忽略后继续执行；
+Claude/ZCode 仍保持原协议。
 常规测试、建临时目录和读取画面不触发此门。协议探针为 PASS，真实客户端
 重新加载后的权限状态仍需单独核验，不能把静态配置当成已生效的运行时。
 参见[官方 hooks 协议](https://learn.chatgpt.com/docs/hooks)。
@@ -80,5 +87,6 @@ Codex 的 PreToolUse 响应采用 `hookSpecificOutput.permissionDecision`。
 - 改规则/路由：见 `docs/AGENT_RULES/README.md` 维护节；工具面零改动。
 - 个人状态（`settings.local.json`、`review/`、`sessions/`、`.codex/state/`、
   `.zcode/plans/`）不入库；共享文件保持无凭据。
-- hooks 是第二道安全门，不是规则加载器；权限白名单在 `.claude/settings.json`，
-  两者语义不得互相替代。
+- hooks 是第二道安全门，不是规则加载器；`.claude/settings.json` 自 2026-10
+  起仅保留凭据读取 deny（白名单与 ask 级规则已按用户授权放开），两者语义
+  不得互相替代。
