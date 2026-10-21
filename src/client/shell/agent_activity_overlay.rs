@@ -163,7 +163,11 @@ pub(super) struct AgentActivityContentView {
     /// `first_line`）。从头重读时归零。
     pub(super) dropped: u64,
     /// 内容修订号：每次追加、丢行或清空都加一，视图计算阶段据此决定是否重新同步转写。
+    /// 只在这份内容实例里单调；跨实例要与 [`Self::generation`] 一起比较。
     pub(super) revision: u64,
+    /// 建出这份内容实例的读取代际（换选中、游标失效重读都会换新实例与新代际）。
+    /// 同一节点前后两份内容的修订号可能相同，缓存键靠它区分。
+    pub(super) generation: u64,
     /// server 标了截断，或客户端因上限丢过头部：顶部提示「仅显示最新部分」。
     pub(super) truncated: bool,
     pub(super) eof: bool,
@@ -473,8 +477,8 @@ pub(super) struct AgentPageOwner {
 /// 时间线「概要」面板的缓存（视图计算阶段写，渲染只读）。
 #[derive(Debug, Default)]
 pub(super) struct AgentPageSummary {
-    /// 缓存对应的 (节点, 内容修订号, 解析方式, 折行宽度)。
-    key: Option<(String, u64, TranscriptMode, usize)>,
+    /// 缓存对应的 (节点, 内容代际, 内容修订号, 解析方式, 折行宽度)。
+    key: Option<(String, u64, u64, TranscriptMode, usize)>,
     /// 统计所属的节点；与所选节点不符时不显示。
     pub(super) node: String,
     pub(super) tool_calls: usize,
@@ -552,7 +556,7 @@ pub(super) struct ClientAgentActivityOverlay {
     /// 所选节点 Text 内容的转写排版（视图计算阶段同步与折行，渲染只读）。
     pub(super) transcript: TranscriptView,
     /// 转写同步到的 (节点, 内容修订号, 解析方式)；对不上时视图计算阶段重新同步。
-    transcript_synced: Option<(String, u64, TranscriptMode)>,
+    transcript_synced: Option<(String, u64, u64, TranscriptMode)>,
     /// 时间线概要用的统计与「最近输出」折行：视图计算阶段按（节点、内容修订号、
     /// 解析方式、宽度）缓存，渲染只读。
     pub(super) summary: AgentPageSummary,
@@ -819,7 +823,10 @@ impl ClientAgentActivityOverlay {
             .as_ref()
             .is_none_or(|content| content.node_id != node)
         {
-            self.content = Some(AgentActivityContentView::new(node.to_owned()));
+            self.content = Some(AgentActivityContentView {
+                generation: read.generation,
+                ..AgentActivityContentView::new(node.to_owned())
+            });
         }
         let Some(content) = self.content.as_mut() else {
             return;
@@ -2110,8 +2117,9 @@ impl ClientShellState {
 }
 
 impl ClientAgentActivityOverlay {
-    /// 视图计算阶段：所选节点的 Text 内容有变化（节点、内容修订号或解析方式）时重新
-    /// 同步转写；换了节点先丢掉旧节点的展开状态。
+    /// 视图计算阶段：所选节点的 Text 内容有变化（节点、内容代际、修订号或解析方式）
+    /// 时重新同步转写；换了节点或内容实例（重新选中、游标失效重读）先丢掉旧的展开
+    /// 状态。
     fn sync_transcript(&mut self, mode: TranscriptMode) {
         let Some(content) = self
             .content
@@ -2120,24 +2128,34 @@ impl ClientAgentActivityOverlay {
         else {
             return;
         };
-        let current = self
-            .transcript_synced
-            .as_ref()
-            .is_some_and(|(node, revision, synced)| {
-                node == &content.node_id && *revision == content.revision && *synced == mode
-            });
+        let current =
+            self.transcript_synced
+                .as_ref()
+                .is_some_and(|(node, generation, revision, synced)| {
+                    node == &content.node_id
+                        && *generation == content.generation
+                        && *revision == content.revision
+                        && *synced == mode
+                });
         if current {
             return;
         }
         if self
             .transcript_synced
             .as_ref()
-            .is_some_and(|(node, _, _)| node != &content.node_id)
+            .is_none_or(|(node, generation, _, _)| {
+                node != &content.node_id || *generation != content.generation
+            })
         {
             self.transcript = TranscriptView::default();
         }
         self.transcript.sync(&content.lines, content.dropped, mode);
-        self.transcript_synced = Some((content.node_id.clone(), content.revision, mode));
+        self.transcript_synced = Some((
+            content.node_id.clone(),
+            content.generation,
+            content.revision,
+            mode,
+        ));
     }
 
     /// 视图计算阶段：概要的工具调用数与「最近输出」折行随转写或宽度变化重算。
@@ -2150,16 +2168,15 @@ impl ClientAgentActivityOverlay {
             self.summary = AgentPageSummary::default();
             return;
         };
-        let current = self
-            .summary
-            .key
-            .as_ref()
-            .is_some_and(|(node, revision, synced, cached)| {
+        let current = self.summary.key.as_ref().is_some_and(
+            |(node, generation, revision, synced, cached)| {
                 node == &content.node_id
+                    && *generation == content.generation
                     && *revision == content.revision
                     && *synced == mode
                     && *cached == width
-            });
+            },
+        );
         if current {
             return;
         }
@@ -2170,7 +2187,13 @@ impl ClientAgentActivityOverlay {
             });
         }
         self.summary = AgentPageSummary {
-            key: Some((content.node_id.clone(), content.revision, mode, width)),
+            key: Some((
+                content.node_id.clone(),
+                content.generation,
+                content.revision,
+                mode,
+                width,
+            )),
             node: content.node_id.clone(),
             tool_calls: self.transcript.stats().tool_calls,
             last_output,

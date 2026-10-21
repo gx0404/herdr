@@ -2497,3 +2497,92 @@ fn summary_cache_is_built_in_the_view_phase() {
         "面板变窄后重新折行"
     );
 }
+
+/// 同一节点重新加载出的内容修订号可能与旧内容相同：缓存键带内容代际，往返切换
+/// 后概要与转写都换成新内容。
+const THREE_TOOLS: &str = "[exec_command] ls\n    a.txt\n[exec_command] pwd\n    /fresh\n[exec_command] whoami\n    newest\n";
+
+#[test]
+fn summary_and_transcript_follow_a_reloaded_node_with_the_same_revision() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    press(&mut state, "3");
+    select_with_content(&mut state, "a", TOOL_TRANSCRIPT);
+    state.compose(160, 45).expect("frame");
+    assert_eq!(overlay(&state).summary.tool_calls, 2);
+    let first_revision = overlay(&state).content.as_ref().expect("内容").revision;
+
+    press(&mut state, "1");
+    select_with_content(&mut state, "b", "boom\n");
+    state.compose(160, 45).expect("frame");
+    select_with_content(&mut state, "a", THREE_TOOLS);
+    assert_eq!(
+        overlay(&state).content.as_ref().expect("内容").revision,
+        first_revision,
+        "前提：新旧内容修订号相同"
+    );
+    press(&mut state, "3");
+    state.compose(160, 45).expect("frame");
+    let summary = &overlay(&state).summary;
+    assert_eq!(summary.tool_calls, 3, "概要换成新内容");
+    assert!(
+        summary
+            .last_output
+            .iter()
+            .any(|line| line.contains("newest")),
+        "最近输出换成新内容: {:?}",
+        summary.last_output
+    );
+    assert_eq!(overlay(&state).transcript.stats().tool_calls, 3);
+}
+
+/// 游标失效后从头重读：新内容与旧内容同节点、同修订号，转写与概要仍重新同步。
+#[test]
+fn a_stale_cursor_reread_resyncs_the_transcript_and_summary() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    press(&mut state, "3");
+    let mut outcome = ClientShellInput::default();
+    state.select_agent_activity_node("a".into(), &mut outcome);
+    let (id, _) = single_read(&outcome);
+    let (_, next) = respond(
+        &mut state,
+        &id,
+        content_result("a", TOOL_TRANSCRIPT, false, Some("c1")),
+    );
+    state.compose(160, 45).expect("frame");
+    assert_eq!(overlay(&state).summary.tool_calls, 2);
+    let old_revision = overlay(&state).content.as_ref().expect("内容").revision;
+    let (id, _) = single_read(&next);
+    respond(
+        &mut state,
+        &id,
+        Err(ClientShellEndpointError {
+            code: Some("activity_cursor_stale".into()),
+            message: "rotated".into(),
+        }),
+    );
+    let mut outcome = ClientShellInput::default();
+    state.tick_agent_activity(Instant::now(), &mut outcome);
+    let (id, params) = single_read(&outcome);
+    assert_eq!(params.cursor, None, "从头重读");
+    respond(
+        &mut state,
+        &id,
+        content_result("a", THREE_TOOLS, true, Some("c9")),
+    );
+    assert_eq!(
+        overlay(&state).content.as_ref().expect("内容").revision,
+        old_revision,
+        "前提：新旧内容修订号相同"
+    );
+    state.compose(160, 45).expect("frame");
+    assert_eq!(
+        overlay(&state).transcript.stats().tool_calls,
+        3,
+        "转写重新同步"
+    );
+    assert_eq!(overlay(&state).summary.tool_calls, 3, "概要重新计算");
+    let text = rows_text(&state, state.hits.agent_activity_content).join("\n");
+    assert!(text.contains("whoami"), "转写画的是新内容:\n{text}");
+}
