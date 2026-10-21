@@ -470,6 +470,18 @@ pub(super) struct AgentPageOwner {
     pub(super) agent: Option<String>,
 }
 
+/// 时间线「概要」面板的缓存（视图计算阶段写，渲染只读）。
+#[derive(Debug, Default)]
+pub(super) struct AgentPageSummary {
+    /// 缓存对应的 (节点, 内容修订号, 解析方式, 折行宽度)。
+    key: Option<(String, u64, TranscriptMode, usize)>,
+    /// 统计所属的节点；与所选节点不符时不显示。
+    pub(super) node: String,
+    pub(super) tool_calls: usize,
+    /// 「最近输出」按面板宽度折好的行。
+    pub(super) last_output: Vec<String>,
+}
+
 #[derive(Debug)]
 pub(super) struct ClientAgentActivityOverlay {
     pub(super) endpoint_id: ClientEndpointId,
@@ -541,6 +553,9 @@ pub(super) struct ClientAgentActivityOverlay {
     pub(super) transcript: TranscriptView,
     /// 转写同步到的 (节点, 内容修订号, 解析方式)；对不上时视图计算阶段重新同步。
     transcript_synced: Option<(String, u64, TranscriptMode)>,
+    /// 时间线概要用的统计与「最近输出」折行：视图计算阶段按（节点、内容修订号、
+    /// 解析方式、宽度）缓存，渲染只读。
+    pub(super) summary: AgentPageSummary,
     /// server 未宣告或拒绝 `agent.activity.read`：显示「不提供」并不再重试。
     pub(super) unsupported: bool,
     /// 视图计算阶段记下的墙钟毫秒，渲染据此算运行中节点的耗时。
@@ -603,6 +618,7 @@ impl ClientAgentActivityOverlay {
             content: None,
             transcript: TranscriptView::default(),
             transcript_synced: None,
+            summary: AgentPageSummary::default(),
             unsupported: false,
             now_ms: 0,
             owner_view: AgentPageOwner::default(),
@@ -1438,7 +1454,13 @@ impl ClientShellState {
         }) else {
             return;
         };
-        let glyphs = self.status_glyphs();
+        // 端点离线 / 陈旧时页面是缓存：与会话树、面包屑同口径画静态字形，不驱动转圈。
+        let glyphs = match self.agent_activity() {
+            Some(overlay) if self.endpoint_stale(&overlay.endpoint_id) => {
+                StatusGlyphs::fixed(self.config.status_indicators)
+            }
+            _ => self.status_glyphs(),
+        };
         let own_footer = !self.workbench.enabled;
         let Some(overlay) = self.agent_activity_mut() else {
             return;
@@ -1472,6 +1494,9 @@ impl ClientShellState {
         // 展开、点工具标题）立即有区块可切。
         let mode = transcript_mode(&overlay.owner_view, overlay.is_external());
         overlay.sync_transcript(mode);
+        if !layout.summary.is_empty() {
+            overlay.refresh_summary(mode, agent_page::summary_text_width(layout.summary));
+        }
         let text = layout.content_text;
         let height = usize::from(text.height);
         if text.width == 0 || height == 0 {
@@ -2113,6 +2138,43 @@ impl ClientAgentActivityOverlay {
         }
         self.transcript.sync(&content.lines, content.dropped, mode);
         self.transcript_synced = Some((content.node_id.clone(), content.revision, mode));
+    }
+
+    /// 视图计算阶段：概要的工具调用数与「最近输出」折行随转写或宽度变化重算。
+    fn refresh_summary(&mut self, mode: TranscriptMode, width: usize) {
+        let Some(content) = self
+            .content
+            .as_ref()
+            .filter(|content| content.is_transcript())
+        else {
+            self.summary = AgentPageSummary::default();
+            return;
+        };
+        let current = self
+            .summary
+            .key
+            .as_ref()
+            .is_some_and(|(node, revision, synced, cached)| {
+                node == &content.node_id
+                    && *revision == content.revision
+                    && *synced == mode
+                    && *cached == width
+            });
+        if current {
+            return;
+        }
+        let mut last_output = Vec::new();
+        if let Some(last) = self.transcript.last_output() {
+            wrap_text(last, width, width, |start, end| {
+                last_output.push(last[start..end].to_owned());
+            });
+        }
+        self.summary = AgentPageSummary {
+            key: Some((content.node_id.clone(), content.revision, mode, width)),
+            node: content.node_id.clone(),
+            tool_calls: self.transcript.stats().tool_calls,
+            last_output,
+        };
     }
 
     /// 按行滚内容；滚到底且在跟随时重新钉住底部。上界由视图计算阶段夹紧。

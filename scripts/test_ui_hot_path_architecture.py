@@ -416,6 +416,10 @@ fn render() { TerminalRuntime::input_state; }
         if match is not None:
             self.fail(f"agent_page.rs 渲染期回写滚动状态：{match.group(0)!r}")
         self.assertNotIn("&mut ClientAgentActivityOverlay", page, "绘制只读页面状态")
+        # 转写的统计、最近输出与折行都在视图计算阶段算好缓存到页面状态（概要缓存
+        # `AgentPageSummary`），绘制只读结果，不在每帧重算。
+        for call in ("stats(", "last_output(", "wrap_text(", ".sync(", ".layout("):
+            self.assertNotIn(call, page, f"agent_page.rs 绘制期不得调用 {call}")
 
     def test_session_sidebar_render_reads_state_only(self) -> None:
         shell = PROJECT_ROOT / "src" / "client" / "shell"

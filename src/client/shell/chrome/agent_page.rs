@@ -17,7 +17,7 @@ use super::super::agent_activity_overlay::{
     ClientAgentActivityOverlay, LineTone,
 };
 use super::super::feedback::{ChromeContext, ChromeHover};
-use super::super::render::{display_width, put_text, wrap_text, OverlayRender};
+use super::super::render::{display_width, put_text, OverlayRender};
 use super::agent_transcript::Tone;
 use crate::api::schema::{AgentActivityKind, AgentActivityNode, AgentActivityStatus};
 use crate::harness::AgentBucket;
@@ -1356,8 +1356,9 @@ fn paint_summary(
         .content
         .as_ref()
         .filter(|content| content.is_transcript() && content.node_id == node.id);
-    let tools = transcript.map(|content| {
-        let count = overlay.transcript.stats().tool_calls;
+    let summary = Some(&overlay.summary).filter(|summary| summary.node == node.id);
+    let tools = transcript.zip(summary).map(|(content, summary)| {
+        let count = summary.tool_calls;
         if content.truncated {
             format!("≥{count}")
         } else {
@@ -1409,7 +1410,11 @@ fn paint_summary(
         put(b, cursor, y, right, &value, design::body(p));
         y += 1;
     }
-    let Some(last) = transcript.and_then(|_| overlay.transcript.last_output()) else {
+    let Some(last) = transcript
+        .and(summary)
+        .map(|summary| &summary.last_output)
+        .filter(|lines| !lines.is_empty())
+    else {
         return;
     };
     y += 1;
@@ -1425,16 +1430,18 @@ fn paint_summary(
         design::section(p),
     );
     y += 1;
-    let width = usize::from(right.saturating_sub(x).max(1));
-    let mut lines = Vec::new();
-    wrap_text(last, width, width, |start, end| lines.push((start, end)));
-    for (start, end) in lines {
+    for line in last {
         if y >= bottom {
             break;
         }
-        put(b, x, y, right, &last[start..end], design::muted(p));
+        put(b, x, y, right, line, design::muted(p));
         y += 1;
     }
+}
+
+/// 概要「最近输出」的折行宽度：与 [`paint_summary`] 同口径（左留 2 列、右留 1 列）。
+pub(in crate::client::shell) fn summary_text_width(summary: Rect) -> usize {
+    usize::from(summary.width.saturating_sub(3).max(1))
 }
 
 /// 转写栏绘制结果。

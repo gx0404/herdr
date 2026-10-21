@@ -2441,3 +2441,59 @@ fn narrow_page_syncs_the_transcript_before_it_is_shown() {
         "全部展开:\n{text}"
     );
 }
+
+/// 端点离线时页面是缓存：有运行中节点也不驱动转圈时钟，状态字形画静态。
+#[test]
+fn offline_pages_draw_static_glyphs_and_do_not_drive_the_spinner() {
+    use crate::harness::AgentBucket;
+    let mut state = state();
+    // 属主自己空闲，只留页面上的运行中节点驱动转圈。
+    let mut projected = named_snapshot("claude-main", "zcode desktop");
+    projected.agents[0].agent_status = AgentStatus::Idle;
+    state.set_snapshot(Box::new(projected));
+    state.config.feedback.animations = true;
+    state.config.feedback.spinner.enabled = true;
+    open_with_tree(&mut state);
+    state.compose(160, 45).expect("frame");
+    assert!(overlay(&state).has_running());
+    assert!(state.spinner_active(), "在线：运行中节点驱动转圈");
+    assert_ne!(
+        overlay(&state).glyphs.bucket(AgentBucket::Working),
+        crate::ui::design::WORKING_STATIC,
+        "在线画转圈帧"
+    );
+
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Attention);
+    state.compose(160, 45).expect("frame");
+    assert!(!state.spinner_active(), "离线缓存不驱动转圈");
+    assert_eq!(
+        overlay(&state).glyphs.bucket(AgentBucket::Working),
+        crate::ui::design::WORKING_STATIC,
+        "离线画静态字形"
+    );
+}
+
+/// 时间线概要的统计与「最近输出」折行在视图计算阶段缓存；宽度变了重新折行。
+#[test]
+fn summary_cache_is_built_in_the_view_phase() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    press(&mut state, "3");
+    let long = format!("[exec_command] cat log\n    {}\n", "word ".repeat(40));
+    select_with_content(&mut state, "a", &long);
+    state.compose(160, 45).expect("frame");
+    let summary = &overlay(&state).summary;
+    assert_eq!(summary.node, "a");
+    assert_eq!(summary.tool_calls, 1);
+    let wide = summary.last_output.len();
+    assert!(
+        wide >= 2,
+        "最近输出按面板宽度折行: {:?}",
+        summary.last_output
+    );
+    state.compose(120, 40).expect("frame");
+    assert!(
+        overlay(&state).summary.last_output.len() > wide,
+        "面板变窄后重新折行"
+    );
+}

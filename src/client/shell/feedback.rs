@@ -342,7 +342,13 @@ impl ClientShellState {
     /// 当前投影的端点不在线（断线 / 重连中）：标签、面包屑里的状态字形来自缓存快照，
     /// 与侧栏的 stale 行同口径画静态字形、置灰。
     pub(super) fn active_endpoint_stale(&self) -> bool {
-        self.endpoint_status(&self.active_endpoint_id)
+        self.endpoint_stale(&self.active_endpoint_id)
+    }
+
+    /// 某个端点不在线（断线 / 重连中 / 需处理）：它的数据来自缓存快照，状态字形画
+    /// 静态、不驱动转圈。与 [`Self::active_endpoint_stale`] 同一口径。
+    pub(super) fn endpoint_stale(&self, endpoint_id: &ClientEndpointId) -> bool {
+        self.endpoint_status(endpoint_id)
             .is_some_and(|status| status != ClientEndpointStatus::Online)
     }
 
@@ -374,8 +380,11 @@ impl ClientShellState {
                     Some(ClientShellOverlay::Settings(overlay)) => {
                         overlay.loading_integrations || overlay.installing_integrations
                     }
-                    // 子智能体页面上的运行中节点画转圈；属主自己不在运行时也要走时钟。
-                    Some(ClientShellOverlay::AgentActivity(overlay)) => overlay.has_running(),
+                    // 子智能体页面上的运行中节点画转圈；属主自己不在运行时也要走时钟。页面所属
+                    // 端点离线时节点来自缓存，不转。
+                    Some(ClientShellOverlay::AgentActivity(overlay)) => {
+                        overlay.has_running() && !self.endpoint_stale(&overlay.endpoint_id)
+                    }
                     _ => false,
                 })
     }
