@@ -910,7 +910,9 @@ fn attach_thin_client_with_config(
     let mut attached = false;
     while Instant::now() < deadline {
         let out = read_output(&output);
+        // The narrow sidebar uses vertical separators without English labels.
         if out.contains('\u{2500}')
+            || out.contains('\u{2502}')
             || out.contains("workspace")
             || out.contains("pane")
             || out.contains("terminal")
@@ -2077,7 +2079,11 @@ fn read_until_client_attaches(client: &SpawnedHerdr) -> String {
             }
             Err(err) => panic!("read thin client PTY: {err}"),
         }
-        if output.contains('\u{2500}')
+        // The narrow sidebar uses vertical separators without English labels.
+                // The narrow sidebar uses vertical separators without English labels.
+                if output.contains('\u{2500}')
+                    || output.contains('\u{2502}')
+            || output.contains('\u{2502}')
             || output.contains("workspace")
             || output.contains("pane")
             || output.contains("terminal")
