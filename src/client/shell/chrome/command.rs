@@ -1,7 +1,6 @@
 use super::super::action_table::ActionId;
 use super::super::command_palette::{ClientPaletteAction, ClientPaletteItem, ClientPaletteRow};
 use super::super::*;
-use crate::ui::display_width_u16;
 
 pub(in crate::client::shell) fn text(en: &'static str, zh: &'static str) -> &'static str {
     if crate::i18n::lang() == crate::i18n::Lang::ZhCn {
@@ -289,15 +288,12 @@ pub(in crate::client::shell) fn paint_row(
 ) {
     let palette = cx.palette;
     let components = cx.components;
-    let bg = if selected {
-        super::settings::selected_bg(palette)
-    } else if hovered {
-        palette.surface_dim
-    } else {
-        palette.panel_bg
-    };
+    // 三态与其它浮层列表同一口径：选中 = 中性选中底 + 粗体 + 首列 ▌，悬浮只换底色。
+    let row_style =
+        super::super::list_row_style(palette, components, selected, hovered && !selected);
+    let bg = row_style.bg.unwrap_or(palette.panel_bg);
     let base = Style::default()
-        .fg(palette.text)
+        .fg(row_style.fg.unwrap_or(palette.text))
         .bg(bg)
         .remove_modifier(Modifier::all());
     buffer.set_style(rect, base);
@@ -337,7 +333,7 @@ pub(in crate::client::shell) fn paint_row(
     } else {
         None
     };
-    let key_width = key.map_or(0, |key| display_width_u16(key).saturating_add(2));
+    let key_width = key.map_or(0, crate::ui::kit::key_cap::cap_width);
     let key_width = if key_width + 14 < rect.width {
         key_width
     } else {
@@ -366,7 +362,7 @@ pub(in crate::client::shell) fn paint_row(
             rect.y,
             room,
             &super::settings::truncate_with_ellipsis(item_description(row.item), room),
-            base.fg(palette.subtext0),
+            crate::ui::design::muted(palette).bg(bg),
         );
     }
     if row.item.badge {
@@ -380,13 +376,16 @@ pub(in crate::client::shell) fn paint_row(
         );
     }
     if let Some(key) = key.filter(|_| key_width > 0) {
-        super::super::render::put_text(
+        crate::ui::kit::key_cap::paint_cap(
             buffer,
             rect.right() - key_width,
             rect.y,
-            key_width,
-            &format!(" {key} "),
+            rect.right(),
+            key,
             super::bar_key_cap(palette, bg),
         );
+    }
+    if selected {
+        crate::ui::kit::paint_selection_mark(buffer, rect.x, rect.y, palette);
     }
 }

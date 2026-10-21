@@ -45,10 +45,9 @@ pub(in crate::client::shell) fn paint(
     let stacked = rows.iter().any(|(_, label, key)| {
         crate::ui::display_width_u16(label)
             .saturating_add(3)
-            .saturating_add(
-                key.as_deref()
-                    .map_or(0, |key| crate::ui::display_width_u16(key).saturating_add(3)),
-            )
+            .saturating_add(key.as_deref().map_or(0, |key| {
+                crate::ui::kit::key_cap::cap_width(key).saturating_add(1)
+            }))
             > width
     });
     let header_rows = if area.height >= 9 { 3 } else { 1 };
@@ -112,17 +111,18 @@ pub(in crate::client::shell) fn paint(
             let bg = buffer[(rect.x, rect.y)].bg;
             let key_row = Rect::new(rect.x, y + 1, width, 1);
             buffer.set_style(key_row, Style::default().bg(bg));
-            let key_width = crate::ui::display_width_u16(key).saturating_add(2);
+            let key_width = crate::ui::kit::key_cap::cap_width(key);
             let inset = if key_width <= width.saturating_sub(3) {
                 3
             } else {
                 0
             };
-            buffer.set_stringn(
+            crate::ui::kit::key_cap::paint_cap(
+                buffer,
                 rect.x + inset,
                 y + 1,
-                format!(" {key} "),
-                usize::from(width - inset),
+                rect.right(),
+                key,
                 super::bar_key_cap(p, bg),
             );
             hits.push((Rect::new(rect.x, rect.y, width, 2), action));

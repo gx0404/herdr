@@ -2586,7 +2586,9 @@ fn navigator_uses_machine_parents_only_for_federated_clients() {
             .iter()
             .take(expected.chars().count())
             .map(|cell| cell.symbol.as_str())
-            .collect::<String>();
+            .collect::<String>()
+            // 选中行首列是选中标记 ▌，按留白比较缩进。
+            .replace('▌', " ");
         assert_eq!(prefix, expected, "{target:?}");
     }
 

@@ -199,9 +199,11 @@ impl ActionSpec {
     }
 
     /// 用户当前键位的首个标签（菜单右侧只放一个，多个键位时取第一个）。
-    pub(super) fn shortcut(&self, keybinds: &Keybinds) -> Option<String> {
+    /// 菜单里显示的快捷键：第一个绑定的完整按键序列（`chrome::key_sequence`，前缀
+    /// 展开为实际前缀键、小写写法）。
+    pub(super) fn shortcut(&self, keybinds: &crate::config::LiveKeybindConfig) -> Option<String> {
         let binding = self.binding?;
-        (binding.keys)(keybinds).labels().into_iter().next()
+        super::chrome::key_sequence(keybinds, (binding.keys)(&keybinds.keybinds))
     }
 }
 

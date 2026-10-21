@@ -695,7 +695,12 @@ impl ClientShellState {
                                 .description
                                 .clone()
                                 .unwrap_or_else(|| command.command.clone()),
-                            subtitle: command.label.clone(),
+                            // 键帽与其它动作同口径：前缀展开成实际前缀键、小写写法。
+                            subtitle: super::chrome::key_sequence(
+                                &self.config.keybinds,
+                                &command.bindings,
+                            )
+                            .unwrap_or_default(),
                             category: spec.category.index(),
                             group: spec.group.into(),
                             badge: false,
@@ -747,7 +752,8 @@ impl ClientShellState {
                 id: id.into(),
                 title: title.into(),
                 subtitle: if id == "search" {
-                    keybinds.command_search.label().unwrap_or_default()
+                    super::chrome::key_sequence(&self.config.keybinds, &keybinds.command_search)
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 },
@@ -1417,7 +1423,7 @@ pub(crate) fn render_command_palette(
         header.y,
         header.width,
         title,
-        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        crate::ui::design::title(p),
     );
     let cursor = if searching {
         render_search_bar(
@@ -1462,14 +1468,32 @@ pub(crate) fn render_command_palette(
     );
     let mut row_hits = Vec::new();
     if rows.is_empty() {
-        let empty = super::render::text_inset(body);
-        put_text(
+        // 空状态区分「过滤无匹配」与「这里本来就没有条目」。
+        let filtered = !palette.query.as_str().is_empty();
+        crate::ui::kit::empty_state::render_empty_state(
             b,
-            empty.x,
-            empty.y,
-            empty.width,
-            t.no_matches,
-            Style::default().fg(p.overlay0),
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some(if filtered { "∅" } else { "○" }),
+                title: if filtered {
+                    t.no_matches.trim()
+                } else {
+                    super::observability::tr("Nothing here yet", "这里还没有条目")
+                },
+                body: Some(if filtered {
+                    super::observability::tr(
+                        "Try another word, or press esc to clear the search",
+                        "换个关键词，或按 esc 清除搜索",
+                    )
+                } else {
+                    super::observability::tr(
+                        "Commands for this view appear when they apply",
+                        "适用于当前视图的命令会出现在这里",
+                    )
+                }),
+                action: None,
+            },
+            p,
         );
     }
     for (offset, visual_index) in (scroll..visual.len())
@@ -1517,7 +1541,7 @@ pub(crate) fn render_command_palette(
             max_offset_from_bottom,
             viewport_rows,
         };
-        crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, p.accent, "┃");
+        crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, p.overlay1, "┃");
     }
     let mut hints = vec![
         ("enter".into(), t.footer_run.into()),

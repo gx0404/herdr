@@ -184,12 +184,7 @@ pub const TEXTS: Texts = Texts {
         filter_idle: "idle",
         filter_done: "done",
         search_panes_hint: " / search panes",
-        navigator_search_footer: " search type · move ↑↓/ctrl+n/p · open enter · back esc",
-        navigator_footer:
-            " move j/k · expand space · filter a/b/w/i/d · search / · open enter · close esc",
         help_filter_hint: " / press / to filter by command or shortcut",
-        edit_footer: " edit ←→/home/end · kill ^u/^k · yank ^y · scroll ↑↓ · back esc",
-        search_footer: " search / · scroll j/k/↑↓/pgup/pgdn · close esc/enter",
         no_matching_keybinds: " no matching keybinds",
         link_hints_no_links: "no links visible",
     },
@@ -450,7 +445,6 @@ pub const TEXTS: Texts = Texts {
     history: HistoryTexts {
         title: "notifications",
         empty: "no notifications yet",
-        footer: " ↑/↓ select  ↵ jump  esc close ",
         just_now: "just now",
         minutes_ago_fmt: "{n}m ago",
         hours_ago_fmt: "{n}h ago",

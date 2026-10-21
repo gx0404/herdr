@@ -1107,6 +1107,8 @@ fn navigator_renders_every_terminal_in_workspace_sections() {
                     .take(rect.width as usize)
                     .map(|cell| cell.symbol.as_str())
                     .collect::<String>()
+                    // 选中行首列是选中标记 ▌，按留白比较缩进。
+                    .replace('▌', " ")
             })
             .collect::<Vec<_>>()
     };

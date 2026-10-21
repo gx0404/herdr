@@ -1673,7 +1673,7 @@ fn onboarding_body_wraps_instead_of_cutting_words() {
         for part in [
             "ctrl+b",
             texts.prefix_suffix.trim_end_matches([' ', '·']),
-            crate::ui::ONBOARDING_HELP_LABEL,
+            "?",
             texts.help_suffix,
         ] {
             assert!(
@@ -1697,10 +1697,7 @@ fn onboarding_body_wraps_instead_of_cutting_words() {
             .unwrap_or(inner.len());
         for row in &inner[2..continue_row] {
             let words = row.split_whitespace().count();
-            let key_row = row.contains("ctrl+b")
-                || row
-                    .trim_start()
-                    .starts_with(crate::ui::ONBOARDING_HELP_LABEL);
+            let key_row = row.contains("ctrl+b") || row.trim_start().starts_with("?");
             assert!(
                 words == 0 || key_row || words >= 3,
                 "{case}: 没有只含一两个词的孤立尾行：{row:?}\n{}",

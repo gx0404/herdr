@@ -505,25 +505,21 @@ pub(in crate::client::shell) fn render_search_bar(
     bar: &SearchBar<'_>,
     p: &Palette,
 ) -> Option<crate::protocol::CursorState> {
-    let text = if bar.focused {
-        " / ".to_owned()
+    // 占位提示与已有内容分开配色：没有查询时是说明（元信息色），聚焦的输入、回显的
+    // 查询与筛选状态是正文；计数是元信息。
+    let (text, style) = if bar.focused {
+        (" / ".to_owned(), crate::ui::design::body(p))
     } else if let Some(status) = bar.status.as_deref() {
-        format!(" / {status}")
+        (format!(" / {status}"), crate::ui::design::body(p))
     } else if bar.echo_query && !bar.query.as_str().is_empty() {
-        format!(" / {}", bar.query.as_str())
+        (
+            format!(" / {}", bar.query.as_str()),
+            crate::ui::design::body(p),
+        )
     } else {
-        bar.hint.to_owned()
+        (bar.hint.to_owned(), crate::ui::design::meta(p))
     };
-    put_text(
-        b,
-        area.x,
-        area.y,
-        area.width,
-        &text,
-        Style::default()
-            .fg(if bar.focused { p.text } else { p.overlay0 })
-            .bg(p.panel_bg),
-    );
+    put_text(b, area.x, area.y, area.width, &text, style.bg(p.panel_bg));
     let count_width = bar.count.as_deref().map(display_width).unwrap_or(0);
     // 计数离右边框留 1 列（冒烟 L4），输入区在计数左边再空 1 列。
     let count_room = if bar.count.is_some() {
@@ -552,7 +548,7 @@ pub(in crate::client::shell) fn render_search_bar(
             text_inset(area),
             area.y,
             count,
-            Style::default().fg(p.overlay0).bg(p.panel_bg),
+            crate::ui::design::meta(p).bg(p.panel_bg),
         );
     }
     cursor
@@ -795,9 +791,9 @@ fn render_onboarding_overlay(
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     let p = cx.palette;
-    // 上游 dbdb8dc8：欢迎页展示「配置的」前缀而不是静态默认键。
-    let prefix_label = k.primary_prefix_label();
-    let size = onboarding_modal_size(b.area, &prefix_label);
+    // 上游 dbdb8dc8：欢迎页展示「配置的」前缀与帮助键而不是静态默认键。
+    let pairs = onboarding_key_pairs(k);
+    let size = onboarding_modal_size(b.area, &pairs);
     let (outer, inner) = modal_panel(b, size, cx)?;
     if inner.height < 11 {
         return Some(OverlayRender {
@@ -812,7 +808,7 @@ fn render_onboarding_overlay(
     let title = base.fg(p.text).add_modifier(Modifier::BOLD);
     let muted = base.fg(p.subtext0);
     let text = base.fg(p.subtext0);
-    let accent = crate::ui::design::key_cap(p);
+    let cap = crate::ui::design::key_cap(p);
 
     let wordmark = crate::ui::ONBOARDING_TITLE.trim();
     let wordmark_width = display_width(wordmark);
@@ -841,47 +837,46 @@ fn render_onboarding_overlay(
     }
     y = y.saturating_add(1);
     // 键位提示：一行放得下就一行；放不下在「·」处分成两行（两个键各带说明）。
-    let pairs = onboarding_key_pairs(&prefix_label);
-    let rows: [&[(String, &'static str)]; 2] =
-        if onboarding_key_rows(content.width, &prefix_label) == 1 {
-            [&pairs, &pairs[..0]]
-        } else {
-            [&pairs[..1], &pairs[1..]]
-        };
-    let rows: &[&[(String, &'static str)]] = if rows[0].len() == pairs.len() {
-        &rows[..1]
+    let split = if onboarding_key_rows(content.width, &pairs) == 1 {
+        pairs.len()
     } else {
-        &rows[..2]
+        1
     };
-    for row in rows {
-        if y >= content.bottom() {
-            break;
+    let (first, second) = pairs.split_at(split.min(pairs.len()));
+    for row in [first, second] {
+        if row.is_empty() || y >= content.bottom() {
+            continue;
         }
         let mut key_x = content.x;
         let last = row.len() - 1;
         for (index, (key, suffix)) in row.iter().enumerate() {
-            let suffix = if rows.len() > 1 && index == last {
-                // 分两行时行尾的「 · 」分隔符不画。
+            let suffix = if index == last {
+                // 行尾的「 · 」分隔符不画。
                 suffix.trim_end_matches([' ', '·'])
             } else {
                 suffix
             };
-            for (value, style) in [
-                (if index == 0 { ONBOARDING_KEY_LEAD } else { "" }, base),
-                (key.as_str(), accent),
-                (suffix, text),
-            ] {
-                let width = display_width(value);
+            if index == 0 {
                 put_text(
                     b,
                     key_x,
                     y,
                     content.right().saturating_sub(key_x),
-                    value,
-                    style,
+                    ONBOARDING_KEY_LEAD,
+                    base,
                 );
-                key_x = key_x.saturating_add(width);
+                key_x = key_x.saturating_add(display_width(ONBOARDING_KEY_LEAD));
             }
+            key_x = crate::ui::kit::key_cap::paint_cap(b, key_x, y, content.right(), key, cap);
+            put_text(
+                b,
+                key_x,
+                y,
+                content.right().saturating_sub(key_x),
+                suffix,
+                text,
+            );
+            key_x = key_x.saturating_add(display_width(suffix));
         }
         y = y.saturating_add(1);
     }
@@ -993,23 +988,26 @@ fn put_wrapped(b: &mut Buffer, area: Rect, y: u16, line: &str, style: Style) -> 
 /// 欢迎页键位提示的两对（键, 说明）与行首缩进。
 const ONBOARDING_KEY_LEAD: &str = "  ";
 
-fn onboarding_key_pairs(prefix_label: &str) -> [(String, &'static str); 2] {
+/// 欢迎页的（键, 说明）：实际配置的前缀键与帮助键（帮助键展开成完整序列，如
+/// 「ctrl+b ?」）；帮助没有绑定时只列前缀。
+fn onboarding_key_pairs(k: &LiveKeybindConfig) -> Vec<(String, &'static str)> {
     let texts = &crate::i18n::texts().onboarding;
-    [
-        (prefix_label.to_owned(), texts.prefix_suffix),
-        (
-            crate::ui::ONBOARDING_HELP_LABEL.to_owned(),
-            texts.help_suffix,
-        ),
-    ]
+    let mut pairs = vec![(
+        crate::ui::key_labels::display_key(&k.primary_prefix_label()).into_owned(),
+        texts.prefix_suffix,
+    )];
+    if let Some(help) = super::chrome::key_sequence(k, &k.keybinds.help) {
+        pairs.push((help, texts.help_suffix));
+    }
+    pairs
 }
 
 /// 键位提示在 `width` 列里要几行：一行放得下就一行，否则在「·」处分成两行。
-fn onboarding_key_rows(width: u16, prefix_label: &str) -> u16 {
+fn onboarding_key_rows(width: u16, pairs: &[(String, &'static str)]) -> u16 {
     let one_line = display_width(ONBOARDING_KEY_LEAD)
-        + onboarding_key_pairs(prefix_label)
+        + pairs
             .iter()
-            .map(|(key, suffix)| display_width(key) + display_width(suffix))
+            .map(|(key, suffix)| crate::ui::kit::key_cap::cap_width(key) + display_width(suffix))
             .sum::<u16>();
     if one_line <= width {
         1
@@ -1020,7 +1018,7 @@ fn onboarding_key_rows(width: u16, prefix_label: &str) -> u16 {
 
 /// 欢迎页正文在 `width` 列里排开要占的行数（与绘制同一套折行）：说明各行、空一
 /// 行、键位提示、下一步。
-fn onboarding_body_rows(width: u16, prefix_label: &str) -> u16 {
+fn onboarding_body_rows(width: u16, pairs: &[(String, &'static str)]) -> u16 {
     let rows = |line: &str| {
         let mut rows = 0u16;
         wrap_indented(line, width, |_, _| rows = rows.saturating_add(1));
@@ -1031,7 +1029,7 @@ fn onboarding_body_rows(width: u16, prefix_label: &str) -> u16 {
         .map(|line| rows(line))
         .sum::<u16>()
         .saturating_add(1)
-        .saturating_add(onboarding_key_rows(width, prefix_label))
+        .saturating_add(onboarding_key_rows(width, pairs))
         .saturating_add(rows(crate::i18n::texts().onboarding.next))
 }
 
@@ -1045,13 +1043,13 @@ fn onboarding_header_rows(width: u16) -> u16 {
 
 /// 欢迎页浮层尺寸：默认中号；正文折行后默认高度放不下时加高（仍受终端高度
 /// 限制）。宽度与高度无关，先按默认高度取宽度，再按这个宽度量正文。
-fn onboarding_modal_size(area: Rect, prefix_label: &str) -> crate::ui::ModalSize {
+fn onboarding_modal_size(area: Rect, pairs: &[(String, &'static str)]) -> crate::ui::ModalSize {
     let base = crate::ui::ModalSize::Medium;
     let Some(inner) = crate::ui::modal_rect(area, base).and_then(panel_inner) else {
         return base;
     };
     // 标题 / 副标题按宽度计行，再加两处间隔、按钮和上下边框。
-    let needed = onboarding_body_rows(inner.width, prefix_label)
+    let needed = onboarding_body_rows(inner.width, pairs)
         .saturating_add(onboarding_header_rows(inner.width))
         .saturating_add(5);
     base.with_height(needed.max(base.cells().1))
@@ -1167,21 +1165,19 @@ fn render_navigator_overlay(
         height,
     )
     .intersection(a);
-    let i = panel(b, q, p.accent, p.panel_bg, cx.glyphs)?;
+    let i = panel(b, q, crate::ui::design::frame(p), p.panel_bg, cx.glyphs)?;
     let rows = super::aggregate_navigation::navigator_rows(endpoints, active_endpoint_id, n);
     // 列表只剩终端行与分组头（上游 #4384），计数按终端计。
     let terminal_count = rows
         .iter()
         .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
         .count();
-    let count = format!(
-        "{terminal_count} {}",
-        if terminal_count == 1 {
-            "terminal"
-        } else {
-            "terminals"
-        }
-    );
+    let count = if terminal_count == 1 {
+        super::observability::tr("1 terminal", "1 个终端").to_owned()
+    } else {
+        super::observability::tr("{n} terminals", "{n} 个终端")
+            .replace("{n}", &terminal_count.to_string())
+    };
     let filter_label = n.filter.map(|f| {
         match f {
             ClientNavigatorFilter::Blocked => crate::i18n::texts().overlays.filter_blocked,
@@ -1191,6 +1187,7 @@ fn render_navigator_overlay(
         }
         .to_owned()
     });
+    let filtering = n.filter.is_some() || !n.query.as_str().is_empty();
     let cursor = render_search_bar(
         b,
         Rect::new(i.x, i.y, i.width, 1),
@@ -1210,7 +1207,7 @@ fn render_navigator_overlay(
         i.y + 1,
         i.width,
         &"─".repeat(i.width as usize),
-        Style::default().fg(p.surface1).bg(p.panel_bg),
+        crate::ui::design::rule(p).bg(p.panel_bg),
     );
     let body = Rect::new(i.x, i.y + 2, i.width, i.height.saturating_sub(5));
     let selected = super::aggregate_navigation::navigator_selected_index(&rows, n).unwrap_or(0);
@@ -1234,13 +1231,36 @@ fn render_navigator_overlay(
     let row_width = body.width.saturating_sub(u16::from(scrollbar.is_some()));
     let mut row_hits = Vec::new();
     if rows.is_empty() {
-        put_text(
+        let (title, detail) = if filtering {
+            (
+                super::observability::tr(
+                    "No matching agents or terminals",
+                    "没有匹配的智能体或终端",
+                ),
+                super::observability::tr(
+                    "Try another search, or press a to clear the filter",
+                    "换个关键词，或按 a 清除筛选",
+                ),
+            )
+        } else {
+            (
+                super::observability::tr("No terminals yet", "还没有终端"),
+                super::observability::tr(
+                    "Terminals of every connected machine show up here",
+                    "已连接机器上的终端会列在这里",
+                ),
+            )
+        };
+        crate::ui::kit::empty_state::render_empty_state(
             b,
-            body.x,
-            body.y,
-            body.width,
-            " No matching agents or terminals",
-            Style::default().fg(p.overlay0).bg(p.panel_bg),
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some(if filtering { "∅" } else { "○" }),
+                title,
+                body: Some(detail),
+                action: None,
+            },
+            p,
         );
     }
     for (ix, r) in rows
@@ -1251,30 +1271,26 @@ fn render_navigator_overlay(
     {
         let rect = Rect::new(body.x, body.y + (ix - scroll) as u16, row_width, 1);
         row_hits.push((rect, r.target.clone()));
-        // 三态与其它浮层同一口径：选中 accent 反色 > 悬浮弱底色 > 常态。
-        // stale 行保留它自己的 surface0 选中底色（它不参与反色）。
-        let is_hovered = ix != selected && hovered == Some(ix);
-        let row_bg = super::list_row_bg(p, cx.components, false, is_hovered);
+        // 三态与其它浮层同一口径（`list_row_style`）：选中 = 中性选中底 + 粗体 +
+        // 首列 ▌，悬浮只换底色。stale 行照样用这套选中态，只是文字降为元信息色。
+        let is_selected = ix == selected;
+        let is_hovered = !is_selected && hovered == Some(ix);
+        let base = super::list_row_style(p, cx.components, is_selected, is_hovered);
+        let row_bg = base.bg.unwrap_or(p.panel_bg);
         let st = if r.stale {
-            Style::default()
-                .fg(p.overlay0)
-                .bg(if ix == selected { p.surface0 } else { row_bg })
-                .add_modifier(Modifier::DIM)
-        } else if ix == selected {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
+            base.fg(p.overlay1)
+        } else if !is_selected && matches!(r.target, ClientNavigatorTarget::Machine { .. }) {
+            base.fg(p.subtext0)
         } else {
-            Style::default()
-                .fg(
-                    if matches!(r.target, ClientNavigatorTarget::Machine { .. }) {
-                        p.subtext0
-                    } else {
-                        p.text
-                    },
-                )
-                .bg(row_bg)
+            base
+        };
+        // 次要列（智能体名、状态、元信息）：元信息色；选中底上退到说明色保证可读。
+        let meta_style = if r.stale {
+            st
+        } else if is_selected {
+            st.fg(p.subtext0)
+        } else {
+            st.fg(p.overlay1)
         };
         let is_pane = matches!(r.target, ClientNavigatorTarget::Pane { .. });
         let connector = if !is_pane {
@@ -1320,41 +1336,27 @@ fn render_navigator_overlay(
             st,
         );
         if is_pane {
+            // 树线是结构线：始终 overlay0，不随选中变色。
             put_text(
                 b,
                 connector_x,
                 rect.y,
                 rect.right().saturating_sub(connector_x).min(2),
                 connector,
-                if r.stale || ix == selected {
-                    st
-                } else {
-                    st.fg(p.overlay0)
-                },
+                st.fg(p.overlay0).remove_modifier(Modifier::BOLD),
             );
         }
         if let Some(status) = r.status {
             let prefix = format!("{indent}{current}");
-            let status_style = if r.stale || ix == selected {
-                st
-            } else {
-                Style::default()
-                    .fg(status_color(status, p, cx.components))
-                    .bg(row_bg)
-            };
+            // 状态字形保持状态色，选中时也不反色。
             put_text(
                 b,
                 rect.x.saturating_add(display_width(&prefix)),
                 rect.y,
                 display_width(status_dot(status)),
                 status_dot(status),
-                status_style,
+                st.fg(status_color(status, p, cx.components)),
             );
-            let meta_style = if r.stale || ix == selected {
-                st
-            } else {
-                st.fg(p.overlay0)
-            };
             if columns > 0 {
                 put_text(
                     b,
@@ -1394,19 +1396,13 @@ fn render_navigator_overlay(
             } else {
                 format!("{glyph} {state}")
             };
-            let signal_style = if ix == selected {
-                st
-            } else {
-                Style::default()
-                    .fg(color)
-                    .bg(row_bg)
-                    .add_modifier(if r.stale {
-                        Modifier::DIM
-                    } else {
-                        Modifier::empty()
-                    })
-            };
-            put_right_text(b, rect, rect.y, &signal, signal_style);
+            put_right_text(
+                b,
+                rect,
+                rect.y,
+                &signal,
+                Style::default().fg(color).bg(row_bg),
+            );
         } else if r.status.is_none() && !r.meta.is_empty() {
             let label_width = display_width(&label).min(rect.width);
             let meta = Rect::new(
@@ -1415,7 +1411,16 @@ fn render_navigator_overlay(
                 rect.width.saturating_sub(label_width.saturating_add(1)),
                 1,
             );
-            put_right_text(b, meta, rect.y, &r.meta, st)
+            put_right_text(
+                b,
+                meta,
+                rect.y,
+                &r.meta,
+                meta_style.remove_modifier(Modifier::BOLD),
+            )
+        }
+        if is_selected {
+            crate::ui::kit::paint_selection_mark(b, rect.x, rect.y, p);
         }
     }
     if let Some(track) = scrollbar {
@@ -1428,7 +1433,7 @@ fn render_navigator_overlay(
             i.bottom() - 3,
             i.width,
             &format!(" {}", r.detail),
-            Style::default().fg(p.subtext0).bg(p.panel_bg),
+            crate::ui::design::muted(p).bg(p.panel_bg),
         );
         put_text(
             b,
@@ -1436,20 +1441,14 @@ fn render_navigator_overlay(
             i.bottom() - 2,
             i.width,
             &format!(" {}", r.meta),
-            Style::default().fg(p.overlay0).bg(p.panel_bg),
+            crate::ui::design::meta(p).bg(p.panel_bg),
         );
     }
-    put_text(
+    super::render_key_hints(
         b,
-        i.x,
-        i.bottom() - 1,
-        i.width,
-        if n.search_focused {
-            crate::i18n::texts().overlays.navigator_search_footer
-        } else {
-            crate::i18n::texts().overlays.navigator_footer
-        },
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
+        text_inset(Rect::new(i.x, i.bottom() - 1, i.width, 1)),
+        &navigator_footer_hints(n.search_focused),
+        p,
     );
     Some(OverlayRender {
         area: q,
@@ -1468,6 +1467,43 @@ fn render_navigator_overlay(
     })
 }
 
+/// 导航器页脚：键帽 + 标签（搜索框聚焦时换成编辑态的那组）。
+fn navigator_footer_hints(search_focused: bool) -> Vec<(String, String)> {
+    use super::observability::tr;
+    let hints: &[(&str, &str)] = if search_focused {
+        &[
+            ("↑↓", tr("move", "移动")),
+            ("enter", tr("open", "打开")),
+            ("esc", tr("back", "后退")),
+        ]
+    } else {
+        &[
+            ("j/k", tr("move", "移动")),
+            ("enter", tr("open", "打开")),
+            ("space", tr("expand", "展开")),
+            ("/", tr("search", "搜索")),
+            ("a/b/w/i/d", tr("filter", "筛选")),
+            ("esc", tr("close", "关闭")),
+        ]
+    };
+    hints
+        .iter()
+        .map(|(key, label)| ((*key).to_owned(), (*label).to_owned()))
+        .collect()
+}
+
+/// 键帽列的显示宽度上限：超长的多键行（导航组的方向键）不把整列推得太宽，
+/// 说明紧跟在它自己的键帽后面。
+const HELP_KEY_COLUMN_MAX: usize = 24;
+
+/// 一行键帽（含备选之间的 `/`）占的列数。
+fn help_caps_width(caps: &[String]) -> usize {
+    caps.iter()
+        .map(|cap| usize::from(crate::ui::kit::key_cap::cap_width(cap)))
+        .sum::<usize>()
+        + caps.len().saturating_sub(1)
+}
+
 fn help_lines(
     keybinds: &LiveKeybindConfig,
     query: &str,
@@ -1475,66 +1511,120 @@ fn help_lines(
 ) -> Vec<(usize, ratatui::text::Line<'static>)> {
     use ratatui::text::{Line, Span};
 
+    let prefix = keybinds.primary_prefix_label();
     let groups = crate::input::filter_keybind_help_groups(
         crate::input::keybind_help_groups(&keybinds.keybinds, &keybinds.prefix),
         query,
+        &prefix,
     );
-    let key_width = groups
-        .iter()
-        .flat_map(|(_, entries)| {
-            entries
-                .iter()
-                .map(|(key, _)| usize::from(display_width(key)))
+    let unset = crate::i18n::texts().keybinds.unset;
+    let rows = groups
+        .into_iter()
+        .map(|(group, entries)| {
+            let entries = entries
+                .into_iter()
+                .map(|(keys, label)| {
+                    let caps = keys
+                        .iter()
+                        .map(|key| key.sequence(&prefix))
+                        .collect::<Vec<_>>();
+                    (caps, label)
+                })
+                .collect::<Vec<_>>();
+            (group.title(), entries)
         })
-        .max()
-        .unwrap_or(8);
-    if groups.is_empty() {
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
         let message = crate::i18n::texts().overlays.no_matching_keybinds;
         return vec![(
             usize::from(display_width(message)),
             Line::from(Span::styled(
                 message,
-                Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+                crate::ui::design::muted(palette).bg(palette.panel_bg),
             )),
         )];
     }
+    let entry_width = |caps: &[String]| {
+        if caps.is_empty() {
+            usize::from(display_width(unset))
+        } else {
+            help_caps_width(caps)
+        }
+    };
+    let key_width = rows
+        .iter()
+        .flat_map(|(_, entries)| entries.iter().map(|(caps, _)| entry_width(caps)))
+        .filter(|width| *width <= HELP_KEY_COLUMN_MAX)
+        .max()
+        .unwrap_or(8);
 
+    let background = Style::default().bg(palette.panel_bg);
+    let cap_style = crate::ui::design::key_cap(palette);
+    let separator = crate::ui::design::meta(palette).bg(palette.panel_bg);
     let mut lines = Vec::new();
-    for (group, entries) in groups {
+    for (group, entries) in rows {
         lines.push((
             usize::from(display_width(group)) + 1,
             Line::from(Span::styled(
                 format!(" {group}"),
-                Style::default()
-                    .fg(palette.accent)
-                    .bg(palette.panel_bg)
-                    .add_modifier(Modifier::BOLD),
+                crate::ui::design::section(palette).bg(palette.panel_bg),
             )),
         ));
-        for (key, label) in entries {
-            // 冒烟 M5：`{:<width$}` 按 `.chars().count()` 补齐，CJK 键名
-            // （如「未设置」，3 字符占 6 显示列）会被多垫 `key_width - 3`
-            // 个空格，实际显示宽度超出 `key_width`，动作列整体右移。改按
-            // `display_width` 手写补齐空格数。
-            let key_columns = usize::from(display_width(&key));
-            let pad = " ".repeat(key_width.saturating_sub(key_columns));
-            let padded_key = format!(" {key}{pad} ");
-            let width =
-                usize::from(display_width(&padded_key)) + usize::from(display_width(&label));
-            lines.push((
-                width,
-                Line::from(vec![
-                    Span::styled(padded_key, crate::ui::design::key_cap(palette)),
-                    Span::styled(
-                        label.into_owned(),
-                        Style::default().fg(palette.text).bg(palette.panel_bg),
-                    ),
-                ]),
+        for (caps, label) in entries {
+            // 冒烟 M5：补齐按显示宽度算，CJK 键名（「未设置」）不会多垫空格把说明列
+            // 挤右。
+            let mut spans = vec![Span::styled(" ", background)];
+            if caps.is_empty() {
+                spans.push(Span::styled(
+                    unset,
+                    crate::ui::design::meta(palette).bg(palette.panel_bg),
+                ));
+            }
+            for (index, cap) in caps.iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::styled("/", separator));
+                }
+                spans.push(Span::styled(
+                    format!(" {} ", crate::ui::kit::key_cap::cap_text(cap)),
+                    cap_style,
+                ));
+            }
+            let used = entry_width(&caps);
+            let pad = key_width.saturating_sub(used) + 1;
+            spans.push(Span::styled(" ".repeat(pad), background));
+            let width = 1 + used + pad + usize::from(display_width(&label));
+            spans.push(Span::styled(
+                label.into_owned(),
+                crate::ui::design::body(palette).bg(palette.panel_bg),
             ));
+            lines.push((width, Line::from(spans)));
         }
         lines.push((0, Line::raw("")));
     }
     lines
+}
+
+/// 帮助浮层页脚：键帽 + 标签（搜索框聚焦时换成编辑态的那组）。
+fn help_footer_hints(search_focused: bool) -> Vec<(String, String)> {
+    use super::observability::tr;
+    let hints: &[(&str, &str)] = if search_focused {
+        &[
+            ("↑↓", tr("scroll", "滚动")),
+            ("ctrl+u", tr("clear", "清空")),
+            ("esc", tr("back", "后退")),
+        ]
+    } else {
+        &[
+            ("/", tr("filter", "筛选")),
+            ("j/k", tr("scroll", "滚动")),
+            ("pgup/pgdn", tr("page", "翻页")),
+            ("esc", tr("close", "关闭")),
+        ]
+    };
+    hints
+        .iter()
+        .map(|(key, label)| ((*key).to_owned(), (*label).to_owned()))
+        .collect()
 }
 
 /// 帮助浮层的弹窗与正文矩形：视图计算阶段与渲染阶段共用（STATE-04）。
@@ -1673,17 +1763,11 @@ fn render_help_overlay(
     }
 
     if let Some(footer) = stack.footer {
-        put_text(
+        super::render_key_hints(
             b,
-            footer.x,
-            footer.y,
-            footer.width,
-            if h.search_focused {
-                crate::i18n::texts().overlays.edit_footer
-            } else {
-                crate::i18n::texts().overlays.search_footer
-            },
-            Style::default().fg(p.overlay0).bg(p.panel_bg),
+            text_inset(footer),
+            &help_footer_hints(h.search_focused),
+            p,
         );
     }
     Some(OverlayRender {
@@ -1709,9 +1793,10 @@ fn render_confirm_close_overlay(
         stack.header.x,
         stack.header.y,
         stack.header.width,
-        &format!(" {}", c.title),
+        &format!(" ✕ {}", c.title),
+        // 危险语义放在标题（失败色 + ✕）与确认按钮上，边框保持中性。
         Style::default()
-            .fg(p.red)
+            .fg(cx.components.status_failed)
             .bg(p.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
@@ -1720,8 +1805,8 @@ fn render_confirm_close_overlay(
         stack.header.x,
         stack.header.y + 1,
         stack.header.width,
-        &format!(" {}", c.detail),
-        Style::default().fg(p.text).bg(p.panel_bg),
+        &format!("   {}", c.detail),
+        crate::ui::design::body(p).bg(p.panel_bg),
     );
     let rs = modal_button_row(
         stack.actions.unwrap_or_default(),
@@ -1835,17 +1920,20 @@ fn render_notification_history_overlay(
     let mut rows = Vec::new();
     let count = history.len();
     if count == 0 {
-        if !body.is_empty() {
-            let empty = text_inset(body);
-            put_text(
-                b,
-                empty.x,
-                empty.y,
-                empty.width,
-                t.empty,
-                base.fg(p.overlay0),
-            );
-        }
+        crate::ui::kit::empty_state::render_empty_state(
+            b,
+            body,
+            &crate::ui::kit::empty_state::EmptyState {
+                glyph: Some("○"),
+                title: t.empty,
+                body: Some(super::observability::tr(
+                    "Agent and system notices will collect here",
+                    "智能体与系统的通知会汇总在这里",
+                )),
+                action: None,
+            },
+            p,
+        );
     } else {
         let viewport = usize::from(body.height.max(1));
         let selected = o.selected.min(count.saturating_sub(1));
@@ -1868,22 +1956,14 @@ fn render_notification_history_overlay(
             );
             let is_selected = ix == selected;
             let is_hovered = !is_selected && o.hovered == Some(ix);
-            let row_bg = super::list_row_bg(p, cx.components, is_selected, is_hovered);
-            let base = base.bg(row_bg);
-            let row_style = if is_selected {
-                base.fg(panel_contrast_fg(p)).add_modifier(Modifier::BOLD)
-            } else {
-                base.fg(p.text)
-            };
+            // 三态同其它浮层（`list_row_style`）：选中 = 中性选中底 + 粗体 + 首列 ▌；
+            // 状态图标始终保持状态色，不随选中反色。
+            let row_style = super::list_row_style(p, cx.components, is_selected, is_hovered);
             b.set_style(rect, row_style);
-            let level_color = if is_selected {
-                row_style.fg.unwrap_or(p.text)
-            } else {
-                record
-                    .bucket
-                    .map(|bucket| crate::ui::design::status_color(bucket, p, cx.components))
-                    .unwrap_or_else(|| record.level.color(cx.components))
-            };
+            let level_color = record
+                .bucket
+                .map(|bucket| crate::ui::design::status_color(bucket, p, cx.components))
+                .unwrap_or_else(|| record.level.color(cx.components));
             put_text(
                 b,
                 rect.x,
@@ -1901,26 +1981,19 @@ fn render_notification_history_overlay(
                         ))
                         .unwrap_or_else(|| record.level.icon())
                 ),
-                if is_selected {
-                    row_style
-                } else {
-                    base.fg(level_color)
-                },
+                row_style.fg(level_color),
             );
             let time = relative_time_ago(record.received_at, cx.now);
             let time_width = display_width(&time).saturating_add(1);
-            let text_width = rect.width.saturating_sub(2 + time_width);
-            let title_style = if is_selected {
-                row_style
-            } else {
-                base.fg(p.subtext0)
-            };
+            // 图标与标题之间空一格。
+            let text_width = rect.width.saturating_sub(3 + time_width);
+            let title_style = row_style;
             match record.body.as_deref().filter(|body| !body.is_empty()) {
                 Some(body) => {
                     let combined = format!("{} · {}", record.title, body);
                     put_text(
                         b,
-                        rect.x.saturating_add(2),
+                        rect.x.saturating_add(3),
                         rect.y,
                         text_width,
                         &combined,
@@ -1930,7 +2003,7 @@ fn render_notification_history_overlay(
                 None => {
                     put_text(
                         b,
-                        rect.x.saturating_add(2),
+                        rect.x.saturating_add(3),
                         rect.y,
                         text_width,
                         &record.title,
@@ -1944,22 +2017,28 @@ fn render_notification_history_overlay(
                 rect.y,
                 &time,
                 if is_selected {
-                    row_style
+                    row_style.fg(p.subtext0)
                 } else {
-                    base.fg(p.overlay0)
+                    row_style.fg(p.overlay1)
                 },
             );
+            if is_selected {
+                crate::ui::kit::paint_selection_mark(b, rect.x, rect.y, p);
+            }
             rows.push((rect, ix));
         }
     }
     if let Some(footer) = stack.footer {
-        put_text(
+        use super::observability::tr;
+        super::render_key_hints(
             b,
-            footer.x,
-            footer.y,
-            footer.width,
-            t.footer,
-            base.fg(p.overlay0),
+            text_inset(footer),
+            &[
+                ("↑↓".to_owned(), tr("select", "选择").to_owned()),
+                ("enter".to_owned(), tr("jump", "跳转").to_owned()),
+                ("esc".to_owned(), tr("close", "关闭").to_owned()),
+            ],
+            p,
         );
     }
     Some(OverlayRender {
@@ -2081,20 +2160,87 @@ mod tests {
         let mut key_column_widths = Vec::new();
         let mut found_unset = false;
         for (_, line) in &lines {
-            let [key_span, _label_span] = line.spans.as_slice() else {
+            // 条目行 = 前导空格 + 键帽（或「未设置」）+ 补齐 + 说明；组标题与空行跳过。
+            let Some((_label, keys)) = line.spans.split_last() else {
                 continue;
             };
-            if key_span.content.trim() == unset {
+            if keys.len() < 2 {
+                continue;
+            }
+            if keys.iter().any(|span| span.content.trim() == unset) {
                 found_unset = true;
             }
-            key_column_widths.push(usize::from(display_width(&key_span.content)));
+            key_column_widths.push(
+                keys.iter()
+                    .map(|span| usize::from(display_width(&span.content)))
+                    .sum::<usize>(),
+            );
         }
         assert!(found_unset, "「未设置」这一行应该出现在帮助列表里");
         let first = key_column_widths[0];
+        // 超过键帽列上限的长行（导航组的方向键）说明紧跟在自己的键帽后，不参与对齐。
         assert!(
-            key_column_widths.iter().all(|width| *width == first),
+            key_column_widths
+                .iter()
+                .all(|width| *width == first || *width > HELP_KEY_COLUMN_MAX + 2),
             "键名列显示宽度必须整齐对齐，不因 CJK 键名多垫空格：{key_column_widths:?}"
         );
+        assert!(first <= HELP_KEY_COLUMN_MAX + 2);
+    }
+
+    /// 帮助里的前缀绑定写成实际的前缀键（不是「prefix+」），每个备选一个键帽；
+    /// 组标题用分区标题色。
+    #[test]
+    fn help_lines_spell_out_the_live_prefix_with_one_cap_per_binding() {
+        let config: crate::config::Config =
+            toml::from_str("[keys]\nprefix = \"ctrl+a\"\nnew_tab = [\"prefix+c\", \"ctrl+t\"]\n")
+                .expect("config parses");
+        let keybinds = config
+            .live_keybinds_with_diagnostics()
+            .map(|(keybinds, _)| keybinds)
+            .expect("live keybinds");
+        let palette = Palette::catppuccin();
+        let lines = help_lines(&keybinds, "", &palette);
+        let texts = lines
+            .iter()
+            .map(|(_, line)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            texts.iter().all(|text| !text.contains("prefix+")),
+            "{texts:#?}"
+        );
+        let new_tab = crate::i18n::texts().keybinds.new_tab;
+        let (_, line) = lines
+            .iter()
+            .find(|(_, line)| {
+                line.spans
+                    .last()
+                    .is_some_and(|span| span.content.as_ref() == new_tab)
+            })
+            .expect("new tab row");
+        let caps = line
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == crate::ui::design::key_cap(&palette).bg)
+            .map(|span| span.content.trim().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(caps, ["ctrl+a c", "ctrl+t"]);
+        assert!(line.spans.iter().any(
+            |span| span.content == "/" && span.style.fg == crate::ui::design::meta(&palette).fg
+        ));
+        let header = &lines[0].1.spans[0];
+        assert_eq!(header.style.fg, crate::ui::design::section(&palette).fg);
+        // 按实际前缀过滤。
+        let filtered = help_lines(&keybinds, "ctrl+a c", &palette);
+        assert!(filtered.iter().any(|(_, line)| line
+            .spans
+            .last()
+            .is_some_and(|span| span.content == new_tab)));
     }
 
     #[test]

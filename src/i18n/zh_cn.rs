@@ -206,12 +206,7 @@ pub const TEXTS: Texts = Texts {
         filter_idle: "空闲",
         filter_done: "已完成",
         search_panes_hint: " / 搜索窗格",
-        navigator_search_footer: " 搜索类型 · 移动 ↑↓/ctrl+n/p · 打开 enter · 后退 esc",
-        navigator_footer:
-            " 移动 j/k · 展开 space · 筛选 a/b/w/i/d · 搜索 / · 打开 enter · 关闭 esc",
         help_filter_hint: " / 按 / 筛选命令或快捷键",
-        edit_footer: " 编辑 ←→/home/end · 删除 ^u/^k · 粘贴 ^y · 滚动 ↑↓ · 后退 esc",
-        search_footer: " 搜索 / · 滚动 j/k/↑↓/pgup/pgdn · 关闭 esc/enter",
         no_matching_keybinds: " 没有匹配的快捷键",
         link_hints_no_links: "可见区域没有链接",
     },
@@ -471,7 +466,6 @@ pub const TEXTS: Texts = Texts {
     history: HistoryTexts {
         title: "通知历史",
         empty: "暂无通知",
-        footer: " ↑/↓ 选择  ↵ 跳转  esc 关闭 ",
         just_now: "刚刚",
         minutes_ago_fmt: "{n} 分钟前",
         hours_ago_fmt: "{n} 小时前",

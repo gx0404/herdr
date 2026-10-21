@@ -45,13 +45,8 @@ impl ContextMenuEnv {
                     if spec_kind != kind {
                         return None;
                     }
-                    spec.shortcut(&keybinds.keybinds).map(|label| {
-                        let label = label
-                            .strip_prefix("prefix+")
-                            .map(|key| format!("{} {key}", keybinds.primary_prefix_label()))
-                            .unwrap_or(label);
-                        (action, label)
-                    })
+                    // 与命令面板、帮助同一份按键序列（前缀展开为实际前缀键）。
+                    spec.shortcut(keybinds).map(|label| (action, label))
                 })
                 .collect(),
             active_machine: false,

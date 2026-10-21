@@ -778,13 +778,13 @@ fn catalog_main_menu_draws_submenu_arrows_badges_and_the_search_shortcut() {
         .iter()
         .any(|cell| cell == "●"));
     let search = menu_row_with(&state, area, t.command_search);
-    let shortcut = state
-        .config
-        .keybinds
-        .keybinds
-        .command_search
-        .label()
-        .expect("默认键位");
+    // 快捷键写成实际按键序列（前缀展开为实际前缀键）。
+    let shortcut = crate::client::shell::chrome::key_sequence(
+        &state.config.keybinds,
+        &state.config.keybinds.keybinds.command_search,
+    )
+    .expect("默认键位");
+    assert!(!shortcut.contains("prefix+"), "{shortcut}");
     assert!(find_cells(&row_cells(&state, area, search), &shortcut).is_some());
     let glyphs = state.config.border_glyphs;
     assert_eq!(
@@ -1863,4 +1863,122 @@ fn monitor_menu_entry_names_the_monitor_tabs() {
             );
         }
     }
+}
+
+/// 一条前缀自定义命令（快照里的命令清单由 server 给出，测试直接塞进键位）。
+fn push_custom_command(state: &mut ClientShellState) {
+    state
+        .config
+        .keybinds
+        .keybinds
+        .custom_commands
+        .push(crate::config::CustomCommandKeybind {
+            bindings: crate::config::ActionKeybinds::prefix("g"),
+            label: "prefix+g".into(),
+            command: "echo hi".into(),
+            action: crate::config::CustomCommandAction::Shell,
+            description: Some("say hi from a custom command".into()),
+            width: None,
+            height: None,
+        });
+}
+
+/// 命令面板里自定义命令的键帽走 `chrome::key_sequence`：前缀展开为实际前缀键、
+/// 小写写法，不再显示配置原文「prefix+g」。
+#[test]
+fn custom_command_shortcuts_spell_out_the_live_prefix() {
+    let config: Config = toml::from_str("[keys]\nprefix = \"ctrl+a\"\n").expect("config");
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    push_custom_command(&mut state);
+    state.open_command_search();
+    let item = palette_overlay(&state)
+        .items
+        .iter()
+        .find(|item| {
+            matches!(
+                item.action,
+                ClientPaletteAction::Run(ActionId::CustomCommand, _)
+            )
+        })
+        .expect("自定义命令条目");
+    assert_eq!(item.subtitle, "ctrl+a g");
+}
+
+/// 通知历史：选中行 = 中性选中底 + 首列 ▌，悬浮行只换底色、不画 ▌；状态图标在
+/// 选中行上仍是状态色，不随选中反色。
+#[test]
+fn notification_history_marks_only_the_selected_row() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    for title in ["first", "second", "third"] {
+        state.record_notification(
+            crate::client::shell::feedback::ClientToastLevel::Error,
+            title,
+            None,
+            None,
+        );
+    }
+    state.open_notification_history();
+    if let Some(ClientShellOverlay::NotificationHistory(history)) = state.overlay.as_mut() {
+        history.selected = 1;
+        history.hovered = Some(2);
+    }
+    state.compose(106, 30).expect("history");
+    let buffer = state.compose_buffer.as_ref().expect("retained buffer");
+    let rows = state.hits.notification_history_rows.clone();
+    assert_eq!(rows.len(), 3);
+    let palette = &state.config.palette;
+    let components = &state.config.components;
+    for (rect, index) in &rows {
+        let first = &buffer[(rect.x, rect.y)];
+        let icon = &buffer[(rect.x + 1, rect.y)];
+        let body = &buffer[(rect.x + 5, rect.y)];
+        match index {
+            1 => {
+                assert_eq!(first.symbol(), "▌", "选中行首列画 ▌");
+                assert_eq!(first.fg, palette.accent);
+                assert_eq!(body.bg, palette.selection_row_bg());
+                assert!(body.modifier.contains(Modifier::BOLD));
+                assert_eq!(icon.fg, components.status_failed, "图标不随选中反色");
+            }
+            2 => {
+                assert_ne!(first.symbol(), "▌", "悬浮行不画 ▌");
+                assert_eq!(body.bg, components.hover_bg);
+            }
+            _ => {
+                assert_ne!(first.symbol(), "▌");
+                assert_eq!(body.bg, palette.panel_bg);
+            }
+        }
+    }
+}
+
+/// 空状态区分「没有数据」（通知历史为空）与「过滤无匹配」（命令搜索）。
+#[test]
+fn empty_states_tell_no_data_from_no_match() {
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_notification_history();
+    let text = compact_text(&state.compose(106, 30).expect("empty history"));
+    assert!(
+        text.contains(&compact(crate::i18n::texts().history.empty)),
+        "{text}"
+    );
+    assert!(text.contains(&compact("Agent and system notices will collect here")));
+
+    state.overlay = None;
+    state.open_command_search();
+    state.handle_input_bytes(b"zzqqxxjj");
+    let text = compact_text(&state.compose(106, 30).expect("no match"));
+    assert!(
+        text.contains(&compact(crate::i18n::texts().global_menu.no_matches)),
+        "{text}"
+    );
+    assert!(text.contains(&compact("Try another word")), "{text}");
+    assert!(!text.contains(&compact("Nothing here yet")));
 }

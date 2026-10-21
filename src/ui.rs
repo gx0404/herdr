@@ -17,9 +17,7 @@ mod widgets;
 
 pub(crate) use self::borders::BorderGlyphs;
 
-pub(crate) use self::onboarding::{
-    onboarding_welcome_continue_rect, ONBOARDING_HELP_LABEL, ONBOARDING_TITLE,
-};
+pub(crate) use self::onboarding::{onboarding_welcome_continue_rect, ONBOARDING_TITLE};
 // 工作台画廊的模拟窗格按 server 同一口径画边框标题。
 #[cfg(all(test, unix))]
 pub(crate) use self::panes::popup_pane_rects;

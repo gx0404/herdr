@@ -1645,7 +1645,25 @@ fn overlay_text_keeps_a_one_column_inset_from_the_border() {
         let screen = frame_rows(&state.compose(cols, rows).expect("command search"));
         let t = &crate::i18n::texts().global_menu;
         assert_left_inset(&screen, t.command_search, &format!("{case} 命令搜索标题"));
-        assert_left_inset(&screen, t.no_matches, &format!("{case} 命令搜索空态"));
+        // 空态改用居中的 kit::empty_state（区分「过滤无匹配」），不再贴左对齐。
+        let (empty_y, empty_x) = find_text(&screen, t.no_matches.trim()).expect("命令搜索空态");
+        let row = screen[empty_y].chars().collect::<Vec<_>>();
+        let left = row[..empty_x]
+            .iter()
+            .rposition(|ch| *ch == '│')
+            .expect("左边框");
+        let right = empty_x
+            + row[empty_x..]
+                .iter()
+                .position(|ch| *ch == '│')
+                .expect("右边框");
+        let width = crate::ui::display_width(t.no_matches.trim());
+        let (before, after) = (empty_x - left - 1, right - empty_x - width);
+        assert!(
+            before.abs_diff(after) <= 2,
+            "{case}: 命令搜索空态居中：{:?}",
+            screen[empty_y]
+        );
         let (y, _) = find_text(&screen, "/ zzqqxxjj").expect("搜索栏");
         let chars = screen[y].chars().collect::<Vec<_>>();
         let border = chars
@@ -1677,7 +1695,24 @@ fn overlay_text_keeps_a_one_column_inset_from_the_border() {
         let screen = frame_rows(&state.compose(cols, rows).expect("history"));
         let history = &crate::i18n::texts().history;
         assert_left_inset(&screen, history.title, &format!("{case} 通知历史标题"));
-        assert_left_inset(&screen, history.empty, &format!("{case} 通知历史空态"));
+        // 空态改用居中的 kit::empty_state，不再贴左对齐。
+        let (empty_y, empty_x) = find_text(&screen, history.empty).expect("通知历史空态");
+        let row = screen[empty_y].chars().collect::<Vec<_>>();
+        let left = row[..empty_x]
+            .iter()
+            .rposition(|ch| *ch == '│')
+            .expect("左边框");
+        let right = empty_x
+            + row[empty_x..]
+                .iter()
+                .position(|ch| *ch == '│')
+                .expect("右边框");
+        let width = crate::ui::display_width(history.empty);
+        assert!(
+            (empty_x - left - 1).abs_diff(right - empty_x - width) <= 2,
+            "{case}: 通知历史空态居中：{:?}",
+            screen[empty_y]
+        );
     }
 }
 

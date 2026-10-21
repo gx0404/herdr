@@ -231,7 +231,6 @@ pub struct GlobalMenuTexts {
 pub struct HistoryTexts {
     pub title: &'static str,
     pub empty: &'static str,
-    pub footer: &'static str,
     pub just_now: &'static str,
     pub minutes_ago_fmt: &'static str, // args: n
     pub hours_ago_fmt: &'static str,   // args: n
@@ -329,11 +328,7 @@ pub struct OverlayTexts {
     pub filter_idle: &'static str,
     pub filter_done: &'static str,
     pub search_panes_hint: &'static str,
-    pub navigator_search_footer: &'static str,
-    pub navigator_footer: &'static str,
     pub help_filter_hint: &'static str,
-    pub edit_footer: &'static str,
-    pub search_footer: &'static str,
     pub no_matching_keybinds: &'static str,
     pub link_hints_no_links: &'static str,
 }

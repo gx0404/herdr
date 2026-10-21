@@ -2279,3 +2279,60 @@ fn kitty_ctrl_bracket_cancels_a_blocked_foreign_preview() {
     assert_ne!(state.mode, ClientShellMode::Navigate);
     assert!(state.navigate_workspace_id.is_none());
 }
+
+/// 导航器：选中行用中性选中底 + 首列 ▌，悬浮行只换底色、不画 ▌（指针悬浮不改键盘
+/// 选择）；状态字形保持状态色；过滤无匹配时是双语空状态。
+#[test]
+fn navigator_marks_only_the_selected_row_and_keeps_hover_distinct() {
+    let mut state = navigator_state_with_panes(&["web server", "database", "logs"]);
+    state.open_navigator_overlay();
+    state.compose(106, 30).expect("navigator");
+    let hovered = state
+        .hits
+        .navigator_rows
+        .iter()
+        .rev()
+        .find(|(_, target)| matches!(target, ClientNavigatorTarget::Pane { .. }))
+        .map(|(_, target)| target.clone())
+        .expect("pane row");
+    if let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() {
+        navigator.hovered = Some(hovered.clone());
+    }
+    state.compose(106, 30).expect("navigator with hover");
+    let buffer = state.compose_buffer.as_ref().expect("retained buffer");
+    let palette = &state.config.palette;
+    let components = &state.config.components;
+    let marked = state
+        .hits
+        .navigator_rows
+        .iter()
+        .filter(|(rect, _)| buffer[(rect.x, rect.y)].symbol() == "▌")
+        .collect::<Vec<_>>();
+    assert_eq!(marked.len(), 1, "只有选中行画 ▌");
+    let (rect, target) = marked[0];
+    assert!(matches!(target, ClientNavigatorTarget::Pane { pane_id, .. } if pane_id == "pane_1"));
+    assert_eq!(buffer[(rect.x, rect.y)].fg, palette.accent);
+    let selected_bg = buffer[(rect.right() - 2, rect.y)].bg;
+    assert_eq!(
+        selected_bg,
+        palette.selection_row_bg(),
+        "中性选中底，不是 accent 反色"
+    );
+    let (hover_rect, _) = state
+        .hits
+        .navigator_rows
+        .iter()
+        .find(|(_, target)| *target == hovered)
+        .expect("hovered row");
+    assert_ne!(buffer[(hover_rect.x, hover_rect.y)].symbol(), "▌");
+    assert_eq!(
+        buffer[(hover_rect.right() - 2, hover_rect.y)].bg,
+        components.hover_bg
+    );
+
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::En);
+    let rows = navigator_rows_for(&mut state, "zzzz-no-such-pane");
+    assert!(rows.is_empty());
+    let text = frame_rows(&state.compose(106, 30).expect("empty navigator")).join("\n");
+    assert!(text.contains("No matching agents or terminals"), "{text}");
+}
