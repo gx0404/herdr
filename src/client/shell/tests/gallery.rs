@@ -2071,6 +2071,8 @@ fn shoot_agent_page(
         state.select_agent_activity_node(node.into(), &mut ClientShellInput::default());
     }
     answer_agent_page(&mut state, &nodes, scene.answers.saturating_sub(1));
+    // 先合成一帧：转写在视图计算阶段同步，之后的按键（如 Enter 全部展开）才有区块可切。
+    let _ = state.compose(cols, rows);
     (scene.prepare)(&mut state);
     // 两次合成：第一次建列表显示行并把选中项滚进视野。
     let _ = state.compose(cols, rows);
@@ -2126,7 +2128,31 @@ fn ui_gallery_agent_page() {
                 .collect(),
         );
     };
+    let transcript: Prepare = |state| {
+        state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        ))]);
+    };
+    let expanded: Prepare = |state| {
+        state.handle_raw_events(
+            [KeyCode::Tab, KeyCode::Enter]
+                .into_iter()
+                .map(|code| {
+                    RawInputEvent::Key(crate::input::TerminalKey::new(code, KeyModifiers::NONE))
+                })
+                .collect(),
+        );
+    };
     let mut scenes = Vec::new();
+    // 窄屏单栏：焦点切到转写，看转写在窄宽度下的折行与「+N 行」。
+    for size in [(80, 24), (60, 20)] {
+        scenes.push((scene("transcript", Some("hume"), transcript), size));
+    }
+    // 转写全部展开：工具输出的边线对齐与区块间距。
+    for size in [(160, 45), (80, 24)] {
+        scenes.push((scene("expanded", Some("hume"), expanded), size));
+    }
     for size in [(200, 50), (160, 45), (120, 40), (80, 24), (60, 20)] {
         scenes.push((scene("tree", Some("hume"), none), size));
     }

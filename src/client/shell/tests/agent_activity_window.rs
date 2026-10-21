@@ -1265,13 +1265,27 @@ fn content_scroll_bounds_are_computed_before_rendering() {
         .agent_activity_scroll_metrics
         .expect("滚动指标")
         .viewport_rows;
-    assert_eq!(max, 40 - text_rows);
+    // 按转写模式解析：40 行正文并成一个助手正文块，前面多一行小标题。
+    assert_eq!(max, overlay(&state).transcript.rows().len() - text_rows);
 
     select_with_content(&mut state, "a.1", &"x".repeat(400));
     state.compose(120, 40).expect("frame");
     let width = usize::from(state.hits.agent_activity_content.width - 3);
-    let rows = overlay(&state).transcript.rows().len();
-    assert_eq!(rows, 400usize.div_ceil(width), "按正文宽度折行");
+    let rows = overlay(&state).transcript.rows();
+    // 1 行小标题 + 正文（缩进两格）按剩余宽度折行；每行都不超出正文区。
+    assert_eq!(
+        rows.len(),
+        1 + 400usize.div_ceil(width - 2),
+        "按正文宽度折行"
+    );
+    for row in rows {
+        let used = row
+            .segments
+            .iter()
+            .map(|segment| usize::from(crate::ui::display_width_u16(&segment.text)))
+            .sum::<usize>();
+        assert!(used <= width, "折行不超宽: {used} > {width}");
+    }
 }
 
 /// 未跟随时属主的活动摘要变了：标题旁提示「有更新」，r 刷新后消失。
@@ -2266,4 +2280,164 @@ fn the_page_has_no_floating_window_key() {
         scroll: 0,
     });
     assert!(super::super::floating_pages::window_key(&help).is_some());
+}
+
+// ---- 转写排版接入（D1）：工具标题点击、Enter 全部展开 / 收起、概要计数 ----
+
+/// 两次工具调用、中间一段助手正文的 Codex 风格转写。
+const TOOL_TRANSCRIPT: &str = "user: list and read
+[exec_command] ls
+    a.txt
+    b.txt
+    c.txt
+listing done
+[exec_command] cat a.txt
+    hello
+";
+
+fn transcript_rows(state: &ClientShellState) -> usize {
+    overlay(state).transcript.rows().len()
+}
+
+/// 点转写里的工具标题行切换该工具输出；焦点在转写时 Enter 全部展开，再按全部收起。
+#[test]
+fn tool_headers_toggle_on_click_and_enter_toggles_all() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    select_with_content(&mut state, "a", TOOL_TRANSCRIPT);
+    state.compose(160, 45).expect("frame");
+    let collapsed = transcript_rows(&state);
+    let toggles = state.hits.agent_activity_toggles.clone();
+    assert_eq!(toggles.len(), 2, "两个工具标题可点: {toggles:?}");
+    let text = rows_text(&state, state.hits.agent_activity_content).join("\n");
+    assert!(!text.contains("b.txt"), "工具输出默认收起:\n{text}");
+
+    let (rect, _) = toggles[0];
+    state.handle_raw_events(vec![mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        rect.x + 2,
+        rect.y,
+    )]);
+    assert_eq!(
+        overlay(&state).focus,
+        AgentActivityFocus::Content,
+        "点击把焦点交给转写"
+    );
+    state.compose(160, 45).expect("frame");
+    let text = rows_text(&state, state.hits.agent_activity_content).join("\n");
+    assert!(text.contains("b.txt"), "点标题展开该工具的输出:\n{text}");
+    assert!(!text.contains("hello"), "另一个工具仍收起:\n{text}");
+    let one_open = transcript_rows(&state);
+    assert!(one_open > collapsed);
+    let (rect, _) = state.hits.agent_activity_toggles[0];
+    state.handle_raw_events(vec![mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        rect.x + 2,
+        rect.y,
+    )]);
+    state.compose(160, 45).expect("frame");
+    assert_eq!(transcript_rows(&state), collapsed, "再点收起");
+
+    // Enter：有收起的就全部展开，否则全部收起；不重读内容。
+    let outcome = state.handle_raw_events(vec![key(KeyCode::Enter)]);
+    assert!(reads(&outcome).is_empty(), "转写里的 Enter 不重读");
+    state.compose(160, 45).expect("frame");
+    let text = rows_text(&state, state.hits.agent_activity_content).join("\n");
+    assert!(
+        text.contains("b.txt") && text.contains("hello"),
+        "全部展开:\n{text}"
+    );
+    assert!(transcript_rows(&state) > one_open);
+    state.handle_raw_events(vec![key(KeyCode::Enter)]);
+    state.compose(160, 45).expect("frame");
+    assert_eq!(transcript_rows(&state), collapsed, "再按全部收起");
+}
+
+/// 时间线概要的「工具调用」随转写变化：跟随续读追加一次工具调用后计数加一；内容
+/// 被截断时写 `≥N`。
+#[test]
+fn summary_tool_count_follows_the_transcript() {
+    use super::super::chrome::agent_page::page_layout;
+    let summary_text = |state: &ClientShellState| {
+        let area = Rect::new(0, 0, 160, 45);
+        let layout =
+            page_layout(area, state.overlay_bounds(160, 45), overlay(state)).expect("layout");
+        assert!(!layout.summary.is_empty(), "160 列显示概要");
+        rows_text(state, layout.summary).join("\n")
+    };
+    let tools_row = |text: &str| {
+        text.lines()
+            .find(|line| has(line, texts().summary_tools))
+            .map(|line| line.chars().filter(|ch| *ch != ' ').collect::<String>())
+            .unwrap_or_default()
+    };
+    let mut state = state();
+    open_with_tree(&mut state);
+    press(&mut state, "3");
+    select_with_content(&mut state, "a", TOOL_TRANSCRIPT);
+    state.compose(160, 45).expect("frame");
+    let compact_label = texts()
+        .summary_tools
+        .chars()
+        .filter(|ch| *ch != ' ')
+        .collect::<String>();
+    assert_eq!(
+        tools_row(&summary_text(&state)),
+        format!("{compact_label}2")
+    );
+
+    // 跟随：树先回来，内容按游标续读并追加第三次工具调用。
+    let mut outcome = ClientShellInput::default();
+    state.tick_agent_activity(Instant::now() + FOLLOW_INTERVAL * 2, &mut outcome);
+    let (id, _) = single_read(&outcome);
+    let (_, next) = respond(&mut state, &id, tree_result(sample_nodes()));
+    let (id, params) = single_read(&next);
+    assert_eq!(params.cursor.as_deref(), Some("end"));
+    respond(
+        &mut state,
+        &id,
+        content_result("a", "[exec_command] pwd\n    /src\n", true, Some("end2")),
+    );
+    state.compose(160, 45).expect("frame");
+    let text = summary_text(&state);
+    assert_eq!(tools_row(&text), format!("{compact_label}3"), "{text}");
+    assert!(text.contains("/src"), "最近输出取最后的工具输出:\n{text}");
+
+    // 截断：头部丢过行时计数写 ≥N。
+    overlay_mut(&mut state)
+        .content
+        .as_mut()
+        .expect("内容")
+        .truncated = true;
+    state.compose(160, 45).expect("frame");
+    assert_eq!(
+        tools_row(&summary_text(&state)),
+        format!("{compact_label}≥3")
+    );
+}
+
+/// 窄屏单栏：只显示列表时转写也在视图计算阶段同步，Tab 切到转写后 Enter 立即
+/// 全部展开（不需要先画一帧转写）。
+#[test]
+fn narrow_page_syncs_the_transcript_before_it_is_shown() {
+    let mut state = state();
+    open_with_tree(&mut state);
+    select_with_content(&mut state, "a", TOOL_TRANSCRIPT);
+    state.compose(80, 24).expect("frame");
+    assert!(
+        state.hits.agent_activity_content.is_empty(),
+        "单栏只显示列表"
+    );
+    assert_eq!(
+        overlay(&state).transcript.stats().tool_calls,
+        2,
+        "转写已同步"
+    );
+    state.handle_raw_events(vec![key(KeyCode::Tab), key(KeyCode::Enter)]);
+    state.compose(80, 24).expect("frame");
+    let text = rows_text(&state, state.hits.agent_activity_content).join("\n");
+    assert!(
+        text.contains("b.txt") && text.contains("hello"),
+        "全部展开:\n{text}"
+    );
 }
