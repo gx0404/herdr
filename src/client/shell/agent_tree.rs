@@ -644,9 +644,9 @@ fn render_tree_row(
                 content.y,
                 content.width,
                 label,
-                Style::default()
-                    .fg(palette.overlay0)
-                    .add_modifier(Modifier::DIM),
+                // 「更多 / 已完成活动」是可点的操作文字：元信息色，读得清（stale 行在下面
+                // 整行置灰）。
+                crate::ui::design::meta(palette),
             );
             let node_id = if matches!(node.kind, AgentTreeKind::ActivityDone { .. }) {
                 ACTIVITY_DONE_HIT_ID.to_owned()

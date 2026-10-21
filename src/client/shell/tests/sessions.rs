@@ -1382,3 +1382,67 @@ fn external_agent_metadata_keeps_full_name_unreadable_marker_and_age_spacing() {
     );
     assert!(!text.contains("zcode8m"), "{text}");
 }
+
+/// 侧栏选中态（Graphite 精修）：键盘导航光标所在行 = 选中底色 + 粗体 + 首列 accent
+/// `▌`；指针悬浮行只换底色、不画竖条；光标在场时整个侧栏只有它一道竖条。
+#[test]
+fn sidebar_selection_has_the_bar_and_hover_only_changes_the_background() {
+    use crate::client::shell::feedback::ChromeHover;
+    let _lang = crate::i18n::lang_guard(crate::i18n::Lang::ZhCn);
+    let mut state = ready();
+    let palette = state.config.palette.clone();
+    let row_of = |state: &ClientShellState, id: &str| {
+        state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.workspace_id == id)
+            .map(|hit| hit.rect)
+            .expect("workspace row")
+    };
+    state.hover = Some(ChromeHover::WorkspaceRow {
+        endpoint_id: crate::client::endpoint::ClientEndpointId::Local,
+        workspace_id: "ws_2".into(),
+    });
+    state.compose(120, 40).expect("悬浮");
+    let hovered = row_of(&state, "ws_2");
+    let buffer = state.compose_buffer.as_ref().expect("buffer");
+    assert_eq!(
+        buffer[(hovered.x + 3, hovered.y)].bg,
+        palette.hover_row_bg(),
+        "悬浮换底"
+    );
+    assert_ne!(buffer[(hovered.x, hovered.y)].symbol(), "▌", "悬浮不画竖条");
+
+    state.handle_input_bytes(&[0x02]);
+    state.handle_input_bytes(b"w");
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    state.compose(120, 40).expect("导航");
+    let selected = state
+        .session_view
+        .selected
+        .clone()
+        .expect("进入会话导航后有键盘光标");
+    let rect = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| selected.matches(&hit.endpoint_id, &hit.workspace_id))
+        .map(|hit| hit.rect)
+        .expect("光标行");
+    let buffer = state.compose_buffer.as_ref().expect("buffer");
+    let mark = &buffer[(rect.x, rect.y)];
+    assert_eq!(mark.symbol(), "▌", "光标行首列是选中竖条");
+    assert_eq!(mark.fg, palette.accent);
+    assert_eq!(mark.bg, palette.selection_row_bg(), "竖条沿用选中底色");
+    let label = (rect.x..rect.right())
+        .map(|x| &buffer[(x, rect.y)])
+        .find(|cell| cell.symbol().chars().all(char::is_alphanumeric) && cell.symbol() != " ")
+        .expect("label cell");
+    assert!(label.modifier.contains(Modifier::BOLD), "光标行文字加粗");
+    let body = state.session_view.body;
+    let bars = (body.y..body.bottom())
+        .filter(|y| buffer[(body.x, *y)].symbol() == "▌")
+        .count();
+    assert_eq!(bars, 1, "光标在场时侧栏只有一道竖条");
+}

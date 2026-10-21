@@ -692,7 +692,8 @@ fn update_ready_menu_opens_client_owned_release_notes_and_dismisses_by_version()
     );
     assert_eq!(
         shell_buffer[(badge_x + 2, launcher.y)].fg,
-        state.config.palette.overlay0
+        state.config.palette.overlay1,
+        "菜单入口文字是元信息色（overlay0 读不清）"
     );
 
     state.sidebar_collapsed = true;

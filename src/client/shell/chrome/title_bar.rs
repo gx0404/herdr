@@ -1,6 +1,6 @@
 //! 标题栏（第 1 行，整宽，侧栏面底色）：左侧「≡ herdr」主菜单入口与聚焦终端的
-//! 面包屑（`[机器 /] 工作区 / 标签 · agent`），右侧「调整布局」标记、注意力计数、
-//! 命令搜索提示与 `⋯` 布局菜单。
+//! 面包屑（`[机器 ›] 工作区 › 标签 › ⠋ agent`，按 [`BreadcrumbModel`] 去重），右侧
+//! 「调整布局」标记、注意力计数、命令搜索提示与 `⋯` 布局菜单。
 //!
 //! 窄屏按固定顺序降级（[`layout`]）：先丢命令提示；面包屑先从左截断、再隐藏；计数
 //! 收成优先级最高的一个；再丢「调整布局」标记与计数；最后才把入口收成「≡」——入口
@@ -214,6 +214,8 @@ pub(in crate::client::shell) struct TitleBarView<'a> {
     pub(in crate::client::shell) arrange: Option<&'a str>,
     /// 命令搜索的键位（键帽文字）；`None` = 没配键位，只画放大镜。
     pub(in crate::client::shell) command: Option<String>,
+    /// 键帽后的说明（「命令」）；没配键位时不画。
+    pub(in crate::client::shell) command_label: &'a str,
     /// 命令提示是否存在（不接鼠标、也没配键位时整项不画）。
     pub(in crate::client::shell) show_command: bool,
     pub(in crate::client::shell) hovered: Option<TitleTarget>,
@@ -232,11 +234,16 @@ pub(in crate::client::shell) struct TitleBarHits {
 
 fn command_width(view: &TitleBarView<'_>) -> Option<u16> {
     view.show_command.then(|| {
-        display_width_u16(SEARCH_GLYPH).saturating_add(
-            view.command
-                .as_deref()
-                .map_or(0, |key| display_width_u16(key).saturating_add(2)),
-        )
+        display_width_u16(SEARCH_GLYPH).saturating_add(view.command.as_deref().map_or(0, |key| {
+            let label = display_width_u16(view.command_label);
+            crate::ui::kit::key_cap::cap_width(key)
+                .saturating_add(if label > 0 {
+                    label.saturating_add(1)
+                } else {
+                    0
+                })
+                .saturating_add(1)
+        }))
     })
 }
 
@@ -368,12 +375,22 @@ pub(in crate::client::shell) fn paint(
                     .bg(lit.unwrap_or(bg));
                 let mut spans = vec![Span::new(SEARCH_GLYPH, glyph)];
                 if let Some(key) = view.command.as_deref() {
-                    // 与状态栏同一档的栏内键帽；悬浮时字提亮。
+                    // 与状态栏同一档的栏内键帽 + 说明色标签；悬浮时字提亮。
                     let mut cap = super::bar_key_cap(palette, bg);
                     if lit.is_some() {
                         cap = cap.fg(palette.text);
                     }
-                    spans.push(Span::new(format!(" {key} "), cap));
+                    spans.push(Span::new(
+                        format!(" {} ", crate::ui::kit::key_cap::cap_text(key)),
+                        cap,
+                    ));
+                    if !view.command_label.is_empty() {
+                        spans.push(Span::new(
+                            format!(" {}", view.command_label),
+                            super::bar_hint_label(palette, bg).bg(lit.unwrap_or(bg)),
+                        ));
+                    }
+                    spans.push(Span::new(" ", Style::default().bg(lit.unwrap_or(bg))));
                 }
                 paint_spans(buffer, area.x, row.y, area.right(), &spans);
                 hits.command = area;
@@ -402,38 +419,123 @@ pub(in crate::client::shell) fn paint(
     hits
 }
 
-/// 面包屑的各段：较前的段 `subtext0`，最后一段 `text`，分隔符 `overlay0`；agent 段
-/// 带状态字形。
-pub(in crate::client::shell) struct Crumbs<'a> {
-    pub(in crate::client::shell) segments: Vec<&'a str>,
-    /// `(字形, 字形样式, 名称)`。
+/// 面包屑里一段的角色：决定样式与去重规则。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::client::shell) enum CrumbRole {
+    /// 机器（只在连着多个端点时出现）。
+    Endpoint,
+    Workspace,
+    Tab,
+}
+
+/// 组装面包屑的输入（按身份与角色给，不是拼好的字符串）。
+#[derive(Debug, Clone, Default)]
+pub(in crate::client::shell) struct BreadcrumbInput<'a> {
+    /// 机器名：只在多端点时给。
+    pub(in crate::client::shell) endpoint: Option<&'a str>,
+    pub(in crate::client::shell) workspace: Option<&'a str>,
+    pub(in crate::client::shell) tab: Option<TabCrumb<'a>>,
+    /// `(字形, 字形样式, 名称)`：聚焦窗格是 agent 时。
     pub(in crate::client::shell) agent: Option<(&'static str, Style, &'a str)>,
 }
 
+/// 标签段的输入。
+#[derive(Debug, Clone, Copy)]
+pub(in crate::client::shell) struct TabCrumb<'a> {
+    pub(in crate::client::shell) label: &'a str,
+    /// 用户起过名字（否则只是自动编号）。
+    pub(in crate::client::shell) custom: bool,
+    /// 同一工作区里有几个标签。
+    pub(in crate::client::shell) siblings: usize,
+}
+
+/// 去重后的面包屑（纯数据）：`[机器 ›] 工作区 › 标签 › ⠋ agent`。
+///
+/// - 单标签且标签只是自动编号、或与工作区同名时省略标签段——它不提供定位信息；
+///   多个标签时保留（编号也是定位）。
+/// - 相邻同名段压缩成一段；最后一段与 agent 同名时由 agent 段（带状态字形）代表。
+/// - 普通终端（不是 agent）不凭空加 agent 段。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(in crate::client::shell) struct BreadcrumbModel<'a> {
+    pub(in crate::client::shell) segments: Vec<(CrumbRole, &'a str)>,
+    pub(in crate::client::shell) agent: Option<(&'static str, Style, &'a str)>,
+}
+
+impl<'a> BreadcrumbModel<'a> {
+    pub(in crate::client::shell) fn build(input: &BreadcrumbInput<'a>) -> Self {
+        let mut segments: Vec<(CrumbRole, &'a str)> = Vec::with_capacity(3);
+        let mut push = |role, label: &'a str| {
+            let label = label.trim();
+            if label.is_empty() {
+                return;
+            }
+            match segments.last_mut() {
+                // 相邻同名压缩成一段；与工作区同名时保留工作区的角色（定位锚点的样式）。
+                Some((last_role, last)) if *last == label => {
+                    if role == CrumbRole::Workspace {
+                        *last_role = role;
+                    }
+                }
+                _ => segments.push((role, label)),
+            }
+        };
+        if let Some(endpoint) = input.endpoint {
+            push(CrumbRole::Endpoint, endpoint);
+        }
+        if let Some(workspace) = input.workspace {
+            push(CrumbRole::Workspace, workspace);
+        }
+        if let Some(tab) = input.tab {
+            let redundant = tab.siblings <= 1
+                && (!tab.custom
+                    || input
+                        .workspace
+                        .is_some_and(|ws| ws.trim() == tab.label.trim()));
+            if !redundant {
+                push(CrumbRole::Tab, tab.label);
+            }
+        }
+        let agent = input.agent.filter(|(_, _, name)| !name.trim().is_empty());
+        if let Some((_, _, name)) = agent {
+            // 只压掉与 agent 同名的标签段：工作区段是定位锚点，保留。
+            if segments
+                .last()
+                .is_some_and(|(role, last)| *role == CrumbRole::Tab && *last == name.trim())
+            {
+                segments.pop();
+            }
+        }
+        Self { segments, agent }
+    }
+}
+
+/// 面包屑的 spans（目标样式：`herdr  build › ⠋ codex`）：工作区粗体正文、机器与标签
+/// 说明色、分隔符 `›` 结构色；agent 段是状态字形 + 粗体名字。
 pub(in crate::client::shell) fn breadcrumb_spans<'a>(
-    crumbs: &Crumbs<'a>,
+    model: &BreadcrumbModel<'a>,
     palette: &Palette,
 ) -> Vec<Span<'a>> {
     let separator = Style::default().fg(palette.overlay0);
-    let earlier = crate::ui::design::muted(palette);
-    let last = crate::ui::design::body(palette);
-    let mut spans = Vec::with_capacity(crumbs.segments.len() * 2 + 4);
-    for (index, segment) in crumbs.segments.iter().enumerate() {
+    let mut spans = Vec::with_capacity(model.segments.len() * 2 + 4);
+    for (index, (role, segment)) in model.segments.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::new(" / ", separator));
+            spans.push(Span::new(" › ", separator));
         }
-        let is_last = index + 1 == crumbs.segments.len() && crumbs.agent.is_none();
-        spans.push(Span::new(*segment, if is_last { last } else { earlier }));
+        let style = match role {
+            CrumbRole::Workspace => crate::ui::design::title(palette),
+            CrumbRole::Endpoint | CrumbRole::Tab => crate::ui::design::muted(palette),
+        };
+        spans.push(Span::new(*segment, style));
     }
-    if let Some((glyph, glyph_style, name)) = crumbs.agent {
+    if let Some((glyph, glyph_style, name)) = model.agent {
         if !spans.is_empty() {
-            spans.push(Span::new(" · ", separator));
+            spans.push(Span::new(" › ", separator));
         }
         if !glyph.is_empty() {
             spans.push(Span::new(glyph, glyph_style));
-            spans.push(Span::new(" ", last));
+            spans.push(Span::new(" ", Style::default()));
         }
-        spans.push(Span::new(name, last));
+        spans.push(Span::new(name, crate::ui::design::title(palette)));
     }
     spans
 }
@@ -489,18 +591,18 @@ impl super::super::ClientShellState {
                     .iter()
                     .find(|agent| agent.pane_id == pane_id)
             });
-        let mut segments = Vec::with_capacity(3);
-        if self.endpoints.len() > 1 {
-            segments.push(self.active_endpoint_label());
-        }
-        if let Some(workspace) = workspace {
-            segments.push(workspace.label.as_str());
-        }
-        if let Some(tab) = tab {
-            segments.push(tab.label.as_str());
-        }
-        let crumbs = Crumbs {
-            segments,
+        let crumbs = BreadcrumbModel::build(&BreadcrumbInput {
+            endpoint: (self.endpoints.len() > 1).then(|| self.active_endpoint_label()),
+            workspace: workspace.map(|workspace| workspace.label.as_str()),
+            tab: tab.map(|tab| TabCrumb {
+                label: tab.label.as_str(),
+                custom: tab.custom_label,
+                siblings: snapshot
+                    .tabs
+                    .iter()
+                    .filter(|other| other.workspace_id == tab.workspace_id)
+                    .count(),
+            }),
             agent: agent.and_then(|agent| {
                 let name = agent
                     .display_agent
@@ -525,7 +627,7 @@ impl super::super::ClientShellState {
                 };
                 Some((glyph, style, name))
             }),
-        };
+        });
 
         let counts = self
             .agent_attention
@@ -562,6 +664,7 @@ impl super::super::ClientShellState {
             // 不接鼠标时提示点不了，没配键位也就没什么可提示的。
             show_command: self.config.mouse_capture || command.is_some(),
             command,
+            command_label: super::super::observability::tr("Commands", "命令"),
             hovered,
             open,
         };
@@ -690,34 +793,138 @@ mod tests {
         assert_eq!(chip_label(&chips[1]), " ⠹ 2 ");
     }
 
+    fn crumb_text(input: &BreadcrumbInput<'_>) -> String {
+        let palette = Palette::graphite_dark();
+        breadcrumb_spans(&BreadcrumbModel::build(input), &palette)
+            .iter()
+            .map(|span| span.text.as_ref())
+            .collect()
+    }
+
+    fn tab(label: &str, custom: bool, siblings: usize) -> Option<TabCrumb<'_>> {
+        Some(TabCrumb {
+            label,
+            custom,
+            siblings,
+        })
+    }
+
     #[test]
-    fn breadcrumb_spans_mark_the_last_segment_and_prefix_the_agent_glyph() {
+    fn breadcrumb_styles_follow_the_refined_reference() {
         let palette = Palette::graphite_dark();
         let glyph = Style::default().fg(palette.blue);
-        let crumbs = Crumbs {
-            segments: vec!["Local", "herdr", "1"],
-            agent: Some(("⠹", glyph, "claude")),
-        };
-        let spans = breadcrumb_spans(&crumbs, &palette);
+        let model = BreadcrumbModel::build(&BreadcrumbInput {
+            endpoint: None,
+            workspace: Some("herdr"),
+            tab: tab("build", true, 2),
+            agent: Some(("⠋", glyph, "codex")),
+        });
+        let spans = breadcrumb_spans(&model, &palette);
         let text: String = spans.iter().map(|span| span.text.as_ref()).collect();
-        assert_eq!(text, "Local / herdr / 1 · ⠹ claude");
-        assert_eq!(spans[0].style.fg, Some(palette.subtext0));
-        assert_eq!(spans[1].style.fg, Some(palette.overlay0));
+        assert_eq!(text, "herdr › build › ⠋ codex");
         assert_eq!(
-            spans.last().map(|span| span.style.fg),
-            Some(Some(palette.text))
+            spans[0].style,
+            crate::ui::design::title(&palette),
+            "工作区粗体正文"
         );
-        let plain = breadcrumb_spans(
-            &Crumbs {
-                segments: vec!["herdr", "build"],
+        assert_eq!(spans[1].style.fg, Some(palette.overlay0), "分隔符结构色");
+        assert_eq!(
+            spans[2].style,
+            crate::ui::design::muted(&palette),
+            "标签说明色"
+        );
+        assert_eq!(spans[4].style, glyph, "agent 带状态字形");
+        assert_eq!(
+            spans.last().map(|span| span.style),
+            Some(crate::ui::design::title(&palette)),
+            "agent 名字粗体"
+        );
+    }
+
+    #[test]
+    fn breadcrumb_model_drops_redundant_segments() {
+        let glyph = Style::default();
+        // 截屏里的「herdr / 1 · claude」：单标签的自动编号不提供定位。
+        assert_eq!(
+            crumb_text(&BreadcrumbInput {
+                workspace: Some("herdr"),
+                tab: tab("1", false, 1),
+                agent: Some(("◆", glyph, "claude")),
+                ..Default::default()
+            }),
+            "herdr › ◆ claude"
+        );
+        // 多标签时编号就是定位，保留。
+        assert_eq!(
+            crumb_text(&BreadcrumbInput {
+                workspace: Some("herdr"),
+                tab: tab("2", false, 3),
+                ..Default::default()
+            }),
+            "herdr › 2"
+        );
+        // 单标签与工作区同名：省略；多标签同名：相邻同名压缩。
+        for siblings in [1, 2] {
+            assert_eq!(
+                crumb_text(&BreadcrumbInput {
+                    workspace: Some("herdr"),
+                    tab: tab("herdr", true, siblings),
+                    ..Default::default()
+                }),
+                "herdr",
+                "{siblings} 个标签"
+            );
+        }
+        // 单标签但起过名字：保留。
+        assert_eq!(
+            crumb_text(&BreadcrumbInput {
+                workspace: Some("herdr"),
+                tab: tab("build", true, 1),
+                ..Default::default()
+            }),
+            "herdr › build"
+        );
+        // 标签与 agent 同名：agent 段代表它；工作区与 agent 同名则保留工作区锚点。
+        assert_eq!(
+            crumb_text(&BreadcrumbInput {
+                workspace: Some("web"),
+                tab: tab("claude", true, 2),
+                agent: Some(("●", glyph, "claude")),
+                ..Default::default()
+            }),
+            "web › ● claude"
+        );
+        assert_eq!(
+            crumb_text(&BreadcrumbInput {
+                workspace: Some("claude"),
+                tab: tab("1", false, 1),
+                agent: Some(("●", glyph, "claude")),
+                ..Default::default()
+            }),
+            "claude › ● claude"
+        );
+        // 多端点：机器段在最前；与工作区同名时压缩。
+        assert_eq!(
+            crumb_text(&BreadcrumbInput {
+                endpoint: Some("devbox"),
+                workspace: Some("herdr"),
+                tab: tab("build", true, 2),
                 agent: None,
-            },
-            &palette,
+            }),
+            "devbox › herdr › build"
         );
         assert_eq!(
-            plain.last().map(|span| span.style.fg),
-            Some(Some(palette.text))
+            crumb_text(&BreadcrumbInput {
+                endpoint: Some("herdr"),
+                workspace: Some("herdr"),
+                ..Default::default()
+            }),
+            "herdr"
         );
-        assert_eq!(plain[0].style.fg, Some(palette.subtext0));
+        // 普通终端不加 agent 段；什么都没有就是空。
+        assert_eq!(
+            BreadcrumbModel::build(&BreadcrumbInput::default()),
+            BreadcrumbModel::default()
+        );
     }
 }

@@ -1500,10 +1500,11 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
                 assert!(compact(&line)
                     .contains(&compact(crate::i18n::texts().agent_activity.kind_subagent)));
             } else if index == 2 {
+                // 「已完成活动」是可点的操作文字：元信息色，读得清。
                 let first = text.chars().next().expect("completion text").to_string();
                 assert_eq!(
                     text_cell(&state, rect, &first).fg,
-                    state.config.palette.overlay0
+                    state.config.palette.overlay1
                 );
             }
             state.handle_raw_events(vec![click_at(rect.x + 10, rect.y)]);
@@ -1543,7 +1544,8 @@ fn tree_agent_rows_show_the_activity_summary_collapsed_by_default() {
     assert_eq!(rect_rows(&state, toggle)[0], "▸5");
     assert_eq!(
         text_cell(&state, toggle, "5").fg,
-        state.config.palette.overlay0
+        state.config.palette.overlay1,
+        "已完成活动的可点计数是元信息色"
     );
 }
 
@@ -2052,15 +2054,20 @@ fn tree_multi_line_agent_rows_draw_continuation_guides() {
     state.compose(106, 30).expect("多行配置帧");
     let status = &crate::i18n::texts().status;
     for (pane, primary, secondary) in [
-        ("pane_1", "○one", status.idle),
+        // 聚焦的 agent 行首列画选中竖条 `▌`。
+        ("pane_1", "▌○one", status.idle),
         ("pane_2", "×two", status.blocked),
     ] {
         let lines = rect_rows(&state, classic_agent_rect(&state, pane));
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert_eq!(compact(&lines[0]), primary, "首行不重复状态文案");
         assert_eq!(compact(&lines[1]), compact(secondary));
+        // 首列的选中竖条占的是内边距列，不改缩进。
         assert_eq!(
-            lines[0].chars().take_while(|ch| ch.is_whitespace()).count(),
+            lines[0]
+                .chars()
+                .take_while(|ch| ch.is_whitespace() || *ch == '▌')
+                .count(),
             lines[1].chars().take_while(|ch| ch.is_whitespace()).count()
         );
     }
@@ -2077,7 +2084,11 @@ fn tree_multi_line_agent_rows_draw_continuation_guides() {
     let owner = classic_agent_rect(&state, "pane_0");
     let lines = rect_rows(&state, owner);
     assert!(
-        lines[0].trim_start().starts_with("◐ agent-0") && lines[0].contains("▾2"),
+        lines[0]
+            .trim_start_matches('▌')
+            .trim_start()
+            .starts_with("◐ agent-0")
+            && lines[0].contains("▾2"),
         "{lines:?}"
     );
     assert_eq!(compact(&lines[1]), compact(status.working));
@@ -2711,12 +2722,18 @@ fn one_row_agent_list_keeps_the_agent_name_visible() {
         let lines = rect_rows(&state, rect);
         if expected == 1 {
             let line = compact(&lines[0]);
+            let line = line.trim_start_matches('▌');
             assert!(
                 line.starts_with('○') && line.contains("one") && line.contains("client-shell"),
                 "{line}"
             );
         } else {
-            assert!(compact(&lines[0]).starts_with("○client-shell"), "{lines:?}");
+            assert!(
+                compact(&lines[0])
+                    .trim_start_matches('▌')
+                    .starts_with("○client-shell"),
+                "{lines:?}"
+            );
             assert_eq!(compact(&lines[1]), "one");
         }
     }
@@ -3524,7 +3541,11 @@ fn tree_rows_and_header_keep_a_one_column_inset_from_both_edges() {
         assert_eq!(buffer[(header.right() - 1, header.y)].symbol(), " ");
         let one = classic_agent_rect(&state, "pane_1");
         assert_eq!(one.width, state.session_view.body.width);
-        assert_eq!(buffer[(one.x, one.y)].symbol(), " ");
+        assert_eq!(
+            buffer[(one.x, one.y)].symbol(),
+            "▌",
+            "聚焦的 agent 行：首列（内边距列）画选中竖条"
+        );
         assert_eq!(buffer[(one.right() - 1, one.y)].symbol(), " ");
         assert!(rect_rows(&state, one)[0].contains("○ one"));
         let grouping = state

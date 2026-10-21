@@ -1680,11 +1680,9 @@ fn narrow_title_bar_drops_items_in_order_and_keeps_the_menu() {
         "宽屏：全部画出"
     );
     let rows = frame_rows(&state.compose(160, 32).expect("wide frame"));
-    assert!(
-        rows[0].contains("client-shell / 1 · "),
-        "面包屑：{}",
-        rows[0]
-    );
+    // 单标签的自动编号不提供定位，面包屑去重后是「工作区 › 状态字形 agent」。
+    assert!(rows[0].contains("client-shell › "), "面包屑：{}", rows[0]);
+    assert!(!rows[0].contains(" › 1 › "), "单标签编号省略：{}", rows[0]);
     assert!(rows[0].contains("claude"), "聚焦窗格是 agent：{}", rows[0]);
     // 逐列收窄，各项按降级顺序消失，且一旦消失不再回来。
     let mut seen_drop = Vec::new();
@@ -1817,7 +1815,12 @@ fn command_hint_spells_the_configured_keys_and_opens_command_search() {
         .skip(usize::from(hint.x))
         .take(usize::from(hint.width))
         .collect();
-    assert_eq!(text.trim(), "⌕  ctrl+b /", "{text:?}");
+    assert!(text.trim().starts_with("⌕  ctrl+b / "), "{text:?}");
+    let label = crate::client::shell::observability::tr("Commands", "命令");
+    assert!(
+        text.replace(' ', "").ends_with(&label.replace(' ', "")),
+        "键帽后跟说明：{text:?}"
+    );
     state.handle_raw_events(vec![mouse_event(
         MouseEventKind::Down(MouseButton::Left),
         hint.x + 1,

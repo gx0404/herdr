@@ -2166,6 +2166,28 @@ pub(in crate::client::shell) fn paint_sessions(
         .append(&mut hits.external_agents);
 }
 
+/// 「当前项」（聚焦的 agent / 终端、收起后容纳焦点的工作区 / 标签）的首列 `▌`。键盘
+/// 导航光标在场时只有光标行画竖条——同一时刻只有一个「你在这里」。悬浮从不画竖条，
+/// 只换底色（指针悬浮不改键盘选择）。先于行内容画，内容撞到首列时盖住它。
+fn current_mark(buffer: &mut Buffer, rect: Rect, frame: &SessionPaint<'_>) {
+    if frame.view.selected.is_none() && !rect.is_empty() {
+        crate::ui::kit::paint_selection_mark(buffer, rect.x, rect.y, &frame.config.palette);
+    }
+}
+
+/// 键盘导航光标所在行：选中底色、首列 `▌`（文字加粗由各行的标签样式负责）。
+fn selected_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    bg: ratatui::style::Color,
+    palette: &crate::app::state::Palette,
+) {
+    buffer.set_style(rect, Style::default().bg(bg));
+    if !rect.is_empty() {
+        crate::ui::kit::paint_selection_mark(buffer, rect.x, rect.y, palette);
+    }
+}
+
 fn hover_bg(frame: &SessionPaint<'_>, rect: Rect, buffer: &mut Buffer, hovered: bool) {
     if hovered {
         buffer.set_style(
@@ -2479,24 +2501,30 @@ fn paint_rail(buffer: &mut Buffer, frame: &SessionPaint<'_>, hits: &mut ShellHit
             .selected
             .as_ref()
             .is_some_and(|target| target.matches(&item.endpoint_id, &item.workspace_id));
+        let number = if display_width_u16(&item.number) > 2 {
+            "…"
+        } else {
+            item.number.as_str()
+        };
+        let pad = 2u16.saturating_sub(display_width_u16(number));
+        // 首列空着（一位编号）才画竖条，两位编号顶格时只靠底色与粗体。
+        let marked = Rect::new(rect.x, rect.y, u16::from(pad > 0), 1);
         if selected {
-            buffer.set_style(rect, Style::default().bg(palette.selection_row_bg()));
+            selected_row(buffer, rect, palette.selection_row_bg(), palette);
         } else if item.focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+            current_mark(buffer, marked, frame);
         } else {
             hover_bg(frame, rect, buffer, frame.hovered(&hit));
         }
-        let number_style = Style::default()
-            .fg(if item.focused {
-                palette.text
-            } else {
-                palette.overlay0
-            })
-            .add_modifier(if item.focused {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
+        // 编号：选中 / 当前项粗体正文，其余元信息色（overlay0 读不清，只留给结构线）。
+        let number_style = if selected || item.focused {
+            crate::ui::design::title(palette)
+        } else if item.stale {
+            Style::default().fg(palette.overlay0)
+        } else {
+            crate::ui::design::meta(palette)
+        };
         let glyph_bucket = if item.bucket == AgentBucket::None {
             AgentBucket::Idle
         } else {
@@ -2509,12 +2537,6 @@ fn paint_rail(buffer: &mut Buffer, frame: &SessionPaint<'_>, hits: &mut ShellHit
         } else {
             crate::ui::design::status_style(glyph_bucket, palette, &frame.config.components)
         };
-        let number = if display_width_u16(&item.number) > 2 {
-            "…"
-        } else {
-            item.number.as_str()
-        };
-        let pad = 2u16.saturating_sub(display_width_u16(number));
         paint_spans(
             buffer,
             rect.x.saturating_add(pad),
@@ -2838,8 +2860,9 @@ fn paint_row(
             } else {
                 palette.selection_row_bg()
             };
+            let first_line = Rect::new(rect.x, rect.y, rect.width, rect.height.min(1));
             if selected {
-                buffer.set_style(rect, Style::default().bg(selection_bg));
+                selected_row(buffer, rect, selection_bg, palette);
             } else if dragged {
                 buffer.set_style(rect, Style::default().bg(palette.surface1));
             } else if *holds_focus || *focused {
@@ -2850,6 +2873,10 @@ fn paint_row(
                         palette.active_row_bg
                     };
                 buffer.set_style(rect, Style::default().bg(background));
+                // 收起后焦点藏在这一行里：它就是当前项。展开时竖条落在聚焦的子行上。
+                if *holds_focus {
+                    current_mark(buffer, first_line, frame);
+                }
             } else {
                 hover_bg(frame, rect, buffer, hovered);
             }
@@ -2885,7 +2912,7 @@ fn paint_row(
                 rect.y,
                 &rollup_spans(*rollup, frame, row.stale),
             );
-            let label_style = if *focused || dragged {
+            let label_style = if *focused || dragged || selected {
                 crate::ui::design::title(palette)
             } else {
                 Style::default().fg(palette.subtext0)
@@ -2974,6 +3001,7 @@ fn paint_row(
             let target = SessionHit::Tab(row.endpoint_id.clone(), tab_id.clone());
             if *holds_focus {
                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+                current_mark(buffer, rect, frame);
             } else {
                 hover_bg(
                     frame,
@@ -3001,7 +3029,11 @@ fn paint_row(
                         label,
                         usize::from(right.saturating_sub(1).saturating_sub(text_x)),
                     ),
-                    crate::ui::design::body(palette),
+                    if *holds_focus {
+                        crate::ui::design::title(palette)
+                    } else {
+                        crate::ui::design::body(palette)
+                    },
                 )],
             );
             hits.sessions.push((Rect::new(x, rect.y, 1, 1), toggle));
@@ -3020,6 +3052,7 @@ fn paint_row(
             let hit = SessionHit::Terminal(row.endpoint_id.clone(), pane_id.clone());
             if *focused {
                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+                current_mark(buffer, rect, frame);
             } else {
                 hover_bg(frame, rect, buffer, frame.hovered(&hit));
             }
@@ -3038,7 +3071,7 @@ fn paint_row(
                     Span::new(
                         truncate_end(title, usize::from(budget)),
                         if *focused {
-                            Style::default().fg(palette.text)
+                            crate::ui::design::title(palette)
                         } else {
                             crate::ui::design::meta(palette)
                         },
@@ -3280,6 +3313,7 @@ fn paint_agent_row(
         if endpoint_id == &row.endpoint_id && pane_id == &agent.pane_id);
     if agent.focused {
         buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+        current_mark(buffer, Rect::new(rect.x, rect.y, rect.width, 1), frame);
     } else {
         hover_bg(frame, rect, buffer, hovered);
     }
@@ -3319,10 +3353,11 @@ fn paint_agent_row(
             let style = if frame.hovered(&hit) {
                 Style::default().fg(palette.text).bg(palette.hover_row_bg())
             } else {
+                // 已完成活动的计数可点：元信息色（overlay0 读不清，只留给结构线）。
                 Style::default().fg(if agent.activity_running {
                     frame.config.components.status_running
                 } else {
-                    palette.overlay0
+                    palette.overlay1
                 })
             };
             paint_spans(

@@ -66,7 +66,7 @@ pub(super) fn render_expanded(
             header.y,
             menu_width,
             label,
-            crate::ui::design::meta(&config.palette).fg(config.palette.overlay0),
+            crate::ui::design::meta(&config.palette),
         );
         if attention {
             put_text(

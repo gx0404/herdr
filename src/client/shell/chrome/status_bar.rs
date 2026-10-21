@@ -1,5 +1,5 @@
-//! 状态栏（最后一行，侧栏面底色）：左侧模式标签（终端模式低调，前缀 / 导航 / 复制 /
-//! 调整 / 调整布局用 accent 反色），中部上下文键位提示——或紧凑 / 最大化 / 锁定等
+//! 状态栏（最后一行，侧栏面底色）：左侧模式标签（终端模式是 `surface1` 底的粗体正文
+//! 芯片，前缀 / 导航 / 复制 / 调整 / 调整布局用 accent 反色），中部上下文键位提示——或紧凑 / 最大化 / 锁定等
 //! 说明、复制模式的搜索栏、端点错误——右侧是 `tab_bar_right`（主机、时间等）。
 //!
 //! 经典布局的模式条用同一个组件：只在非终端模式（或有错误 / 广播）时画，位置与
@@ -19,7 +19,7 @@ use crate::ui::kit::footer_hints::{render_footer_hints_styled, FooterHint, Foote
 /// 模式标签的语气。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::client::shell) enum Tone {
-    /// 终端模式：低调的灰标签。
+    /// 终端模式：中性芯片（`surface1` 底、粗体正文）。
     Subtle,
     /// 前缀 / 导航 / 复制 / 调整 / 调整布局：accent 反色。
     Accent,
@@ -97,17 +97,15 @@ const MIDDLE_MIN: u16 = 16;
 fn chip_style(tone: Tone, bg: Color, palette: &Palette, components: &ComponentStyles) -> Style {
     match tone {
         Tone::Subtle => {
-            let chip = if Palette::row_bg_is_distinct(bg, palette.surface0) {
-                palette.surface0
-            } else {
+            // 参考稿「 终端 」：比栏面亮一档的中性芯片上的粗体正文。surface1 与栏面撞色
+            // （16 色 / 自定义主题）时退到 surface0。
+            let chip = if Palette::row_bg_is_distinct(bg, palette.surface1) {
                 palette.surface1
+            } else {
+                palette.surface0
             };
             Style::default()
-                .fg(super::readable_on(
-                    palette,
-                    chip,
-                    &[palette.overlay1, palette.subtext0, palette.text],
-                ))
+                .fg(crate::ui::design::readable_text_on(palette, chip))
                 .bg(chip)
                 .add_modifier(Modifier::BOLD)
         }
@@ -729,6 +727,11 @@ mod tests {
             assert_eq!(cell.symbol(), "终");
             assert_eq!(cell.bg == components.mode_bar_accent, loud, "{tone:?}");
             assert_ne!(cell.bg, bg, "{tone:?}：标签有自己的底色");
+            assert!(cell.modifier.contains(Modifier::BOLD), "{tone:?}");
+            if !loud {
+                assert_eq!(cell.bg, palette.surface1, "终端芯片是中性的 surface1");
+                assert_eq!(cell.fg, palette.text, "终端芯片粗体正文");
+            }
         }
     }
 

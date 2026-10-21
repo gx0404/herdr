@@ -235,13 +235,11 @@ pub(in crate::client::shell) fn render_tab_strip(
                 chrome_hover,
                 Some(super::feedback::ChromeHover::Tab(id)) if id == &tab.tab_id
             );
-        // 会话式标签：活动标签 surface1 底加粗，悬浮换 hover 底，其余 subtext0 平铺在
-        // 标签条底色上（颜色只留给状态字形）。
+        // 会话式标签：活动标签与页面标签同一套中性样式（浅一档结构面 + 粗体正文，
+        // `kit::tabs::active_tab_style`），悬浮换 hover 底，其余 subtext0 平铺在标签条
+        // 底色上（颜色只留给状态字形）。
         let style = if active {
-            Style::default()
-                .fg(palette.text)
-                .bg(palette.surface1)
-                .add_modifier(Modifier::BOLD)
+            crate::ui::kit::tabs::active_tab_style(palette)
         } else if hovered {
             Style::default().fg(palette.text).bg(hover_bg)
         } else {
