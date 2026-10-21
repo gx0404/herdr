@@ -114,11 +114,37 @@ fn spawn_client_process_with_args_and_env(
     args: &[&str],
     extra_env: &[(&str, &str)],
 ) -> SpawnedHerdr {
+    spawn_client_process_sized(
+        config_home,
+        runtime_dir,
+        api_socket_path,
+        args,
+        extra_env,
+        80,
+        24,
+    )
+}
+
+/// 联邦客户端用例的宿主终端尺寸。停靠工作台窄于 100 列时把工作区面板收成 4 列
+/// 图标栏（只剩编号与状态字形，见 `RAIL_BELOW_COLS`），满 140 列又会自动展开
+/// Inspector；120 列保持展开的工作区文字树，用例才能按名称等待与点击工作区。
+const FEDERATED_CLIENT_COLS: u16 = 120;
+const FEDERATED_CLIENT_ROWS: u16 = 24;
+
+fn spawn_client_process_sized(
+    config_home: &PathBuf,
+    runtime_dir: &PathBuf,
+    api_socket_path: &PathBuf,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+    cols: u16,
+    rows: u16,
+) -> SpawnedHerdr {
     register_runtime_dir(runtime_dir);
     let pair = native_pty_system()
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -974,12 +1000,14 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
 
         // Exercise both auto-start and a subsequent attach to the healthy Local server.
         for args in [&[][..], &["client"][..]] {
-            let client = spawn_client_process_with_args_and_env(
+            let client = spawn_client_process_sized(
                 &config_home,
                 &runtime_dir,
                 &api_socket,
                 args,
                 &[("PATH", &path)],
+                FEDERATED_CLIENT_COLS,
+                FEDERATED_CLIENT_ROWS,
             );
             let output =
                 spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
@@ -1090,12 +1118,14 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut client = spawn_client_process_with_args_and_env(
+    let mut client = spawn_client_process_sized(
         &config_home,
         &runtime_dir,
         &api_socket,
         &["client"],
         &[("PATH", &path)],
+        FEDERATED_CLIENT_COLS,
+        FEDERATED_CLIENT_ROWS,
     );
     let output = spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
     let screen_text = || {
@@ -1104,7 +1134,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
             .unwrap_or_else(|p| p.into_inner())
             .bytes
             .clone();
-        terminal_screen::text(&bytes, 80, 24)
+        terminal_screen::text(&bytes, FEDERATED_CLIENT_COLS, FEDERATED_CLIENT_ROWS)
     };
     assert!(
         wait_until(REMOTE_READY_TIMEOUT, Duration::from_millis(20), || {
@@ -1544,12 +1574,14 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let client = spawn_client_process_with_args_and_env(
+    let client = spawn_client_process_sized(
         &config_home,
         &runtime_dir,
         &api_socket,
         &["client"],
         &[("PATH", &path)],
+        FEDERATED_CLIENT_COLS,
+        FEDERATED_CLIENT_ROWS,
     );
     let output = spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
     let screen_text = || {
@@ -1558,7 +1590,7 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
             .unwrap_or_else(|p| p.into_inner())
             .bytes
             .clone();
-        terminal_screen::text(&bytes, 80, 24)
+        terminal_screen::text(&bytes, FEDERATED_CLIENT_COLS, FEDERATED_CLIENT_ROWS)
     };
     assert!(
         wait_until(Duration::from_secs(12), Duration::from_millis(20), || {
@@ -1590,8 +1622,9 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
     // 落库后的投影刷新在下一个调度 tick 里下发。先等正面信号——改后的标题上屏，
     // 即修订号前进的新快照已到达客户端——再在稳定窗口里反复确认空闲画面没被
     // 「正在同步终端…」占位替换（否定式断言只在快照确已前进之后才有意义）。
-    // 80 列下外部条目标签按剩余宽度截短并以「…」收尾，只露出前 5 格（原标题
-    // 显示为「Refac…」），所以改后的标题换一个开头，让变化本身在画面上可见。
+    // 侧栏按剩余宽度截短外部条目标签并以「…」收尾，只断言标题开头 5 格（原标题
+    // 「Refactor the parser」取「Refac」），所以改后的标题换一个开头，让变化本身在
+    // 画面上可见。
     let original_label = "Refac";
     let changed_title = "Resumed parser refactor";
     let changed_label = "Resum";
