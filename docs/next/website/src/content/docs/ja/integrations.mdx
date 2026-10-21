@@ -153,7 +153,7 @@ herdr integration install codex
 
 Codex を `--no-daemon` で実行すると、フックは Herdr のローカル socket API を通じてセッション識別とターンの開始・終了状態を報告します。画面ルールは表示中のブロッカーや他のシグナルの不足を補います。共有 Codex daemon はフックを別のペインへ送る場合があるため、確実な報告には `--no-daemon` を使ってください。自動起動を無効にするだけでは既存の daemon は停止しません。
 
-Codex 0.163 以降では、Herdr はプログラム状態シグナル `ESC ] 7501 ; state=…:app=codex ST` も検出入力として収集します。`blocked` は入力待ち、`working` は作業中を示し、`idle`/`done`/`error` はアイドルの根拠になります。`state=clear` は保持中のシグナルを消去します。fork の 3 つのルールはすべて本文の `app=codex` を必須とし、旧版 Codex ではタイトルと画面ルールにフォールバックします。Windows のシステム ConPTY と Herdr 同梱の ConPTY 1.24 は、どちらもこのシグナルをそのまま転送します。
+Codex 0.163 以降では、Herdr はプログラム状態シグナル `ESC ] 7501 ; state=…:app=codex ST` も検出入力として収集します。`blocked` は入力待ち、`working` は作業中を示し、`idle`/`done`/`error` はアイドルの根拠になります。`state=clear` は保持中のシグナルを消去します。`app=codex` を含むシグナルだけが使われ、旧版 Codex ではタイトルと画面ルールにフォールバックします。Windows のシステム ConPTY と Herdr 同梱の ConPTY 1.24 は、どちらもこのシグナルをそのまま転送します。
 
 Codex インテグレーション v9 は `SubagentStart` と `SubagentStop` も購読します。これらのフックは、Codex のサブエージェントスレッドが開始または終了したことをローカルの Herdr ソケットに通知するだけで、エージェントの状態は報告しません。Herdr はアクティビティツリーを Codex 自身のセッションファイルから再構築します。Codex 0.163 ではフックが既定で有効です。Herdr は旧バージョンとの互換性のため `[features] hooks = true` を明示的に書き込みます。明示的に false を指定するとフックは無効になります。v10 からはアクティビティフックが Windows にもインストールされ、PowerShell フックが `herdr pane report-agent-activity` で送ります。アップグレード後に Codex インテグレーションを再インストールして追加してください。
 

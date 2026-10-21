@@ -153,7 +153,7 @@ herdr integration install codex
 
 Codex 以 `--no-daemon` 运行时，钩子通过 Herdr 的本地 socket API 上报会话身份以及回合开始、结束状态；屏幕规则继续兜底可见阻塞及其他信号的缺口。共享 Codex daemon 可能把钩子路由到错误窗格，因此可靠上报需要 `--no-daemon`；仅关闭 daemon 自动启动不会停止已运行的 daemon。
 
-从 Codex 0.163 起，Herdr 还会采集程序状态信号 `ESC ] 7501 ; state=…:app=codex ST` 作为检测输入：`blocked` 表示需要输入，`working` 表示工作中，`idle`/`done`/`error` 提供空闲证据。`state=clear` 清除保留的信号。三条 fork 规则都要求正文含 `app=codex`；旧版 Codex 回退到标题与屏幕规则。Windows 系统 ConPTY 与 Herdr 自带的 ConPTY 1.24 均原样透传此信号。
+从 Codex 0.163 起，Herdr 还会采集程序状态信号 `ESC ] 7501 ; state=…:app=codex ST` 作为检测输入：`blocked` 表示需要输入，`working` 表示工作中，`idle`/`done`/`error` 提供空闲证据。`state=clear` 清除保留的信号。只有带 `app=codex` 的信号才会被采用；旧版 Codex 回退到标题与屏幕规则。Windows 系统 ConPTY 与 Herdr 自带的 ConPTY 1.24 均原样透传此信号。
 
 Codex 集成 v9 还会订阅 `SubagentStart` 和 `SubagentStop`。这些钩子只向本地 Herdr socket 通知 Codex 的子 agent 线程启动或结束，不上报 agent 状态；Herdr 会从 Codex 自己的会话文件重建活动树。Codex 0.163 默认启用钩子。Herdr 仍会显式写入 `[features] hooks = true` 以兼容旧版本；显式设为 false 会禁用钩子。从 v10 起 Windows 上也安装这些活动钩子，由 PowerShell 钩子经 `herdr pane report-agent-activity` 发送。升级后请重新安装 Codex 集成以添加它们。
 
