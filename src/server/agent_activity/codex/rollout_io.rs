@@ -98,15 +98,15 @@ impl Entry {
                     }
             });
         let life_bytes = match &self.lifecycle {
-            Some(
-                Lifecycle::Completed {
-                    error: Some(value), ..
-                }
-                | Lifecycle::Aborted {
-                    reason: Some(value),
-                    ..
-                },
-            ) => value.len(),
+            Some(Lifecycle::Running { last_tool }) => last_tool.as_ref().map_or(0, String::len),
+            Some(Lifecycle::Completed {
+                error,
+                last_message,
+                ..
+            }) => {
+                error.as_ref().map_or(0, String::len) + last_message.as_ref().map_or(0, String::len)
+            }
+            Some(Lifecycle::Aborted { reason, .. }) => reason.as_ref().map_or(0, String::len),
             _ => 0,
         };
         std::mem::size_of::<Self>()
@@ -629,6 +629,34 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_summaries_are_charged_to_the_cache_budget() {
+        let path = Path::new("synthetic.jsonl.zst");
+        let mut entry = Entry {
+            fingerprint: Fingerprint {
+                len: 0,
+                modified: None,
+                created: None,
+            },
+            touched: 0,
+            meta: None,
+            lifecycle: None,
+            decoded: None,
+            failure: None,
+        };
+        let base = entry.bytes(path);
+        entry.lifecycle = Some(Lifecycle::Running {
+            last_tool: Some("Read src/main.rs".to_owned()),
+        });
+        assert_eq!(entry.bytes(path) - base, "Read src/main.rs".len());
+        entry.lifecycle = Some(Lifecycle::Completed {
+            ended_at_ms: None,
+            error: Some("failure".to_owned()),
+            last_message: Some("finished".to_owned()),
+        });
+        assert_eq!(entry.bytes(path) - base, "failure".len() + "finished".len());
+    }
+
+    #[test]
     fn transient_reader_errors_are_not_format_failures() {
         struct FailsAfter {
             bytes: Cursor<Vec<u8>>,
@@ -690,7 +718,7 @@ mod tests {
         fs::write(&path, encoded(&next)).unwrap();
         assert!(matches!(
             lifecycle(&path, &cache, &mut DecodeBudget::default()).unwrap(),
-            Lifecycle::Running
+            Lifecycle::Running { last_tool: None }
         ));
         fs::remove_dir_all(dir).unwrap();
     }

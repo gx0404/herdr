@@ -91,6 +91,24 @@
 //!   `interrupt_agent` / `close_agent` / `resume_agent` 只有目标，`wait_agent` 是 id
 //!   数组；摘要写 `→ 目标: 消息`。消息与 `spawn_agent` 的正文一样可能是加密令牌
 //!   （`gAAAA` 开头），这时只写 `(encrypted)`。
+//!
+//! # 0.163 补充取证（codex-cli 0.163.0-alpha.10.2，2026-10-21，本机最近 80 份
+//! rollout；只看类型与键名，不记录会话正文）
+//!
+//! - 顶层计数：event_msg 11514、response_item 9538、token_usage_record 2706、
+//!   turn_context 645、world_state 126、session_meta 84、compacted 14、retained_context 7。
+//!   官方 RolloutItem 另有 inter_agent_communication、inter_agent_communication_metadata、
+//!   security_risk_score、realtime_item；retained_context 与 security_risk_score 是簿记。
+//! - response_item 计数：reasoning 2836、message 1889、function_call 1617、
+//!   function_call_output 1617、custom_tool_call 710、custom_tool_call_output 708、
+//!   agent_message 100、additional_tools 61；additional_tools 是工具注册信息，不进转写。
+//! - 顶层键序改为 timestamp、ordinal、type、payload；function_call 增加 namespace，
+//!   name 为短名。multi_agent_v1 / collaboration 直接显示短名，MCP 用双下划线合成，
+//!   其他命名空间用点连接；只有 encrypted_function_args 时不显示加密参数。
+//! - multi_agent_v1 的 spawn_agent 用 message / items、agent_type、model、
+//!   reasoning_effort；send_input 用 target、message / items；wait_agent 用 targets。
+//!   collaboration 的 spawn_agent 另有 task_name，list_agents 用 path_prefix。
+//!   顶层 inter_agent_communication 用 author、recipient、content，content 可能加密。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -107,11 +125,13 @@ use crate::api::schema::{
 use crate::harness::insight::InsightScan;
 use crate::harness::json;
 use crate::harness::tail::Tail;
-use crate::harness::text::{clean_output, clip_chars, collapse};
+use crate::harness::text::{clean_line, clean_output, clip_chars, collapse, first_line};
 use crate::harness::time::{rfc3339_ms, rfc3339_value_ms, unix_seconds_ms};
 use crate::harness::tool_display::{self, ToolKind};
 
 mod rollout_io;
+#[cfg(test)]
+mod tests_0163;
 use rollout_io::DecodeBudget;
 pub(crate) use rollout_io::RolloutCache;
 
@@ -136,21 +156,25 @@ const MAX_PAGE_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 /// 内存里至多占这么多原始字节（另加解析出的 JSON 树）；上限与请求的页大小无关，同一
 /// 条记录在大页小页里渲染结果一致。
 const MAX_RECORD_BYTES: u64 = MAX_READ_BYTES as u64;
-/// 超长记录留下的开头字节数：rollout 记录的键序是 `ordinal`、`timestamp`、`type`、
-/// `payload`，负载的 `type` / `role`（以及完成事件的 `item.type`）也排在正文之前，
+/// 超长记录留下的开头字节数：rollout 前两个键为 `ordinal` / `timestamp`（0.163
+/// 顺序反转），之后是 `type`、`payload`；负载的 `type` / `role` 和 `item.type` 在正文前，
 /// 都落在行首几百字节内。
 const OVERSIZED_HEAD_BYTES: usize = 4 * 1024;
 /// 超长记录要展示正文、却读不进来时留的一行占位。
 const OVERSIZED_PLACEHOLDER: &str = "[oversized record]";
 /// 不进转写的顶层记录类型（簿记）：会话元数据、回合上下文、世界状态、用量记录、
-/// 协作元数据。
-const BOOKKEEPING_RECORDS: [&str; 5] = [
+/// 协作元数据、安全评分与保留上下文。
+const BOOKKEEPING_RECORDS: [&str; 7] = [
     "session_meta",
     "turn_context",
     "world_state",
     "token_usage_record",
     "inter_agent_communication_metadata",
+    "security_risk_score",
+    "retained_context",
 ];
+/// 工具注册信息不属于会话内容，正常记录与超长记录都隐藏。
+const HIDDEN_RESPONSE_ITEMS: [&str; 1] = ["additional_tools"];
 /// 要看正文才能渲染的 `response_item` 负载类型（[`render_response_item`] 逐一处理的）；
 /// 其余认不出的只画一行类型名，超长时也照样画（[`render_oversized`]）。
 const CONTENT_RESPONSE_ITEMS: [&str; 10] = [
@@ -202,9 +226,8 @@ const CALL_ARGUMENT_KEYS: [&str; 8] = [
     "pattern",
     "url",
 ];
-/// 多 agent 工具里指明目标 agent 的参数（codex-cli 0.156.1 二进制里的工具说明核实：
-/// `send_message` / `followup_task` / `interrupt_agent` 用 `target`，旧版
-/// `send_input` / `close_agent` / `resume_agent` 用 `id`）。
+/// 多 agent 工具里指明目标 agent 的参数：0.163 的 send_input / close_agent 也用
+/// target，resume_agent 与早期工具用 id；保留 agent_id 兼容旧记录。
 const AGENT_TARGET_KEYS: [&str; 3] = ["target", "id", "agent_id"];
 /// `wait_agent` 等的 agent 列表参数（id 数组，也兼容单个字符串）。
 const AGENT_LIST_KEYS: [&str; 4] = ["ids", "targets", "target", "id"];
@@ -758,9 +781,9 @@ fn node_from_meta(meta: &RolloutMeta, parent_id: Option<String>) -> AgentActivit
 
 /// 显示名：昵称与任务名（`agent_path` 末段，父 agent 派生时给的 `task_name`）都有时
 /// 拼成「昵称 · 任务名」，与 claude / opencode 子 agent 行显示任务的口径一致——
-/// 任务描述本身（`spawn_agent` 的 `message`）在 rollout 里是加密的，任务名是唯一的
-/// 明文。缺一个就用另一个，都没有再按 角色 → 来源名 → 线程 id 回退；角色另在
-/// `agent_type` 里，完整路径另在摘要里。
+/// 任务描述本身（`spawn_agent` 的 `message`）不在 session_meta 里且可能加密，
+/// 所以标签仍取元数据中的任务名。缺一个就用另一个，都没有再按 角色 → 来源名 →
+/// 线程 id 回退；角色另在 `agent_type` 里，完整路径作为摘要的回退。
 fn label_for(meta: &RolloutMeta) -> String {
     let task = meta.agent_path.as_deref().and_then(|path| {
         path.rsplit('/')
@@ -789,10 +812,13 @@ enum Lifecycle {
     /// 文件里还没有任何回合标记。
     Idle,
     /// 最后一个标记是 `task_started`，或尾窗口里全是进行中的输出。
-    Running,
+    Running {
+        last_tool: Option<String>,
+    },
     Completed {
         ended_at_ms: Option<u64>,
         error: Option<String>,
+        last_message: Option<String>,
     },
     Aborted {
         ended_at_ms: Option<u64>,
@@ -801,7 +827,7 @@ enum Lifecycle {
     Unreadable,
 }
 
-/// 只看尾窗口的回合标记（见文件头「生命周期」）。
+/// 同一次尾窗口扫描收集回合标记与摘要，不额外读取文件（见文件头「生命周期」）。
 fn lifecycle_from_tail(path: &Path, tail_bytes: u64) -> io::Result<Lifecycle> {
     let mut file = fs::File::open(path)?;
     let length = file.metadata()?.len();
@@ -826,6 +852,8 @@ fn lifecycle_from_reader(
         };
     }
     let mut last = None;
+    let mut last_tool = None;
+    let mut cwd = None;
     for line in window.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -833,20 +861,45 @@ fn lifecycle_from_reader(
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
-        if record.get("type").and_then(Value::as_str) != Some("event_msg") {
-            continue;
-        }
         let Some(payload) = record.get("payload") else {
             continue;
         };
+        match json::str_field(&record, "type") {
+            Some("session_meta" | "turn_context") => {
+                if let Some(path) = json::str_field(payload, "cwd") {
+                    cwd = Some(path.to_owned());
+                }
+                continue;
+            }
+            Some("response_item") => {
+                if matches!(
+                    json::str_field(payload, "type"),
+                    Some("function_call" | "custom_tool_call" | "local_shell_call")
+                ) {
+                    let name = display_tool_name(payload);
+                    let input = tool_input(payload);
+                    let display = tool_display::display(&name, input.as_ref(), cwd.as_deref());
+                    last_tool = clean_line(&display.line(), SUMMARY_CHARS);
+                }
+                continue;
+            }
+            Some("event_msg") => {}
+            _ => continue,
+        }
         let ended_at_ms = || unix_seconds_ms(payload.get("completed_at"));
         match payload.get("type").and_then(Value::as_str) {
-            Some("task_started") => last = Some(Lifecycle::Running),
+            Some("task_started") => {
+                last_tool = None;
+                last = Some(Lifecycle::Running { last_tool: None });
+            }
             Some("task_complete") => {
                 let error = payload.get("error").filter(|error| !error.is_null());
                 last = Some(Lifecycle::Completed {
                     ended_at_ms: ended_at_ms(),
                     error: error.map(error_message),
+                    last_message: json::str_field(payload, "last_agent_message")
+                        .and_then(first_line)
+                        .and_then(|line| clean_line(line, SUMMARY_CHARS)),
                 });
             }
             Some("turn_aborted") => {
@@ -862,9 +915,10 @@ fn lifecycle_from_reader(
         }
     }
     Ok(match last {
+        Some(Lifecycle::Running { .. }) => Lifecycle::Running { last_tool },
         Some(lifecycle) => lifecycle,
         // 窗口被一个回合的输出填满而没有任何标记：这一回合还没结束。
-        None if start > 0 => Lifecycle::Running,
+        None if start > 0 => Lifecycle::Running { last_tool },
         None => Lifecycle::Idle,
     })
 }
@@ -881,17 +935,27 @@ fn error_message(error: &Value) -> String {
 fn apply_lifecycle(node: &mut AgentActivityNode, lifecycle: &Lifecycle) {
     match lifecycle {
         Lifecycle::Idle => node.status = AgentActivityStatus::Pending,
-        Lifecycle::Running => node.status = AgentActivityStatus::Running,
+        Lifecycle::Running { last_tool } => {
+            node.status = AgentActivityStatus::Running;
+            if let Some(summary) = last_tool {
+                node.summary = Some(summary.clone());
+            }
+        }
         Lifecycle::Completed {
             ended_at_ms,
             error: None,
+            last_message,
         } => {
             node.status = AgentActivityStatus::Done;
             node.ended_at_ms = *ended_at_ms;
+            if let Some(summary) = last_message {
+                node.summary = Some(summary.clone());
+            }
         }
         Lifecycle::Completed {
             ended_at_ms,
             error: Some(message),
+            ..
         } => {
             node.status = AgentActivityStatus::Failed;
             node.ended_at_ms = *ended_at_ms;
@@ -1052,39 +1116,9 @@ impl CodexInsight {
                     _ => {}
                 }
             }
-            Some("function_call") => {
-                let arguments = payload
-                    .get("arguments")
-                    .and_then(Value::as_str)
-                    .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok());
-                self.tool_started(payload, arguments.as_ref(), at_ms);
-            }
-            Some("custom_tool_call") => {
-                let input = payload.get("input").and_then(Value::as_str).map(|input| {
-                    let shell = payload
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| tool_display::tool_kind(name) == ToolKind::Shell);
-                    if shell {
-                        serde_json::json!({ "command": input })
-                    } else {
-                        Value::String(input.to_owned())
-                    }
-                });
+            Some("function_call" | "custom_tool_call" | "local_shell_call") => {
+                let input = tool_input(payload);
                 self.tool_started(payload, input.as_ref(), at_ms);
-            }
-            Some("local_shell_call") => {
-                let command = payload
-                    .get("action")
-                    .and_then(|action| action.get("command"))
-                    .map(|command| serde_json::json!({ "command": command }));
-                let Some(call_id) =
-                    json::str_field(payload, "call_id").or_else(|| json::str_field(payload, "id"))
-                else {
-                    return;
-                };
-                let display = tool_display::display("local_shell", command.as_ref(), self.cwd());
-                self.scan.tool_started(call_id, &display, at_ms);
             }
             Some("function_call_output" | "custom_tool_call_output") => {
                 if let Some(call_id) = json::str_field(payload, "call_id") {
@@ -1096,13 +1130,16 @@ impl CodexInsight {
     }
 
     fn tool_started(&mut self, payload: &Value, input: Option<&Value>, at_ms: Option<u64>) {
-        let (Some(call_id), Some(name)) = (
-            json::str_field(payload, "call_id"),
-            json::str_field(payload, "name"),
-        ) else {
+        let local_shell = json::str_field(payload, "type") == Some("local_shell_call");
+        let Some(call_id) = json::str_field(payload, "call_id").or_else(|| {
+            local_shell
+                .then(|| json::str_field(payload, "id"))
+                .flatten()
+        }) else {
             return;
         };
-        let display = tool_display::display(name, input, self.cwd());
+        let name = display_tool_name(payload);
+        let display = tool_display::display(&name, input, self.cwd());
         self.scan.tool_started(call_id, &display, at_ms);
         if display.kind == ToolKind::Question {
             if let Some(question) = input.and_then(tool_display::question) {
@@ -1465,6 +1502,7 @@ fn render_record(line: &str, history_start: Option<u64>) -> Option<String> {
     match record.get("type").and_then(Value::as_str)? {
         "response_item" => render_response_item(payload?),
         "event_msg" => render_event(payload?),
+        "inter_agent_communication" => Some(render_inter_agent_communication(payload?)),
         "compacted" => Some("[compacted]".to_string()),
         kind if BOOKKEEPING_RECORDS.contains(&kind) => None,
         other => Some(type_line(other)),
@@ -1492,6 +1530,7 @@ fn render_oversized(head: &[u8], history_start: Option<u64>) -> Option<String> {
     };
     match kind {
         "response_item" => match (head.payload_kind.as_deref(), head.role.as_deref()) {
+            (Some(kind), _) if HIDDEN_RESPONSE_ITEMS.contains(&kind) => None,
             (Some("message"), Some(role)) if !matches!(role, "user" | "assistant") => None,
             (Some(kind), _) if !CONTENT_RESPONSE_ITEMS.contains(&kind) => Some(type_line(kind)),
             _ => placeholder(),
@@ -1511,6 +1550,7 @@ fn render_oversized(head: &[u8], history_start: Option<u64>) -> Option<String> {
             _ => placeholder(),
         },
         "compacted" => Some("[compacted]".to_string()),
+        "inter_agent_communication" => placeholder(),
         kind if BOOKKEEPING_RECORDS.contains(&kind) => None,
         other => Some(type_line(other)),
     }
@@ -1605,12 +1645,22 @@ fn render_response_item(payload: &Value) -> Option<String> {
         "agent_message" => Some(render_agent_message(payload)),
         "reasoning" => Some(render_reasoning(payload)),
         "function_call" => {
-            let name = tool_name(payload);
-            let summary = arguments_summary(&name, payload.get("arguments"));
+            let (name, bare_name) = tool_name(payload);
+            let summary = arguments_summary(&bare_name, payload.get("arguments")).or_else(|| {
+                json::str_field(payload, "encrypted_function_args")
+                    .filter(|_| match tool_input(payload) {
+                        None | Some(Value::Null) => true,
+                        Some(Value::String(text)) => text.trim().is_empty(),
+                        Some(Value::Object(fields)) => fields.is_empty(),
+                        Some(Value::Array(items)) => items.is_empty(),
+                        _ => false,
+                    })
+                    .map(|_| "(encrypted)".to_owned())
+            });
             Some(call_line(&name, summary))
         }
         "custom_tool_call" => Some(call_line(
-            &tool_name(payload),
+            &tool_name(payload).0,
             payload
                 .get("input")
                 .and_then(Value::as_str)
@@ -1639,6 +1689,7 @@ fn render_response_item(payload: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .and_then(single_line),
         )),
+        kind if HIDDEN_RESPONSE_ITEMS.contains(&kind) => None,
         other => Some(type_line(other)),
     }
 }
@@ -1704,6 +1755,30 @@ fn render_agent_message(payload: &Value) -> String {
         line.push_str(" (encrypted)");
     }
     line
+}
+
+/// 0.163 顶层协作消息：同时标出发送方与接收方，正文可能是加密令牌。
+fn render_inter_agent_communication(payload: &Value) -> String {
+    let name = |key| {
+        json::str_field(payload, key)
+            .map(collapse)
+            .filter(|name| !name.is_empty())
+            .map(|name| clip_chars(&name, NAME_CHARS))
+    };
+    let tag = match (name("author"), name("recipient")) {
+        (Some(author), Some(recipient)) => format!("[message from {author} → {recipient}]"),
+        (Some(author), None) => format!("[message from {author}]"),
+        (None, _) => "[message]".to_owned(),
+    };
+    let content = content_text(payload.get("content"));
+    let content = collapse(&content);
+    if content.is_empty() {
+        tag
+    } else if looks_encrypted(&content) {
+        format!("{tag} (encrypted)")
+    } else {
+        format!("{tag} {}", clip_chars(&content, MESSAGE_CHARS))
+    }
 }
 
 /// 推理：有摘要就带上，只有加密内容时只留标记。
@@ -1845,6 +1920,7 @@ fn push_output_lines(out: &mut String, text: &str) {
 
 /// `[名字] 摘要`；没有摘要时只留名字。
 fn call_line(name: &str, summary: Option<String>) -> String {
+    let name = clip_chars(name, NAME_CHARS);
     match summary {
         Some(summary) => format!("[{name}] {summary}"),
         None => format!("[{name}]"),
@@ -1859,14 +1935,54 @@ fn tagged_line(tag: &str, text: Option<&str>) -> String {
     }
 }
 
-fn tool_name(payload: &Value) -> String {
-    payload
+/// 合成显示名并保留裸名：协作工具按裸名匹配摘要，命名空间不会丢失 MCP 身份。
+fn tool_name(payload: &Value) -> (String, String) {
+    let name = payload
         .get("name")
         .and_then(Value::as_str)
         .map(collapse)
         .filter(|name| !name.is_empty())
-        .map(|name| clip_chars(&name, NAME_CHARS))
-        .unwrap_or_else(|| "tool".to_string())
+        .unwrap_or_else(|| "tool".to_string());
+    let namespace = json::str_field(payload, "namespace")
+        .map(collapse)
+        .filter(|namespace| !namespace.is_empty());
+    let display = match namespace.as_deref() {
+        None | Some("multi_agent_v1" | "collaboration") => name.clone(),
+        Some(namespace) if namespace.starts_with("mcp__") => format!("{namespace}__{name}"),
+        Some(namespace) => format!("{namespace}.{name}"),
+    };
+    (display, name)
+}
+
+fn display_tool_name(payload: &Value) -> String {
+    if json::str_field(payload, "type") == Some("local_shell_call") {
+        "local_shell".to_owned()
+    } else {
+        tool_name(payload).0
+    }
+}
+
+/// 转写洞察与子节点摘要共用工具输入形状，不为摘要再次读取 rollout。
+fn tool_input(payload: &Value) -> Option<Value> {
+    match json::str_field(payload, "type")? {
+        "function_call" => match payload.get("arguments")? {
+            Value::String(arguments) => serde_json::from_str(arguments).ok(),
+            other => Some(other.clone()),
+        },
+        "custom_tool_call" => {
+            let input = payload.get("input")?.as_str()?;
+            if tool_display::tool_kind(&display_tool_name(payload)) == ToolKind::Shell {
+                Some(serde_json::json!({ "command": input }))
+            } else {
+                Some(Value::String(input.to_owned()))
+            }
+        }
+        "local_shell_call" => payload
+            .get("action")?
+            .get("command")
+            .map(|command| serde_json::json!({ "command": command })),
+        _ => None,
+    }
 }
 
 fn type_line(kind: &str) -> String {
@@ -1927,6 +2043,42 @@ fn multi_agent_summary(
             .and_then(|agents| single_line(&format!("→ {agents}")))
     };
     match name {
+        "spawn_agent" => {
+            let mut summary = fields
+                .get("task_name")
+                .and_then(Value::as_str)
+                .map(collapse)
+                .filter(|task| !task.is_empty())
+                .or_else(|| {
+                    fields
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .and_then(first_line)
+                        .and_then(agent_message_summary)
+                })
+                .or_else(|| first_item_text(fields).and_then(agent_message_summary))
+                .unwrap_or_default();
+            for key in ["agent_type", "model"] {
+                if let Some(value) = fields.get(key).and_then(Value::as_str) {
+                    let value = collapse(value);
+                    if !value.is_empty() {
+                        if !summary.is_empty() {
+                            summary.push_str(" · ");
+                        }
+                        summary.push_str(&value);
+                    }
+                }
+            }
+            Some(single_line(&summary))
+        }
+        "list_agents" => Some(
+            fields
+                .get("path_prefix")
+                .and_then(Value::as_str)
+                .map(collapse)
+                .filter(|path| !path.is_empty())
+                .and_then(|path| single_line(&format!("→ {path}"))),
+        ),
         "wait_agent" => Some(waited()),
         "wait" => waited().map(Some),
         "send_message" | "followup_task" | "send_input" | "interrupt_agent" | "close_agent"
@@ -1941,20 +2093,37 @@ fn multi_agent_summary(
             let message = fields
                 .get("message")
                 .and_then(Value::as_str)
-                .map(|message| {
-                    if looks_encrypted(message) {
-                        "(encrypted)".to_string()
-                    } else {
-                        collapse(message)
-                    }
+                .or_else(|| {
+                    (name == "send_input")
+                        .then(|| first_item_text(fields))
+                        .flatten()
                 })
-                .filter(|message| !message.is_empty());
+                .and_then(agent_message_summary);
             Some(single_line(&match message {
                 Some(message) => format!("→ {target}: {message}"),
                 None => format!("→ {target}"),
             }))
         }
         _ => None,
+    }
+}
+
+/// items 只取首个非空 text 块，不把图片或后续任务正文展开到摘要。
+fn first_item_text(fields: &serde_json::Map<String, Value>) -> Option<&str> {
+    fields
+        .get("items")?
+        .as_array()?
+        .iter()
+        .filter(|item| json::str_field(item, "type") == Some("text"))
+        .find_map(|item| json::str_field(item, "text"))
+}
+
+fn agent_message_summary(message: &str) -> Option<String> {
+    let message = collapse(message);
+    if looks_encrypted(&message) {
+        Some("(encrypted)".to_owned())
+    } else {
+        (!message.is_empty()).then_some(message)
     }
 }
 
@@ -2159,7 +2328,10 @@ mod tests {
         assert_eq!(child_a.status, AgentActivityStatus::Done);
         assert_eq!(child_a.started_at_ms, Some(1_790_042_460_000));
         assert_eq!(child_a.ended_at_ms, Some(1_790_042_490_000));
-        assert_eq!(child_a.summary.as_deref(), Some("/root/fix_login"));
+        assert_eq!(
+            child_a.summary.as_deref(),
+            Some("fake summary: login fixed")
+        );
         assert_eq!(child_a.content_ref.as_deref(), Some(CHILD_A));
 
         let child_b = node(&nodes, CHILD_B);
@@ -2229,9 +2401,9 @@ mod tests {
         let child = node(&nodes, PROBE_CHILD);
         assert_eq!(child.label, "Noor · print_probe");
         assert_eq!(child.kind, AgentActivityKind::Subagent);
-        // 角色为空时 agent_type 为空；完整的任务路径仍在摘要里。
+        // 角色为空时 agent_type 为空；完成后摘要使用最后回复。
         assert_eq!(child.agent_type, None);
-        assert_eq!(child.summary.as_deref(), Some("/root/print_probe"));
+        assert_eq!(child.summary.as_deref(), Some("fake-probe"));
         assert_eq!(child.status, AgentActivityStatus::Done);
     }
 
@@ -3103,6 +3275,10 @@ mod tests {
             assert!(CONTENT_RESPONSE_ITEMS.contains(&kind), "{kind}");
             assert_ne!(item(payload), Some(type_line(kind)), "{kind} 有自己的渲染");
         }
+        for kind in HIDDEN_RESPONSE_ITEMS {
+            assert!(!CONTENT_RESPONSE_ITEMS.contains(&kind));
+            assert_eq!(item(&format!(r#"{{"type":"{kind}"}}"#)), None);
+        }
         let samples = [
             (
                 "task_complete",
@@ -3614,12 +3790,13 @@ mod tests {
             Lifecycle::Completed {
                 ended_at_ms: Some(1_790_042_490_000),
                 error: None,
+                last_message: Some("fake summary: login fixed".to_owned()),
             }
         );
         // 窗口小到装不下最后一个标记，而文件比窗口大：视为回合进行中。
         assert_eq!(
             lifecycle_from_tail(&child_b, 64).expect("可读"),
-            Lifecycle::Running
+            Lifecycle::Running { last_tool: None }
         );
         // 整个文件都在窗口里且没有标记：还没开始。
         assert_eq!(

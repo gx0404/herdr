@@ -175,7 +175,7 @@ pub fn display(name: &str, input: Option<&Value>, cwd: Option<&str>) -> ToolDisp
             input
                 .and_then(|input| string_field(input, &["subagent_type", "agent_type", "agent"]))
                 .unwrap_or_else(|| "Agent".to_owned()),
-            input.and_then(|input| string_field(input, &["description", "title", "prompt"])),
+            input.and_then(agent_summary),
         ),
         ToolKind::Plan => ("Plan".to_owned(), input.and_then(plan_summary)),
         ToolKind::Question => (
@@ -191,6 +191,29 @@ pub fn display(name: &str, input: Option<&Value>, cwd: Option<&str>) -> ToolDisp
             .map(|summary| super::text::collapse(&summary))
             .filter(|summary| !summary.is_empty()),
     }
+}
+
+/// 子 agent 的任务摘要：兼容 Codex 的 task_name / message，不展示加密正文。
+fn agent_summary(input: &Value) -> Option<String> {
+    ["description", "title", "task_name", "prompt", "message"]
+        .iter()
+        .find_map(|key| {
+            let text = input.get(*key)?.as_str()?.trim();
+            let encrypted = text.starts_with("gAAAA")
+                && text.len() >= 24
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'='));
+            if text.is_empty() || encrypted {
+                return None;
+            }
+            let text = if *key == "message" {
+                super::text::first_line(text)?
+            } else {
+                text
+            };
+            Some(text.to_owned())
+        })
 }
 
 /// 工具名人性化：命名空间形式（`mcp__server__tool`、`a.b`、`a/b`、`a:b`）原样保留；
@@ -533,6 +556,67 @@ mod tests {
         );
         assert_eq!(line("browser.click", json!({})), "browser.click");
         assert_eq!(display("Think", None, None).kind, ToolKind::Other);
+    }
+
+    #[test]
+    fn agent_tools_show_codex_task_names_and_the_first_message_line() {
+        assert_eq!(
+            line(
+                "spawn_agent",
+                json!({"task_name": "review", "message": "ignored", "agent_type": "worker"})
+            ),
+            "worker review"
+        );
+        assert_eq!(
+            line(
+                "spawn_agent",
+                json!({"message": "\n  review code\nthen run tests"})
+            ),
+            "Agent review code"
+        );
+        let encrypted = "gAAAAABmFakeToken0123456789abcdefABCDEF_-==";
+        for key in ["description", "title", "task_name", "prompt", "message"] {
+            assert_eq!(line("spawn_agent", json!({key: encrypted})), "Agent");
+        }
+        assert_eq!(
+            line(
+                "spawn_agent",
+                json!({"task_name": encrypted, "message": "fallback"})
+            ),
+            "Agent fallback"
+        );
+        for text in [
+            "gAAAAshort",
+            "gAAAA ordinary prose with spaces",
+            "gAAAA1234567890123456789+",
+        ] {
+            assert_eq!(
+                line("spawn_agent", json!({"message": text})),
+                format!("Agent {text}")
+            );
+        }
+    }
+
+    #[test]
+    fn multi_agent_controls_keep_their_own_verbs() {
+        for (name, expected) in [
+            ("wait_agent", "Wait agent"),
+            ("send_input", "Send input"),
+            ("send_message", "Send message"),
+            ("followup_task", "Followup task"),
+            ("interrupt_agent", "Interrupt agent"),
+            ("resume_agent", "Resume agent"),
+            ("close_agent", "Close agent"),
+            ("list_agents", "List agents"),
+        ] {
+            let display = display(
+                name,
+                Some(&json!({"agent_type": "worker", "message": "ignored"})),
+                None,
+            );
+            assert_eq!(display.kind, ToolKind::Other);
+            assert_eq!(display.line(), expected);
+        }
     }
 
     #[test]
