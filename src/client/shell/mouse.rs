@@ -846,6 +846,8 @@ impl ClientShellState {
                         | ClientShellOverlay::ConfirmClose(_)
                         | ClientShellOverlay::Onboarding
                         | ClientShellOverlay::ProductAnnouncement(_)
+                        // 子智能体页面：页面外（标题栏）的点击吞掉，不切菜单。
+                        | ClientShellOverlay::AgentActivity(_)
                 )
             )
             && !contains(self.hits.notification_toast, point)

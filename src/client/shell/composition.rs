@@ -875,7 +875,7 @@ impl ClientShellState {
         let spinner = self.spinner_glyph();
         let (frame_width, frame_height) = canvas.size();
         let cx = super::feedback::ChromeContext {
-            page_bounds: self.floating_page_rect(frame_width, frame_height),
+            page_bounds: self.overlay_bounds(frame_width, frame_height),
             palette: &self.config.palette,
             components: &self.config.components,
             glyphs: self.config.border_glyphs,
@@ -1009,6 +1009,7 @@ impl ClientShellState {
                 self.hits.agent_activity_tree_rows = rendered.agent_activity_tree_rows;
                 self.hits.agent_activity_scroll_metrics = rendered.agent_activity_scroll_metrics;
                 self.hits.agent_activity_actions = rendered.agent_activity_actions;
+                self.hits.agent_activity_toggles = rendered.agent_activity_toggles;
                 self.hits.snippet_popup = rendered.snippet_popup;
                 self.hits.snippet_search = rendered.snippet_search;
                 self.hits.snippet_rows = rendered.snippet_rows;
@@ -1034,9 +1035,13 @@ impl ClientShellState {
                 })
             };
             self.hits.overlay_bounds = entrance_area;
-            if self.overlay_since.is_some_and(|since| {
-                compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
-            }) && !entrance_area.is_empty()
+            // 子智能体页面是整块内容区（页面而非浮窗），不做入场压暗。
+            let page = matches!(overlay, ClientShellOverlay::AgentActivity(_));
+            if !page
+                && self.overlay_since.is_some_and(|since| {
+                    compose_now.duration_since(since) < super::feedback::ENTRANCE_DURATION
+                })
+                && !entrance_area.is_empty()
             {
                 // 入场提示压暗的是浮层**周围**的一帧：压自己会把边框、标题与
                 // 按钮一起变暗，看起来像渲染故障（HERDR-UX-07）。

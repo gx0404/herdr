@@ -496,7 +496,7 @@ fn agent_activity_window_opens_from_the_menu_and_closes_on_esc_or_outside_click(
     let popup = state.hits.agent_activity_popup;
     assert!(!popup.is_empty());
 
-    // 窗内点击被吞掉，窗外点击关闭。
+    // 子智能体页面占满内容区：页内空白处的点击被吞掉，‹ 返回关闭页面。
     state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Left),
         popup.x + 1,
@@ -506,18 +506,21 @@ fn agent_activity_window_opens_from_the_menu_and_closes_on_esc_or_outside_click(
         state.overlay,
         Some(ClientShellOverlay::AgentActivity(_))
     ));
-    let outside = if popup.x > 0 {
-        (0, 0)
-    } else {
-        (popup.right(), 0)
-    };
-    assert!(!super::super::contains(popup, outside));
+    let back = state
+        .hits
+        .agent_activity_actions
+        .iter()
+        .find(|(_, button)| {
+            *button == super::super::agent_activity_overlay::AgentActivityButton::Back
+        })
+        .map(|(rect, _)| *rect)
+        .expect("返回按钮");
     state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Left),
-        outside.0,
-        outside.1,
+        back.x + 1,
+        back.y,
     )]);
-    assert!(state.overlay.is_none(), "点窗外关闭");
+    assert!(state.overlay.is_none(), "‹ 返回关闭页面");
 
     // 从别的浮层进入时 Esc 回到它。
     state.overlay = Some(ClientShellOverlay::Help(ClientHelpOverlay {

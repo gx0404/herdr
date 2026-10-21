@@ -1154,13 +1154,28 @@ pub struct AgentPanelTexts {
 /// 「Agent 活动」二级窗口的文案；节点种类 / 状态的标签 Agents 面板也读。
 /// `*_fmt` entries are `fill` templates; placeholders are documented inline.
 pub struct AgentActivityTexts {
-    pub title_fmt: &'static str, // args: name
-    pub tree_title: &'static str,
-    pub content_title: &'static str,
+    /// 页面标题（页头与时间线标签栏）。
+    pub page_title: &'static str,
+    /// 工作台状态栏的模式块（自带左右内边距）。
+    pub mode_chip: &'static str,
+    pub back: &'static str,
+    pub jump_button: &'static str,
+    pub refresh_button: &'static str,
+    pub view_tree: &'static str,
+    pub view_status: &'static str,
+    pub view_timeline: &'static str,
+    /// 视图标签行右侧的筛选入口。
+    pub filter: &'static str,
+    pub no_matches: &'static str,
+    /// 列表末尾「已完成 N 项」。 args: n
+    pub done_count_fmt: &'static str,
+    pub hide_done: &'static str,
+    pub show_done: &'static str,
     pub empty_tree: &'static str,
     pub empty_content: &'static str,
     pub loading: &'static str,
-    pub read_failed_fmt: &'static str, // args: error
+    /// args: error
+    pub read_failed_fmt: &'static str,
     pub unsupported: &'static str,
     /// Inspector：服务端没有该 Agent 的活动来源（`not_implemented`）时的中性说明。
     pub not_reported: &'static str,
@@ -1168,22 +1183,36 @@ pub struct AgentActivityTexts {
     pub truncated: &'static str,
     pub follow_on: &'static str,
     pub follow_off: &'static str,
-    pub hint_select: &'static str,
-    pub hint_follow: &'static str,
-    pub hint_close: &'static str,
-    /// 页脚：`r` 重新读取树与内容。
-    pub hint_refresh: &'static str,
-    /// 页脚：`←→` 折叠 / 展开树节点。
-    pub hint_collapse: &'static str,
-    /// 页脚：`Tab` 在活动树与内容之间切换（窄窗口只显示其中一列）。
-    pub hint_switch_column: &'static str,
-    /// 标题栏按钮（后接跟随状态的 `●` / `○`）。
-    pub follow_button: &'static str,
-    pub refresh_button: &'static str,
-    /// 未跟随时属主的活动摘要变了：标题旁的提示。
+    /// 转写底部跟随行（跟随中）的说明。
+    pub follow_tail: &'static str,
+    /// 转写底部跟随行（已暂停）的说明。
+    pub follow_resume: &'static str,
+    /// 未跟随时属主的活动摘要变了：页头的提示。
     pub updates_badge: &'static str,
     /// 已选节点读完但没有任何输出。
     pub no_output: &'static str,
+    pub timeline_now: &'static str,
+    pub timeline_unknown: &'static str,
+    pub summary_title: &'static str,
+    pub summary_status: &'static str,
+    pub summary_role: &'static str,
+    pub summary_detail: &'static str,
+    pub summary_started: &'static str,
+    pub summary_children: &'static str,
+    pub summary_tools: &'static str,
+    pub summary_last_output: &'static str,
+    /// args: age
+    pub ago_fmt: &'static str,
+    pub too_small: &'static str,
+    /// 状态栏 / 页面页脚的固定键位提示。
+    pub hint_select: &'static str,
+    pub hint_switch_focus: &'static str,
+    pub hint_expand: &'static str,
+    pub hint_filter: &'static str,
+    pub hint_views: &'static str,
+    pub hint_follow: &'static str,
+    pub hint_jump: &'static str,
+    pub hint_back: &'static str,
     pub kind_subagent: &'static str,
     pub kind_task: &'static str,
     pub kind_todo: &'static str,
@@ -1195,6 +1224,8 @@ pub struct AgentActivityTexts {
     pub status_done: &'static str,
     pub status_failed: &'static str,
     pub status_unknown: &'static str,
+    /// 状态视图里未知状态一组的标题。
+    pub group_unknown: &'static str,
 }
 
 /// 统一菜单组件（全局菜单 / 右键菜单 / 子菜单）、工作台标题栏与 `⋯` 布局菜单、

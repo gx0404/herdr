@@ -480,12 +480,21 @@ impl super::super::ClientShellState {
         let t = &crate::i18n::texts().mode_bar;
         let palette = &self.config.palette;
         let mut actions = Vec::new();
-        let (mode, middle) = match mode_content(
-            self.mode,
-            self.copy_mode.as_ref(),
-            self.endpoint_error.as_deref(),
-            &self.config.keybinds,
-        ) {
+        // 子智能体页面打开时：模式块写「子智能体」，中部是页面的固定键位提示；端点
+        // 错误仍优先。
+        let page = self
+            .endpoint_error
+            .is_none()
+            .then(|| self.agent_page_status())
+            .flatten();
+        let (mode, middle) = match page.or_else(|| {
+            mode_content(
+                self.mode,
+                self.copy_mode.as_ref(),
+                self.endpoint_error.as_deref(),
+                &self.config.keybinds,
+            )
+        }) {
             Some(content) => content,
             None if self.workbench.arranging => {
                 let (middle, clickable) = self.arrange_hints();
@@ -534,6 +543,23 @@ impl super::super::ClientShellState {
                     .map(|action| (rect, index, action))
             })
             .collect()
+    }
+
+    /// 子智能体页面开着时状态栏的模式块与中部提示（页面固定键，不是可配置键位；外部
+    /// 来源不列 t）。
+    fn agent_page_status(&self) -> Option<((&'static str, Tone), Middle<'static>)> {
+        let Some(super::super::ClientShellOverlay::AgentActivity(overlay)) = self.overlay.as_ref()
+        else {
+            return None;
+        };
+        let hints = super::agent_page::page_hints(overlay.is_external())
+            .into_iter()
+            .map(|(key, label)| Hint::new(key, label))
+            .collect();
+        Some((
+            (crate::i18n::texts().agent_activity.mode_chip, Tone::Accent),
+            Middle::Hints(hints),
+        ))
     }
 
     /// 调整布局模式的键位提示；「Esc 完成」可点，退出模式。锁定布局时调尺寸 / 移动

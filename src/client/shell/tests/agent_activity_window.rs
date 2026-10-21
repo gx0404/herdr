@@ -3,7 +3,7 @@
 //! server 不支持）、键盘与鼠标两条交互路径，以及视图计算阶段写入的滚动上界。
 
 use super::super::agent_activity_overlay::{
-    format_elapsed, AgentActivityButton, AgentActivityFocus, AgentActivityOwner,
+    format_elapsed, AgentActivityButton, AgentActivityFocus, AgentActivityOwner, AgentPageView,
     ClientAgentActivityOverlay, CONTENT_CAP_BYTES, FOLLOW_INTERVAL,
 };
 use super::super::state::PendingEndpointKind;
@@ -446,31 +446,45 @@ fn activity_tree_prioritizes_running_ancestry_and_recently_ended_nodes() {
         .expect("unknown 行")
         .0;
     let at = find_cell(&state, unknown, "unknown end").expect("已结束未知标签");
-    assert_eq!(cell(&state, at).fg, state.config.palette.overlay0);
+    assert_eq!(
+        cell(&state, at).fg,
+        state.config.palette.text,
+        "状态只由字形表达，标签保持正文色"
+    );
 }
 
-/// 宽窗口：标题栏（标题 + 三个按钮）、左列树（前缀引导线、状态字形、标签、
-/// 种类、耗时）、右列头行与正文、页脚提示；选中行 accent 反色、运行中强调色、
-/// 已结束灰显。
+/// 宽页面（经典布局占满整帧、最后一行是页面页脚）：页头（返回、标题、属主、按钮）、
+/// 视图标签、两行的列表项（树前缀、状态字形、标签、角色 / 种类、耗时、摘要行）、
+/// 右栏转写与跟随行；选中项选中底色 + 竖条，状态只经字形与状态色表达，标签保持
+/// 正文色。
 #[test]
-fn wide_window_renders_title_tree_content_and_footer() {
-    for (cols, rows) in [(120, 40), (90, 30)] {
+fn wide_page_renders_header_list_transcript_and_footer() {
+    for (cols, rows) in [(200, 50), (160, 45), (120, 40)] {
         let mut state = state();
         open_with_tree(&mut state);
         select_with_content(&mut state, "a", "line one\nline two\n");
         state.compose(cols, rows).expect("frame");
-        let popup = state.hits.agent_activity_popup;
+        let page = state.hits.agent_activity_popup;
         assert_eq!(
-            popup,
-            crate::ui::modal_rect(Rect::new(0, 0, cols, rows), crate::ui::ModalSize::Large)
-                .expect("large modal"),
-            "{cols}x{rows}: 没有记住的位置时取 Large 模态"
+            page,
+            Rect::new(0, 0, cols, rows),
+            "{cols}x{rows}: 经典布局占满整帧"
         );
-        let text = popup_text(&state).join("\n");
-        let title = crate::i18n::fill(texts().title_fmt, &[("name", "claude-main")]);
-        assert!(has(&text, &title), "{cols}x{rows} 标题:\n{text}");
+        let lines = popup_text(&state);
+        let text = lines.join("\n");
+        assert!(
+            has(&lines[0], texts().page_title),
+            "{cols}x{rows} 标题:\n{text}"
+        );
+        assert!(
+            lines[0].contains("claude-main"),
+            "{cols}x{rows} 属主:\n{text}"
+        );
         for label in ["explore repo", "read files", "write summary", "cargo test"] {
-            assert!(text.contains(label), "{cols}x{rows} 树行 {label}:\n{text}");
+            assert!(
+                text.contains(label),
+                "{cols}x{rows} 列表项 {label}:\n{text}"
+            );
         }
         assert!(text.contains("├─"), "{cols}x{rows} 连接线:\n{text}");
         assert!(text.contains("└─"), "{cols}x{rows} 末子连接线:\n{text}");
@@ -480,39 +494,53 @@ fn wide_window_renders_title_tree_content_and_footer() {
             text.contains("1m05s"),
             "{cols}x{rows} 失败节点耗时:\n{text}"
         );
+        assert!(text.contains("Explore"), "{cols}x{rows} 角色:\n{text}");
+        assert!(has(&text, texts().kind_task), "{cols}x{rows} 种类:\n{text}");
         assert!(
-            has(&text, texts().kind_subagent),
-            "{cols}x{rows} 种类:\n{text}"
+            text.contains("scanning src"),
+            "{cols}x{rows} 摘要行:\n{text}"
         );
-        assert!(text.contains("line one"), "{cols}x{rows} 正文:\n{text}");
-        assert!(text.contains("line two"), "{cols}x{rows} 正文:\n{text}");
         assert!(
-            text.contains("Explore — scanning src"),
-            "{cols}x{rows} 头行摘要:\n{text}"
+            text.contains("line one") && text.contains("line two"),
+            "{cols}x{rows} 正文:\n{text}"
         );
-        assert!(has(&text, texts().tree_title), "{cols}x{rows} 左列表头");
+        for view in [
+            texts().view_tree,
+            texts().view_status,
+            texts().view_timeline,
+        ] {
+            assert!(has(&text, view), "{cols}x{rows} 视图标签 {view}:\n{text}");
+        }
         assert!(
-            has(&text, texts().follow_on),
-            "{cols}x{rows} 跟随状态:\n{text}"
+            has(&text, texts().follow_tail),
+            "{cols}x{rows} 跟随行:\n{text}"
         );
-        assert!(has(&text, texts().hint_select), "{cols}x{rows} 页脚提示");
-        assert!(has(&text, texts().refresh_button), "{cols}x{rows} 刷新按钮");
-        assert!(text.contains('×'), "{cols}x{rows} 关闭按钮");
-        assert!(text.contains('●'), "{cols}x{rows} 跟随按钮");
+        assert!(
+            has(&lines[usize::from(rows) - 1], texts().hint_select),
+            "{cols}x{rows} 页面页脚"
+        );
         let buttons = state
             .hits
             .agent_activity_actions
             .iter()
             .map(|(_, button)| *button)
             .collect::<Vec<_>>();
-        assert_eq!(
-            buttons,
-            [
-                AgentActivityButton::Close,
-                AgentActivityButton::Refresh,
-                AgentActivityButton::ToggleFollow
-            ]
-        );
+        for button in [
+            AgentActivityButton::Close,
+            AgentActivityButton::Jump,
+            AgentActivityButton::Refresh,
+            AgentActivityButton::ToggleFollow,
+            AgentActivityButton::Back,
+            AgentActivityButton::View(AgentPageView::Tree),
+            AgentActivityButton::View(AgentPageView::Timeline),
+            AgentActivityButton::Filter,
+            AgentActivityButton::ToggleDone,
+        ] {
+            assert!(
+                buttons.contains(&button),
+                "{cols}x{rows} {button:?}: {buttons:?}"
+            );
+        }
         let order = state
             .hits
             .agent_activity_tree_rows
@@ -520,57 +548,88 @@ fn wide_window_renders_title_tree_content_and_footer() {
             .map(|(_, id)| id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(order, ["a", "a.1", "a.2", "b"], "前序展开");
-
-        let palette = &state.config.palette;
-        let tree_rows =
+        assert!(
             state
                 .hits
                 .agent_activity_tree_rows
                 .iter()
-                .fold(Rect::default(), |acc, (rect, _)| {
-                    if acc.is_empty() {
-                        *rect
-                    } else {
-                        acc.union(*rect)
-                    }
-                });
-        let explore = find_cell(&state, tree_rows, "explore repo").expect("选中行");
-        assert_eq!(cell(&state, explore).bg, palette.accent, "选中行 accent 底");
-        let cargo = find_cell(&state, tree_rows, "cargo test").expect("失败行");
-        assert_eq!(cell(&state, cargo).fg, palette.overlay0, "失败灰");
-        let read = find_cell(&state, tree_rows, "read files").expect("完成行");
-        assert_eq!(cell(&state, read).fg, palette.overlay0, "完成灰");
-        // 右列正文在分隔线右侧。
-        let body = find_cell(&state, popup, "line one").expect("正文");
-        assert!(body.0 > explore.0 + 20, "正文在右列");
+                .all(|(rect, _)| rect.height == 2),
+            "{cols}x{rows} 每项两行"
+        );
+
+        let palette = &state.config.palette;
+        let list = state.hits.agent_activity_tree_rows[0].0;
+        let explore = find_cell(&state, list, "explore repo").expect("选中项");
+        assert_eq!(
+            cell(&state, explore).bg,
+            palette.selection_row_bg(),
+            "选中底色"
+        );
+        assert_eq!(cell(&state, (list.x, list.y)).symbol(), "▌", "选中竖条");
+        let b_row = state.hits.agent_activity_tree_rows[3].0;
+        let cargo = find_cell(&state, b_row, "cargo test").expect("失败项");
+        assert_eq!(cell(&state, cargo).fg, palette.text, "标签正文色");
+        let failed = find_cell(&state, b_row, "✕").expect("失败字形");
+        assert_eq!(
+            cell(&state, failed).fg,
+            crate::ui::design::status_color(
+                crate::harness::AgentBucket::Failed,
+                palette,
+                &state.config.components
+            ),
+            "失败字形用失败色"
+        );
+        let body = find_cell(&state, page, "line one").expect("正文");
+        assert!(body.0 > list.right(), "正文在右栏");
         assert!(!state.hits.agent_activity_content.is_empty());
     }
 }
 
-/// 极窄（56×20）：内框窄于 60 列只显示一列，Tab 在树与内容之间切换。
+/// 窄页面：内宽 < 100 单栏，Tab 在列表与转写之间切换；< 60 每项只占一行。
 #[test]
-fn narrow_window_shows_one_column_and_tab_switches() {
-    let mut state = state();
-    open_with_tree(&mut state);
-    select_with_content(&mut state, "a.1", "only in content\n");
-    state.compose(56, 20).expect("frame");
-    let text = popup_text(&state).join("\n");
-    assert!(text.contains("read files"), "树可见:\n{text}");
-    assert!(!text.contains("only in content"), "内容隐藏:\n{text}");
-    assert!(text.contains("Tab"), "窄屏切列提示:\n{text}");
-    assert!(has(&text, texts().hint_switch_column), "切列文案:\n{text}");
-    assert!(state.hits.agent_activity_content.is_empty());
+fn narrow_page_shows_one_column_and_tab_switches() {
+    for (cols, rows, compact) in [(90, 30, false), (56, 20, true)] {
+        let mut state = state();
+        open_with_tree(&mut state);
+        select_with_content(&mut state, "a.1", "only in content\n");
+        state.compose(cols, rows).expect("frame");
+        let text = popup_text(&state).join("\n");
+        assert!(
+            text.contains("read files"),
+            "{cols}x{rows} 列表可见:\n{text}"
+        );
+        assert!(
+            !text.contains("only in content"),
+            "{cols}x{rows} 转写隐藏:\n{text}"
+        );
+        assert!(state.hits.agent_activity_content.is_empty());
+        assert_eq!(
+            state
+                .hits
+                .agent_activity_tree_rows
+                .iter()
+                .all(|(rect, _)| rect.height == 1),
+            compact,
+            "{cols}x{rows} 每项行数"
+        );
 
-    state.handle_raw_events(vec![key(KeyCode::Tab)]);
-    assert_eq!(overlay(&state).focus, AgentActivityFocus::Content);
-    state.compose(56, 20).expect("frame");
-    let text = popup_text(&state).join("\n");
-    assert!(text.contains("only in content"), "内容可见:\n{text}");
-    assert!(!text.contains("write summary"), "树隐藏:\n{text}");
-    assert!(state.hits.agent_activity_tree_rows.is_empty());
+        state.handle_raw_events(vec![key(KeyCode::Tab)]);
+        assert_eq!(overlay(&state).focus, AgentActivityFocus::Content);
+        state.compose(cols, rows).expect("frame");
+        let text = popup_text(&state).join("\n");
+        assert!(
+            text.contains("only in content"),
+            "{cols}x{rows} 转写可见:\n{text}"
+        );
+        assert!(
+            !text.contains("write summary"),
+            "{cols}x{rows} 列表隐藏:\n{text}"
+        );
+        assert!(state.hits.agent_activity_tree_rows.is_empty());
 
-    state.handle_raw_events(vec![key(KeyCode::BackTab)]);
-    assert_eq!(overlay(&state).focus, AgentActivityFocus::Tree);
+        state.handle_raw_events(vec![key(KeyCode::BackTab)]);
+        assert_eq!(overlay(&state).focus, AgentActivityFocus::Tree);
+    }
 }
 
 /// 打开立即读树（pane 属主、follow = true）；树应答后选中节点读内容（从头读），
@@ -1029,11 +1088,14 @@ fn mouse_hovers_selects_toggles_and_clicks_buttons() {
     assert_eq!(overlay(&state).selected_node, None, "悬浮不改选中");
     state.compose(120, 40).expect("frame");
     let hovered = find_cell(&state, b_row, "cargo").expect("悬浮行");
-    assert_eq!(
-        cell(&state, hovered).bg,
-        state.config.palette.hover_row_bg(),
-        "悬浮底色"
-    );
+    let palette = &state.config.palette;
+    let hover =
+        if crate::app::state::Palette::row_bg_is_distinct(palette.panel_bg, palette.surface0) {
+            palette.surface0
+        } else {
+            palette.hover_row_bg()
+        };
+    assert_eq!(cell(&state, hovered).bg, hover, "悬浮底色");
 
     let outcome = state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Left),
@@ -1054,11 +1116,11 @@ fn mouse_hovers_selects_toggles_and_clicks_buttons() {
         content_result("b", "boom\n", true, Some("1")),
     );
 
-    // 折叠开关：a 的前缀里本节点那一格。
+    // 折叠开关：a 的前缀里本节点那一格（竖条与留白之后）。
     let a_row = row(&state, "a");
     state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Left),
-        a_row.x + 1,
+        a_row.x + 2,
         a_row.y,
     )]);
     assert!(overlay(&state).collapsed.contains("a"), "点开关折叠");
@@ -1135,13 +1197,14 @@ fn mouse_hovers_selects_toggles_and_clicks_buttons() {
         popup.x + 2,
         popup.y + 1,
     )]);
-    assert!(state.overlay.is_some(), "窗内空白处点击吞掉");
+    assert!(state.overlay.is_some(), "页内空白处点击吞掉");
+    let back = button(&state, AgentActivityButton::Back);
     state.handle_raw_events(vec![mouse(
         MouseEventKind::Down(MouseButton::Left),
-        popup.x.saturating_sub(2),
-        popup.y,
+        back.x + 1,
+        back.y,
     )]);
-    assert!(state.overlay.is_none(), "窗外点击关闭");
+    assert!(state.overlay.is_none(), "‹ 返回 关闭页面");
 }
 
 /// 滚轮按指针所在的列滚动：在内容上滚内容，在树上滚树（不改选中）。
@@ -1193,7 +1256,7 @@ fn content_scroll_bounds_are_computed_before_rendering() {
     select_with_content(&mut state, "a", &long);
     overlay_mut(&mut state).content_tail = false;
     overlay_mut(&mut state).content_scroll = 10_000;
-    state.compose(90, 30).expect("frame");
+    state.compose(120, 40).expect("frame");
     let max = overlay(&state).content_max_scroll;
     assert!(max > 0);
     assert_eq!(overlay(&state).content_scroll, max, "夹到上界");
@@ -1205,9 +1268,9 @@ fn content_scroll_bounds_are_computed_before_rendering() {
     assert_eq!(max, 40 - text_rows);
 
     select_with_content(&mut state, "a.1", &"x".repeat(400));
-    state.compose(90, 30).expect("frame");
-    let width = usize::from(state.hits.agent_activity_content.width - 2);
-    let rows = overlay(&state).content.as_ref().expect("内容").row_count();
+    state.compose(120, 40).expect("frame");
+    let width = usize::from(state.hits.agent_activity_content.width - 3);
+    let rows = overlay(&state).transcript.rows().len();
     assert_eq!(rows, 400usize.div_ceil(width), "按正文宽度折行");
 }
 
@@ -1273,20 +1336,18 @@ fn external_updates_badge_ignores_a_listed_tree_cut_short_by_the_list() {
         state.set_snapshot(Box::new(external_summary_snapshot(2, 5)));
         state.compose(cols, rows).expect("frame");
         assert!(overlay(&state).has_updates, "{cols}x{rows} 对上之后的变化");
-        let title = popup_text(&state)[1].clone();
-        if cols >= 90 {
-            assert!(
-                has(&title, texts().updates_badge),
-                "{cols}x{rows} 有更新徽标: {title:?}"
-            );
-        } else {
-            // 窄窗口的标题栏放不下两个徽标：按取舍顺序「有更新」先丢、「只读」最后丢，
-            // 判定本身照常（上面已断言 has_updates）。
-            assert!(
-                has(&title, texts().external_read_only) && !has(&title, texts().updates_badge),
-                "{cols}x{rows} 只留只读徽标: {title:?}"
-            );
-        }
+        // 「只读」常驻页头第 1 行，「有更新」在第 2 行最右侧（不和按钮争宽度）。
+        let lines = popup_text(&state);
+        assert!(
+            has(&lines[0], texts().external_read_only),
+            "{cols}x{rows} 只读徽标: {:?}",
+            lines[0]
+        );
+        assert!(
+            has(&lines[1], texts().updates_badge),
+            "{cols}x{rows} 有更新徽标: {:?}",
+            lines[1]
+        );
 
         // r 刷新：读到的新树与快照不同（又被挤掉）时，重新等快照对上。
         let outcome = state.handle_raw_events(vec![key(KeyCode::Char('r'))]);
@@ -1343,7 +1404,8 @@ fn an_external_owner_leaving_the_active_list_refreshes_its_final_tree_once() {
         .expect("完成行")
         .0;
     let at = find_cell(&state, rect, "explore repo").expect("完成标签");
-    assert_eq!(cell(&state, at).fg, state.config.palette.overlay0);
+    assert_eq!(cell(&state, at).fg, state.config.palette.text);
+    assert!(find_cell(&state, rect, "●").is_some(), "已完成用待查看字形");
     assert!(!overlay(&state).has_updates);
     let mut duplicate = ClientShellInput::default();
     state.tick_agent_activity(Instant::now() + FOLLOW_INTERVAL * 8, &mut duplicate);
@@ -1638,7 +1700,7 @@ fn content_header_meta_is_dropped_whole_never_cut() {
             nodes[3].ended_at_ms = Some(725_000);
             respond(&mut state, &id, tree_result(nodes));
             select_with_content(&mut state, "b", "boom\n");
-            if cols < 60 {
+            if cols < 100 {
                 state.handle_raw_events(vec![key(KeyCode::Tab)]);
             }
             state.compose(cols, rows).expect("frame");
@@ -1683,7 +1745,7 @@ fn content_header_meta_is_dropped_whole_never_cut() {
 /// 与未跟随时的「有更新」提示都不会被长标题挤掉。
 #[test]
 fn long_owner_names_keep_the_title_badges() {
-    let long = "Refactor the parser for streaming mode";
+    let long = "Refactor the parser for streaming mode across every crate in the workspace";
     for (cols, rows) in [(120, 40), (90, 30), (56, 20)] {
         let mut state = state_named("claude-main", long);
         let outcome = open(
@@ -1695,12 +1757,14 @@ fn long_owner_names_keep_the_title_badges() {
         let (id, _) = single_read(&outcome);
         respond(&mut state, &id, tree_result(sample_nodes()));
         state.compose(cols, rows).expect("frame");
-        let title = popup_text(&state)[1].clone();
+        let title = popup_text(&state)[0].clone();
         assert!(
             has(&title, texts().external_read_only),
             "{cols}x{rows} 只读徽标: {title:?}"
         );
-        assert!(title.contains('…'), "{cols}x{rows} 标题截断: {title:?}");
+        if cols >= 90 {
+            assert!(title.contains('…'), "{cols}x{rows} 属主名截断: {title:?}");
+        }
         assert!(title.contains('×'), "{cols}x{rows} 关闭按钮: {title:?}");
     }
 
@@ -1717,12 +1781,17 @@ fn long_owner_names_keep_the_title_badges() {
         state.set_snapshot(Box::new(projected));
         state.compose(cols, rows).expect("frame");
         assert!(overlay(&state).has_updates);
-        let title = popup_text(&state)[1].clone();
+        let lines = popup_text(&state);
         assert!(
-            has(&title, texts().updates_badge),
-            "{cols}x{rows} 有更新徽标: {title:?}"
+            has(&lines[1], texts().updates_badge),
+            "{cols}x{rows} 有更新徽标: {:?}",
+            lines[1]
         );
-        assert!(title.contains('…'), "{cols}x{rows} 标题截断: {title:?}");
+        assert!(
+            lines[0].contains('…'),
+            "{cols}x{rows} 属主名截断: {:?}",
+            lines[0]
+        );
     }
 }
 

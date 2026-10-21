@@ -378,8 +378,11 @@ fn render() { TerminalRuntime::input_state; }
             PROJECT_ROOT / "src" / "client" / "shell" / "snippets_overlay.rs": (
                 "render_run_pick_machines",
             ),
-            PROJECT_ROOT / "src" / "client" / "shell" / "agent_activity_overlay.rs": (
-                "render_agent_activity_overlay",
+            PROJECT_ROOT / "src" / "client" / "shell" / "chrome" / "agent_page.rs": (
+                "paint_agent_page",
+                "paint_list",
+                "paint_lanes",
+                "paint_content",
             ),
             PROJECT_ROOT / "src" / "client" / "shell" / "chrome" / "inspector.rs": ("paint",),
             PROJECT_ROOT / "src" / "client" / "shell" / "chrome" / "overview.rs": ("paint",),
@@ -397,6 +400,22 @@ fn render() { TerminalRuntime::input_state; }
                         f"{path.name}: {name} 渲染期回写滚动状态"
                         f"（body 内第 {line} 行）：{match.group(0)!r}"
                     )
+        # 子智能体页面的滚动字段带前缀（list_scroll / content_scroll / list_reveal …），
+        # 上面的 `.scroll` 规则匹配不到：绘制模块整体不得写这些字段，也不得拿到页面
+        # 状态的可变借用。
+        page = production_code(
+            (PROJECT_ROOT / "src" / "client" / "shell" / "chrome" / "agent_page.rs").read_text(
+                encoding="utf-8"
+            )
+        )
+        prefixed = re.compile(
+            r"\.(?:list_scroll|list_reveal|list_lines|content_scroll|content_max_scroll"
+            r"|content_tail|scroll_drag|transcript_synced)\s*=[^=]"
+        )
+        match = prefixed.search(page)
+        if match is not None:
+            self.fail(f"agent_page.rs 渲染期回写滚动状态：{match.group(0)!r}")
+        self.assertNotIn("&mut ClientAgentActivityOverlay", page, "绘制只读页面状态")
 
     def test_session_sidebar_render_reads_state_only(self) -> None:
         shell = PROJECT_ROOT / "src" / "client" / "shell"

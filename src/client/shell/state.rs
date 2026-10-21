@@ -234,6 +234,8 @@ pub(super) struct ShellHitMap {
     pub(super) agent_activity_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) agent_activity_actions:
         Vec<(Rect, super::agent_activity_overlay::AgentActivityButton)>,
+    /// 子智能体页面转写里的工具标题行：点击切换该工具输出的展开（值是工具块首行号）。
+    pub(super) agent_activity_toggles: Vec<(Rect, u64)>,
     pub(super) snippet_popup: Rect,
     pub(super) snippet_search: Rect,
     pub(super) snippet_rows: Vec<(Rect, usize)>,
@@ -1092,7 +1094,8 @@ pub(super) enum ClientShellOverlay {
     Scenes(super::scenes_overlay::ClientScenesOverlay),
     Broadcast(super::broadcast::ClientBroadcastOverlay),
     MachineFiles(super::machine_files_overlay::ClientMachineFilesOverlay),
-    AgentActivity(super::agent_activity_overlay::ClientAgentActivityOverlay),
+    /// 子智能体页面（全屏）。装箱：页面状态（转写排版、列表显示行等）比其余浮层大得多。
+    AgentActivity(Box<super::agent_activity_overlay::ClientAgentActivityOverlay>),
 }
 
 impl ClientShellOverlay {
@@ -1588,6 +1591,8 @@ pub(crate) struct ClientShellState {
     /// 下发、已被 `(revision, boot)` 覆盖，本字段恒为 0；为带外通道预留，启用者
     /// 须给上述守门脚本加一条同形规则。
     pub(super) agent_activity_epoch: u64,
+    /// 子智能体页面上次所选的视图：本次客户端会话内重开页面沿用，不写入设置。
+    pub(super) agent_page_view: super::agent_activity_overlay::AgentPageView,
     /// 在途的片段运行，按 run id 索引：并发运行互不覆盖（TOOL-06）。
     pub(super) snippet_runs: HashMap<u64, super::snippets_overlay::ClientSnippetRunState>,
     /// 下一个 run id（单调递增，跨运行不重复）。
@@ -1843,6 +1848,7 @@ impl ClientShellState {
             agent_rows_epoch: 0,
             tree_collapse_epoch: 0,
             agent_activity_epoch: 0,
+            agent_page_view: Default::default(),
             snippet_runs: HashMap::new(),
             next_snippet_run_id: 0,
             broadcast: crate::client::endpoint::BroadcastSet::load().unwrap_or_default(),

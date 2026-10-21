@@ -1,7 +1,8 @@
-//! 「Agent 活动」二级窗口：左列活动树、右列所选节点的内容。只读窗口，数据来自
-//! `agent.activity.read`；快照里的活动摘要只用来提示「有更新」。
+//! 子智能体页面（全屏）的状态、读取与输入路由：属主的活动树、所选节点的内容与三种
+//! 视图（层级、状态、时间线）。版式与绘制在 `chrome::agent_page`，这里不画任何东西。
+//! 数据来自 `agent.activity.read`；快照里的活动摘要只用来提示「有更新」。
 //!
-//! 数据通道（单飞）：窗口同时至多一个在途读取。打开时先读树（`node_id` 省略），
+//! 数据通道（单飞）：页面同时至多一个在途读取。打开时先读树（`node_id` 省略），
 //! 选中节点后读内容（`node_id` 给出、从头读）；内容没读完（`eof = false`）就按
 //! `next_cursor` 立即续读。跟随模式下树应答落地后每隔 [`FOLLOW_INTERVAL`] 重发
 //! 一次树读取（`follow = true`，让 server 在 `FOLLOW_TTL` 内保持跟随），树回来
@@ -10,25 +11,27 @@
 //! 每个请求的 `epoch` 取全局递增的请求序号，响应对不上在途请求即丢弃；内容读取
 //! 另带内容代际，选中节点或刷新之后到达的旧内容也丢弃。只有成功应答立即续发
 //! 下一个读取；错误结局交给下一次 tick，被取消的读取（断线等）放回队列、不算
-//! 读取失败。窗口关闭后不再发起任何读取。外部来源属主忽略跟随（server 也
+//! 读取失败。页面关闭后不再发起任何读取。外部来源属主忽略跟随（server 也
 //! 忽略）。旧 server 未宣告或拒绝该方法时显示「不提供」文案并不再重试。
 //!
-//! 阶段划分（STATE-04）：输入阶段改选中 / 折叠 / 滚动意图并排队读取；视图计算
-//! 阶段（[`ClientShellState::compute_agent_activity_view`]）按当前几何夹紧滚动、
-//! 折行内容、记下翻页步长；渲染阶段（[`render_agent_activity_overlay`]）只读。
-//! 窗口不在 pane 规模的循环里，每帧只画可见的树行与内容行。
+//! 阶段划分（STATE-04）：输入阶段改选中 / 折叠 / 视图 / 筛选 / 滚动意图并排队读取；
+//! 视图计算阶段（[`ClientShellState::compute_agent_activity_view`]）按页面几何建列表
+//! 显示行、同步并折行转写、夹紧滚动；渲染阶段（`chrome::agent_page::paint_agent_page`）
+//! 只读。页面不在 pane 规模的循环里，每帧只画可见的列表行与转写行。
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::render::{display_width, panel, panel_inner, put_text, OverlayRender};
+use super::chrome::agent_page::{self, ListLine};
+use super::chrome::agent_transcript::{TranscriptMode, TranscriptView};
+use super::render::wrap_text;
 use super::*;
 use crate::api::schema::{
     AgentActivityContent, AgentActivityContentFormat, AgentActivityKind, AgentActivityNode,
     AgentActivityReadParams, AgentActivityStatus, Method, ResponseResult,
 };
-use crate::ui::kit::footer_hints::{render_footer_hints, FooterHint};
-use crate::ui::kit::tree::{fill_last_child_masks, render_tree_prefix, TreeEntry, MAX_TREE_DEPTH};
+use crate::harness::AgentBucket;
+use crate::ui::kit::tree::{fill_last_child_masks, TreeEntry, MAX_TREE_DEPTH};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 /// 跟随时重发树读取（并续读内容）的间隔，从上一次树应答落地时起算；与 server
@@ -42,12 +45,8 @@ const READ_MAX_BYTES: u32 = 256 * 1024;
 pub(super) const CONTENT_CAP_BYTES: usize = 512 * 1024;
 /// 客户端接收的节点上限（适配器自身封顶 256，这里只防异常 server）。
 const MAX_NODES: usize = 1024;
-/// 左列宽度占内框的比例与下限；内框窄于 [`NARROW_WIDTH`] 时只显示一列。
-const TREE_SHARE_PERCENT: u16 = 35;
-const TREE_MIN_WIDTH: u16 = 24;
-pub(super) const NARROW_WIDTH: u16 = 60;
-/// 树行左侧留白列数（开关命中区据此换算）。
-const TREE_PAD: u16 = 1;
+/// 筛选输入的字符上限（只防粘贴巨量文本）。
+const FILTER_MAX_CHARS: usize = 128;
 
 /// 活动树的属主：某个 pane 里的 agent，或不属于任何 pane 的外部来源条目。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,14 +55,46 @@ pub(super) enum AgentActivityOwner {
     External { external_id: String },
 }
 
+/// 页面的三种视图。本次客户端会话内记在 `ClientShellState::agent_page_view`，重开
+/// 页面沿用，不写入设置。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum AgentPageView {
+    /// 层级：按父子关系的树。
+    #[default]
+    Tree,
+    /// 状态：按状态桶分组的平铺列表。
+    Status,
+    /// 时间线：泳道 + 下方的转写与概要。
+    Timeline,
+}
+
+impl AgentPageView {
+    pub(super) const ALL: [Self; 3] = [Self::Tree, Self::Status, Self::Timeline];
+
+    pub(super) fn label(self) -> &'static str {
+        let texts = &crate::i18n::texts().agent_activity;
+        match self {
+            Self::Tree => texts.view_tree,
+            Self::Status => texts.view_status,
+            Self::Timeline => texts.view_timeline,
+        }
+    }
+}
+
+/// 页面上可点的控件：页头按钮、视图标签、筛选入口与「已完成 N 项」行。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AgentActivityButton {
     Close,
     ToggleFollow,
     Refresh,
+    Back,
+    Jump,
+    View(AgentPageView),
+    Filter,
+    ToggleDone,
 }
 
-/// 键盘焦点所在的列。窄窗口只显示焦点所在的一列。
+/// 键盘焦点所在的栏：列表（时间线视图里是泳道）或转写。窄屏只显示焦点所在的一栏。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum AgentActivityFocus {
     #[default]
@@ -71,7 +102,7 @@ pub(super) enum AgentActivityFocus {
     Content,
 }
 
-/// 在途读取（窗口同时只有一个）。
+/// 在途读取（页面同时只有一个）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AgentActivityRead {
     pub(super) epoch: u64,
@@ -99,18 +130,25 @@ pub(super) struct ContentLine {
     pub(super) text: String,
     pub(super) tone: LineTone,
     /// 需要着色的前缀字节数（列表记号 / jsonl 前缀）；标题整行着色。
-    marker: usize,
+    pub(super) marker: usize,
+}
+
+impl AsRef<str> for ContentLine {
+    fn as_ref(&self) -> &str {
+        &self.text
+    }
 }
 
 /// 折行后的一个显示行：`lines[line]` 的 `[start, end)` 字节区间。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WrapRow {
-    line: u32,
-    start: u32,
-    end: u32,
+pub(super) struct WrapRow {
+    pub(super) line: u32,
+    pub(super) start: u32,
+    pub(super) end: u32,
 }
 
-/// 已选节点的内容：按页追加，显示行与折行结果增量维护。
+/// 已选节点的内容：按页追加，显示行与折行结果增量维护。Text 格式的折行交给
+/// [`TranscriptView`]，这里只维护 Markdown / Jsonl 的按行折行。
 #[derive(Debug, Default)]
 pub(super) struct AgentActivityContentView {
     pub(super) node_id: String,
@@ -121,11 +159,16 @@ pub(super) struct AgentActivityContentView {
     partial: Option<String>,
     /// `lines` 的文本总字节，超过 [`CONTENT_CAP_BYTES`] 时从头部丢行。
     bytes: usize,
+    /// 客户端从头部累计丢弃的行数：`lines[0]` 在整个内容里的行号（转写的
+    /// `first_line`）。从头重读时归零。
+    pub(super) dropped: u64,
+    /// 内容修订号：每次追加、丢行或清空都加一，视图计算阶段据此决定是否重新同步转写。
+    pub(super) revision: u64,
     /// server 标了截断，或客户端因上限丢过头部：顶部提示「仅显示最新部分」。
     pub(super) truncated: bool,
     pub(super) eof: bool,
     pub(super) next_cursor: Option<String>,
-    rows: Vec<WrapRow>,
+    pub(super) rows: Vec<WrapRow>,
     wrap_width: u16,
     /// `lines[..wrapped]` 已折进 `rows`。
     wrapped: usize,
@@ -154,7 +197,15 @@ impl AgentActivityContentView {
         text
     }
 
-    /// 折行后的显示行数（视图计算阶段之后有效）。
+    /// 是否按转写排版（Text / 未知格式）；Markdown / Jsonl 走按行着色。
+    pub(super) fn is_transcript(&self) -> bool {
+        matches!(
+            self.format,
+            AgentActivityContentFormat::Text | AgentActivityContentFormat::Unknown
+        )
+    }
+
+    /// 折行后的显示行数（视图计算阶段之后有效；只对 Markdown / Jsonl）。
     pub(super) fn row_count(&self) -> usize {
         self.rows.len()
     }
@@ -163,7 +214,9 @@ impl AgentActivityContentView {
         self.lines.clear();
         self.partial = None;
         self.bytes = 0;
+        self.dropped = 0;
         self.truncated = false;
+        self.revision = self.revision.wrapping_add(1);
         self.invalidate_from(0);
     }
 
@@ -172,6 +225,7 @@ impl AgentActivityContentView {
         if text.is_empty() {
             return;
         }
+        self.revision = self.revision.wrapping_add(1);
         let mut pending = match self.partial.take() {
             Some(partial) => {
                 // 撤掉半行的临时显示行，与新的一页拼起来重新整理。
@@ -202,7 +256,7 @@ impl AgentActivityContentView {
         self.lines.push(line);
     }
 
-    /// 超出上限时从头部整行丢弃；折行结果随之平移，不整体重算。
+    /// 超出上限时从头部整行丢弃并记下累计丢弃行数；折行结果随之平移，不整体重算。
     fn enforce_cap(&mut self) {
         if self.bytes <= CONTENT_CAP_BYTES {
             return;
@@ -217,6 +271,9 @@ impl AgentActivityContentView {
         }
         self.lines.drain(..drop);
         self.truncated = true;
+        self.dropped = self
+            .dropped
+            .saturating_add(u64::try_from(drop).unwrap_or(u64::MAX));
         let drop32 = u32::try_from(drop).unwrap_or(u32::MAX);
         self.rows.retain(|row| row.line >= drop32);
         for row in &mut self.rows {
@@ -236,7 +293,8 @@ impl AgentActivityContentView {
         self.wrapped = line;
     }
 
-    /// 按 `width` 列折行：宽度变了全部重折，否则只折新增的行。
+    /// 按 `width` 列折行（按显示宽度、优先在空格处断，不拆宽字符）：宽度变了全部
+    /// 重折，否则只折新增的行。
     fn ensure_wrapped(&mut self, width: u16) {
         if width == 0 {
             return;
@@ -246,54 +304,20 @@ impl AgentActivityContentView {
             self.rows.clear();
             self.wrapped = 0;
         }
+        let room = usize::from(width);
+        let to32 = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
         for (index, line) in self.lines.iter().enumerate().skip(self.wrapped) {
-            let line_index = u32::try_from(index).unwrap_or(u32::MAX);
-            wrap_line(&line.text, width, |start, end| {
+            let line_index = to32(index);
+            wrap_text(&line.text, room, room, |start, end| {
                 self.rows.push(WrapRow {
                     line: line_index,
-                    start,
-                    end,
+                    start: to32(start),
+                    end: to32(end),
                 });
             });
         }
         self.wrapped = self.lines.len();
     }
-}
-
-/// 按显示宽度折一行，逐段回调 `[start, end)` 字节区间；空行也占一行。优先在
-/// 本段最后一个空格之后断行（空格留在上一段末尾），没有空格时按列硬断。
-fn wrap_line(text: &str, width: u16, mut emit: impl FnMut(u32, u32)) {
-    let width = usize::from(width.max(1));
-    let to32 = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
-    let mut start = 0usize;
-    let mut used = 0usize;
-    // 本段里最近一个空格之后的位置，及到它为止占用的列数。
-    let mut soft_break: Option<(usize, usize)> = None;
-    for (offset, ch) in text.char_indices() {
-        let cell = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        while used + cell > width && offset > start {
-            match soft_break
-                .take()
-                .filter(|(at, _)| *at > start && *at <= offset)
-            {
-                Some((at, used_at)) => {
-                    emit(to32(start), to32(at));
-                    start = at;
-                    used -= used_at;
-                }
-                None => {
-                    emit(to32(start), to32(offset));
-                    start = offset;
-                    used = 0;
-                }
-            }
-        }
-        used += cell;
-        if ch == ' ' {
-            soft_break = Some((offset + ch.len_utf8(), used));
-        }
-    }
-    emit(to32(start), to32(text.len()));
 }
 
 /// 去掉会弄乱单元格的控制字符：制表符换成空格，ESC 序列整段丢弃。
@@ -429,6 +453,23 @@ fn jsonl_line(text: String) -> ContentLine {
     }
 }
 
+/// 页头用的属主信息：视图计算阶段从快照取一次，渲染只读。
+#[derive(Debug, Clone, Default)]
+pub(super) struct AgentPageOwner {
+    /// 显示名：pane 型取 agent 名，外部条目取标签；找不到时回退到 id。
+    pub(super) name: String,
+    /// 位置：`工作区 / 标签`（pane 型）或工作目录（外部条目）；没有就省略。
+    pub(super) location: Option<String>,
+    /// 属主自己的状态桶；不在快照里时为 `None`（不画状态字形）。
+    pub(super) bucket: Option<AgentBucket>,
+    /// 运行开始的墙钟毫秒（快照里有才有）。
+    pub(super) since_ms: Option<u64>,
+    pub(super) model: Option<String>,
+    pub(super) session_title: Option<String>,
+    /// agent 种类标签（`codex` / `claude` …），决定转写的解析方式。
+    pub(super) agent: Option<String>,
+}
+
 #[derive(Debug)]
 pub(super) struct ClientAgentActivityOverlay {
     pub(super) endpoint_id: ClientEndpointId,
@@ -439,17 +480,30 @@ pub(super) struct ClientAgentActivityOverlay {
     pub(super) hovered_node: Option<String>,
     /// 折叠的节点（默认全部展开）。
     pub(super) collapsed: HashSet<String>,
-    pub(super) tree_scroll: usize,
+    /// 当前视图（层级 / 状态 / 时间线）。
+    pub(super) view: AgentPageView,
+    /// 筛选词（按标签、摘要、角色不分大小写匹配，保留匹配项的祖先）。
+    pub(super) filter: String,
+    /// 正在输入筛选词：可打印字符进筛选框，不当快捷键。
+    pub(super) filter_editing: bool,
+    /// 收起已完成：隐藏整棵子树都已完成的节点（失败节点永远可见）。
+    pub(super) hide_done: bool,
+    /// 列表滚动（显示行；时间线视图里是泳道行）。视图计算阶段夹紧。
+    pub(super) list_scroll: usize,
     /// 键盘移动选中后要求把它滚进视野；视图计算阶段消费。
-    tree_reveal: bool,
+    list_reveal: bool,
+    /// 视图计算阶段建的列表显示行（渲染只读）。
+    pub(super) list_lines: Vec<ListLine>,
     pub(super) content_scroll: usize,
     /// 视图计算阶段写入，渲染只读（STATE-04）。
     pub(super) content_max_scroll: usize,
     /// 内容钉在底部：新内容到达后视图计算阶段把滚动跟到最新（跟随时的默认）。
     pub(super) content_tail: bool,
     /// 视图计算阶段记下的一页行数（PgUp / PgDn 步长）。
-    tree_page: usize,
+    list_page: usize,
     content_page: usize,
+    /// 正在拖转写的滚动条。
+    scroll_drag: bool,
     pub(super) follow: bool,
     pub(super) focus: AgentActivityFocus,
     /// 最近一次发出的读取的代际（全局请求序号）。
@@ -464,8 +518,9 @@ pub(super) struct ClientAgentActivityOverlay {
     /// 跟随模式下一次重发树读取的时刻（树应答落地时重置）；`None` = 立即。
     next_follow_at: Option<Instant>,
     pub(super) nodes: Vec<AgentActivityNode>,
-    /// 按父子前序展开、跳过折叠子树的可见行（`kind` = `nodes` 下标）。
-    rows: Vec<TreeEntry<usize>>,
+    /// 当前视图的可选条目（`kind` = `nodes` 下标）：层级 / 时间线按父子前序展开、
+    /// 跳过折叠子树；状态视图按状态桶排序、不分层。筛选与「收起已完成」已应用。
+    pub(super) rows: Vec<TreeEntry<usize>>,
     pub(super) tree_loaded: bool,
     pub(super) tree_error: Option<String>,
     /// 最近一次读到的树的 (running, total)，与快照摘要比对得出「有更新」。
@@ -482,16 +537,26 @@ pub(super) struct ClientAgentActivityOverlay {
     /// 内容读取的错误。
     pub(super) error: Option<String>,
     pub(super) content: Option<AgentActivityContentView>,
+    /// 所选节点 Text 内容的转写排版（视图计算阶段同步与折行，渲染只读）。
+    pub(super) transcript: TranscriptView,
+    /// 转写同步到的 (节点, 内容修订号, 解析方式)；对不上时视图计算阶段重新同步。
+    transcript_synced: Option<(String, u64, TranscriptMode)>,
     /// server 未宣告或拒绝 `agent.activity.read`：显示「不提供」并不再重试。
     pub(super) unsupported: bool,
     /// 视图计算阶段记下的墙钟毫秒，渲染据此算运行中节点的耗时。
-    now_ms: u64,
+    pub(super) now_ms: u64,
+    /// 视图计算阶段从快照取的属主信息。
+    pub(super) owner_view: AgentPageOwner,
+    /// 视图计算阶段取的状态字形（指示风格 + 全局转圈帧）。
+    pub(super) glyphs: StatusGlyphs,
+    /// 页面自己画页脚（经典 / 移动布局没有工作台状态栏）。视图计算阶段写入。
+    pub(super) own_footer: bool,
     /// 从别的浮层（如右键菜单之外的入口）打开时，Esc 回到它。
     pub(super) return_to: Option<Box<ClientShellOverlay>>,
 }
 
 impl ClientAgentActivityOverlay {
-    fn new(endpoint_id: ClientEndpointId, owner: AgentActivityOwner) -> Self {
+    fn new(endpoint_id: ClientEndpointId, owner: AgentActivityOwner, view: AgentPageView) -> Self {
         let follow = matches!(owner, AgentActivityOwner::Pane { .. });
         Self {
             endpoint_id,
@@ -499,13 +564,19 @@ impl ClientAgentActivityOverlay {
             selected_node: None,
             hovered_node: None,
             collapsed: HashSet::new(),
-            tree_scroll: 0,
-            tree_reveal: false,
+            view,
+            filter: String::new(),
+            filter_editing: false,
+            hide_done: false,
+            list_scroll: 0,
+            list_reveal: false,
+            list_lines: Vec::new(),
             content_scroll: 0,
             content_max_scroll: 0,
             content_tail: follow,
-            tree_page: 1,
+            list_page: 1,
             content_page: 1,
+            scroll_drag: false,
             follow,
             focus: AgentActivityFocus::Tree,
             read_epoch: 0,
@@ -525,8 +596,13 @@ impl ClientAgentActivityOverlay {
             has_updates: false,
             error: None,
             content: None,
+            transcript: TranscriptView::default(),
+            transcript_synced: None,
             unsupported: false,
             now_ms: 0,
+            owner_view: AgentPageOwner::default(),
+            glyphs: StatusGlyphs::fixed(crate::config::StatusIndicatorStyle::Graphite),
+            own_footer: false,
             return_to: None,
         }
     }
@@ -540,19 +616,27 @@ impl ClientAgentActivityOverlay {
         self.follow && !self.is_external()
     }
 
-    /// 可见树行的节点 id（按显示顺序）。
+    /// 可见条目的节点 id（按显示顺序）。
     #[cfg(test)]
     pub(super) fn visible_node_ids(&self) -> impl Iterator<Item = &str> {
         self.rows.iter().map(|row| row.key.as_str())
     }
 
-    fn selected_row(&self) -> Option<usize> {
+    pub(super) fn selected_row(&self) -> Option<usize> {
         let selected = self.selected_node.as_deref()?;
         self.rows.iter().position(|row| row.key == selected)
     }
 
-    fn node(&self, id: &str) -> Option<&AgentActivityNode> {
+    pub(super) fn node(&self, id: &str) -> Option<&AgentActivityNode> {
         self.nodes.iter().find(|node| node.id == id)
+    }
+
+    /// 已完成（`Done`）的节点数：列表末尾「已完成 N 项」。
+    pub(super) fn done_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|node| node.status == AgentActivityStatus::Done)
+            .count()
     }
 
     fn mark_unsupported(&mut self) {
@@ -564,13 +648,15 @@ impl ClientAgentActivityOverlay {
 
     /// 改选中节点：内容换新代际、清空，从头读。已是它时只要求滚进视野。
     fn select(&mut self, node_id: String) -> bool {
-        self.tree_reveal = true;
+        self.list_reveal = true;
         if self.selected_node.as_deref() == Some(node_id.as_str()) {
             return false;
         }
         self.selected_node = Some(node_id);
         self.restart_selected_content();
         self.content = None;
+        self.transcript = TranscriptView::default();
+        self.transcript_synced = None;
         self.error = None;
         self.content_scroll = 0;
         self.content_tail = self.follow_active();
@@ -584,11 +670,21 @@ impl ClientAgentActivityOverlay {
         self.want_content = self.selected_node.is_some();
     }
 
+    /// 按视图、折叠、筛选与「收起已完成」重建可选条目。
     fn rebuild_rows(&mut self) {
-        self.rows = build_rows(&self.nodes, &self.collapsed);
+        let keep = visible_mask(&self.nodes, &self.filter, self.hide_done);
+        self.rows = match self.view {
+            AgentPageView::Tree | AgentPageView::Timeline => {
+                build_rows_where(&self.nodes, &self.collapsed, Some(&keep))
+            }
+            AgentPageView::Status => status_rows(&self.nodes, &keep),
+        };
     }
 
     fn toggle_collapsed(&mut self, node_id: &str) -> bool {
+        if self.view == AgentPageView::Status {
+            return false;
+        }
         let has_children = self
             .rows
             .iter()
@@ -785,12 +881,8 @@ pub(in crate::client::shell) fn method_unsupported(error: &ClientShellEndpointEr
     }
 }
 
-/// 节点按 `parent_id` 前序展开：找不到父节点的是根；成环的链在首个节点处断开；
-/// 折叠节点的子树不展开。
-pub(in crate::client::shell) fn build_rows(
-    nodes: &[AgentActivityNode],
-    collapsed: &HashSet<String>,
-) -> Vec<TreeEntry<usize>> {
+/// 每个节点的父节点下标：找不到父节点的是根；成环的链在首个节点处断开。
+fn parent_indices(nodes: &[AgentActivityNode]) -> Vec<Option<usize>> {
     let index: HashMap<&str, usize> = nodes
         .iter()
         .enumerate()
@@ -821,9 +913,35 @@ pub(in crate::client::shell) fn build_rows(
             cursor = parent_of[parent];
         }
     }
+    parent_of
+}
+
+/// 节点按 `parent_id` 前序展开：找不到父节点的是根；成环的链在首个节点处断开；
+/// 折叠节点的子树不展开。
+pub(in crate::client::shell) fn build_rows(
+    nodes: &[AgentActivityNode],
+    collapsed: &HashSet<String>,
+) -> Vec<TreeEntry<usize>> {
+    build_rows_where(nodes, collapsed, None)
+}
+
+/// 同 [`build_rows`]，只展开 `keep` 为真的节点（`None` = 全部）。`keep` 须对祖先
+/// 封闭（保留的节点其祖先也保留，[`visible_mask`] 保证），否则被丢掉的父节点下的
+/// 子树整个看不见。
+fn build_rows_where(
+    nodes: &[AgentActivityNode],
+    collapsed: &HashSet<String>,
+    keep: Option<&[bool]>,
+) -> Vec<TreeEntry<usize>> {
+    let kept =
+        |position: usize| keep.is_none_or(|keep| keep.get(position).copied().unwrap_or(false));
+    let parent_of = parent_indices(nodes);
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     let mut roots = Vec::new();
     for (position, parent) in parent_of.iter().enumerate() {
+        if !kept(position) {
+            continue;
+        }
         match parent {
             Some(parent) => children[*parent].push(position),
             None => roots.push(position),
@@ -887,36 +1005,162 @@ pub(in crate::client::shell) fn build_rows(
     rows
 }
 
-/// 属主的显示名：pane 型取该端点快照里 agent 的名字，外部条目取其标签；找不到
-/// 时回退到 id。
-fn owner_label(overlay: &ClientAgentActivityOverlay, endpoints: &[ClientShellEndpoint]) -> String {
-    let snapshot = endpoint_snapshot(endpoints, &overlay.endpoint_id);
-    match &overlay.owner {
-        AgentActivityOwner::Pane { pane_id } => snapshot
-            .and_then(|snapshot| {
+/// 哪些节点可见：筛选词（不分大小写匹配标签、摘要、角色）保留匹配项及其祖先；
+/// 「收起已完成」隐藏整棵子树都已完成（`Done`）的节点——失败、运行中与等待的
+/// 节点及其祖先永远可见。结果对祖先封闭。
+pub(super) fn visible_mask(
+    nodes: &[AgentActivityNode],
+    filter: &str,
+    hide_done: bool,
+) -> Vec<bool> {
+    let parent_of = parent_indices(nodes);
+    // 沿祖先链逐个置位；步数封顶，防异常数据里没断开的长链。
+    let mark_ancestors = |mask: &mut Vec<bool>, start: usize| {
+        let mut cursor = Some(start);
+        let mut steps = 0;
+        while let Some(index) = cursor {
+            if steps > nodes.len() || mask[index] {
+                break;
+            }
+            mask[index] = true;
+            steps += 1;
+            cursor = parent_of[index];
+        }
+    };
+    let query = filter.trim().to_lowercase();
+    let mut keep = if query.is_empty() {
+        vec![true; nodes.len()]
+    } else {
+        let mut keep = vec![false; nodes.len()];
+        for (position, node) in nodes.iter().enumerate() {
+            let matches = [
+                Some(node.label.as_str()),
+                node.summary.as_deref(),
+                node.agent_type.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|text| text.to_lowercase().contains(&query));
+            if matches {
+                mark_ancestors(&mut keep, position);
+            }
+        }
+        keep
+    };
+    if hide_done {
+        let mut unfinished = vec![false; nodes.len()];
+        for (position, node) in nodes.iter().enumerate() {
+            if node.status != AgentActivityStatus::Done {
+                mark_ancestors(&mut unfinished, position);
+            }
+        }
+        for (kept, unfinished) in keep.iter_mut().zip(unfinished) {
+            *kept &= unfinished;
+        }
+    }
+    keep
+}
+
+/// 状态视图的条目：按状态桶的列表顺序（需要输入、失败、已完成、运行中、等待、未知）
+/// 稳定排序，组内保持层级视图的前序；不分层、不折叠。
+fn status_rows(nodes: &[AgentActivityNode], keep: &[bool]) -> Vec<TreeEntry<usize>> {
+    let mut rows = build_rows_where(nodes, &HashSet::new(), Some(keep));
+    rows.sort_by_key(|row| {
+        crate::ui::design::activity_bucket(nodes[row.kind].status).listing_rank()
+    });
+    for row in &mut rows {
+        row.depth = 0;
+        row.last_child_mask = 0;
+        row.has_children = false;
+        row.collapsed = false;
+    }
+    rows
+}
+
+/// 属主的页头信息：pane 型取该端点快照里的 agent（名字、位置、状态、模型、会话
+/// 标题），外部条目取其标签与工作目录；找不到时名字回退到 id。
+fn owner_view(
+    endpoints: &[ClientShellEndpoint],
+    endpoint_id: &ClientEndpointId,
+    owner: &AgentActivityOwner,
+) -> AgentPageOwner {
+    let snapshot = endpoint_snapshot(endpoints, endpoint_id);
+    match owner {
+        AgentActivityOwner::Pane { pane_id } => {
+            let agent = snapshot.and_then(|snapshot| {
                 snapshot
                     .agents
                     .iter()
                     .find(|agent| &agent.pane_id == pane_id)
-            })
-            .and_then(|agent| {
-                agent
+            });
+            let Some(agent) = agent else {
+                return AgentPageOwner {
+                    name: pane_id.clone(),
+                    ..AgentPageOwner::default()
+                };
+            };
+            let location = snapshot.and_then(|snapshot| {
+                let workspace = snapshot
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
+                let tab = snapshot
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.tab_id == agent.tab_id)
+                    .map(|tab| tab.label.as_str())
+                    .filter(|label| !label.is_empty());
+                Some(match tab {
+                    Some(tab) => format!("{} / {tab}", workspace.label),
+                    None => workspace.label.clone(),
+                })
+            });
+            let bucket = client_agent_bucket(agent);
+            AgentPageOwner {
+                name: agent
                     .name
                     .clone()
                     .or_else(|| agent.display_agent.clone())
                     .or_else(|| agent.agent.clone())
-            })
-            .unwrap_or_else(|| pane_id.clone()),
-        AgentActivityOwner::External { external_id } => snapshot
-            .and_then(|snapshot| {
+                    .unwrap_or_else(|| pane_id.clone()),
+                location,
+                bucket: Some(bucket),
+                since_ms: (bucket == AgentBucket::Working)
+                    .then_some(agent.insight.working_since_ms)
+                    .flatten(),
+                model: agent
+                    .insight
+                    .model
+                    .clone()
+                    .filter(|model| !model.is_empty()),
+                session_title: agent
+                    .insight
+                    .session_title
+                    .clone()
+                    .filter(|title| !title.is_empty()),
+                agent: agent.agent.clone(),
+            }
+        }
+        AgentActivityOwner::External { external_id } => {
+            let agent = snapshot.and_then(|snapshot| {
                 snapshot
                     .external_agents
                     .iter()
                     .find(|agent| &agent.external_id == external_id)
-            })
-            .map(|agent| agent.label.clone())
-            .filter(|label| !label.is_empty())
-            .unwrap_or_else(|| external_id.clone()),
+            });
+            AgentPageOwner {
+                name: agent
+                    .map(|agent| agent.label.clone())
+                    .filter(|label| !label.is_empty())
+                    .unwrap_or_else(|| external_id.clone()),
+                location: agent.and_then(|agent| agent.cwd.clone()),
+                bucket: agent.map(|agent| agent_bucket(agent.agent_status)),
+                since_ms: None,
+                model: None,
+                session_title: None,
+                agent: agent.and_then(|agent| agent.agent.clone()),
+            }
+        }
     }
 }
 
@@ -955,6 +1199,23 @@ fn owner_summary(
     Some((activity.running, activity.total))
 }
 
+/// 转写的解析方式：转写格式明确的属主（codex / claude / opencode）按区块解析，其余
+/// （kimi、pi、外部来源等）每行都当正文。
+fn transcript_mode(owner: &AgentPageOwner, external: bool) -> TranscriptMode {
+    let agent = owner.agent.as_deref().map(str::to_ascii_lowercase);
+    match agent.as_deref() {
+        Some("codex" | "claude" | "opencode") if !external => TranscriptMode::Transcript,
+        _ => TranscriptMode::Plain,
+    }
+}
+
+/// 节点标签里 ` · ` 之前的昵称（Codex 子智能体的 `Hume · ui_audit` 取 `Hume`）。
+pub(super) fn node_nickname(label: &str) -> &str {
+    label
+        .split_once(" · ")
+        .map_or(label, |(nickname, _)| nickname)
+}
+
 fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -963,7 +1224,7 @@ fn unix_now_ms() -> u64 {
 }
 
 /// 节点耗时：结束时刻（未结束的运行态取现在）减开始时刻；缺时间戳时为 `None`。
-fn node_elapsed_ms(node: &AgentActivityNode, now_ms: u64) -> Option<u64> {
+pub(super) fn node_elapsed_ms(node: &AgentActivityNode, now_ms: u64) -> Option<u64> {
     let started = node.started_at_ms?;
     let ended = match node.ended_at_ms {
         Some(ended) => ended,
@@ -991,7 +1252,7 @@ pub(super) fn format_elapsed(ms: u64) -> String {
     }
 }
 
-fn kind_label(kind: AgentActivityKind) -> &'static str {
+pub(super) fn kind_label(kind: AgentActivityKind) -> &'static str {
     let texts = &crate::i18n::texts().agent_activity;
     match kind {
         AgentActivityKind::Subagent => texts.kind_subagent,
@@ -1002,7 +1263,7 @@ fn kind_label(kind: AgentActivityKind) -> &'static str {
     }
 }
 
-fn status_label(status: AgentActivityStatus) -> &'static str {
+pub(super) fn status_label(status: AgentActivityStatus) -> &'static str {
     let texts = &crate::i18n::texts().agent_activity;
     match status {
         AgentActivityStatus::Pending => texts.status_pending,
@@ -1014,839 +1275,36 @@ fn status_label(status: AgentActivityStatus) -> &'static str {
     }
 }
 
-fn status_glyph(status: AgentActivityStatus) -> &'static str {
-    match status {
-        AgentActivityStatus::Running => "●",
-        AgentActivityStatus::Pending => "○",
-        AgentActivityStatus::Blocked => "◐",
-        AgentActivityStatus::Done => "✓",
-        AgentActivityStatus::Failed => "✗",
-        AgentActivityStatus::Unknown => "·",
-    }
-}
-
-/// 状态色：运行中强调、已结束灰显、受阻黄，其余常规文字色。
-fn status_color(status: AgentActivityStatus, palette: &Palette) -> ratatui::style::Color {
-    match status {
-        AgentActivityStatus::Running => palette.accent,
-        AgentActivityStatus::Failed | AgentActivityStatus::Done | AgentActivityStatus::Unknown => {
-            palette.overlay0
-        }
-        AgentActivityStatus::Blocked => palette.yellow,
-        AgentActivityStatus::Pending => palette.text,
-    }
-}
-
-/// 窗口版式：视图计算与渲染共用同一份（STATE-04）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct AgentActivityLayout {
-    pub(super) popup: Rect,
-    /// 内框第一行：标题、徽标与按钮。
-    pub(super) title: Rect,
-    pub(super) footer: Rect,
-    pub(super) narrow: bool,
-    /// 标题栏与页脚之间的整块区域（两列与分隔线）。
-    pub(super) body: Rect,
-    /// 左列（含表头行）；窄窗口焦点在内容时为空。
-    pub(super) tree: Rect,
-    pub(super) tree_rows: Rect,
-    pub(super) divider: Rect,
-    /// 右列（含头行）；窄窗口焦点在树时为空。
-    pub(super) content: Rect,
-    pub(super) content_header: Rect,
-    /// 头行之下、滚动条之左的正文区。
-    pub(super) content_text: Rect,
-    /// 正文右侧预留的滚动条列（常驻，折行宽度不随滚动条出没变化）。
-    pub(super) scrollbar: Rect,
-}
-
-/// 右列头行数：节点标题行 + 摘要行（有 summary / agent_type 时）+ 提示行（截断
-/// 或读取失败时）。
-fn content_header_rows(overlay: &ClientAgentActivityOverlay) -> u16 {
-    let node = overlay
-        .selected_node
-        .as_deref()
-        .and_then(|id| overlay.node(id));
-    let detail = node.is_some_and(|node| node.summary.is_some() || node.agent_type.is_some());
-    let notice = overlay.content.as_ref().is_some_and(|content| {
-        content.truncated || (overlay.error.is_some() && !content.lines.is_empty())
-    });
-    1 + u16::from(detail) + u16::from(notice)
-}
-
-pub(super) fn agent_activity_layout(
-    area: Rect,
-    page_bounds: Option<Rect>,
-    overlay: &ClientAgentActivityOverlay,
-) -> Option<AgentActivityLayout> {
-    let popup = page_bounds
-        .map(|rect| rect.intersection(area))
-        .filter(|rect| !rect.is_empty())
-        .or_else(|| crate::ui::modal_rect(area, crate::ui::ModalSize::Large))?;
-    let inner = panel_inner(popup)?;
-    let mut layout = AgentActivityLayout {
-        popup,
-        title: Rect::new(inner.x, inner.y, inner.width, 1),
-        ..AgentActivityLayout::default()
-    };
-    if inner.width < 20 || inner.height < 4 {
-        return Some(layout);
-    }
-    let footer_height = u16::from(inner.height >= 6);
-    if footer_height > 0 {
-        layout.footer = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
-    }
-    let body = Rect::new(
-        inner.x,
-        inner.y + 1,
-        inner.width,
-        inner.height - 1 - footer_height,
-    );
-    layout.body = body;
-    layout.narrow = inner.width < NARROW_WIDTH;
-    let (tree, content) = if layout.narrow {
-        match overlay.focus {
-            AgentActivityFocus::Tree => (body, Rect::default()),
-            AgentActivityFocus::Content => (Rect::default(), body),
-        }
-    } else {
-        let tree_width = (inner.width * TREE_SHARE_PERCENT / 100)
-            .max(TREE_MIN_WIDTH)
-            .min(inner.width.saturating_sub(21));
-        layout.divider = Rect::new(body.x + tree_width, body.y, 1, body.height);
-        (
-            Rect::new(body.x, body.y, tree_width, body.height),
-            Rect::new(
-                body.x + tree_width + 1,
-                body.y,
-                body.width - tree_width - 1,
-                body.height,
-            ),
-        )
-    };
-    layout.tree = tree;
-    if !tree.is_empty() {
-        layout.tree_rows = Rect::new(tree.x, tree.y + 1, tree.width, tree.height - 1);
-    }
-    layout.content = content;
-    if !content.is_empty() {
-        let header = content_header_rows(overlay).min(content.height.saturating_sub(1));
-        layout.content_header = Rect::new(content.x, content.y, content.width, header);
-        let text_height = content.height - header;
-        layout.content_text = Rect::new(
-            content.x + 1,
-            content.y + header,
-            content.width.saturating_sub(2),
-            text_height,
-        );
-        layout.scrollbar = Rect::new(content.right() - 1, content.y + header, 1, text_height);
-    }
-    Some(layout)
-}
-
-/// 渲染：标题栏、左列活动树、右列内容、页脚提示。只读状态，不写任何滚动状态
-/// （`test_overlay_renderers_never_write_scroll_state`）。
-pub(super) fn render_agent_activity_overlay(
-    b: &mut Buffer,
-    overlay: &ClientAgentActivityOverlay,
-    endpoints: &[ClientShellEndpoint],
-    cx: &super::feedback::ChromeContext<'_>,
-) -> Option<OverlayRender> {
-    let layout = agent_activity_layout(b.area, cx.page_bounds, overlay)?;
-    panel(
-        b,
-        layout.popup,
-        cx.palette.accent,
-        cx.palette.panel_bg,
-        cx.glyphs,
-    )?;
-    let actions = render_title_bar(b, layout.title, overlay, endpoints, cx);
-    let mut render = OverlayRender {
-        area: layout.popup,
-        agent_activity_popup: layout.popup,
-        agent_activity_actions: actions,
-        ..OverlayRender::default()
-    };
-    if layout.tree.is_empty() && layout.content.is_empty() {
-        return Some(render);
-    }
-    if overlay.unsupported {
-        crate::ui::kit::empty_state::render_empty_state(
-            b,
-            layout.body,
-            &crate::ui::kit::empty_state::EmptyState {
-                glyph: Some("⊘"),
-                title: crate::i18n::texts().agent_activity.unsupported,
-                body: None,
-                action: None,
-            },
-            cx.palette,
-        );
-    } else {
-        if !layout.tree.is_empty() {
-            render.agent_activity_tree_rows = render_tree_column(b, &layout, overlay, cx);
-        }
-        if !layout.divider.is_empty() {
-            let style = Style::default().fg(cx.palette.surface1);
-            for y in layout.divider.y..layout.divider.bottom() {
-                put_text(b, layout.divider.x, y, 1, cx.glyphs.vertical, style);
-            }
-        }
-        if !layout.content.is_empty() {
-            render.agent_activity_content = layout.content;
-            let (scrollbar, metrics) = render_content_column(b, &layout, overlay, cx);
-            render.agent_activity_scrollbar = scrollbar;
-            render.agent_activity_scroll_metrics = metrics;
-        }
-    }
-    if !layout.footer.is_empty() {
-        render_footer(b, layout.footer, overlay, layout.narrow, cx);
-    }
-    Some(render)
-}
-
-/// 标题栏里标题至少保留的列数（含前导空格与省略号）。
-const TITLE_MIN_WIDTH: u16 = 12;
-
-/// 标题栏：左侧标题与徽标，右侧 [跟随 ●/○] [刷新] [×]。按钮从右往左放，放不下
-/// 的（先丢跟随、再丢刷新）不画也不登记命中区。标题按徽标留出的宽度截断，徽标
-/// 从不被长标题挤掉。
-fn render_title_bar(
-    b: &mut Buffer,
-    title_row: Rect,
-    overlay: &ClientAgentActivityOverlay,
-    endpoints: &[ClientShellEndpoint],
-    cx: &super::feedback::ChromeContext<'_>,
-) -> Vec<(Rect, AgentActivityButton)> {
-    let p = cx.palette;
+/// 状态桶的短标签（状态视图的组标题、页头计数）。
+pub(super) fn bucket_label(bucket: AgentBucket) -> &'static str {
     let texts = &crate::i18n::texts().agent_activity;
-    let follow_label = format!(
-        " {} {} ",
-        texts.follow_button,
-        if overlay.follow_active() {
-            "●"
-        } else {
-            "○"
-        }
-    );
-    let refresh_label = format!(" {} ", texts.refresh_button);
-    let buttons = [
-        (AgentActivityButton::Close, " × "),
-        (AgentActivityButton::Refresh, refresh_label.as_str()),
-        (AgentActivityButton::ToggleFollow, follow_label.as_str()),
-    ];
-    let mut hits = Vec::new();
-    let mut right = title_row.right();
-    // 标题至少留 TITLE_MIN_WIDTH 列，放不下的按钮整个不画。
-    let min_left = title_row.x.saturating_add(TITLE_MIN_WIDTH);
-    for (button, label) in buttons {
-        let width = display_width(label);
-        let Some(x) = right.checked_sub(width) else {
-            break;
-        };
-        if x < min_left {
-            break;
-        }
-        let enabled = button != AgentActivityButton::ToggleFollow || !overlay.is_external();
-        let base = match button {
-            AgentActivityButton::ToggleFollow if overlay.follow_active() => {
-                crate::ui::ModalButtonState::Focused
-            }
-            _ => crate::ui::ModalButtonState::Normal,
-        };
-        let state = if enabled {
-            cx.button_state(
-                &super::feedback::ChromeHover::AgentActivityButton(button),
-                base,
-            )
-        } else {
-            crate::ui::ModalButtonState::Disabled
-        };
-        let rect = Rect::new(x, title_row.y, width, 1);
-        let style = crate::ui::modal_button_style(p, crate::ui::ModalButtonTone::Secondary, state);
-        b.set_style(rect, style);
-        put_text(b, rect.x, rect.y, rect.width, label, style);
-        if enabled {
-            hits.push((rect, button));
-        }
-        right = x.saturating_sub(1);
+    match bucket {
+        AgentBucket::NeedsInput => texts.status_blocked,
+        AgentBucket::Failed => texts.status_failed,
+        AgentBucket::Working => texts.status_running,
+        AgentBucket::Review => texts.status_done,
+        AgentBucket::Idle => texts.status_pending,
+        AgentBucket::None => texts.group_unknown,
     }
-    let base = Style::default().bg(p.panel_bg);
-    let title = format!(
-        " {}",
-        crate::i18n::fill(
-            texts.title_fmt,
-            &[("name", &owner_label(overlay, endpoints))]
-        )
-    );
-    let limit = right.saturating_sub(1);
-    let mut x = title_row.x;
-    let room = limit.saturating_sub(x);
-    // 徽标紧跟标题，按显示顺序：只读（说明窗口性质，最后丢）、有更新（先丢）。
-    let mut badges = [
-        overlay
-            .is_external()
-            .then(|| format!(" {} ", texts.external_read_only)),
-        overlay
-            .has_updates
-            .then(|| format!(" {} ", texts.updates_badge)),
-    ];
-    let styles = [
-        base.fg(p.subtext0).bg(p.surface0),
-        base.fg(p.yellow).add_modifier(Modifier::BOLD),
-    ];
-    // 每个徽标前留一列间隔。
-    let badges_width = |badges: &[Option<String>; 2]| {
-        badges
-            .iter()
-            .flatten()
-            .map(|label| display_width(label).saturating_add(1))
-            .fold(0u16, u16::saturating_add)
-    };
-    // 标题先截到给徽标留出的宽度（至少 TITLE_MIN_WIDTH 列，带省略号）；实在放不下
-    // 时从后往前整个丢徽标。
-    let title_min = display_width(&title).min(TITLE_MIN_WIDTH);
-    for index in (0..badges.len()).rev() {
-        if title_min.saturating_add(badges_width(&badges)) <= room {
-            break;
-        }
-        badges[index] = None;
-    }
-    let title_room = room.saturating_sub(badges_width(&badges));
-    let title = crate::ui::truncate_end(&title, usize::from(title_room));
-    let width = display_width(&title).min(title_room);
-    put_text(
-        b,
-        x,
-        title_row.y,
-        width,
-        &title,
-        base.fg(p.text).add_modifier(Modifier::BOLD),
-    );
-    x = x.saturating_add(width);
-    for (badge, style) in badges.iter().zip(styles) {
-        let Some(label) = badge else {
-            continue;
-        };
-        let width = display_width(label);
-        put_text(b, x + 1, title_row.y, width, label, style);
-        x = x + 1 + width;
-    }
-    hits
-}
-
-/// 左列：表头行 + 活动树（`kit::tree` 前缀 + 状态字形 + 标签 + 种类 + 耗时）。
-fn render_tree_column(
-    b: &mut Buffer,
-    layout: &AgentActivityLayout,
-    overlay: &ClientAgentActivityOverlay,
-    cx: &super::feedback::ChromeContext<'_>,
-) -> Vec<(Rect, String)> {
-    let p = cx.palette;
-    let texts = &crate::i18n::texts().agent_activity;
-    let tree = layout.tree;
-    let focused = overlay.focus == AgentActivityFocus::Tree;
-    let header_style = Style::default()
-        .fg(if focused { p.accent } else { p.subtext0 })
-        .add_modifier(Modifier::BOLD);
-    match overlay.tree_error.as_deref() {
-        Some(error) if overlay.tree_loaded => {
-            let text = crate::i18n::fill(texts.read_failed_fmt, &[("error", error)]);
-            put_text(
-                b,
-                tree.x + TREE_PAD,
-                tree.y,
-                tree.width.saturating_sub(TREE_PAD),
-                &text,
-                Style::default().fg(p.red),
-            );
-        }
-        _ => put_text(
-            b,
-            tree.x + TREE_PAD,
-            tree.y,
-            tree.width.saturating_sub(TREE_PAD),
-            texts.tree_title,
-            header_style,
-        ),
-    }
-    let rows_area = layout.tree_rows;
-    let mut hits = Vec::new();
-    if rows_area.is_empty() {
-        return hits;
-    }
-    if overlay.rows.is_empty() {
-        let (line, style) = match (&overlay.tree_error, overlay.tree_loaded) {
-            (Some(error), _) => (
-                crate::i18n::fill(texts.read_failed_fmt, &[("error", error)]),
-                Style::default().fg(p.red),
-            ),
-            (None, false) => (texts.loading.to_owned(), Style::default().fg(p.overlay1)),
-            (None, true) => (texts.empty_tree.to_owned(), Style::default().fg(p.overlay1)),
-        };
-        put_text(
-            b,
-            rows_area.x + TREE_PAD,
-            rows_area.y,
-            rows_area.width.saturating_sub(TREE_PAD),
-            &line,
-            style,
-        );
-        return hits;
-    }
-    let visible = usize::from(rows_area.height);
-    let start = overlay
-        .tree_scroll
-        .min(overlay.rows.len().saturating_sub(visible));
-    for (offset, entry) in overlay.rows.iter().skip(start).take(visible).enumerate() {
-        let y = rows_area.y + u16::try_from(offset).unwrap_or(u16::MAX);
-        let row = Rect::new(rows_area.x, y, rows_area.width, 1);
-        let node = &overlay.nodes[entry.kind];
-        let selected = overlay.selected_node.as_deref() == Some(node.id.as_str());
-        let hovered = overlay.hovered_node.as_deref() == Some(node.id.as_str());
-        render_tree_row(b, row, entry, node, selected, hovered, overlay, cx);
-        hits.push((row, node.id.clone()));
-    }
-    hits
-}
-
-#[allow(clippy::too_many_arguments)] // 一行的全部呈现输入；拆结构体只为过 lint 反而难读
-fn render_tree_row(
-    b: &mut Buffer,
-    row: Rect,
-    entry: &TreeEntry<usize>,
-    node: &AgentActivityNode,
-    selected: bool,
-    hovered: bool,
-    overlay: &ClientAgentActivityOverlay,
-    cx: &super::feedback::ChromeContext<'_>,
-) {
-    let p = cx.palette;
-    let focused = overlay.focus == AgentActivityFocus::Tree;
-    // 选中且树有焦点：accent 反色；选中但焦点在内容：浅底；悬浮：hover 底。
-    let (fill, strong) = if selected && focused {
-        (Some(p.accent), Some(panel_contrast_fg(p)))
-    } else if selected {
-        (Some(p.surface0), None)
-    } else if hovered {
-        (Some(p.hover_row_bg()), None)
-    } else {
-        (None, None)
-    };
-    if let Some(fill) = fill {
-        b.set_style(row, Style::default().bg(fill));
-    }
-    let fg = |color: ratatui::style::Color| Style::default().fg(strong.unwrap_or(color));
-    let x = row.x + TREE_PAD;
-    let right = row.right().saturating_sub(1);
-    let (used, toggle) = render_tree_prefix(
-        b,
-        x,
-        row.y,
-        right.saturating_sub(x),
-        entry.depth,
-        entry.last_child_mask,
-        entry.has_children,
-        entry.collapsed,
-        false,
-        fg(p.overlay0),
-    );
-    if !toggle.is_empty() && !selected && hovered {
-        b.set_style(toggle, Style::default().fg(p.accent));
-    }
-    let mut x = x.saturating_add(used);
-    let glyph = status_glyph(node.status);
-    let color = status_color(node.status, p);
-    x = put_segment_until(b, x, row.y, right, glyph, fg(color));
-    x = put_segment_until(b, x, row.y, right, " ", fg(p.text));
-    let elapsed = node_elapsed_ms(node, overlay.now_ms).map(format_elapsed);
-    let kind = kind_label(node.kind);
-    let elapsed_width = elapsed.as_deref().map_or(0, |text| display_width(text) + 1);
-    let label_width = display_width(&node.label);
-    let kind_width = display_width(kind) + 1;
-    let room = right.saturating_sub(x);
-    // 宽度预算：标签优先（至少留 8 列），其次右对齐的耗时，种类最先让出。
-    let show_elapsed = label_width.min(8) + kind_width + elapsed_width <= room
-        || label_width.min(8) + elapsed_width <= room;
-    let show_kind = label_width + kind_width + if show_elapsed { elapsed_width } else { 0 } <= room;
-    let label_limit = room
-        .saturating_sub(if show_kind { kind_width } else { 0 })
-        .saturating_sub(if show_elapsed { elapsed_width } else { 0 });
-    let label_style = match node.status {
-        AgentActivityStatus::Running => fg(color).add_modifier(Modifier::BOLD),
-        AgentActivityStatus::Failed | AgentActivityStatus::Done | AgentActivityStatus::Unknown => {
-            fg(color)
-        }
-        _ => fg(p.text),
-    };
-    let label = crate::ui::truncate_end(&node.label, usize::from(label_limit));
-    x = put_segment_until(
-        b,
-        x,
-        row.y,
-        x.saturating_add(label_limit),
-        &label,
-        label_style,
-    );
-    if show_kind {
-        x = put_segment_until(b, x, row.y, right, " ", fg(p.text));
-        put_segment_until(b, x, row.y, right, kind, fg(p.overlay1));
-    }
-    if show_elapsed {
-        if let Some(elapsed) = elapsed.as_deref() {
-            let width = display_width(elapsed);
-            put_text(
-                b,
-                right.saturating_sub(width),
-                row.y,
-                width,
-                elapsed,
-                fg(p.overlay0),
-            );
-        }
-    }
-}
-
-/// 从 `x` 写到 `right` 为止，返回写完后的列。
-fn put_segment_until(b: &mut Buffer, x: u16, y: u16, right: u16, text: &str, style: Style) -> u16 {
-    let width = display_width(text).min(right.saturating_sub(x));
-    put_text(b, x, y, width, text, style);
-    x.saturating_add(width)
-}
-
-/// 右列头行里标签至少保留的列数（含省略号）；元信息只在这之外的宽度里取舍。
-const HEADER_LABEL_MIN_WIDTH: u16 = 8;
-
-/// 右列头行的宽度预算：`tokens` 是按显示顺序的 [种类, 状态, 耗时]，返回标签可用
-/// 的列数与要画的元信息（`  种类 · 状态 · 耗时` 的子集）。元信息按整段取舍、从不
-/// 画半截；优先级从高到低：标签的前 [`HEADER_LABEL_MIN_WIDTH`] 列、耗时、种类、
-/// 标签其余部分、状态（状态字形已经表达了它）。
-fn header_meta_budget(label: &str, room: u16, tokens: [Option<&str>; 3]) -> (u16, String) {
-    const KIND: usize = 0;
-    const STATUS: usize = 1;
-    const ELAPSED: usize = 2;
-    let mut keep = tokens.map(|token| token.is_some_and(|token| !token.is_empty()));
-    let meta_width = |keep: &[bool; 3]| {
-        let (count, width) = tokens.iter().zip(keep).filter(|(_, kept)| **kept).fold(
-            (0u16, 0u16),
-            |(count, width), (token, _)| {
-                (
-                    count + 1,
-                    width.saturating_add(display_width(token.unwrap_or_default())),
-                )
-            },
-        );
-        if count == 0 {
-            0
-        } else {
-            // 前导两空格 + 各段 + 段间「 · 」。
-            width.saturating_add(2 + 3 * (count - 1))
-        }
-    };
-    let label_width = display_width(label);
-    // 状态排在标签其余部分之后：整段标签连同全部元信息放不下时先让出状态。
-    if label_width.saturating_add(meta_width(&keep)) > room {
-        keep[STATUS] = false;
-    }
-    // 再保标签前几列：放不下时依次整段丢种类、耗时。
-    let label_min = label_width.min(HEADER_LABEL_MIN_WIDTH);
-    for drop in [KIND, ELAPSED] {
-        if label_min.saturating_add(meta_width(&keep)) <= room {
-            break;
-        }
-        keep[drop] = false;
-    }
-    let label_limit = room.saturating_sub(meta_width(&keep));
-    let mut meta = String::new();
-    for token in tokens
-        .iter()
-        .zip(keep)
-        .filter_map(|(token, kept)| kept.then_some(*token).flatten())
-    {
-        meta.push_str(if meta.is_empty() { "  " } else { " · " });
-        meta.push_str(token);
-    }
-    (label_limit, meta)
-}
-
-/// 右列：头行（节点标签 · 种类 · 状态 · 耗时 / 摘要 / 提示）+ 正文 + 滚动条。
-fn render_content_column(
-    b: &mut Buffer,
-    layout: &AgentActivityLayout,
-    overlay: &ClientAgentActivityOverlay,
-    cx: &super::feedback::ChromeContext<'_>,
-) -> (Rect, Option<crate::pane::ScrollMetrics>) {
-    let p = cx.palette;
-    let texts = &crate::i18n::texts().agent_activity;
-    let header = layout.content_header;
-    let focused = overlay.focus == AgentActivityFocus::Content;
-    let node = overlay
-        .selected_node
-        .as_deref()
-        .and_then(|id| overlay.node(id));
-    let x = header.x + 1;
-    let right = header.right().saturating_sub(1);
-    let mut y = header.y;
-    if header.height > 0 {
-        // 右侧：跟随状态（只对 pane 属主）。
-        let mut limit = right;
-        if !overlay.is_external() && overlay.selected_node.is_some() {
-            let (status, style) = if overlay.follow_active() {
-                (
-                    format!("● {}", texts.follow_on),
-                    Style::default().fg(p.accent),
-                )
-            } else {
-                (
-                    format!("○ {}", texts.follow_off),
-                    Style::default().fg(p.overlay0),
-                )
-            };
-            let width = display_width(&status);
-            if width + 12 < right.saturating_sub(x) {
-                put_text(b, right - width, y, width, &status, style);
-                limit = right - width - 1;
-            }
-        }
-        let title_style = Style::default()
-            .fg(if focused { p.accent } else { p.subtext0 })
-            .add_modifier(Modifier::BOLD);
-        match (node, overlay.selected_node.as_deref()) {
-            (Some(node), _) => {
-                let mut cursor = put_segment_until(
-                    b,
-                    x,
-                    y,
-                    limit,
-                    status_glyph(node.status),
-                    Style::default().fg(status_color(node.status, p)),
-                );
-                cursor = put_segment_until(b, cursor, y, limit, " ", title_style);
-                let elapsed = node_elapsed_ms(node, overlay.now_ms).map(format_elapsed);
-                let (label_limit, meta) = header_meta_budget(
-                    &node.label,
-                    limit.saturating_sub(cursor),
-                    [
-                        Some(kind_label(node.kind)),
-                        Some(status_label(node.status)),
-                        elapsed.as_deref(),
-                    ],
-                );
-                let label = crate::ui::truncate_end(&node.label, usize::from(label_limit));
-                cursor = put_segment_until(
-                    b,
-                    cursor,
-                    y,
-                    cursor.saturating_add(label_limit),
-                    &label,
-                    title_style,
-                );
-                if !meta.is_empty() {
-                    put_segment_until(b, cursor, y, limit, &meta, Style::default().fg(p.overlay1));
-                }
-            }
-            (None, Some(id)) => {
-                let id = crate::ui::truncate_end(id, usize::from(limit.saturating_sub(x)));
-                put_segment_until(b, x, y, limit, &id, title_style);
-            }
-            (None, None) => {
-                put_segment_until(b, x, y, limit, texts.content_title, title_style);
-            }
-        }
-        y += 1;
-    }
-    if y < header.bottom() {
-        if let Some(node) = node.filter(|node| node.summary.is_some() || node.agent_type.is_some())
-        {
-            let detail = match (node.agent_type.as_deref(), node.summary.as_deref()) {
-                (Some(agent_type), Some(summary)) => format!("{agent_type} — {summary}"),
-                (Some(agent_type), None) => agent_type.to_owned(),
-                (None, Some(summary)) => summary.to_owned(),
-                (None, None) => String::new(),
-            };
-            let detail = sanitize(&detail);
-            let detail = crate::ui::truncate_end(&detail, usize::from(right.saturating_sub(x)));
-            put_segment_until(b, x, y, right, &detail, Style::default().fg(p.overlay1));
-            y += 1;
-        }
-    }
-    if y < header.bottom() {
-        let notice = match (&overlay.error, overlay.content.as_ref()) {
-            (Some(error), Some(content)) if !content.lines.is_empty() => Some((
-                crate::i18n::fill(texts.read_failed_fmt, &[("error", error)]),
-                Style::default().fg(p.red),
-            )),
-            (_, Some(content)) if content.truncated => Some((
-                format!("↑ {}", texts.truncated),
-                Style::default().fg(p.yellow),
-            )),
-            _ => None,
-        };
-        if let Some((notice, style)) = notice {
-            let notice = crate::ui::truncate_end(&notice, usize::from(right.saturating_sub(x)));
-            put_segment_until(b, x, y, right, &notice, style);
-        }
-    }
-
-    let text = layout.content_text;
-    if text.is_empty() {
-        return (Rect::default(), None);
-    }
-    let placeholder = |b: &mut Buffer, line: &str, style: Style| {
-        put_text(b, text.x, text.y, text.width, line, style);
-    };
-    let Some(selected) = overlay.selected_node.as_deref() else {
-        crate::ui::kit::empty_state::render_empty_state(
-            b,
-            text,
-            &crate::ui::kit::empty_state::EmptyState {
-                glyph: None,
-                title: texts.empty_content,
-                body: None,
-                action: None,
-            },
-            p,
-        );
-        return (Rect::default(), None);
-    };
-    let Some(content) = overlay
-        .content
-        .as_ref()
-        .filter(|content| content.node_id == selected)
-    else {
-        match overlay.error.as_deref() {
-            Some(error) => placeholder(
-                b,
-                &crate::i18n::fill(texts.read_failed_fmt, &[("error", error)]),
-                Style::default().fg(p.red),
-            ),
-            None => placeholder(b, texts.loading, Style::default().fg(p.overlay1)),
-        }
-        return (Rect::default(), None);
-    };
-    if content.lines.is_empty() {
-        let line = if content.eof {
-            texts.no_output
-        } else {
-            texts.loading
-        };
-        placeholder(b, line, Style::default().fg(p.overlay1));
-        return (Rect::default(), None);
-    }
-    let visible = usize::from(text.height);
-    let max_scroll = content.rows.len().saturating_sub(visible);
-    let scroll = overlay.content_scroll.min(max_scroll);
-    for (offset, row) in content.rows.iter().skip(scroll).take(visible).enumerate() {
-        let y = text.y + u16::try_from(offset).unwrap_or(u16::MAX);
-        let Some(line) = content.lines.get(row.line as usize) else {
-            continue;
-        };
-        let (start, end) = (row.start as usize, row.end as usize);
-        let Some(slice) = line.text.get(start..end) else {
-            continue;
-        };
-        let base = match line.tone {
-            LineTone::Heading => Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-            _ => Style::default().fg(p.text),
-        };
-        put_text(b, text.x, y, text.width, slice, base);
-        if matches!(line.tone, LineTone::ListItem | LineTone::Record) && start < line.marker {
-            let marker_end = line.marker.min(end);
-            if let Some(marker) = line.text.get(start..marker_end) {
-                let style = match line.tone {
-                    LineTone::Record => Style::default().fg(p.blue).add_modifier(Modifier::BOLD),
-                    _ => Style::default().fg(p.accent),
-                };
-                put_text(b, text.x, y, text.width, marker, style);
-            }
-        }
-    }
-    let metrics = crate::pane::ScrollMetrics {
-        offset_from_bottom: max_scroll.saturating_sub(scroll),
-        max_offset_from_bottom: max_scroll,
-        viewport_rows: visible,
-    };
-    let track = layout.scrollbar;
-    if max_scroll > 0 && !track.is_empty() {
-        crate::ui::render_scrollbar_buffer(b, metrics, track, p.surface1, p.overlay1, "▐");
-        (track, Some(metrics))
-    } else {
-        (Rect::default(), Some(metrics))
-    }
-}
-
-fn render_footer(
-    b: &mut Buffer,
-    footer: Rect,
-    overlay: &ClientAgentActivityOverlay,
-    narrow: bool,
-    cx: &super::feedback::ChromeContext<'_>,
-) {
-    let texts = &crate::i18n::texts().agent_activity;
-    let hints = [
-        FooterHint {
-            key: "↑↓",
-            label: texts.hint_select,
-            enabled: !overlay.unsupported,
-            primary: true,
-        },
-        FooterHint {
-            key: "Tab",
-            label: texts.hint_switch_column,
-            enabled: !overlay.unsupported,
-            primary: narrow,
-        },
-        FooterHint {
-            key: "f",
-            label: texts.hint_follow,
-            enabled: !overlay.is_external() && !overlay.unsupported,
-            primary: false,
-        },
-        FooterHint {
-            key: "r",
-            label: texts.hint_refresh,
-            enabled: !overlay.unsupported,
-            primary: false,
-        },
-        FooterHint {
-            key: "←→",
-            label: texts.hint_collapse,
-            enabled: !overlay.unsupported,
-            primary: false,
-        },
-        FooterHint {
-            key: "esc",
-            label: texts.hint_close,
-            enabled: true,
-            primary: true,
-        },
-    ];
-    let area = Rect::new(
-        footer.x + 1,
-        footer.y,
-        footer.width.saturating_sub(2),
-        footer.height,
-    );
-    render_footer_hints(b, area, &hints, None, cx.palette);
 }
 
 impl ClientShellState {
     fn agent_activity(&self) -> Option<&ClientAgentActivityOverlay> {
         match self.overlay.as_ref() {
-            Some(ClientShellOverlay::AgentActivity(overlay)) => Some(overlay),
+            Some(ClientShellOverlay::AgentActivity(overlay)) => Some(&**overlay),
             _ => None,
         }
     }
 
     fn agent_activity_mut(&mut self) -> Option<&mut ClientAgentActivityOverlay> {
         match self.overlay.as_mut() {
-            Some(ClientShellOverlay::AgentActivity(overlay)) => Some(overlay),
+            Some(ClientShellOverlay::AgentActivity(overlay)) => Some(&mut **overlay),
             _ => None,
         }
     }
 
-    /// 打开某个属主的「Agent 活动」窗口并立即读树；已有浮层时记为返回目标
-    /// （右键菜单不记；从另一个活动窗口打开时沿用它的返回目标，不叠层）。
+    /// 打开某个属主的子智能体页面并立即读树；已有浮层时记为返回目标（右键菜单不记；
+    /// 从另一个活动页面打开时沿用它的返回目标，不叠层）。视图沿用本次会话上次所选。
     pub(super) fn open_agent_activity(
         &mut self,
         endpoint_id: ClientEndpointId,
@@ -1857,7 +1315,7 @@ impl ClientShellState {
             &endpoint_id,
             &Method::AgentActivityRead(AgentActivityReadParams::default()),
         );
-        let mut overlay = ClientAgentActivityOverlay::new(endpoint_id, owner);
+        let mut overlay = ClientAgentActivityOverlay::new(endpoint_id, owner, self.agent_page_view);
         overlay.next_follow_at = Some(Instant::now() + FOLLOW_INTERVAL);
         if !supported {
             overlay.mark_unsupported();
@@ -1867,7 +1325,7 @@ impl ClientShellState {
             Some(ClientShellOverlay::AgentActivity(mut previous)) => previous.return_to.take(),
             Some(previous) => Some(Box::new(previous)),
         };
-        self.overlay = Some(ClientShellOverlay::AgentActivity(overlay));
+        self.overlay = Some(ClientShellOverlay::AgentActivity(Box::new(overlay)));
         outcome.repaint = true;
         self.pump_agent_activity(outcome);
     }
@@ -1945,7 +1403,7 @@ impl ClientShellState {
     /// 客户端定时器（约 100 ms 一次）：跟随模式下树应答落地满 [`FOLLOW_INTERVAL`]
     /// 排一次树读取与内容续读，并把排队的读取发出去。树读取已排队或在途时不再
     /// 追加：否则树往返慢于间隔时每次树应答回来都又排上了树读取，内容续读永远
-    /// 轮不到。窗口没开时什么也不做。
+    /// 轮不到。页面没开时什么也不做。
     pub(crate) fn tick_agent_activity(&mut self, now: Instant, outcome: &mut ClientShellInput) {
         let Some(overlay) = self.agent_activity_mut() else {
             return;
@@ -1971,78 +1429,143 @@ impl ClientShellState {
         self.pump_agent_activity(outcome);
     }
 
-    /// 视图计算阶段：墙钟、「有更新」、树滚动（含一次性 reveal）、内容折行与
-    /// 滚动上界。渲染只读这里写下的结果（STATE-04）。
+    /// 视图计算阶段：墙钟、属主信息与状态字形、「有更新」、列表显示行与滚动（含
+    /// 一次性 reveal）、转写同步与折行、内容滚动上界。页面矩形与绘制共用
+    /// `floating_pages::overlay_bounds` 一个入口；渲染只读这里写下的结果（STATE-04）。
     pub(super) fn compute_agent_activity_view(&mut self, area: Rect, page_bounds: Option<Rect>) {
-        let Some(summary) = self
-            .agent_activity()
-            .map(|overlay| owner_summary(&self.endpoints, overlay))
-        else {
+        let Some((summary, owner)) = self.agent_activity().map(|overlay| {
+            (
+                owner_summary(&self.endpoints, overlay),
+                owner_view(&self.endpoints, &overlay.endpoint_id, &overlay.owner),
+            )
+        }) else {
             return;
         };
+        let glyphs = self.status_glyphs();
+        let own_footer = !self.workbench.enabled;
         let Some(overlay) = self.agent_activity_mut() else {
             return;
         };
         overlay.now_ms = unix_now_ms();
         overlay.observe_summary(summary);
-        let Some(layout) = agent_activity_layout(area, page_bounds, overlay) else {
+        overlay.owner_view = owner;
+        overlay.glyphs = glyphs;
+        overlay.own_footer = own_footer;
+        let Some(layout) = agent_page::page_layout(area, page_bounds, overlay) else {
             return;
         };
-        let visible = usize::from(layout.tree_rows.height);
+        overlay.list_lines = agent_page::list_lines(overlay, &layout);
+        let visible = usize::from(layout.list.height);
         if visible > 0 {
-            let selected = overlay.selected_row();
-            overlay.tree_scroll = page::list_start(
-                overlay.tree_scroll,
-                selected.unwrap_or(0),
-                overlay.rows.len(),
-                visible,
-                overlay.tree_reveal && selected.is_some(),
-            );
-            overlay.tree_reveal = false;
-            overlay.tree_page = visible;
+            let total = overlay.list_lines.len();
+            let mut start = overlay.list_scroll.min(total.saturating_sub(visible));
+            if overlay.list_reveal {
+                if let Some((first, last)) = overlay
+                    .selected_row()
+                    .and_then(|row| agent_page::item_span(&overlay.list_lines, row))
+                {
+                    start = start.min(first).max((last + 1).saturating_sub(visible));
+                }
+                overlay.list_reveal = false;
+            }
+            overlay.list_scroll = start;
+            overlay.list_page = visible;
         }
         let text = layout.content_text;
         let height = usize::from(text.height);
-        if text.width > 0 && height > 0 {
-            let rows = overlay.content.as_mut().map_or(0, |content| {
+        if text.width == 0 || height == 0 {
+            return;
+        }
+        let mode = transcript_mode(&overlay.owner_view, overlay.is_external());
+        let speaker = overlay
+            .selected_node
+            .as_deref()
+            .and_then(|id| overlay.node(id))
+            .map(|node| node_nickname(&node.label).to_owned())
+            .unwrap_or_default();
+        let ClientAgentActivityOverlay {
+            content,
+            transcript,
+            transcript_synced,
+            ..
+        } = overlay;
+        let rows = match content.as_mut() {
+            Some(content) if content.is_transcript() => {
+                let current = transcript_synced
+                    .as_ref()
+                    .is_some_and(|(node, revision, synced)| {
+                        node == &content.node_id && *revision == content.revision && *synced == mode
+                    });
+                if !current {
+                    if transcript_synced
+                        .as_ref()
+                        .is_some_and(|(node, _, _)| node != &content.node_id)
+                    {
+                        *transcript = TranscriptView::default();
+                    }
+                    transcript.sync(&content.lines, content.dropped, mode);
+                    *transcript_synced = Some((content.node_id.clone(), content.revision, mode));
+                }
+                transcript.layout(text.width, &speaker);
+                transcript.rows().len()
+            }
+            Some(content) => {
                 content.ensure_wrapped(text.width);
                 content.row_count()
-            });
-            let max = rows.saturating_sub(height);
-            overlay.content_max_scroll = max;
-            overlay.content_scroll = if overlay.content_tail {
-                max
-            } else {
-                overlay.content_scroll.min(max)
-            };
-            overlay.content_page = height;
-        }
+            }
+            None => 0,
+        };
+        let max = rows.saturating_sub(height);
+        overlay.content_max_scroll = max;
+        overlay.content_scroll = if overlay.content_tail {
+            max
+        } else {
+            overlay.content_scroll.min(max)
+        };
+        overlay.content_page = height;
     }
 
-    /// 键盘：↑↓ 选节点（焦点在内容时滚内容）、←→ 折叠 / 展开、Enter 选中并拉内容、
-    /// Tab 切列、PgUp / PgDn / Home / End 按焦点滚动、f 跟随、r 刷新、Esc 关闭并
-    /// 回到 `return_to`。其余按键吞掉。
+    /// 键盘：↑↓ / jk 在列表里选节点、在转写里滚动；←→ / hl 折叠 / 展开；Tab 切换
+    /// 焦点；Enter 在列表里打开转写、在转写里展开 / 收起全部工具输出；1-3 切换视图；
+    /// `/` 筛选；c 收起已完成；f 跟随；r 刷新；t 跳到终端；PgUp / PgDn / Home / End
+    /// 翻页与首尾；Esc 先退出筛选、再关闭页面并回到 `return_to`。其余按键吞掉。
     pub(super) fn route_agent_activity_key(
         &mut self,
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> bool {
-        if self.agent_activity().is_none() {
+        let Some(overlay) = self.agent_activity() else {
             return false;
-        }
+        };
         let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+        if overlay.filter_editing {
+            self.route_agent_activity_filter_key(code, modifiers, outcome);
+            return true;
+        }
         let plain = modifiers.is_empty();
         match code {
-            KeyCode::Esc => {
-                self.close_agent_activity();
-                outcome.repaint = true;
-            }
+            KeyCode::Esc => self.escape_agent_activity(outcome),
             KeyCode::Tab | KeyCode::BackTab => self.toggle_agent_activity_focus(outcome),
             KeyCode::Char('f') if plain => {
                 self.activate_agent_activity_button(AgentActivityButton::ToggleFollow, outcome);
             }
             KeyCode::Char('r') if plain => {
                 self.activate_agent_activity_button(AgentActivityButton::Refresh, outcome);
+            }
+            KeyCode::Char('t') if plain => {
+                self.activate_agent_activity_button(AgentActivityButton::Jump, outcome);
+            }
+            KeyCode::Char('c') if plain => {
+                self.activate_agent_activity_button(AgentActivityButton::ToggleDone, outcome);
+            }
+            KeyCode::Char('/') if plain => {
+                self.activate_agent_activity_button(AgentActivityButton::Filter, outcome);
+            }
+            KeyCode::Char(digit @ '1'..='3') if plain => {
+                let index = usize::from(digit as u8 - b'1');
+                if let Some(view) = AgentPageView::ALL.get(index) {
+                    self.activate_agent_activity_button(AgentActivityButton::View(*view), outcome);
+                }
             }
             KeyCode::Up | KeyCode::Char('k') if plain => self.step_agent_activity(-1, outcome),
             KeyCode::Down | KeyCode::Char('j') if plain => self.step_agent_activity(1, outcome),
@@ -2058,26 +1581,116 @@ impl ClientShellState {
         true
     }
 
+    /// 筛选输入中：可打印字符追加、Backspace 删除、Enter 确认（退出输入、保留筛选）、
+    /// Esc 清空并退出输入；↑↓ 照常在列表里选择。
+    fn route_agent_activity_filter_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+        outcome: &mut ClientShellInput,
+    ) {
+        use crossterm::event::KeyModifiers;
+        let typing = (modifiers - KeyModifiers::SHIFT).is_empty();
+        match code {
+            KeyCode::Up => return self.step_agent_activity(-1, outcome),
+            KeyCode::Down => return self.step_agent_activity(1, outcome),
+            _ => {}
+        }
+        let Some(overlay) = self.agent_activity_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                overlay.filter_editing = false;
+                overlay.filter.clear();
+            }
+            KeyCode::Enter => overlay.filter_editing = false,
+            KeyCode::Backspace => {
+                overlay.filter.pop();
+            }
+            KeyCode::Char(ch) if typing && !ch.is_control() => {
+                if overlay.filter.chars().count() < FILTER_MAX_CHARS {
+                    overlay.filter.push(ch);
+                }
+            }
+            _ => return,
+        }
+        overlay.rebuild_rows();
+        overlay.list_scroll = 0;
+        overlay.list_reveal = true;
+        outcome.repaint = true;
+    }
+
+    /// Esc：有筛选词先清空筛选，否则关闭页面（回到 `return_to`）。
+    fn escape_agent_activity(&mut self, outcome: &mut ClientShellInput) {
+        let Some(overlay) = self.agent_activity_mut() else {
+            return;
+        };
+        if !overlay.filter.is_empty() {
+            overlay.filter.clear();
+            overlay.rebuild_rows();
+            overlay.list_reveal = true;
+        } else {
+            self.close_agent_activity();
+        }
+        outcome.repaint = true;
+    }
+
     fn toggle_agent_activity_focus(&mut self, outcome: &mut ClientShellInput) {
         if let Some(overlay) = self.agent_activity_mut() {
             overlay.focus = match overlay.focus {
                 AgentActivityFocus::Tree => AgentActivityFocus::Content,
                 AgentActivityFocus::Content => AgentActivityFocus::Tree,
             };
-            overlay.tree_reveal = true;
+            overlay.list_reveal = true;
             outcome.repaint = true;
         }
     }
 
-    /// 标题栏按钮与对应快捷键的共同入口。
+    /// 切换视图并记到本次会话（重开页面沿用）。
+    fn set_agent_page_view(&mut self, view: AgentPageView, outcome: &mut ClientShellInput) {
+        self.agent_page_view = view;
+        let Some(overlay) = self.agent_activity_mut() else {
+            return;
+        };
+        if overlay.view == view {
+            return;
+        }
+        overlay.view = view;
+        overlay.rebuild_rows();
+        overlay.list_scroll = 0;
+        overlay.list_reveal = true;
+        outcome.repaint = true;
+    }
+
+    /// 页头按钮、视图标签、筛选入口、「已完成 N 项」行与对应快捷键的共同入口。
     pub(super) fn activate_agent_activity_button(
         &mut self,
         button: AgentActivityButton,
         outcome: &mut ClientShellInput,
     ) {
         match button {
-            AgentActivityButton::Close => {
+            AgentActivityButton::Close | AgentActivityButton::Back => {
                 self.close_agent_activity();
+                outcome.repaint = true;
+            }
+            AgentActivityButton::Jump => self.jump_from_agent_activity(outcome),
+            AgentActivityButton::View(view) => self.set_agent_page_view(view, outcome),
+            AgentActivityButton::Filter => {
+                let Some(overlay) = self.agent_activity_mut() else {
+                    return;
+                };
+                overlay.filter_editing = true;
+                overlay.focus = AgentActivityFocus::Tree;
+                outcome.repaint = true;
+            }
+            AgentActivityButton::ToggleDone => {
+                let Some(overlay) = self.agent_activity_mut() else {
+                    return;
+                };
+                overlay.hide_done = !overlay.hide_done;
+                overlay.rebuild_rows();
+                overlay.list_reveal = true;
                 outcome.repaint = true;
             }
             AgentActivityButton::ToggleFollow => {
@@ -2112,6 +1725,29 @@ impl ClientShellState {
         }
     }
 
+    /// t / 「跳到终端」：聚焦属主所在的 pane 并关闭页面（与 Inspector 的跳转同一
+    /// 做法）。外部来源没有终端，什么也不做。
+    fn jump_from_agent_activity(&mut self, outcome: &mut ClientShellInput) {
+        let Some((endpoint_id, pane_id)) = self.agent_activity().and_then(|overlay| match &overlay
+            .owner
+        {
+            AgentActivityOwner::Pane { pane_id } => {
+                Some((overlay.endpoint_id.clone(), pane_id.clone()))
+            }
+            AgentActivityOwner::External { .. } => None,
+        }) else {
+            return;
+        };
+        self.overlay = None;
+        self.refocus_current_workbench_terminal();
+        self.focus_or_activate(
+            endpoint_id,
+            ClientEndpointFocusTarget::Pane(pane_id),
+            outcome,
+        );
+        outcome.repaint = true;
+    }
+
     fn step_agent_activity(&mut self, delta: isize, outcome: &mut ClientShellInput) {
         let Some(overlay) = self.agent_activity_mut() else {
             return;
@@ -2137,15 +1773,19 @@ impl ClientShellState {
         }
     }
 
-    /// ←：展开的节点先折叠，否则跳到父节点；焦点在内容时回到树。
+    /// ←：展开的节点先折叠，否则跳到父节点（状态视图不分层，不跳）；焦点在转写时
+    /// 回到列表。
     fn collapse_agent_activity(&mut self, outcome: &mut ClientShellInput) {
         let Some(overlay) = self.agent_activity_mut() else {
             return;
         };
         if overlay.focus == AgentActivityFocus::Content {
             overlay.focus = AgentActivityFocus::Tree;
-            overlay.tree_reveal = true;
+            overlay.list_reveal = true;
             outcome.repaint = true;
+            return;
+        }
+        if overlay.view == AgentPageView::Status {
             return;
         }
         let Some(index) = overlay.selected_row() else {
@@ -2193,12 +1833,21 @@ impl ClientShellState {
         }
     }
 
-    /// Enter：树里没有选中时选第一行；有选中时从头重读它的内容并把焦点交给内容。
+    /// Enter：列表里没有选中时选第一项；有选中时从头重读它的内容并把焦点交给转写。
+    /// 焦点在转写时展开 / 收起全部工具输出。
     fn enter_agent_activity(&mut self, outcome: &mut ClientShellInput) {
         let Some(overlay) = self.agent_activity_mut() else {
             return;
         };
-        if overlay.focus != AgentActivityFocus::Tree {
+        if overlay.focus == AgentActivityFocus::Content {
+            if overlay
+                .content
+                .as_ref()
+                .is_some_and(AgentActivityContentView::is_transcript)
+                && overlay.transcript.toggle_all()
+            {
+                outcome.repaint = true;
+            }
             return;
         }
         match overlay.selected_row() {
@@ -2222,11 +1871,11 @@ impl ClientShellState {
         };
         match overlay.focus {
             AgentActivityFocus::Tree => {
-                let page = overlay.tree_page.max(1);
-                overlay.tree_scroll = if down {
-                    overlay.tree_scroll.saturating_add(page)
+                let page = overlay.list_page.max(1);
+                overlay.list_scroll = if down {
+                    overlay.list_scroll.saturating_add(page)
                 } else {
-                    overlay.tree_scroll.saturating_sub(page)
+                    overlay.list_scroll.saturating_sub(page)
                 };
             }
             AgentActivityFocus::Content => {
@@ -2260,9 +1909,10 @@ impl ClientShellState {
         }
     }
 
-    /// 鼠标：点树行选中、点开关折叠、点按钮、点内容区把焦点交给内容、点滚动条
-    /// 跳转、窗外点击关闭；滚轮按指针所在的列滚动；悬浮节点只由 `Moved` 改写
-    /// （MENU-01）。窗口开着时吞掉全部鼠标事件。
+    /// 鼠标：点列表项选中、点折叠开关折叠、点视图标签 / 页头按钮 / 「已完成 N 项」行、
+    /// 点工具标题行切换该工具输出、点转写把焦点交给转写、点或拖滚动条跳转；滚轮按
+    /// 指针所在的栏滚动；页面外（工作台标题栏、状态栏）的点击吞掉、不关闭页面。
+    /// 悬浮节点只由 `Moved` 改写（MENU-01）。页面开着时吞掉全部鼠标事件。
     pub(super) fn handle_agent_activity_mouse(
         &mut self,
         mouse: MouseEvent,
@@ -2272,7 +1922,7 @@ impl ClientShellState {
         if self.agent_activity().is_none() {
             return false;
         }
-        let popup = self.hits.agent_activity_popup;
+        let page = self.hits.agent_activity_popup;
         let content = self.hits.agent_activity_content;
         let row_hit = self
             .hits
@@ -2291,9 +1941,8 @@ impl ClientShellState {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if !super::contains(popup, point) {
-                    self.close_agent_activity();
-                    outcome.repaint = true;
+                if !super::contains(page, point) {
+                    // 工作台标题栏 / 状态栏：页面是整块内容区，不当作「点外面关闭」。
                 } else if let Some(button) = self
                     .hits
                     .agent_activity_actions
@@ -2307,13 +1956,21 @@ impl ClientShellState {
                 } else if super::contains(self.hits.agent_activity_scrollbar, point) {
                     let track = self.hits.agent_activity_scrollbar;
                     if let Some(overlay) = self.agent_activity_mut() {
-                        let span = usize::from(track.height.saturating_sub(1)).max(1);
-                        let offset = usize::from(point.1.saturating_sub(track.y));
-                        overlay.content_scroll =
-                            overlay.content_max_scroll * offset.min(span) / span;
-                        overlay.content_tail = overlay.follow_active()
-                            && overlay.content_scroll >= overlay.content_max_scroll;
+                        overlay.scroll_drag = true;
+                        overlay.scroll_to_track(track, point.1);
                         overlay.focus = AgentActivityFocus::Content;
+                        outcome.repaint = true;
+                    }
+                } else if let Some(tool) = self
+                    .hits
+                    .agent_activity_toggles
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, tool)| *tool)
+                {
+                    if let Some(overlay) = self.agent_activity_mut() {
+                        overlay.focus = AgentActivityFocus::Content;
+                        overlay.transcript.toggle(tool);
                         outcome.repaint = true;
                     }
                 } else if super::contains(content, point) {
@@ -2325,8 +1982,22 @@ impl ClientShellState {
                     }
                 }
             }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let track = self.hits.agent_activity_scrollbar;
+                if let Some(overlay) = self.agent_activity_mut() {
+                    if overlay.scroll_drag && !track.is_empty() {
+                        overlay.scroll_to_track(track, point.1);
+                        outcome.repaint = true;
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(overlay) = self.agent_activity_mut() {
+                    overlay.scroll_drag = false;
+                }
+            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                if super::contains(popup, point) =>
+                if super::contains(page, point) =>
             {
                 let lines = isize::try_from(self.config.mouse_scroll_lines).unwrap_or(3);
                 let delta = if mouse.kind == MouseEventKind::ScrollUp {
@@ -2334,12 +2005,12 @@ impl ClientShellState {
                 } else {
                     lines
                 };
-                let over_content = !content.is_empty() && point.0 >= content.x;
+                let over_content = super::contains(content, point);
                 if let Some(overlay) = self.agent_activity_mut() {
                     if over_content {
                         overlay.scroll_content(delta);
                     } else {
-                        overlay.tree_scroll = overlay.tree_scroll.saturating_add_signed(delta);
+                        overlay.list_scroll = overlay.list_scroll.saturating_add_signed(delta);
                     }
                     outcome.repaint = true;
                 }
@@ -2349,7 +2020,7 @@ impl ClientShellState {
         true
     }
 
-    /// 点树行：落在折叠开关（前缀里本节点那一格起 2 列）上切换折叠，否则选中。
+    /// 点列表项：层级视图里落在本节点的折叠开关上就切换折叠，否则选中。
     fn click_agent_activity_row(
         &mut self,
         rect: Rect,
@@ -2361,15 +2032,14 @@ impl ClientShellState {
             return;
         };
         overlay.focus = AgentActivityFocus::Tree;
-        let toggle = overlay
-            .rows
-            .iter()
-            .find(|row| row.key == node_id && row.has_children)
-            .map(|row| {
-                let x = rect.x + TREE_PAD + u16::from(row.depth.min(MAX_TREE_DEPTH)) * 2;
-                (x..x.saturating_add(2)).contains(&point.0)
-            })
-            .unwrap_or(false);
+        let toggle = overlay.view == AgentPageView::Tree
+            && overlay
+                .rows
+                .iter()
+                .find(|row| row.key == node_id && row.has_children)
+                .is_some_and(|row| {
+                    super::contains(agent_page::fold_toggle_rect(rect, row.depth), point)
+                });
         if toggle {
             overlay.toggle_collapsed(&node_id);
             outcome.repaint = true;
@@ -2440,5 +2110,13 @@ impl ClientAgentActivityOverlay {
             self.content_scroll = self.content_max_scroll;
             self.content_tail = self.follow_active();
         }
+    }
+
+    /// 滚动条点击 / 拖动：按指针在轨道上的位置跳转。
+    fn scroll_to_track(&mut self, track: Rect, row: u16) {
+        let span = usize::from(track.height.saturating_sub(1)).max(1);
+        let offset = usize::from(row.saturating_sub(track.y));
+        self.content_scroll = self.content_max_scroll * offset.min(span) / span;
+        self.content_tail = self.follow_active() && self.content_scroll >= self.content_max_scroll;
     }
 }

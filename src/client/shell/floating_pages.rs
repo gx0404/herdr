@@ -57,13 +57,38 @@ pub(super) struct Drag {
     changed: bool,
 }
 
-fn window_key(overlay: &ClientShellOverlay) -> Option<String> {
+/// 可拖动、记住位置的浮窗的存储键。右键菜单跟着指针走；子智能体页面占满内容区，
+/// 不可拖动、不保存位置（旧版本存下的 `agent_activity` 窗口记录随之被忽略）。
+pub(super) fn window_key(overlay: &ClientShellOverlay) -> Option<String> {
     // 稳定键（ARCH-01）：`{:?}` 会随枚举改名静默丢配置。
-    (!matches!(overlay, ClientShellOverlay::ContextMenu(_)))
-        .then(|| overlay.kind().storage_key().to_owned())
+    (!matches!(
+        overlay,
+        ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::AgentActivity(_)
+    ))
+    .then(|| overlay.kind().storage_key().to_owned())
 }
 
 impl ClientShellState {
+    /// 浮层的页面边界：视图计算（`compute_overlay_view`）与绘制（`ChromeContext.page_bounds`）
+    /// 共用的唯一入口。子智能体页面返回页面矩形，其余浮层返回记住的浮窗矩形（没有
+    /// 记录时为 `None`，由各浮层取默认模态尺寸）。
+    pub(super) fn overlay_bounds(&self, cols: u16, rows: u16) -> Option<Rect> {
+        match self.overlay.as_ref()? {
+            ClientShellOverlay::AgentActivity(_) => Some(self.agent_page_rect(cols, rows)),
+            _ => self.floating_page_rect(cols, rows),
+        }
+    }
+
+    /// 子智能体页面的矩形：工作台布局是标题栏与状态栏之间的整块内容区；经典与移动
+    /// 布局是整帧（页面自己画页脚）。
+    pub(super) fn agent_page_rect(&self, cols: u16, rows: u16) -> Rect {
+        if self.workbench.enabled {
+            super::workbench::content_area(cols, rows)
+        } else {
+            Rect::new(0, 0, cols, rows)
+        }
+    }
+
     pub(super) fn floating_page_rect(&self, cols: u16, rows: u16) -> Option<Rect> {
         let key = window_key(self.overlay.as_ref()?)?;
         self.page_windows

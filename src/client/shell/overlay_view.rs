@@ -16,7 +16,7 @@ impl ClientShellState {
         self.refresh_session_rows();
         self.compute_session_view(cols, rows);
         let area = Rect::new(0, 0, cols, rows);
-        let page_bounds = self.floating_page_rect(cols, rows);
+        let page_bounds = self.overlay_bounds(cols, rows);
         self.compute_scenes_scroll(area, page_bounds);
         self.compute_snippets_scroll(area, page_bounds);
         self.compute_palette_scroll(area, page_bounds);

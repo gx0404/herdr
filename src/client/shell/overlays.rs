@@ -58,6 +58,7 @@ pub(crate) struct OverlayRender {
     pub(crate) agent_activity_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) agent_activity_actions:
         Vec<(Rect, super::agent_activity_overlay::AgentActivityButton)>,
+    pub(crate) agent_activity_toggles: Vec<(Rect, u64)>,
     ///（HERDR-MACH-009）。非查看器视图时为 None。
     pub(crate) snippet_popup: Rect,
     pub(crate) snippet_search: Rect,
@@ -100,10 +101,13 @@ pub(crate) fn render_client_overlay(
     cx: &ChromeContext<'_>,
 ) -> Option<OverlayRender> {
     // 非模态的浮层不压暗整屏：导航器与上下文菜单（按键透传到聚焦终端，正在
-    // 打字的终端内容不能是暗的）。
+    // 打字的终端内容不能是暗的）；子智能体页面是整块内容区，标题栏与状态栏照常
+    // 可读，也不压暗。
     if !matches!(
         o,
-        ClientShellOverlay::Navigator(_) | ClientShellOverlay::ContextMenu(_)
+        ClientShellOverlay::Navigator(_)
+            | ClientShellOverlay::ContextMenu(_)
+            | ClientShellOverlay::AgentActivity(_)
     ) {
         for y in b.area.y..b.area.bottom() {
             for x in b.area.x..b.area.right() {
@@ -212,7 +216,7 @@ pub(crate) fn render_client_overlay(
             super::command_palette::render_command_palette(b, v, status_indicators, cx)
         }
         ClientShellOverlay::AgentActivity(v) => {
-            super::agent_activity_overlay::render_agent_activity_overlay(b, v, endpoints, cx)
+            super::chrome::agent_page::paint_agent_page(b, v, cx)
         }
         ClientShellOverlay::ContextMenu(_) => None,
     }
