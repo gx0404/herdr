@@ -596,7 +596,9 @@ fn server_crash_after_attach_causes_lost_connection_error() {
                 Ok(n) if n > 0 => {
                     let out = String::from_utf8_lossy(&buf[..n]);
                     output.push_str(&out);
+                    // The narrow sidebar uses vertical separators without English labels.
                     if out.contains("\u{2500}")
+                        || out.contains("\u{2502}")
                         || out.contains("workspace")
                         || out.contains("pane")
                         || out.contains("terminal")
@@ -2080,9 +2082,7 @@ fn read_until_client_attaches(client: &SpawnedHerdr) -> String {
             Err(err) => panic!("read thin client PTY: {err}"),
         }
         // The narrow sidebar uses vertical separators without English labels.
-                // The narrow sidebar uses vertical separators without English labels.
-                if output.contains('\u{2500}')
-                    || output.contains('\u{2502}')
+        if output.contains('\u{2500}')
             || output.contains('\u{2502}')
             || output.contains("workspace")
             || output.contains("pane")
