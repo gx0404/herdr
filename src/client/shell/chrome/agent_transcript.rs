@@ -28,7 +28,6 @@ use std::collections::{HashSet, VecDeque};
 use unicode_width::UnicodeWidthChar;
 
 use super::super::observability::tr;
-use super::super::render::wrap_text;
 
 /// 原文的解析方式：转写格式明确的来源（codex / claude / opencode）按区块解析；其余
 /// （kimi 任务输出、pi 的流式文本、外部来源等）每行都当正文，只折行。
@@ -98,6 +97,10 @@ const SUB_BITS: u32 = 32;
 const MAX_TAG_CHARS: usize = 96;
 /// 工具标题行里保住「+N 行」时，前面至少留给开关与名字开头的列数。
 const MIN_HEAD_COLUMNS: usize = 4;
+/// 折行时不放在行首的标点（闭合括号、句读、省略号）。
+const NO_LINE_START: &str = "，。、；：！？）」』》】〉”’…—～·%,.;:!?)]}";
+/// 折行时不放在行尾的标点（开括号与左引号）。
+const NO_LINE_END: &str = "（「『《【〈“‘([{";
 
 /// 一个节点的转写视图：原文行 → 区块 → 显示行。
 #[derive(Debug, Default)]
@@ -1415,7 +1418,7 @@ fn push_wrapped(
         return;
     }
     let mut first = true;
-    wrap_text(&text, first_room.max(1), rest_room.max(1), |start, end| {
+    wrap_cjk(&text, first_room.max(1), rest_room.max(1), |start, end| {
         let mut segments = prefix_segments(if first { first_prefix } else { rest_prefix });
         first = false;
         let mut position = start;
@@ -1440,6 +1443,89 @@ fn push_wrapped(
             toggle: None,
         });
     });
+}
+
+/// 按显示宽度折行，逐行回调字节区间 `[start, end)`：首行宽 `first` 列、续行宽 `rest` 列。
+/// 断点取空格之后，以及宽字符（中日韩文字）前后——中文没有空格，只在空格处断会在
+/// 混排的句子里留下很短的行；行首不放闭合标点、行尾不放开括号。没有断点时按列硬断，
+/// 在空格处断开时下一行行首的空格跳过。换行符强制断行，空文字也占一行。
+pub(in crate::client::shell) fn wrap_cjk(
+    text: &str,
+    first: usize,
+    rest: usize,
+    mut emit: impl FnMut(usize, usize),
+) {
+    let mut width = first.max(1);
+    let mut start = 0usize;
+    let mut used = 0usize;
+    // 本行最近一个断点（字节位置）及断点之前占用的列数。
+    let mut soft: Option<(usize, usize)> = None;
+    let mut skip_spaces = false;
+    let mut previous: Option<char> = None;
+    for (offset, ch) in text.char_indices() {
+        if ch == '\n' {
+            emit(start, offset);
+            start = offset + ch.len_utf8();
+            used = 0;
+            soft = None;
+            width = rest.max(1);
+            skip_spaces = false;
+            previous = None;
+            continue;
+        }
+        if ch == ' ' && skip_spaces {
+            start = offset + ch.len_utf8();
+            continue;
+        }
+        skip_spaces = false;
+        if offset > start && previous.is_some_and(|before| breakable(before, ch)) {
+            soft = Some((offset, used));
+        }
+        let cell = char_width(ch);
+        if ch == ' ' && used + cell > width && offset > start {
+            emit(start, offset);
+            start = offset + ch.len_utf8();
+            used = 0;
+            soft = None;
+            width = rest.max(1);
+            skip_spaces = true;
+            previous = Some(ch);
+            continue;
+        }
+        while used + cell > width && offset > start {
+            match soft.take().filter(|(at, _)| *at > start && *at <= offset) {
+                Some((at, used_at)) => {
+                    emit(start, at);
+                    start = at;
+                    used -= used_at;
+                }
+                None => {
+                    emit(start, offset);
+                    start = offset;
+                    used = 0;
+                }
+            }
+            width = rest.max(1);
+        }
+        used += cell;
+        previous = Some(ch);
+    }
+    emit(start, text.len());
+}
+
+/// `before` 与 `after` 之间能否断行：空格之后（连续空格取最后一个之后），或任一侧是
+/// 宽字符；闭合标点不放行首、开括号不放行尾，零宽字符不与前一个字分开。
+fn breakable(before: char, after: char) -> bool {
+    if char_width(after) == 0 {
+        return false;
+    }
+    if before == ' ' {
+        return after != ' ';
+    }
+    if NO_LINE_START.contains(after) || NO_LINE_END.contains(before) {
+        return false;
+    }
+    char_width(before) == 2 || char_width(after) == 2
 }
 
 fn prefix_segments(prefix: &[(&str, Tone)]) -> Vec<Segment> {

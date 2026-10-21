@@ -23,8 +23,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::chrome::agent_page::{self, ListLine};
+use super::chrome::agent_transcript::wrap_cjk;
 use super::chrome::agent_transcript::{TranscriptMode, TranscriptView};
-use super::render::wrap_text;
 use super::*;
 use crate::api::schema::{
     AgentActivityContent, AgentActivityContentFormat, AgentActivityKind, AgentActivityNode,
@@ -308,7 +308,7 @@ impl AgentActivityContentView {
         let to32 = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
         for (index, line) in self.lines.iter().enumerate().skip(self.wrapped) {
             let line_index = to32(index);
-            wrap_text(&line.text, room, room, |start, end| {
+            wrap_cjk(&line.text, room, room, |start, end| {
                 self.rows.push(WrapRow {
                     line: line_index,
                     start: to32(start),
@@ -2165,7 +2165,7 @@ impl ClientAgentActivityOverlay {
         }
         let mut last_output = Vec::new();
         if let Some(last) = self.transcript.last_output() {
-            wrap_text(last, width, width, |start, end| {
+            wrap_cjk(last, width, width, |start, end| {
                 last_output.push(last[start..end].to_owned());
             });
         }

@@ -548,3 +548,49 @@ fn many_blocks_on_one_line_toggle_independently() {
     );
     assert!(!rows.contains(&"  │ out16".to_owned()), "{rows:#?}");
 }
+
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    wrap_cjk(text, width, width, |start, end| {
+        rows.push(text[start..end].to_owned())
+    });
+    rows
+}
+
+/// 中文没有空格：折行在字与字之间断开，不把混排句子提前断在行首附近的空格处。
+#[test]
+fn chinese_text_breaks_between_characters_instead_of_at_early_spaces() {
+    let rows = wrapped(
+        "审计 herdr 全部 TUI 界面，按严重度输出问题清单和可直接实施的修改建议",
+        24,
+    );
+    // 「界面，」放不下：逗号不放行首，连同前一个字移到下一行。
+    assert_eq!(rows[0], "审计 herdr 全部 TUI 界");
+    for row in &rows {
+        assert!(crate::ui::display_width(row) <= 24, "{row:?}");
+    }
+    assert_eq!(
+        rows.concat(),
+        "审计 herdr 全部 TUI 界面，按严重度输出问题清单和可直接实施的修改建议"
+    );
+}
+
+#[test]
+fn closing_punctuation_never_starts_a_line_and_opening_never_ends_one() {
+    // 宽 10 列：第五个字后正好满行，逗号不能落到下一行行首。
+    let rows = wrapped("一二三四五，六七八九十", 10);
+    assert!(rows.iter().all(|row| !row.starts_with('，')), "{rows:?}");
+    let rows = wrapped("一二三四（五六七八九", 10);
+    assert!(rows.iter().all(|row| !row.ends_with('（')), "{rows:?}");
+}
+
+#[test]
+fn latin_words_still_wrap_at_spaces_and_long_words_hard_break() {
+    assert_eq!(
+        wrapped("one two three four", 9),
+        ["one two ", "three ", "four"]
+    );
+    assert_eq!(wrapped("abcdefghijkl", 5), ["abcde", "fghij", "kl"]);
+    assert_eq!(wrapped("", 5), [""]);
+    assert_eq!(wrapped("a\nb", 5), ["a", "b"]);
+}
