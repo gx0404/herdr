@@ -128,6 +128,8 @@ fn spawn_client_process_with_args_and_env(
 /// 联邦客户端用例的宿主终端尺寸。停靠工作台窄于 100 列时把工作区面板收成 4 列
 /// 图标栏（只剩编号与状态字形，见 `RAIL_BELOW_COLS`），满 140 列又会自动展开
 /// Inspector；120 列保持展开的工作区文字树，用例才能按名称等待与点击工作区。
+/// 这些用例同时断言英文界面文案（`Local`、生命周期横幅里的 `reconnecting`），而默认
+/// 语言是 zh-CN，所以联邦客户端一律带 `HERDR_LANG=en`。
 const FEDERATED_CLIENT_COLS: u16 = 120;
 const FEDERATED_CLIENT_ROWS: u16 = 24;
 
@@ -1005,7 +1007,7 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
                 &runtime_dir,
                 &api_socket,
                 args,
-                &[("PATH", &path)],
+                &[("PATH", &path), ("HERDR_LANG", "en")],
                 FEDERATED_CLIENT_COLS,
                 FEDERATED_CLIENT_ROWS,
             );
@@ -1123,7 +1125,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         &runtime_dir,
         &api_socket,
         &["client"],
-        &[("PATH", &path)],
+        &[("PATH", &path), ("HERDR_LANG", "en")],
         FEDERATED_CLIENT_COLS,
         FEDERATED_CLIENT_ROWS,
     );
@@ -1343,7 +1345,8 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
             read_output(&output)[watermark..].contains("reconnecting")
         }),
-        "the selected remote must be marked disconnected"
+        "the selected remote must be marked disconnected: {}",
+        screen_text()
     );
     let text = read_output(&output);
     assert!(
@@ -1579,7 +1582,7 @@ fn federated_client_with_changing_external_agents_keeps_remote_live() {
         &runtime_dir,
         &api_socket,
         &["client"],
-        &[("PATH", &path)],
+        &[("PATH", &path), ("HERDR_LANG", "en")],
         FEDERATED_CLIENT_COLS,
         FEDERATED_CLIENT_ROWS,
     );
