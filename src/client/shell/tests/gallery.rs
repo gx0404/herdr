@@ -2236,3 +2236,6 @@ fn ui_gallery_agent_page() {
 
 #[path = "gallery_tools.rs"]
 mod tools;
+
+#[path = "gallery_toast.rs"]
+mod toast;
