@@ -409,6 +409,11 @@ fn hover_bg(cx: &ChromeContext<'_>) -> Color {
     }
 }
 
+/// 树前缀（引导线、连接线与折叠开关）：中性的 overlay0，比分隔线深一档，开关看得清。
+fn tree_style(p: &crate::app::state::Palette) -> Style {
+    Style::default().fg(p.overlay0)
+}
+
 fn bucket_style(bucket: AgentBucket, cx: &ChromeContext<'_>) -> Style {
     design::status_style(bucket, cx.palette, cx.components)
 }
@@ -990,7 +995,7 @@ fn paint_item_line(
     let bucket = design::activity_bucket(node.status);
     if detail {
         if tree {
-            x = paint_continuation(b, x, rect.y, right, entry, design::rule(p));
+            x = paint_continuation(b, x, rect.y, right, entry, tree_style(p));
         }
         x = x.saturating_add(2);
         let (text, style) = match node.summary.as_deref().filter(|text| !text.is_empty()) {
@@ -1015,7 +1020,7 @@ fn paint_item_line(
             entry.has_children,
             entry.collapsed,
             false,
-            design::rule(p),
+            tree_style(p),
         );
         x = x.saturating_add(used);
     }
@@ -1200,7 +1205,12 @@ fn paint_lanes(
             None
         };
         if axis.width > 0 {
-            fill(b, Rect::new(axis.x, y, axis.width, 1), "┈", design::rule(p));
+            fill(
+                b,
+                Rect::new(axis.x, y, axis.width, 1),
+                "┈",
+                design::rule(p).bg(p.panel_bg),
+            );
         }
         if let Some(bg) = row_bg {
             b.set_style(rect, Style::default().bg(bg));
@@ -1226,7 +1236,7 @@ fn paint_lanes(
             entry.has_children,
             entry.collapsed,
             false,
-            design::rule(p),
+            tree_style(p),
         );
         x = x.saturating_add(used);
         let bucket = design::activity_bucket(node.status);
