@@ -2241,3 +2241,5 @@ mod tools;
 mod toast;
 #[path = "gallery_layout.rs"]
 mod layout;
+#[path = "gallery_overlays.rs"]
+mod overlays;
