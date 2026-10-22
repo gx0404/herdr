@@ -866,22 +866,34 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn private_named_pipe_accepts_same_user() {
+    fn private_named_pipe_transfers_surface_bursts_without_waiting_for_peer() {
+        use interprocess::local_socket::traits::Stream as _;
         use std::io::Write as _;
 
         let path = temp_socket_marker_path("private-pipe");
         let _ = fs::remove_file(&path);
         let listener = bind_private_local_listener(&path).unwrap();
+        listener
+            .set_nonblocking(interprocess::local_socket::ListenerNonblockingMode::Accept)
+            .unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         let mut client = connect_local_stream(&path).unwrap();
         let mut server = listener.accept().unwrap();
-        client.write_all(b"remote").unwrap();
+        server.set_nonblocking(true).unwrap();
+        client.set_nonblocking(true).unwrap();
 
-        let mut buffer = [0_u8; 16];
-        assert!(matches!(
-            poll_local_stream_read_count(&mut server, &mut buffer).unwrap(),
-            LocalStreamReadCount::Data(6)
-        ));
-        assert_eq!(&buffer[..6], b"remote");
+        // A screen update must fit before the peer's next poll in either direction.
+        let payload = vec![b'x'; 48 * 1024];
+        let mut received = vec![0; payload.len()];
+        assert_eq!(server.write(&payload).unwrap(), payload.len());
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, payload);
+        assert_eq!(client.write(&payload).unwrap(), payload.len());
+        server.read_exact(&mut received).unwrap();
+        assert_eq!(received, payload);
 
         drop(client);
         drop(server);
