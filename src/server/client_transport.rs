@@ -2553,6 +2553,35 @@ mod tests {
         (client, server, TestSocketPath(path))
     }
 
+    fn close_consumed_test_client(stream: LocalStream) {
+        // Call only after the peer has acknowledged every write. On Windows the raw stream's
+        // Drop queues a flush in interprocess's shared linger pool, so it need not release the
+        // handle or wake the server reader. These clients are never cloned or split.
+        #[cfg(windows)]
+        {
+            let LocalStream::NamedPipe(pipe) = stream;
+            let handle: std::os::windows::io::OwnedHandle = pipe.into();
+            drop(handle);
+        }
+        #[cfg(unix)]
+        drop(stream);
+    }
+
+    fn join_client_thread<T>(
+        handle: std::thread::JoinHandle<T>,
+        context: &str,
+    ) -> std::thread::Result<T> {
+        let deadline = Instant::now() + LOADED_WAIT;
+        while !handle.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "{context} did not finish within {LOADED_WAIT:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        handle.join()
+    }
+
     pub(crate) fn endpoint_hello(surface_cols: u16, surface_rows: u16) -> ClientMessage {
         let hello = EndpointClientHello {
             generation: ENDPOINT_PROTOCOL_GENERATION,
@@ -3505,13 +3534,14 @@ mod tests {
             ServerMessage::Welcome { error: None, .. }
         ));
 
-        drop(normal_client);
+        close_consumed_test_client(normal_client);
         drop(idle_client_two);
         for handle in idle_handles {
-            handle.join().expect("idle handshake thread join").unwrap();
+            join_client_thread(handle, "idle handshake")
+                .expect("idle handshake thread join")
+                .unwrap();
         }
-        normal_handle
-            .join()
+        join_client_thread(normal_handle, "normal handshake")
             .expect("normal handshake thread join")
             .unwrap();
         assert_eq!(limiter.active(), 0, "all handshake slots must be released");
@@ -4113,10 +4143,9 @@ mod tests {
             other => panic!("expected ClientShellConnected, got {other:?}"),
         }
 
-        drop(client_stream);
+        close_consumed_test_client(client_stream);
         should_quit.store(true, Ordering::Release);
-        handle
-            .join()
+        join_client_thread(handle, "SSH auth socket handshake")
             .expect("handshake thread join")
             .expect("handshake thread result");
     }
@@ -4177,10 +4206,9 @@ mod tests {
             other => panic!("expected ClientShellConnected, got {other:?}"),
         }
 
-        drop(client_stream);
+        close_consumed_test_client(client_stream);
         should_quit.store(true, Ordering::Release);
-        handle
-            .join()
+        join_client_thread(handle, "surface viewport handshake")
             .expect("handshake thread join")
             .expect("handshake thread result");
     }
@@ -4457,10 +4485,9 @@ mod tests {
             other => panic!("expected ClientInput after rejection, got {other:?}"),
         }
 
-        drop(client_stream);
+        close_consumed_test_client(client_stream);
         should_quit.store(true, Ordering::Release);
-        handle
-            .join()
+        join_client_thread(handle, "oversized bracketed paste reader")
             .expect("read thread join")
             .expect("read thread result");
     }
