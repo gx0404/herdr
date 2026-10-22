@@ -124,6 +124,12 @@ def main() -> int:
                     check("full relation pagination", page.locator("#relations .relation").first.inner_text() != first_relation)
                     page.locator("#relation-previous").click()
                     check("relation previous page", page.locator("#relations .relation").first.inner_text() == first_relation)
+                    page.locator("#detail .detail-content").evaluate("e=>{e.scrollTop=e.scrollHeight;}")
+                    check("detail scroll reset precondition", page.locator("#detail .detail-content").evaluate("e=>e.scrollTop>0"))
+                    next_node = samples["located"] if samples["located"]["id"] != samples["highDegree"]["id"] else samples["last"]
+                    search_id(next_node)
+                    page.evaluate("() => new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))")
+                    check("new node detail starts at top", page.locator("#detail .detail-content").evaluate("e=>e.scrollTop===0"))
                     page.keyboard.press("Escape")
                 page.locator("#search").fill("zz_no_such_node_759238492")
                 page.wait_for_selector("#results .empty-state")

@@ -128,6 +128,7 @@
     $('breadcrumb').textContent = 'herdr / ' + groupLabel(n); $('scene-title').textContent = n.label || n.id;
     $('scene-description').textContent = '查看直接关系与来源证据。';
     renderRelations(); scene.showNode(n); history.replaceState(null, '', '#node=' + encodeURIComponent(id));
+    document.querySelector('#detail .detail-content').scrollTop = 0;
     renderResults(); if (focus) $('detail-title').focus({preventScroll:true});
   }
   function closeDetail(restore = true) {
