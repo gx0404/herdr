@@ -614,6 +614,14 @@ fn machine_api_bad_or_unwritable_metadata_does_not_block_commands() {
                 .expect("read fixture SSH argv after unwritable-metadata failure"),
         );
     }
+    let argv = fs::read_to_string(harness.root.join("ssh-args")).unwrap();
+    let args: Vec<_> = argv.lines().collect();
+    assert!(
+        !args
+            .windows(2)
+            .any(|pair| pair[0] == "-O" && pair[1] == "exit"),
+        "shared master was terminated:\n{argv}",
+    );
     harness.assert_local_untouched();
 }
 

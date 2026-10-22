@@ -1530,7 +1530,8 @@ impl Drop for RemoteSsh {
             .managed_config
             .as_ref()
             .map(|config| &config.options)
-            .filter(|options| options.control_path.is_some())
+            // Shared masters outlive one operation; only owned private masters exit here.
+            .filter(|options| options.control_path.is_some() && options.config_dir.is_some())
         else {
             return;
         };
@@ -4258,6 +4259,89 @@ mod tests {
         worker.join().unwrap().unwrap();
         fixture.assert_owned_descendant_reaped(descendant);
         assert!(String::from_utf8_lossy(&output).contains("final child output"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_ssh_drop_exits_owned_master_and_removes_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // PATH is process-wide: exercise Drop in a dedicated child with fake SSH.
+        if std::env::var_os("HERDR_TEST_PRIVATE_SSH_DROP").is_some() {
+            let _dirs = crate::config::test_dirs::isolate_dirs("private-ssh-drop");
+            let ssh = RemoteSsh::new("fixture-private".into(), true, "main".into());
+            let options = ssh.options().expect("private managed SSH configuration");
+            assert!(options.control_path.is_some());
+            assert!(options.config_dir.is_some());
+            let config_path = options.config_path.clone();
+            assert!(config_path.is_file());
+            drop(ssh);
+            assert!(!config_path.exists());
+            return;
+        }
+
+        let scratch = crate::config::test_dirs::TempDir::new("private-ssh-drop-parent");
+        let root = scratch.path();
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(root.join("tmp")).unwrap();
+        let ssh_path = bin.join("ssh");
+        fs::write(
+            &ssh_path,
+            r#"#!/bin/sh
+printf 'ssh\n' >> "$HERDR_TEST_PRIVATE_SSH_DROP/ssh-calls"
+printf '%s\n' "$@" >> "$HERDR_TEST_PRIVATE_SSH_DROP/ssh-args"
+exit 0
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&ssh_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut search_path = vec![bin];
+        search_path.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "remote::attach::tests::private_ssh_drop_exits_owned_master_and_removes_config",
+            "--nocapture",
+        ]);
+        command
+            .env("HERDR_TEST_PRIVATE_SSH_DROP", root)
+            .env("PATH", std::env::join_paths(search_path).unwrap())
+            .env("HOME", root.join("home"))
+            .env("USERPROFILE", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("APPDATA", root.join("appdata"))
+            .env("LOCALAPPDATA", root.join("localappdata"))
+            .env("TMPDIR", root.join("tmp"))
+            .env("TEMP", root.join("tmp"))
+            .env("TMP", root.join("tmp"))
+            .env_remove("HERDR_CONFIG_PATH")
+            .env_remove(crate::session::SESSION_ENV_VAR);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child test did not run: {}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+        assert_eq!(fs::read_to_string(root.join("ssh-calls")).unwrap(), "ssh\n");
+        let argv = fs::read_to_string(root.join("ssh-args")).unwrap();
+        let args: Vec<_> = argv.lines().collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-O" && pair[1] == "exit"),
+            "private master was not terminated:\n{argv}",
+        );
     }
 
     #[test]
