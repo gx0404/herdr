@@ -160,6 +160,26 @@ class CheckModeTests(LocalTestCase):
 
 
 class ArchiveTests(LocalTestCase):
+    def test_windows_reserved_names_are_rejected_on_every_host(self) -> None:
+        destination = self.root / "out"
+        for name in ("NUL", "con.txt", "nul .txt", "COM1.txt", "LPT9", "COM¹.txt"):
+            with self.subTest(name=name), self.assertRaises(setup_zig.SetupZigError):
+                setup_zig._archive_path(destination, "package/" + name)
+        for name in ("package/zig", "package/COM0"):
+            self.assertEqual(destination / name, setup_zig._archive_path(destination, name))
+        self.assertFalse(destination.exists())
+
+    def test_archive_path_uses_modern_reserved_api_without_legacy_method(self) -> None:
+        with mock.patch.object(setup_zig.ntpath, "isreserved", create=True,
+                               side_effect=lambda name: name == "NUL"), \
+                mock.patch.object(setup_zig.PureWindowsPath, "is_reserved", create=True,
+                                  side_effect=AssertionError("removed pathlib API used")):
+            destination = self.root / "out"
+            self.assertEqual(destination / "package/zig", setup_zig._archive_path(destination, "package/zig"))
+            with self.assertRaises(setup_zig.SetupZigError):
+                setup_zig._archive_path(destination, "package/NUL")
+        self.assertFalse(destination.exists())
+
     def test_zip_does_not_invoke_available_gnu_tar(self) -> None:
         archive = self.root / "zig.zip"
         with zipfile.ZipFile(archive, "w") as zf:

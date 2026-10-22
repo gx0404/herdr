@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ntpath
 import os
 import platform
 import shutil
@@ -245,12 +246,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _windows_reserved_name(name: str) -> bool:
+    # Python 3.15 移除了 PurePath.is_reserved；POSIX 也必须检查 Windows 保留名。
+    modern = getattr(ntpath, "isreserved", None)
+    return modern(name) if modern is not None else PureWindowsPath(name).is_reserved()
+
+
 def _archive_path(dest: Path, name: str) -> Path:
     parts = PurePosixPath(name)
     if (
         not name or parts.is_absolute() or PureWindowsPath(name).drive
         or ".." in parts.parts or "\\" in name or ":" in name or "\0" in name
-        or any(part.endswith((" ", ".")) or PureWindowsPath(part).is_reserved() for part in parts.parts)
+        or any(part.endswith((" ", ".")) or _windows_reserved_name(part) for part in parts.parts)
     ):
         raise SetupZigError(f"归档路径不安全：{name!r}")
     target = dest.joinpath(*parts.parts)
