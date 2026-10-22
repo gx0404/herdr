@@ -145,6 +145,11 @@ platform = "unix"
 reason = "CLI output changes process-wide SIGPIPE disposition; still runs in default."
 
 [[rust_isolated]]
+selector = "cli::plugin::tests::cli_user_dir_creation_seeds_legacy_config_before_printing_config_dir"
+platform = "unix"
+reason = "CLI config-directory output changes process-wide SIGPIPE disposition; still runs in default."
+
+[[rust_isolated]]
 selector = "server::client_transport::tests::windows_transport_handles_threads_and_idle_cpu_remain_bounded"
 platform = "windows"
 reason = "Process-wide resource counts require an isolated process; still runs in default."

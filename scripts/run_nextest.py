@@ -30,8 +30,8 @@ else:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "target" / "test-suite-logs"
 REPORT_ARGS = [
-    "--status-level", "leak", "--final-status-level", "fail",
-    "--failure-output", "final", "--success-output", "never",
+    "--status-level", "pass", "--final-status-level", "fail",
+    "--failure-output", "immediate-final", "--success-output", "never",
 ]
 
 

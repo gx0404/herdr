@@ -3,7 +3,9 @@
 入口统一是 `just`（仓库无 Makefile）。列：用途 / 前置 / 副作用 / 通过条件与证据。
 改动 recipe 时同步本表与 CI 调用面。
 
-`nextest-all`、`test-one` 和完整 Rust 阶段 使用 `--status-level leak`：运行中显示失败、重试、慢测试及 leaky 用例名称，便于定位测试结束后仍占用输出管道的子进程；测试通过条件与退出码判定不变。
+`nextest-all` 和 Rust 分类入口中的 nextest 调用使用 `--status-level pass --failure-output immediate-final`：每条用例完成时显示状态，失败诊断立即输出并保留到最终汇总。成功用例正文仍由 `--success-output never` 隐藏，最终状态汇总仍使用 `--final-status-level fail`。
+
+`test-one` 由 justfile 直接调用 nextest，保留 `--status-level leak --failure-output final`：运行中显示失败、重试、慢测试及 leaky 用例，失败正文在最终汇总输出。`leak` 不显示普通通过用例的完成状态，即使用例此前出现过 `SLOW`。这些输出选项不改变测试通过条件、超时、并发或退出码判定。
 
 ## 日常开发
 

@@ -65,11 +65,11 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_nextest.allocation(2, 4)
 
-    def test_default_command_is_the_original_recipe(self):
+    def test_default_command_reports_completion_and_failure_output(self):
         self.assertEqual(run_nextest.single_command(4, None), [
             "cargo", "nextest", "run", "--locked", "--test-threads", "4",
-            "--status-level", "leak", "--final-status-level", "fail",
-            "--failure-output", "final", "--success-output", "never",
+            "--status-level", "pass", "--final-status-level", "fail",
+            "--failure-output", "immediate-final", "--success-output", "never",
         ])
         self.assertEqual(run_nextest.single_command(4, "test(probe)")[-2:], ["--filterset", "test(probe)"])
 
