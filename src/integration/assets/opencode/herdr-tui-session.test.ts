@@ -744,26 +744,38 @@ test("V1 recovery, abort and child errors do not fail the selected root", async 
 });
 
 test("V2 failure clears obsolete blockers before idle and remains selection scoped", async () => {
-  const plugin = await loadPlugin();
-  const tui = v2Api();
-  const dispose = await plugin.setup(tui.api);
-  activeDisposers.push(dispose);
-  await flushReports();
-  tui.emit("session.execution.started", { sessionID: "a" });
-  tui.emit("permission.asked", { sessionID: "a", id: "pending" });
-  await flushReports();
-  requests.length = 0;
-  tui.emit("session.execution.failed", { sessionID: "child", error: { type: "ChildError", message: "child failure" } });
-  tui.emit("session.execution.failed", { sessionID: "b", error: { type: "OtherError", message: "other root" } });
-  await flushReports();
-  expect(requests).toEqual([]);
-  tui.emit("session.execution.failed", { sessionID: "a", error: { type: "ProviderError", message: "bad key" } });
-  await flushReports();
-  expect(states()).toEqual(["idle"]);
-  expect(requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention").length).toBe(1);
-  tui.emit("session.execution.started", { sessionID: "a" });
-  await flushReports();
-  expect(states().at(-1)).toBe("working");
+  // Freeze the selection retry clock to isolate the failure-event transitions.
+  const originalNow = Date.now;
+  const now = originalNow();
+  Date.now = () => now;
+  let dispose: (() => void) | undefined;
+  try {
+    const plugin = await loadPlugin();
+    const tui = v2Api();
+    dispose = await plugin.setup(tui.api);
+    await flushReports();
+    tui.emit("session.execution.started", { sessionID: "a" });
+    tui.emit("permission.asked", { sessionID: "a", id: "pending" });
+    await flushReports();
+    requests.length = 0;
+    tui.emit("session.execution.failed", { sessionID: "child", error: { type: "ChildError", message: "child failure" } });
+    tui.emit("session.execution.failed", { sessionID: "b", error: { type: "OtherError", message: "other root" } });
+    await flushReports();
+    expect(requests).toEqual([]);
+    tui.emit("session.execution.failed", { sessionID: "a", error: { type: "ProviderError", message: "bad key" } });
+    await flushReports();
+    expect(states()).toEqual(["idle"]);
+    expect(requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention").length).toBe(1);
+    tui.emit("session.execution.started", { sessionID: "a" });
+    await flushReports();
+    expect(states().at(-1)).toBe("working");
+  } finally {
+    try {
+      dispose?.();
+    } finally {
+      Date.now = originalNow;
+    }
+  }
 });
 
 test("V2 resends the latest state after a failed delivery", async () => {
