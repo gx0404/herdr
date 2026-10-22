@@ -111,6 +111,8 @@ This resolves `web` in your SSH config, registers it with the full directives fo
 
 Choose a machine or one of its workspaces in the sidebar. The selected machine receives your pane input and terminal size, and supplies the visible terminal content and graphics. Other connected machines keep updating their workspace information, agent states, and notifications without streaming their pane screens.
 
+Selecting a workspace on another machine returns keyboard focus to that workspace's terminal once the switch is ready. Automatic reconnects preserve the saved panel focus.
+
 Machines with a `group` in their profile are listed under that group in the sidebar; ungrouped machines keep their saved order. Each machine row carries a color tag on the left — the profile's `color` when set, otherwise a stable color derived from its label. In the compact (collapsed) sidebar the row is four cells wide, so the tag moves onto the machine's first letter, which takes the same color.
 
 Click the arrow beside any machine to collapse or expand its workspace list without switching away from your current workspace. This also works while that machine is reconnecting.

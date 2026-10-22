@@ -82,6 +82,147 @@ fn workspace_reselection_preserves_layout_focus_and_requires_a_matching_terminal
 }
 
 #[test]
+fn committed_workspace_navigation_restores_terminal_input_once() {
+    let mut state = ready();
+    advance_snapshot(&mut state, 1);
+    state.workbench.dock.focused = PanelId::Workspaces;
+    state.renew_workbench_surface();
+    state.request_workbench_workspace_focus("ws_1", 1);
+    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+    assert_eq!(state.workbench.dock.focused, PanelId::Terminal(1));
+    assert_eq!(state.active_snapshot_generation, Some(1));
+    assert!(state.receive_view(1, view_frame(&state, 1)));
+    assert_eq!(state.focused_pane_id().as_deref(), Some("pane_1"));
+    let typed = state.handle_input_bytes(b"x");
+    let data = typed
+        .requests
+        .iter()
+        .find_map(|message| match state.view_request(message.clone())? {
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::views::INPUT_KIND =>
+            {
+                Some(data)
+            }
+            _ => None,
+        })
+        .expect("typing must produce the current view input");
+    let input: crate::protocol::views::ViewInput = serde_json::from_str(&data).unwrap();
+    assert_eq!(input.boot_id, "boot-1");
+    assert_eq!(input.views_revision, state.workbench.revision);
+    assert_eq!(
+        (
+            input.view_id.as_str(),
+            input.tab_id.as_str(),
+            input.pane_id.as_str()
+        ),
+        ("1", "tab_1", "pane_1")
+    );
+    assert!(!input.events.is_empty());
+    // Consumed intent must not steal a later deliberate panel selection.
+    state.workbench.dock.focused = PanelId::Workspaces;
+    state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+    assert_eq!(state.workbench.dock.focused, PanelId::Workspaces);
+}
+
+#[test]
+fn automatic_surface_restore_preserves_every_saved_panel_focus() {
+    for panel in [
+        PanelId::Workspaces,
+        PanelId::Monitor,
+        PanelId::Agents,
+        PanelId::Terminal(1),
+    ] {
+        let mut state = ready();
+        state.workbench_open(panel.clone());
+        let layout = state.workbench.dock.clone();
+        state.renew_workbench_surface();
+        state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+        assert_eq!(state.workbench.dock, layout, "{panel:?}");
+    }
+}
+
+#[test]
+fn workspace_restore_focus_rejects_stale_or_inapplicable_intent() {
+    for case in [
+        "workspace",
+        "generation",
+        "boot",
+        "endpoint",
+        "disconnect",
+        "arranging",
+        "mode",
+    ] {
+        let mut state = ready();
+        advance_snapshot(&mut state, 1);
+        state.workbench.dock.focused = PanelId::Workspaces;
+        state.renew_workbench_surface();
+        state.request_workbench_workspace_focus("ws_1", 1);
+        match case {
+            "workspace" => {
+                state.snapshot.as_mut().unwrap().focused_workspace_id = Some("other".into())
+            }
+            "generation" => state.active_snapshot_generation = Some(2),
+            "boot" => state.snapshot.as_mut().unwrap().boot_id = "new-boot".into(),
+            "endpoint" => {
+                let remote = crate::client::endpoint::ClientEndpointId::Ssh(
+                    crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef")
+                        .unwrap(),
+                );
+                state
+                    .workbench
+                    .saved
+                    .insert(remote.storage_key(), state.workbench.dock.clone());
+                state
+                    .endpoints
+                    .iter_mut()
+                    .find(|endpoint| {
+                        endpoint.endpoint_id == crate::client::endpoint::ClientEndpointId::Local
+                    })
+                    .unwrap()
+                    .endpoint_id = remote.clone();
+                state.active_endpoint_id = remote;
+            }
+            "disconnect" => state.renew_workbench_surface(),
+            "arranging" => state.workbench.arranging = true,
+            "mode" => state.mode = ClientShellMode::Navigate,
+            _ => unreachable!(),
+        }
+        state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+        assert_eq!(state.workbench.dock.focused, PanelId::Workspaces, "{case}");
+    }
+}
+
+#[test]
+fn unavailable_workbench_tick_retires_workspace_focus_intent() {
+    for case in ["offline", "unsupported", "snapshot"] {
+        let mut state = ready();
+        advance_snapshot(&mut state, 1);
+        state.workbench.dock.focused = PanelId::Workspaces;
+        state.renew_workbench_surface();
+        state.request_workbench_workspace_focus("ws_1", 1);
+        let snapshot = state.snapshot.clone();
+        match case {
+            "offline" => state.set_endpoint_status(
+                &crate::client::endpoint::ClientEndpointId::Local,
+                crate::client::endpoint::ClientEndpointStatus::Reconnecting,
+            ),
+            "unsupported" => state.set_endpoint_methods(None),
+            "snapshot" => state.snapshot = None,
+            _ => unreachable!(),
+        }
+        state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+        state.set_endpoint_status(
+            &crate::client::endpoint::ClientEndpointId::Local,
+            crate::client::endpoint::ClientEndpointStatus::Online,
+        );
+        state.set_endpoint_methods(Some(vec!["client.views.set".into(), "tab.focus".into()]));
+        state.snapshot = snapshot;
+        state.tick_workbench(std::time::Instant::now(), &mut ClientShellInput::default());
+        assert_eq!(state.workbench.dock.focused, PanelId::Workspaces, "{case}");
+    }
+}
+
+#[test]
 fn layout_requires_explicit_server_capability() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

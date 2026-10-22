@@ -15,6 +15,13 @@ pub(super) struct View {
     pub graphics: crate::kitty_graphics::surface::ClientState,
 }
 
+struct WorkspaceFocusAfterRestore {
+    source: String,
+    boot: String,
+    generation: u64,
+    workspace: String,
+}
+
 pub(super) struct State {
     pub(in crate::client::shell) agent_keyboard_target:
         Option<super::agent_tree::AgentKeyboardTarget>,
@@ -54,6 +61,7 @@ pub(super) struct State {
     pub pending: bool,
     next_request: Instant,
     last_focus: Option<String>,
+    workspace_focus_after_restore: Option<WorkspaceFocusAfterRestore>,
     #[cfg(test)]
     pub(super) compose_count: usize,
 }
@@ -218,6 +226,7 @@ impl State {
             pending: false,
             next_request: Instant::now(),
             last_focus: None,
+            workspace_focus_after_restore: None,
             #[cfg(test)]
             compose_count: 0,
         }
@@ -252,6 +261,7 @@ impl State {
         self.pending = false;
         self.drag = None;
         self.last_focus = None;
+        self.workspace_focus_after_restore = None;
     }
 
     fn retire_views(&mut self) {
@@ -428,6 +438,28 @@ impl ClientShellState {
         self.workbench.disconnect();
     }
 
+    /// One-shot focus intent after the activation fence committed this workspace.
+    /// Ordinary reconnects and rollback keep the complete saved panel focus.
+    pub(crate) fn request_workbench_workspace_focus(&mut self, workspace: &str, generation: u64) {
+        self.workbench.workspace_focus_after_restore = None;
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        if self.workbench.arranging
+            || self.mode != ClientShellMode::Terminal
+            || self.active_snapshot_generation != Some(generation)
+            || snapshot.focused_workspace_id.as_deref() != Some(workspace)
+        {
+            return;
+        }
+        self.workbench.workspace_focus_after_restore = Some(WorkspaceFocusAfterRestore {
+            source: self.active_endpoint_id.storage_key(),
+            boot: snapshot.boot_id.clone(),
+            generation,
+            workspace: workspace.to_owned(),
+        });
+    }
+
     /// 分组销毁后回收它的标签页视口状态：`tab_scroll` / `tab_focus` 按分组 id
     /// 索引，不过滤就会随开关面板与工作区切换无限增长（LEAK-01）。
     fn prune_tab_view_state(&mut self) {
@@ -443,6 +475,8 @@ impl ClientShellState {
     }
 
     pub(crate) fn tick_workbench(&mut self, now: Instant, outcome: &mut ClientShellInput) {
+        // Retire the one-shot request even if this tick cannot restore a live workbench.
+        let requested_workspace_focus = self.workbench.workspace_focus_after_restore.take();
         if self.workbench.stale_until.is_some_and(|until| now >= until) {
             // 沿用旧帧的宽限到期：重画一次，仍未配对的视图回到占位。
             self.workbench.stale_until = None;
@@ -464,6 +498,14 @@ impl ClientShellState {
             return;
         };
         let source = self.active_endpoint_id.storage_key();
+        let workspace_focus = requested_workspace_focus.is_some_and(|focus| {
+            focus.source == source
+                && focus.boot == snapshot.boot_id
+                && self.active_snapshot_generation == Some(focus.generation)
+                && snapshot.focused_workspace_id.as_deref() == Some(focus.workspace.as_str())
+                && !self.workbench.arranging
+                && self.mode == ClientShellMode::Terminal
+        });
         let restored = self.workbench.source != source || self.workbench.boot != snapshot.boot_id;
         if restored {
             // `disconnect` 会清掉 enabled；布局恢复完成后在下方统一置位。
@@ -514,7 +556,7 @@ impl ClientShellState {
                 .then_some(snapshot.focused_tab_id.as_deref())
                 .flatten(),
         );
-        if changed_focus {
+        if changed_focus || workspace_focus {
             if let Some(group) = self
                 .workbench
                 .dock
@@ -522,18 +564,23 @@ impl ClientShellState {
                 .iter()
                 .find(|group| group.active == snapshot.focused_tab_id && group.active.is_some())
             {
-                if !restored
-                    && matches!(
-                        self.workbench.dock.focused,
-                        PanelId::Terminal(_) | PanelId::Workspaces | PanelId::Agents
-                    )
+                if workspace_focus
+                    || (!restored
+                        && matches!(
+                            self.workbench.dock.focused,
+                            PanelId::Terminal(_) | PanelId::Workspaces | PanelId::Agents
+                        ))
                 {
                     self.workbench.dock.focused = PanelId::Terminal(group.id);
+                    outcome.repaint |= workspace_focus;
                 }
             }
             self.workbench
                 .last_focus
                 .clone_from(&snapshot.focused_tab_id);
+        }
+        if workspace_focus {
+            interaction::sync_observation_page(&self.workbench, &mut self.observability);
         }
         self.prune_tab_view_state();
         let Some((cols, rows)) = self.last_composed_size else {

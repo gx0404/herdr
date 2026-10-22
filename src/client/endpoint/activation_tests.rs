@@ -188,6 +188,55 @@ fn resize() -> crate::protocol::ClientMessage {
     }
 }
 
+#[test]
+fn only_committed_explicit_workspace_activation_requests_keyboard_focus() {
+    let (shell, endpoints, _, _) = shell_and_registry();
+    let mut activation = PendingEndpointActivation::prepare(
+        &shell,
+        &endpoints,
+        endpoint(),
+        Some(crate::client::shell::ClientEndpointFocusTarget::Workspace(
+            "workspace".into(),
+        )),
+        resize(),
+        42,
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        activation.completed_workspace_focus(&ActivationCompletion::Activated),
+        Some(("workspace", 7))
+    );
+    for completion in [
+        ActivationCompletion::AwaitingPresentationSync {
+            previous: ClientEndpointId::Local,
+            endpoint: endpoint(),
+        },
+        ActivationCompletion::AwaitingPresentationEffects,
+        ActivationCompletion::RestoredSource {
+            error: "rollback".into(),
+            successor: None,
+        },
+    ] {
+        assert_eq!(activation.completed_workspace_focus(&completion), None);
+    }
+    for focus in [
+        None,
+        Some(crate::client::shell::ClientEndpointFocusTarget::Pane(
+            "pane".into(),
+        )),
+        Some(crate::client::shell::ClientEndpointFocusTarget::Tab(
+            "tab".into(),
+        )),
+    ] {
+        activation.focus = focus;
+        assert_eq!(
+            activation.completed_workspace_focus(&ActivationCompletion::Activated),
+            None
+        );
+    }
+}
+
 fn surface(boot_id: &str, revision: u64, pane: &str) -> crate::protocol::PaneSurfaceFrame {
     crate::protocol::PaneSurfaceFrame {
         boot_id: boot_id.into(),

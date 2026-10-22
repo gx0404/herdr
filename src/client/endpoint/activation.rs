@@ -200,6 +200,20 @@ impl PendingEndpointActivation {
         &self.target.endpoint_id
     }
 
+    /// Only a committed explicit workspace selection changes the restored keyboard focus.
+    pub(crate) fn completed_workspace_focus(
+        &self,
+        completion: &ActivationCompletion,
+    ) -> Option<(&str, u64)> {
+        match (completion, self.focus.as_ref()) {
+            (
+                ActivationCompletion::Activated,
+                Some(crate::client::shell::ClientEndpointFocusTarget::Workspace(workspace)),
+            ) => Some((workspace, self.target.generation)),
+            _ => None,
+        }
+    }
+
     fn geometry(&self) -> crate::protocol::ClientSurfaceSize {
         resize_geometry(&self.resize).expect("activation resize was validated before construction")
     }

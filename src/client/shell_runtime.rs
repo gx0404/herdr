@@ -719,9 +719,16 @@ pub(super) fn complete_endpoint_activation(
         return Ok(None);
     }
 
+    let workspace_focus = pending
+        .as_ref()
+        .and_then(|activation| activation.completed_workspace_focus(&completion))
+        .map(|(workspace, generation)| (workspace.to_owned(), generation));
     let _ = pending.take();
     if let Some(shell) = &mut state.shell {
         shell.renew_workbench_surface();
+        if let Some((workspace, generation)) = workspace_focus {
+            shell.request_workbench_workspace_focus(&workspace, generation);
+        }
     }
     endpoints.unfreeze_input();
     let successor = match completion {
