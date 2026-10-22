@@ -266,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     content = render(payload)
     if args.confirm:
         OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        OUTPUT_PATH.write_text(content, encoding="utf-8")
+        OUTPUT_PATH.write_text(content, encoding="utf-8", newline="\n")
         print(f"written: {OUTPUT_PATH.relative_to(REPO_ROOT)} ({payload['chunk_count']} chunks)")
         return 0
     if not OUTPUT_PATH.is_file():

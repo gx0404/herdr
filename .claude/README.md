@@ -5,7 +5,7 @@
 
 - `settings.json`：权限与 hooks。hooks 是安全门，不是规则加载器；命令经
   `$(git rev-parse --show-toplevel)/` 定位独立 herdr 仓库根；脚本自身按文件
-  位置推导组件根，ZCode 侧复用同一批脚本。
+  位置推导组件根。ZCode 的可选手动接入见 `.zcode/README.md`，项目 hooks 不执行。
 - `rules/*.md`：带 `paths:` frontmatter 的薄适配，只提醒运行
   `python3 scripts/resolve_agent_rules.py <paths...>`，不复制领域规则。
 - `hooks/`：`dangerous_patterns.conf` 是危险模式唯一真源（SHELL/FILE 两段，
@@ -15,5 +15,8 @@
   `record_edit.py` 记录编辑（PostToolUse），`notify_review.py` 写
   `review/READY.json`（Stop，跨工具复审信号）。
 - 修改模式/脚本后运行：`python3 -m unittest scripts.test_ai_tool_hooks`。
+
+SHELL 只匹配登记的命令形状，FILE 只检查受支持编辑工具的路径字段；敏感文件重定向、
+任意脚本间接访问等不在现有覆盖内。保留的最小策略不是完整 shell 分析器或文件隔离。
 
 接入与逐工具验证账见 `docs/AI_TOOLS.md`。

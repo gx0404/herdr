@@ -45,9 +45,11 @@ Windows CI 的 `Run Windows checks` 步骤设置 `HERDR_TEST_PHASE_JOBS=1`，依
 |---|---|---|---|---|
 | `just agent-rules [paths..]` | 解析本轮必读领域规则（转发 resolver） | Python3 | 无 | 文档路径列表；未知路径退出 2 |
 | `just agent-rules-check` | 规则闭集/体积/双射守门（resolver --check） | Python3 | 无 | `OK: 16 份领域规则…` |
-| `just framework-check` | agent-rules-check + hook 探针 + kb-check + graph-check | Python3、图谱/KB 产物 | 无 | 各子检查 OK |
+| `just framework-check` | 规则路由、hook/KB/视图适配器单测 + kb-check + graph-check | Python3、图谱/KB 产物 | 单测写项目内隔离临时目录 | 各子检查 OK；本机页面另跑 graph-view-check |
 | `just graph` | 重建代码图谱（仅 `src/`，全量重建） | graphify（`graphifyy`，wrapper 校验版本） | 写 `graphify-out/`（大文件本机） | 报告生成 + 指纹更新 |
 | `just graph-check` | 指纹 + 报告镜像一致性校验 | 已建图 | 无 | 退出码 0 |
+| `just graph-view` | 由已建图生成离线全图星群视图（底层 `bash scripts/graphify.sh export html`）：固定 Graphify 0.9.20 对 `src/` 的 AST 抽取，输出 `graphify-out/GRAPH_TREE.html` 与 `view-data.js`、`view-assets/`、`view-sources/`、`view-manifest.json` | 已建图（先 `just graph`）、Python3、浏览器 | 写 `graphify-out/`；全图与视图不入库，只重建不提交 | 退出码 0；3D 不可用时降级 2D；全量搜索与源位置可用，无来源的节点不猜位置 |
+| `just graph-view-check` | 校验视图 manifest、资源与来源快照的完整和一致性（底层 `bash scripts/graphify.sh view-check`） | 已生成视图 | 无 | 退出码 0；不代表浏览器内视觉验收 |
 | `just kb` | 重建知识库 `docs/kb/chunks.json` | Python3 | 写 tracked 生成物（审 diff） | 确定性 diff |
 | `just kb-check` | KB freshness（只读） | 同上 | 无 | 退出码 0 |
 

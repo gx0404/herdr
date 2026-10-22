@@ -22,6 +22,8 @@
 - Client handshakes use an absolute deadline and a bounded number of concurrent slots, so idle or partial handshakes cannot hold resources indefinitely.
 - Terminal edge cases no longer lose state: OSC 52 clipboard writes reset stale selection mode, invalid bracketed paste input does not poison the next paste, and narrow retained patches blank clipped wide glyphs consistently with a full render. Native key events retain their UTF-8 storage until encoding, and incomplete pane-graphics generations are cleaned up.
 - Update installation refuses a downloaded executable whose SHA-256 digest does not match before replacing the current binary. Retired endpoint connection generations can no longer rebuild stale port forwards, and forwarding cleanup no longer waits indefinitely for inherited stderr pipes.
+- Selecting a workspace on another machine now returns keyboard focus to that workspace's terminal once the switch is ready, while automatic reconnects keep the saved panel focus.
+- Closing one SSH operation no longer exits a shared OpenSSH master connection; only the private connection Herdr created for that operation is closed.
 
 ### Performance
 - High-rate terminal view traffic now batches compatible frames, avoids redundant composition, and keeps retained-surface patches narrow. Activity and process-discovery paths use bounded work and shared snapshots instead of repeating full scans.

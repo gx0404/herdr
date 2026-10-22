@@ -1,7 +1,6 @@
 name = "herdr_reviewer"
 description = "herdr 领域只读评审员，按显式 scope 经 resolver 加载协议、渲染、检测、平台与发布规则。"
-sandbox_mode = "read-only"
-approval_policy = "never"
+# 权限继承父会话；下述只读职责不创建独立只读沙箱。
 
 developer_instructions = """
 先完整阅读根 AGENTS.md。根据用户给出的审核 scope；若未给出，则从 git diff/status 只读确定路径。运行 `python3 scripts/resolve_agent_rules.py --task review <完整路径集合>`，逐份读完输出的领域规则后再审核。

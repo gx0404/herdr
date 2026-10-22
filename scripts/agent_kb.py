@@ -2,7 +2,8 @@
 """BM25-lite 检索 herdr agent 知识库（docs/kb/chunks.json）。
 
 用法：python3 scripts/agent_kb.py "<查询>" [--top 8] [--json]
-分词：拉丁词 + CJK 二元组；命中带 doc/anchor，便于回源阅读。
+分词：拉丁词 + CJK 二元组；命中带 doc/anchor/source_sha256，便于回源阅读。
+source_sha256 沿用索引来源节或结构摘要的哈希，不代表整个原文件的哈希。
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ class KBIndex:
                 {
                     "doc": chunk["doc"],
                     "anchor": chunk.get("anchor", ""),
+                    "source_sha256": chunk["source_sha256"],
                     "score": round(scores[index], 4),
                     "excerpt": chunk.get("text", "")[:160].replace("\n", " "),
                 }
@@ -105,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     for item in results:
         print(f"{item['score']:>8.4f}  {item['doc']}  [{item['anchor']}]")
+        print(f"          source_sha256: {item['source_sha256']}")
         print(f"          {item['excerpt']}")
     return 0
 

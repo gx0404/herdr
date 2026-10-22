@@ -12,10 +12,17 @@
   `CodexConfigShapeTests` 锁定。
 - `hooks/pre_tool_use_policy.py`：Codex 协议适配器，动态加载
   `.claude/hooks/pre_tool_use_gate.py`（策略真源 `dangerous_patterns.conf`
-  只有一份）。FILE 段在 Codex 侧只覆盖 Bash 面（apply_patch 无
-  file_path 字段）；敏感文件重定向写入已由 SHELL 段拦截。
+  只有一份）。PreToolUse 只注册 Bash，消费 SHELL 段；不覆盖 FILE 段、
+  apply_patch、敏感文件重定向或任意脚本的间接访问。有限模式匹配不构成完整隔离。
 - `agents/herdr_reviewer.toml`：只读复审 agent（注册键 `config_file`），
-  供跨工具评审闭环使用。
+  供跨工具评审闭环使用。只读是职责约定，sandbox 与 approval 继承父会话，
+  角色文件不能将它们覆盖为独立只读沙箱。
+
+项目配置与非受管 hooks 需分别获得客户端信任；使用 CLI `/hooks` 检查来源、
+当前定义及 hash 信任状态。新增或修改的 hook 未受信任时可能被跳过。
+重新打开会话后再验证规则、角色发现及 hook 自动触发；脚本探针不证明这些已生效。
+参见[当前子代理契约](https://learn.chatgpt.com/docs/agent-configuration/subagents)与
+[hooks 契约](https://learn.chatgpt.com/docs/hooks)（2026-10-22 核对）。
 
 修改 hook 后运行 `python3 -m unittest scripts.test_ai_tool_hooks` 演练
 允许/拒绝探针；验证账见 `docs/AI_TOOLS.md`。

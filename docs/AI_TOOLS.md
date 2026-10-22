@@ -8,35 +8,58 @@ herdr 的 AI 协作面是「共享真源 + 薄适配器」：规则真源在 `do
 
 | 工具 | 规则加载 | hooks | 验证状态 |
 |---|---|---|---|
-| ZCode | 根 AGENTS.md + `.zcode/config.json`；resolver 手动/入口提示 | PreToolUse/PostToolUse/Stop 复用 `.claude/hooks/*`（`timeoutMs` 毫秒） | 探针 PASS（`scripts/test_ai_tool_hooks`）；真实会话新开验证见下账 |
-| Claude Code | `CLAUDE.md`（`@AGENTS.md` 薄入口）+ `.claude/rules/*.md`（`paths:` 提醒） | `.claude/settings.json` → `block_dangerous.sh` / `record_edit.sh` / `notify_review.sh` | 探针 PASS；真实会话 PENDING（见下） |
-| Codex | 根 AGENTS.md（`project_doc_max_bytes=32768`）；reviewer 用 resolver | `.codex/hooks/pre_tool_use_policy.py`（复用 gate，codex 协议）；Stop 复用 notify_review | 探针 PASS；真实会话 PENDING |
+| ZCode | 根 AGENTS.md；resolver 显式读取 | 当前版本忽略项目 hooks；可选手动安装见 `.zcode/README.md` | 项目 hooks N/A；用户安装与真实调用 PENDING |
+| Claude Code | `CLAUDE.md`（`@AGENTS.md` 薄入口）+ `.claude/rules/*.md`（`paths:` 提醒） | `.claude/settings.json` → `block_dangerous.sh` / `record_edit.sh` / `notify_review.sh` | 分层证据见下账；真实会话 PENDING |
+| Codex | 根 AGENTS.md（`project_doc_max_bytes=32768`）；reviewer 用 resolver | `.codex/hooks/pre_tool_use_policy.py`（复用 gate，codex 协议）；Stop 复用 notify_review | 分层证据见下账；真实会话 PENDING |
 | Pi | `.pi/prompts/`（pre-release-audit） | 无 | 既有资产，未动 |
 | 其他（kimi 等） | 读根 AGENTS.md + resolver | 无 | N/A（当前无接入需求） |
 
 ## 验证账（按会话逐项记账，未运行不写 PASS）
 
-2026-10-18 本轮重新运行配置解析、决策矩阵与原样注册命令探针；这些是受控子进程
+2026-10-18 曾运行配置解析、决策矩阵与原样注册命令探针；这些是受控子进程
 证据，不代表已在 ZCode、Claude Code 或 Codex 客户端内开启新会话并验证自动触发。
 
 2026-10-21 按用户授权收敛为「最小核心防线」：`dangerous_patterns.conf` 仅保留
 force push、根/家目录 rm、凭据/私钥读取与写入四类 deny（根/家目录 rm 为本次新增，
 原仓库未登记）；`.claude/settings.json` 的白名单、ask 级规则与 `Read(./.git/**)`
-deny 已移除。本轮同步重跑探针（`python3 -m unittest scripts.test_ai_tool_hooks`），
+deny 已移除。当时同步重跑探针（`python3 -m unittest scripts.test_ai_tool_hooks`），
 仍属受控子进程证据，真实客户端会话内的触发状态不变。
 
 | 检查 | ZCode | Claude Code | Codex |
 |---|---|---|---|
-| 配置文件可解析 | PASS（本轮 JSON 探针加载） | PASS（本轮 settings.json JSON 解析） | PASS（本轮 TOML 与数组表形状探针；2026-09 的 v0.154.0 启动为历史证据） |
+| 配置文件可解析 | N/A（移除不执行的项目 hooks 配置） | PASS（2026-10-23 JSON 解析） | PASS（2026-10-23 TOML 解析与形状检查）；原生项目配置加载 PENDING |
 | 规则加载（客户端新会话自动读取） | PENDING（历史会话记录不代证本轮） | PENDING | PENDING |
-| PreToolUse 拒绝（`git push --force` 等） | PASS（探针 + bash wrapper 实测） | PASS（同一 wrapper） | PASS（codex 适配器实测） |
-| PreToolUse 放行（常规命令/编辑） | PASS（探针矩阵） | PASS（同上） | PASS |
-| PostToolUse 记录 / Stop 信号 | PASS（临时仓库实测） | PASS（同脚本） | PASS |
-| 真实客户端会话内 hook 触发 | PENDING：使用下述隔离探针补验 | PENDING | PENDING：真实会话自动触发待补验 |
+| PreToolUse 拒绝（`git push --force` 等） | N/A（无项目注册） | PASS（2026-10-23 按 matcher 的脚本探针） | PASS（2026-10-23 Bash 注册入口脚本探针） |
+| PreToolUse 放行（常规命令/编辑） | N/A（无项目注册） | PASS（2026-10-23 正反矩阵） | PASS（2026-10-23 Bash 正反矩阵） |
+| PostToolUse 记录 / Stop 信号 | N/A（无项目注册） | PASS（2026-10-23 隔离脚本检查） | PASS（同一共享脚本与登记路径检查） |
+| 真实客户端会话内 hook 触发 | PENDING（另行安装后验证，当前项目不提供） | PENDING | PENDING（先核对项目与 hook 信任） |
 
-PENDING 补验方式：在对应工具的真实会话中尝试探针命令
-（通过隔离临时仓库与无副作用 hook 输入，不对真实 PR 或渠道文件执行危险动作），确认被拒并显示理由；
-完成后把上行改为 PASS 并注明日期。
+2026-10-23 修订接入边界：移除 ZCode 无效项目注册；注册入口测试按实际 matcher 选择
+输入，不再向 Codex 的 Bash-only 注册注入 Edit 并据此声称 FILE 保护。保留五条最小
+策略，仅纠正覆盖说明，不新增发布、PR、vendor 等已撤销的限制。
+
+2026-10-23 主会话运行 `python -B scripts/setup_env.py --run python -B -m unittest scripts.test_ai_tool_hooks`：
+26 项通过（6.402 秒）；以上 PASS 仅对应 JSON/TOML、匹配与协议探针、登记路径和隔离信号脚本。
+Codex CLI 0.163.0 的隔离 `debug prompt-input` 已实际读到根规则，但未发现 reviewer，
+破损项目 TOML 的负对照也未触发错误，因此该诊断不能证明项目配置已加载，角色发现保持
+PENDING。该版本明确拒绝 `--strict-config` 与 `debug` 组合，此组合记 N/A，不作为通过证据。
+真实客户端补验：另开会话检查规则与角色发现，在隔离测试仓库使用无副作用目标验证允许与
+拒绝两侧（例如对隔离仓库运行只读 `git status`，以及仅指向本地裸仓库的强推探针）；
+确认工具执行前拒绝及理由。不得用真实远程或敏感文件作为探针目标，直接 stdin 调用 hook
+只能证明脚本行为。完成对应层验证后才改账为 PASS 并注明日期。
+
+ZCode 的项目配置不执行，不能靠新开会话使其生效；仅保留共享脚本与手动接入说明，
+本轮不改用户配置、不安装插件。[官方配置来源说明](https://zcode.z.ai/en/docs/hooks)
+已于 2026-10-22 核对。
+
+## 最小策略的覆盖边界
+
+SHELL 段只匹配登记的 Bash 命令形状；FILE 段只检查支持的编辑工具路径字段。
+Codex PreToolUse 当前只匹配 Bash，因此不消费 FILE 段，也不拦截 apply_patch。
+例如 `echo placeholder > .env` 和写入私钥路径的重定向不会命中现有 SHELL 模式，
+但 `Edit`/`Write` 传入相同路径会命中 FILE 模式。测试只把这些内容作为 JSON 字符串，
+不执行命令、不读取或写入秘密文件。任意脚本、动态路径与其他 shell 形式均不能由这组
+有限正则提供完整隔离。没有匹配表示 hook 未作决定，不等于任务授权或其他客户端权限允许。
 
 ## 测试与性能命令（AI agent）
 
@@ -69,9 +92,17 @@ socket/session。运行根为 receipt 关联的项目 `.local/p-*/` 0700 私有�
 
 Codex 项目配置以 `.codex/config.toml` 为准：当前设置 `approval_policy = "never"`、
 `sandbox_mode = "danger-full-access"`、`project_doc_max_bytes = 32768`；用户级配置和
-启动参数仍须一致，已经启动的会话可能保留旧快照。`never` 控制是否询问；危险操作仍由
-共享 hook 策略拦截，配置值本身不替代 hook 探针或真实会话验证。
+启动参数仍须一致，已经启动的会话可能保留旧快照。`never` 控制是否询问；共享 hook
+只匹配已登记的有限形状，配置值本身不替代 hook 探针或真实会话验证。
 参见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+Codex 项目层须受信任；非受管 hook 还需通过 CLI `/hooks` 审阅当前定义并信任其 hash。
+新建或修改的 hook 未受信任时会被跳过，脚本探针不涵盖这一步。reviewer 的只读职责是
+提示词约定，sandbox 与 approval 继承父会话，不能靠角色文件创建独立只读沙箱。
+当前 CLI 0.163.0 的 `--version`/`--help` 已核对；它们不证明配置已加载。
+执行严格解析或 `debug prompt-input` 时应使用隔离无凭据配置，只保留项目规则与角色
+发现的必要证据，不把完整真实 prompt 写入共享记录。
+参见[官方子代理契约](https://learn.chatgpt.com/docs/agent-configuration/subagents)。
 
 Codex 的 PreToolUse 响应采用 `hookSpecificOutput.permissionDecision`。
 当前官方协议不支持 `ask`，因此共享策略里的 ask 模式（2026-10 起未登记，分叉

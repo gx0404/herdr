@@ -1,5 +1,5 @@
 {
-  "chunk_count": 1293,
+  "chunk_count": 1296,
   "chunks": [
     {
       "anchor": "herdr",
@@ -26,8 +26,8 @@
       "anchor": "herdr > 常用命令",
       "doc": "AGENTS.md",
       "id": "agents-md-herdr-常用命令",
-      "source_sha256": "4e1f9896f33a3801a97d95075a75b7f949e37dc23c56c2d80a719e6a541bf188",
-      "text": "## 常用命令\n\n| 命令 | 用途 |\n|---|---|\n| `just test` / `just check` | 默认回归 / 格式+默认回归+平台 lint |\n| `just test-full` / `just check-full` | 完整自动回归 / 完整开发验收（测试框架变更与发布前） |\n| `just lint` / `just windows-lint` | 本地快速 lint / Windows 目标 lint |\n| `just maintenance-test` | 维护脚本 unittest 清单 |\n| `just docs-contract-test` / `just integration-assets-test` | bun 契约测试 |\n| `just agent-rules` / `just framework-check` | resolver 用法 / 框架守门聚合 |\n| `just graph` / `just graph-check` / `just kb` / `just kb-check` | 图谱与知识库 |\n| `just bench-render-scale` / `just bench-terminal-targets` / `just bench-bsp-layout` | 渲染、终端目标查找、BSP 布局画像 |\n| `just bench-retained-graphics` / `just bench-api-fairness` / `just bench-release-smoke` | retained graphics、API 公平性、发布性能 smoke |\n| `just bench-process-inspection` | Windows 进程检查画像（原生 Windows） |\n| `just release-docs-check` / `just pre-release-check` / `just release` | 发布链（维护者） |\n\n全表与前置/副作用见 `docs/MAKE_COMMANDS.md`。"
+      "source_sha256": "c96e1cde918bbcad321c1f5e6cf6bfd1bf925daacde2d5b9e54c05b3f40277f3",
+      "text": "## 常用命令\n\n| 命令 | 用途 |\n|---|---|\n| `just test` / `just check` | 默认回归 / 格式+默认回归+平台 lint |\n| `just test-full` / `just check-full` | 完整自动回归 / 完整开发验收（测试框架变更与发布前） |\n| `just lint` / `just windows-lint` | 本地快速 lint / Windows 目标 lint |\n| `just maintenance-test` | 维护脚本 unittest 清单 |\n| `just docs-contract-test` / `just integration-assets-test` | bun 契约测试 |\n| `just agent-rules` / `just framework-check` | resolver 用法 / 框架守门聚合 |\n| `just graph` / `just graph-check` / `just kb` / `just kb-check` | 图谱与知识库 |\n| `just graph-view` / `just graph-view-check` | 离线星群视图导出与完整性检查 |\n| `just bench-render-scale` / `just bench-terminal-targets` / `just bench-bsp-layout` | 渲染、终端目标查找、BSP 布局画像 |\n| `just bench-retained-graphics` / `just bench-api-fairness` / `just bench-release-smoke` | retained graphics、API 公平性、发布性能 smoke |\n| `just bench-process-inspection` | Windows 进程检查画像（原生 Windows） |\n| `just release-docs-check` / `just pre-release-check` / `just release` | 发布链（维护者） |\n\n全表与前置/副作用见 `docs/MAKE_COMMANDS.md`。"
     },
     {
       "anchor": "herdr > 提交规范",
@@ -47,8 +47,8 @@
       "anchor": "herdr > 角色与授权分层",
       "doc": "AGENTS.md",
       "id": "agents-md-herdr-角色与授权分层",
-      "source_sha256": "a05613ee95e41cb713da77132fa21ee5e6098e21a774fcc54d56967f1955f4eb",
-      "text": "## 角色与授权分层\n\n指令分层，完整判定条件与流程见 `docs/AGENT_RULES/governance.md`：\n\n- **通用规则**适用所有在本仓库工作的 agent（包括 fork）。\n- **维护者工作流 / Can 本机工作流**：仅在 `governance.md` 列出的账号与环境\n  条件全部满足时适用，否则跳过。\n- **外部贡献者守门**：对上游 `herdrdev/herdr` 开 issue/PR/推分支前必须按\n  `governance.md` 核实身份（`.github/MAINTAINERS`、`APPROVED_CONTRIBUTORS`、\n  `CONTRIBUTING.md`）；不满足条件时不得代为提交。\n- 本仓库是 `gx0404/herdr` fork（upstream `herdrdev/herdr`）：日常开发按通用\n  规则在 fork 分支进行；同步上游时按 `docs/AGENT_RULES/README.md` 的章节映射\n  表移植 AGENTS.md 变更。官方集成只保留六家：同步时不合入上游对其余集成商的\n  新增与修改，口径见同一 README 的「fork 已删除的集成」。\n- fork 在独立仓库 `gx0404/herdr` 的默认分支 `feature/gx_herdr` 维护，只启用 `ci.yml` 与\n  `gx-release.yml`；其余 workflow 原样保存在 `.github/workflows-archive/`，\n  同步上游时不要重新启用。GX Shell 只锁定本仓完整 commit 与源码归档摘要，\n  不保留组件源码；Oh My Zsh 外部 builder 负责包身份、许可证清单与 build receipt，\n  合并安装包由 `gx0404/gx_shell` 发布。独立手动打包链与消费契约见\n  `release-channels.md` 和 `docs/DEVELOPMENT.md`。"
+      "source_sha256": "7523f1b5aeaef16e8bd08be4fba2517502079dba3056ecd3a687d74bb27093f6",
+      "text": "## 角色与授权分层\n\n指令分层，完整判定条件与流程见 `docs/AGENT_RULES/governance.md`：\n\n- **通用规则**适用所有在本仓库工作的 agent（包括 fork）。\n- **维护者工作流 / Can 本机工作流**：仅在 `governance.md` 列出的账号与环境\n  条件全部满足时适用，否则跳过。\n- **外部贡献者守门**：对上游 `herdrdev/herdr` 开 issue/PR/推分支前必须按\n  `governance.md` 核实身份（`.github/MAINTAINERS`、`APPROVED_CONTRIBUTORS`、\n  `CONTRIBUTING.md`）；不满足条件时不得代为提交。\n- 本仓库是 `gx0404/herdr` fork（upstream `herdrdev/herdr`）：日常开发按通用\n  规则在 fork 分支进行；同步上游时按 `docs/AGENT_RULES/README.md` 的章节映射\n  表移植 AGENTS.md 变更。官方集成只保留六家：同步时不合入上游对其余集成商的\n  新增与修改，口径见同一 README 的「fork 已删除的集成」。\n- fork 在独立仓库 `gx0404/herdr` 的默认分支 `feature/gx_herdr` 维护，只启用 `ci.yml` 与\n  `gx-release.yml`；其余 workflow 原样保存在 `.github/workflows-archive/`，\n  同步上游时不要重新启用。GX Shell 只锁定本仓完整 commit 与源码归档摘要，\n  不保留组件源码；Oh My Zsh 外部 builder 负责包身份、许可证清单与 build receipt，\n  合并安装包由 `gx0404/gx_shell` 发布。独立手动打包链与消费契约见\n  `release-channels.md` 和 `docs/DEVELOPMENT.md`。\n- `master` 接收上游源码同步，再合入 `feature/gx_herdr` 并按 fork 规则兼容与裁剪；\n  工作分支先完整合入主分支并验证，确认远程保留后再清理，不向上游推送 fork 改动。"
     },
     {
       "anchor": "herdr > 语言与协作",
@@ -89,36 +89,36 @@
       "anchor": "recent",
       "doc": "CHANGELOG.md",
       "id": "changelog-md-recent-part1",
-      "source_sha256": "ea5744102152781b68ce795ff0b97ae02d76fa1900c985cf9a6eaffabc4325b1",
+      "source_sha256": "187a7eaec5d71b8241ab001156bdae403ec5db46ca8289dc1c9cfe91ede31a9d",
       "text": "# Changelog\n\n## Unreleased\n\n### Added\n- This fork now provides a unified Sessions tree and an Inspector preview for agent activity, questions, failure details and session insight. The default Graphite theme uses shared state indicators; saved dock layouts migrate to the new panel model while retaining the terminal layout.\n- The agent overview supports client-local read/unread marks and inline prompts for idle or review sessions when the endpoint advertises `agent.prompt`. Blocked, failed, offline and read-only external sessions remain jump-only or read-only as appropriate; a timeout preserves the draft and does not imply server-side cancellation.\n\n### Removed\n- This fork no longer exposes CLI account usage monitoring, account binding, or the Accounts panel. Host resource monitoring remains available.\n\n### Changed\n- Agent hooks can attach bounded permission/question and failure details. Shared harness metadata and notification decisions keep lifecycle authority, session identity and late-response handling consistent across the shell. ZCode remains an external read-only source.\n- Codex sessions started or restored inside Herdr now use a pane-local launcher. It adds `--no-daemon` only when the selected executable supports it, removes Herdr's private shim paths without reordering the other `PATH` entries, and on Windows can provide a private native `tar.exe` adapter for Codex's built-in updater without changing the user or system `PATH` or PowerShell execution policy."
     },
     {
       "anchor": "recent",
       "doc": "CHANGELOG.md",
       "id": "changelog-md-recent-part2",
-      "source_sha256": "ea5744102152781b68ce795ff0b97ae02d76fa1900c985cf9a6eaffabc4325b1",
+      "source_sha256": "187a7eaec5d71b8241ab001156bdae403ec5db46ca8289dc1c9cfe91ede31a9d",
       "text": "- Configuration updates now use durable temporary files, preserve existing permissions and symlink targets, and synchronize the replacement. Codex integration installation validates its TOML and JSON inputs before writing and changes only Herdr's top-level hook settings.\n- Client view updates are coalesced per endpoint, terminal snapshots format outside the PTY content lock after a stable capture, and Windows process discovery reuses a shared snapshot across panes.\n\n### Fixed\n- Agent activity refresh and read results are tied to the pane's current agent and session identity, so late results from a previous occupant no longer overwrite current activity.\n- Windows process ancestry now verifies parent and child creation times and treats unknown identities as unknown, preventing reused PIDs or incomplete snapshots from being accepted as live descendants. Closing a Windows pane now also terminates its complete child process tree.\n- PTY input, resize, and response queues now have bounded admission and shutdown rejection, so a blocked Enter write or response flood cannot stall later input. Endpoint response assembly enforces 64 MiB and 4096-chunk limits and reports an `endpoint_response_too_large` error for that request without discarding unrelated requests.\n- Client handshakes use an absolute deadline and a bounded number of concurrent slots, so idle or partial handshakes cannot hold resources indefinitely."
     },
     {
       "anchor": "recent",
       "doc": "CHANGELOG.md",
       "id": "changelog-md-recent-part3",
-      "source_sha256": "ea5744102152781b68ce795ff0b97ae02d76fa1900c985cf9a6eaffabc4325b1",
-      "text": "- Terminal edge cases no longer lose state: OSC 52 clipboard writes reset stale selection mode, invalid bracketed paste input does not poison the next paste, and narrow retained patches blank clipped wide glyphs consistently with a full render. Native key events retain their UTF-8 storage until encoding, and incomplete pane-graphics generations are cleaned up.\n- Update installation refuses a downloaded executable whose SHA-256 digest does not match before replacing the current binary. Retired endpoint connection generations can no longer rebuild stale port forwards, and forwarding cleanup no longer waits indefinitely for inherited stderr pipes.\n\n### Performance\n- High-rate terminal view traffic now batches compatible frames, avoids redundant composition, and keeps retained-surface patches narrow. Activity and process-discovery paths use bounded work and shared snapshots instead of repeating full scans.\n\n## [0.9.5] - 2026-10-14\n\nThis is a hotfix release for v0.9.4. See the v0.9.4 notes for the full feature release: https://github.com/herdrdev/herdr/releases/tag/v0.9.4\n\n### Fixed\n- Prefix shortcuts work again when the terminal sends the next key as plain text. This affected Tern, Chinese, Japanese and Korean input methods on macOS, and Ghostty `text:` keybinds that send the prefix and a key together. Workspace navigation had the same problem. (#5255)"
+      "source_sha256": "187a7eaec5d71b8241ab001156bdae403ec5db46ca8289dc1c9cfe91ede31a9d",
+      "text": "- Terminal edge cases no longer lose state: OSC 52 clipboard writes reset stale selection mode, invalid bracketed paste input does not poison the next paste, and narrow retained patches blank clipped wide glyphs consistently with a full render. Native key events retain their UTF-8 storage until encoding, and incomplete pane-graphics generations are cleaned up.\n- Update installation refuses a downloaded executable whose SHA-256 digest does not match before replacing the current binary. Retired endpoint connection generations can no longer rebuild stale port forwards, and forwarding cleanup no longer waits indefinitely for inherited stderr pipes.\n- Selecting a workspace on another machine now returns keyboard focus to that workspace's terminal once the switch is ready, while automatic reconnects keep the saved panel focus.\n- Closing one SSH operation no longer exits a shared OpenSSH master connection; only the private connection Herdr created for that operation is closed.\n\n### Performance\n- High-rate terminal view traffic now batches compatible frames, avoids redundant composition, and keeps retained-surface patches narrow. Activity and process-discovery paths use bounded work and shared snapshots instead of repeating full scans.\n\n## [0.9.5] - 2026-10-14\n\nThis is a hotfix release for v0.9.4. See the v0.9.4 notes for the full feature release: https://github.com/herdrdev/herdr/releases/tag/v0.9.4\n\n### Fixed"
     },
     {
       "anchor": "recent",
       "doc": "CHANGELOG.md",
       "id": "changelog-md-recent-part4",
-      "source_sha256": "ea5744102152781b68ce795ff0b97ae02d76fa1900c985cf9a6eaffabc4325b1",
-      "text": "- Codex sessions no longer start with a \"clamping Interrupt hook timeout\" warning. Herdr no longer installs Codex turn hooks, and Codex status comes from screen detection again. Run `herdr integration install codex` to update. (#5246, #5278)\n- Claude Code questions show as blocked in named sessions. (#4573, #5192)\n- On Windows, plugin panes start even when a folder on `PATH` has the same name as the plugin's program. (#5267, #5269, thanks @JJLiebig)\n- On Windows, Claude Code session tracking works when the user folder name contains non-ASCII characters, such as Korean. (#5253, #5270, thanks @JJLiebig)\n- Adding a Windows machine no longer prints raw PowerShell progress output. (#4639, #5282, thanks @JJLiebig)\n\n## [0.9.4] - 2026-10-13\n\n### Added\n- `herdr plugin update` updates plugins installed from GitHub, all at once or by name. Running plugin panes keep working on their old files, and new runs pick up the update without a config reload. Locally linked plugins are left alone. (#4245, thanks @JJLiebig)\n- Windows notifications stay in Notification Center. Clicking one jumps to its pane and brings the terminal window forward. (#4773, #4803, thanks @JJLiebig)\n\n### Changed"
+      "source_sha256": "187a7eaec5d71b8241ab001156bdae403ec5db46ca8289dc1c9cfe91ede31a9d",
+      "text": "- Prefix shortcuts work again when the terminal sends the next key as plain text. This affected Tern, Chinese, Japanese and Korean input methods on macOS, and Ghostty `text:` keybinds that send the prefix and a key together. Workspace navigation had the same problem. (#5255)\n- Codex sessions no longer start with a \"clamping Interrupt hook timeout\" warning. Herdr no longer installs Codex turn hooks, and Codex status comes from screen detection again. Run `herdr integration install codex` to update. (#5246, #5278)\n- Claude Code questions show as blocked in named sessions. (#4573, #5192)\n- On Windows, plugin panes start even when a folder on `PATH` has the same name as the plugin's program. (#5267, #5269, thanks @JJLiebig)\n- On Windows, Claude Code session tracking works when the user folder name contains non-ASCII characters, such as Korean. (#5253, #5270, thanks @JJLiebig)\n- Adding a Windows machine no longer prints raw PowerShell progress output. (#4639, #5282, thanks @JJLiebig)\n\n## [0.9.4] - 2026-10-13\n\n### Added\n- `herdr plugin update` updates plugins installed from GitHub, all at once or by name. Running plugin panes keep working on their old files, and new runs pick up the update without a config reload. Locally linked plugins are left alone. (#4245, thanks @JJLiebig)\n- Windows notifications stay in Notification Center. Clicking one jumps to its pane and brings the terminal window forward. (#4773, #4803, thanks @JJLiebig)\n\n### Changed"
     },
     {
       "anchor": "recent",
       "doc": "CHANGELOG.md",
       "id": "changelog-md-recent-part5",
-      "source_sha256": "ea5744102152781b68ce795ff0b97ae02d76fa1900c985cf9a6eaffabc4325b1",
-      "text": "- An elevated Windows server now only accepts administrator clients by default. To let normal clients from the same account in, set `[server] allow_unelevated_clients = true` or start the server with `--allow-unelevated-clients`. Permission errors now say how to fix them, and sessions you can't reach show as unavailable instead of stopped. (#4717, #4769, #4777, #4779, thanks @JJLiebig)\n- On Linux and macOS, closing the shell that started Herdr no longer stops the server. Scripts that stopped Herdr with `SIGHUP` should use "
+      "source_sha256": "187a7eaec5d71b8241ab001156bdae403ec5db46ca8289dc1c9cfe91ede31a9d",
+      "text": "- An elevated Windows server now only accepts administrator clients by default. To let normal clients from the same account in, set `[server] allow_unelevated_clients = true` or start the server w"
     },
     {
       "anchor": "_top",
@@ -243,22 +243,22 @@
       "anchor": "ai-tooling（AI 工具面与框架自身） > Graphify 纪律",
       "doc": "docs/AGENT_RULES/ai-tooling.md",
       "id": "docs-agent-rules-ai-tooling-md-ai-tooling-ai-工具面与框架自身-graphify-纪律",
-      "source_sha256": "c06ed392fdb615405f403ddb7a64f23451c2519ba5458026b730021808cc9acd",
-      "text": "## Graphify 纪律\n\n- 只允许通过 `scripts/graphify.sh`（rebuild/check/query/path/explain/affected）\n  使用图谱；索引根固定 `src/`，禁用增量 update，不把整份 graph.json 塞进上下文。\n- 入库产物只有 `graphify-out/GRAPH_REPORT.md`、`.graphify_labels.json(+.sig)`、\n  `source-fingerprint.json` 与 `docs/graphify/GRAPH_REPORT.md` 镜像；graph.json、\n  HTML 视图、缓存在本机重建，`.graphify-memory/` 为个人经验层，不入库不入图。\n- `scripts/graphify_fingerprint.py::write_fingerprint` 在记录摘要前将报告及镜像规范为 LF，\n  与 Git 的 `eol=lf` 一致，避免 Windows 重建后检出即失效；check 模式仍只读且拒绝内容漂移。\n- 指纹覆盖固定 src/ 内实际抽取的 Rust、TypeScript、JavaScript、Shell、PowerShell；\n  不能只追踪 Rust 而漏掉宿主集成脚本。生成报告的刷新提示使用项目 wrapper。\n- 源码变动后 `just graph-check` 必须能解释指纹差异；视图导出失败不得报告\n  「视图交付完成」。"
+      "source_sha256": "2a44efb4d3ee391c71d558ef40cc341fa281173b50a9bfa2f4fbb46570ef6da8",
+      "text": "## Graphify 纪律\n\n- 只允许通过 `scripts/graphify.sh`（rebuild/check/query/path/explain/affected/export/view-check）\n  使用图谱；索引根固定 `src/`，禁用增量 update，不把整份 graph.json 塞进上下文。\n- 入库产物只有 `graphify-out/GRAPH_REPORT.md`、`.graphify_labels.json(+.sig)`、\n  `source-fingerprint.json` 与 `docs/graphify/GRAPH_REPORT.md` 镜像；graph.json、\n  HTML 视图、缓存在本机重建，`.graphify-memory/` 为个人经验层，不入库不入图。\n- `scripts/graphify_fingerprint.py::write_fingerprint` 在记录摘要前将报告及镜像规范为 LF，\n  与 Git 的 `eol=lf` 一致，避免 Windows 重建后检出即失效；check 模式仍只读且拒绝内容漂移。\n- 指纹覆盖固定 src/ 内实际抽取的 Rust、TypeScript、JavaScript、Shell、PowerShell；\n  不能只追踪 Rust 而漏掉宿主集成脚本。生成报告的刷新提示使用项目 wrapper。\n- 源码变动后 `just graph-check` 必须能解释指纹差异；视图导出失败不得报告\n  「视图交付完成」。\n- `just graph-view` 从当前完整图导出离线星群页面，`just graph-view-check` 只读校验\n  图、适配器、资源、来源与全部自有产物。显示预算不得截断可检索节点或关系；未知来源\n  不推测行号。保留离线依赖许可证，浏览器截图、降级和性能验收另行记录。"
     },
     {
       "anchor": "ai-tooling（AI 工具面与框架自身） > 工具面边界",
       "doc": "docs/AGENT_RULES/ai-tooling.md",
       "id": "docs-agent-rules-ai-tooling-md-ai-tooling-ai-工具面与框架自身-工具面边界",
-      "source_sha256": "fc861f163fc310d9bcc0105385aefda626beeb22dadd2294369ca685f6a42f77",
-      "text": "## 工具面边界\n\n- 共享入库的是无凭据配置：settings、hooks、薄 rules、reviewer、README。个人\n  状态（sessions、auth、`settings.local.json`、review 信号、`.zcode/plans/`）\n  由 `.gitignore` 保持本机。\n- hooks 是安全门，不是规则加载器：危险模式唯一真源是\n  `.claude/hooks/dangerous_patterns.conf`，Claude/Codex/ZCode 各自的协议适配器\n  只消费它；改模式后必须跑 `scripts/test_ai_tool_hooks.py` 探针并演练允许/拒绝。\n- `.agents/skills/`（pre-release-audit、throwaway-repro、triage）与\n  `.pi/prompts/` 是仓库工作流资产；内容与领域文档重复时以领域文档为准收编。\n- `.zed/settings.json` 只放编辑器/rust-analyzer 调优，不放 AI 规则。\n- 工具配置说明必须以仓库内实际配置、探针或真实会话证据为准；静态配置可解析不等于\n  客户端会话已生效，未实际运行的接入项保持 PENDING。接入细节与逐工具验证账见\n  `docs/AI_TOOLS.md`。"
+      "source_sha256": "66581429bc97266f93582f929ae07ec15ee7ecee3b8094bb98fd5afcafa9c099",
+      "text": "## 工具面边界\n\n- 共享入库的是无凭据配置：settings、hooks、薄 rules、reviewer、README。个人\n  状态（sessions、auth、`settings.local.json`、review 信号、`.zcode/plans/`）\n  由 `.gitignore` 保持本机。\n- hooks 是安全门，不是规则加载器：危险模式唯一真源是\n  `.claude/hooks/dangerous_patterns.conf`，已接入的协议适配器只消费它；改模式后必须跑\n  `scripts/test_ai_tool_hooks.py` 探针并演练允许/拒绝。有限模式匹配不构成完整隔离，\n  必须按客户端实际 matcher 和输入形状描述覆盖面。ZCode 当前不执行项目 hooks，\n  不把手动运行共享脚本当成项目接入；可选安装说明见 `.zcode/README.md`。\n- `.agents/skills/`（pre-release-audit、throwaway-repro、triage）与\n  `.pi/prompts/` 是仓库工作流资产；内容与领域文档重复时以领域文档为准收编。\n- `.zed/settings.json` 只放编辑器/rust-analyzer 调优，不放 AI 规则。\n- 工具配置说明必须以仓库内实际配置、探针或真实会话证据为准；静态配置可解析不等于\n  客户端会话已生效，未实际运行的接入项保持 PENDING。接入细节与逐工具验证账见\n  `docs/AI_TOOLS.md`。"
     },
     {
       "anchor": "ai-tooling（AI 工具面与框架自身） > 知识库纪律",
       "doc": "docs/AGENT_RULES/ai-tooling.md",
       "id": "docs-agent-rules-ai-tooling-md-ai-tooling-ai-工具面与框架自身-知识库纪律",
-      "source_sha256": "1dc8e85a26f932f4d144d9e52040af91e8fd976f949b87a204b771358d75b416",
-      "text": "## 知识库纪律\n\n- `docs/kb/chunks.json` 由 `scripts/build_agent_kb.py` 生成（确定性输出、默认\n  check 模式，`--confirm` 才写入），禁止手改；语料闭集与分层见脚本头注释。\n- 命中携带来源路径/anchor/hash；查询走 `scripts/agent_kb.py`（BM25-lite）。\n- 检索质量由 `scripts/test_agent_kb.py` 的 golden 查询锁定；规则/文档变化后\n  重建 KB 并让 freshness 检查通过，不能只改文档不刷新产物。"
+      "source_sha256": "725c1d8b038c0d30f2cb9a823462edd4021352436afc7a202fafb089ff686bf1",
+      "text": "## 知识库纪律\n\n- `docs/kb/chunks.json` 由 `scripts/build_agent_kb.py` 生成（确定性输出、默认\n  check 模式，`--confirm` 才写入），禁止手改；语料闭集与分层见脚本头注释。\n- 命中携带来源路径/anchor/hash；查询走 `scripts/agent_kb.py`（BM25-lite）。\n- `source_sha256` 沿用索引生成时的来源节或结构摘要哈希，不是整个原文件的哈希；\n  同一文件的不同章节可有不同值，检索后仍须回读对应来源。\n- 检索质量由 `scripts/test_agent_kb.py` 的 golden 查询锁定；规则/文档变化后\n  重建 KB 并让 freshness 检查通过，不能只改文档不刷新产物。"
     },
     {
       "anchor": "ai-tooling（AI 工具面与框架自身） > 规则加载协议",
@@ -950,8 +950,15 @@
       "anchor": "AI 工具接入与验证账 > 接入矩阵",
       "doc": "docs/AI_TOOLS.md",
       "id": "docs-ai-tools-md-ai-工具接入与验证账-接入矩阵",
-      "source_sha256": "a8de9f94ff16ea25910f699897579983aa2e34ce4c445ee408b2b57e53657098",
-      "text": "## 接入矩阵\n\n| 工具 | 规则加载 | hooks | 验证状态 |\n|---|---|---|---|\n| ZCode | 根 AGENTS.md + `.zcode/config.json`；resolver 手动/入口提示 | PreToolUse/PostToolUse/Stop 复用 `.claude/hooks/*`（`timeoutMs` 毫秒） | 探针 PASS（`scripts/test_ai_tool_hooks`）；真实会话新开验证见下账 |\n| Claude Code | `CLAUDE.md`（`@AGENTS.md` 薄入口）+ `.claude/rules/*.md`（`paths:` 提醒） | `.claude/settings.json` → `block_dangerous.sh` / `record_edit.sh` / `notify_review.sh` | 探针 PASS；真实会话 PENDING（见下） |\n| Codex | 根 AGENTS.md（`project_doc_max_bytes=32768`）；reviewer 用 resolver | `.codex/hooks/pre_tool_use_policy.py`（复用 gate，codex 协议）；Stop 复用 notify_review | 探针 PASS；真实会话 PENDING |\n| Pi | `.pi/prompts/`（pre-release-audit） | 无 | 既有资产，未动 |\n| 其他（kimi 等） | 读根 AGENTS.md + resolver | 无 | N/A（当前无接入需求） |"
+      "source_sha256": "ecd2717d3047cd665211a883ce4baa55f75f58bf6adbac41403a5f0b3fc570a7",
+      "text": "## 接入矩阵\n\n| 工具 | 规则加载 | hooks | 验证状态 |\n|---|---|---|---|\n| ZCode | 根 AGENTS.md；resolver 显式读取 | 当前版本忽略项目 hooks；可选手动安装见 `.zcode/README.md` | 项目 hooks N/A；用户安装与真实调用 PENDING |\n| Claude Code | `CLAUDE.md`（`@AGENTS.md` 薄入口）+ `.claude/rules/*.md`（`paths:` 提醒） | `.claude/settings.json` → `block_dangerous.sh` / `record_edit.sh` / `notify_review.sh` | 分层证据见下账；真实会话 PENDING |\n| Codex | 根 AGENTS.md（`project_doc_max_bytes=32768`）；reviewer 用 resolver | `.codex/hooks/pre_tool_use_policy.py`（复用 gate，codex 协议）；Stop 复用 notify_review | 分层证据见下账；真实会话 PENDING |\n| Pi | `.pi/prompts/`（pre-release-audit） | 无 | 既有资产，未动 |\n| 其他（kimi 等） | 读根 AGENTS.md + resolver | 无 | N/A（当前无接入需求） |"
+    },
+    {
+      "anchor": "AI 工具接入与验证账 > 最小策略的覆盖边界",
+      "doc": "docs/AI_TOOLS.md",
+      "id": "docs-ai-tools-md-ai-工具接入与验证账-最小策略的覆盖边界",
+      "source_sha256": "98ec218375d79aa241c3d6a8925eed1e2855a932c3b19640bd8d7947c7c72f80",
+      "text": "## 最小策略的覆盖边界\n\nSHELL 段只匹配登记的 Bash 命令形状；FILE 段只检查支持的编辑工具路径字段。\nCodex PreToolUse 当前只匹配 Bash，因此不消费 FILE 段，也不拦截 apply_patch。\n例如 `echo placeholder > .env` 和写入私钥路径的重定向不会命中现有 SHELL 模式，\n但 `Edit`/`Write` 传入相同路径会命中 FILE 模式。测试只把这些内容作为 JSON 字符串，\n不执行命令、不读取或写入秘密文件。任意脚本、动态路径与其他 shell 形式均不能由这组\n有限正则提供完整隔离。没有匹配表示 hook 未作决定，不等于任务授权或其他客户端权限允许。"
     },
     {
       "anchor": "AI 工具接入与验证账 > 测试与性能命令（AI agent）",
@@ -971,15 +978,22 @@
       "anchor": "AI 工具接入与验证账 > 维护",
       "doc": "docs/AI_TOOLS.md",
       "id": "docs-ai-tools-md-ai-工具接入与验证账-维护",
-      "source_sha256": "0be100aee42f96681d26521e57cf5bf7d622fd8920a49338e99944ab49e6770a",
-      "text": "## 维护\n\nCodex 项目配置以 `.codex/config.toml` 为准：当前设置 `approval_policy = \"never\"`、\n`sandbox_mode = \"danger-full-access\"`、`project_doc_max_bytes = 32768`；用户级配置和\n启动参数仍须一致，已经启动的会话可能保留旧快照。`never` 控制是否询问；危险操作仍由\n共享 hook 策略拦截，配置值本身不替代 hook 探针或真实会话验证。\n参见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。\n\nCodex 的 PreToolUse 响应采用 `hookSpecificOutput.permissionDecision`。\n当前官方协议不支持 `ask`，因此共享策略里的 ask 模式（2026-10 起未登记，分叉\n逻辑保留）在 Codex 适配中转为带原因的拒绝，防止无效响应被忽略后继续执行；\nClaude/ZCode 仍保持原协议。\n常规测试、建临时目录和读取画面不触发此门。协议探针为 PASS，真实客户端\n重新加载后的权限状态仍需单独核验，不能把静态配置当成已生效的运行时。\n参见[官方 hooks 协议](https://learn.chatgpt.com/docs/hooks)。\n\n- 改危险模式：编辑 `.claude/hooks/dangerous_patterns.conf`（TSV 四列），跑\n  `python3 -m unittest scripts.test_ai_tool_hooks`，并在真实会话演练允许与拒绝\n  两侧；PostToolUse 不得静默改源码。\n- 改规则/路由：见 `docs/AGENT_RULES/README.md` 维护节；工具面零改动。\n- 个人状态（`settings.local.json`、`review/`、`sessions/`、`.codex/state/`、\n  `.zcode/plans/`）不入库；共享文件保持无凭据。\n- hooks 是第二道安全门，不是规则加载器；`.claude/settings.json` 自 2026-10\n  起仅保留凭据读取 deny（白名单与 ask 级规则已按用户授权放开），两者语义\n  不得互相替代。"
+      "source_sha256": "64226664cd1cceace244da293dbaf38e9737385fcca0c33ebb2491e48e126bcb",
+      "text": "## 维护\n\nCodex 项目配置以 `.codex/config.toml` 为准：当前设置 `approval_policy = \"never\"`、\n`sandbox_mode = \"danger-full-access\"`、`project_doc_max_bytes = 32768`；用户级配置和\n启动参数仍须一致，已经启动的会话可能保留旧快照。`never` 控制是否询问；共享 hook\n只匹配已登记的有限形状，配置值本身不替代 hook 探针或真实会话验证。\n参见[官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。\n\nCodex 项目层须受信任；非受管 hook 还需通过 CLI `/hooks` 审阅当前定义并信任其 hash。\n新建或修改的 hook 未受信任时会被跳过，脚本探针不涵盖这一步。reviewer 的只读职责是\n提示词约定，sandbox 与 approval 继承父会话，不能靠角色文件创建独立只读沙箱。\n当前 CLI 0.163.0 的 `--version`/`--help` 已核对；它们不证明配置已加载。\n执行严格解析或 `debug prompt-input` 时应使用隔离无凭据配置，只保留项目规则与角色\n发现的必要证据，不把完整真实 prompt 写入共享记录。\n参见[官方子代理契约](https://learn.chatgpt.com/docs/agent-configuration/subagents)。\n\nCodex 的 PreToolUse 响应采用 `hookSpecificOutput.permissionDecision`。\n当前官方协议不支持 `ask`，因此共享策略里的 ask 模式（2026-10 起未登记，分叉\n逻辑保留）在 Codex 适配中转为带原因的拒绝，防止无效响应被忽略后继续执行；\nClaude/ZCode 仍保持原协议。\n常规测试、建临时目录和读取画面不触发此门。协议探针为 PASS，真实客户端\n重新加载后的权限状态仍需单独核验，不能把静态配置当成已生效的运行时。\n参见[官方 hooks 协议](https://learn.chatgpt.com/docs/hooks)。\n\n- 改危险模式：编辑 `.claude/hooks/dangerous_patterns.conf`（TSV 四列），跑\n  `python3 -m unittest scripts.test_ai_tool_hooks`，并在真实会话演练允许与拒绝\n  两侧；PostToolUse 不得静默改源码。\n- 改规则/路由：见 `docs/AGENT_RULES/README.md` 维护节；工具面零改动。\n- 个人状态（`settings.local.json`、`review/`、`sessions/`、`.codex/state/`、\n  `.zcode/plans/`）不入库；共享文件保持无凭据。\n- hooks 是第二道安全门，不是规则加载器；`.claude/settings.json` 自 2026-10\n  起仅保留凭据读取 deny（白名单与 ask 级规则已按用户授权放开），两者语义\n  不得互相替代。"
     },
     {
       "anchor": "AI 工具接入与验证账 > 验证账（按会话逐项记账，未运行不写 PASS）",
       "doc": "docs/AI_TOOLS.md",
-      "id": "docs-ai-tools-md-ai-工具接入与验证账-验证账-按会话逐项记账-未运行不写-pass",
-      "source_sha256": "b5c397a32f8d9bb28d0fdb4fb123fb11bf4027fcf75e5b974704cc9801a9d62a",
-      "text": "## 验证账（按会话逐项记账，未运行不写 PASS）\n\n2026-10-18 本轮重新运行配置解析、决策矩阵与原样注册命令探针；这些是受控子进程\n证据，不代表已在 ZCode、Claude Code 或 Codex 客户端内开启新会话并验证自动触发。\n\n2026-10-21 按用户授权收敛为「最小核心防线」：`dangerous_patterns.conf` 仅保留\nforce push、根/家目录 rm、凭据/私钥读取与写入四类 deny（根/家目录 rm 为本次新增，\n原仓库未登记）；`.claude/settings.json` 的白名单、ask 级规则与 `Read(./.git/**)`\ndeny 已移除。本轮同步重跑探针（`python3 -m unittest scripts.test_ai_tool_hooks`），\n仍属受控子进程证据，真实客户端会话内的触发状态不变。\n\n| 检查 | ZCode | Claude Code | Codex |\n|---|---|---|---|\n| 配置文件可解析 | PASS（本轮 JSON 探针加载） | PASS（本轮 settings.json JSON 解析） | PASS（本轮 TOML 与数组表形状探针；2026-09 的 v0.154.0 启动为历史证据） |\n| 规则加载（客户端新会话自动读取） | PENDING（历史会话记录不代证本轮） | PENDING | PENDING |\n| PreToolUse 拒绝（`git push --force` 等） | PASS（探针 + bash wrapper 实测） | PASS（同一 wrapper） | PASS（codex 适配器实测） |\n| PreToolUse 放行（常规命令/编辑） | PASS（探针矩阵） | PASS（同上） | PASS |\n| PostToolUse 记录 / Stop 信号 | PASS（临时仓库实测） | PASS（同脚本） | PASS |\n| 真实客户端会话内 hook 触发 | PENDING：使用下述隔离探针补验 | PENDING | PENDING：真实会话自动触发待补验 |\n\nPENDING 补验方式：在对应工具的真实会话中尝试探针命令\n（通过隔离临时仓库与无副作用 hook 输入，不对真实 PR 或渠道文件执行危险动作），确认被拒并显示理由；\n完成后把上行改为 PASS 并注明日期。"
+      "id": "docs-ai-tools-md-ai-工具接入与验证账-验证账-按会话逐项记账-未运行不写-pass-part1",
+      "source_sha256": "9136f32693c6918fd8763f598f2f01dc57b39b726db02c56904a14730e3dea56",
+      "text": "## 验证账（按会话逐项记账，未运行不写 PASS）\n\n2026-10-18 曾运行配置解析、决策矩阵与原样注册命令探针；这些是受控子进程\n证据，不代表已在 ZCode、Claude Code 或 Codex 客户端内开启新会话并验证自动触发。\n\n2026-10-21 按用户授权收敛为「最小核心防线」：`dangerous_patterns.conf` 仅保留\nforce push、根/家目录 rm、凭据/私钥读取与写入四类 deny（根/家目录 rm 为本次新增，\n原仓库未登记）；`.claude/settings.json` 的白名单、ask 级规则与 `Read(./.git/**)`\ndeny 已移除。当时同步重跑探针（`python3 -m unittest scripts.test_ai_tool_hooks`），\n仍属受控子进程证据，真实客户端会话内的触发状态不变。\n\n| 检查 | ZCode | Claude Code | Codex |\n|---|---|---|---|\n| 配置文件可解析 | N/A（移除不执行的项目 hooks 配置） | PASS（2026-10-23 JSON 解析） | PASS（2026-10-23 TOML 解析与形状检查）；原生项目配置加载 PENDING |\n| 规则加载（客户端新会话自动读取） | PENDING（历史会话记录不代证本轮） | PENDING | PENDING |\n| PreToolUse 拒绝（`git push --force` 等） | N/A（无项目注册） | PASS（2026-10-23 按 matcher 的脚本探针） | PASS（2026-10-23 Bash 注册入口脚本探针） |\n| PreToolUse 放行（常规命令/编辑） | N/A（无项目注册） | PASS（2026-10-23 正反矩阵） | PASS（2026-10-23 Bash 正反矩阵） |\n| PostToolUse 记录 / Stop 信号 | N/A（无项目注册） | PASS（2026-10-23 隔离脚本检查） | PASS（同一共享脚本与登记路径检查） |\n| 真实客户端会话内 hook 触发 | PENDING（另行安装后验证，当前项目不提供） | PENDING | PENDING（先核对项目与 hook 信任） |\n\n2026-10-23 修订接入边界：移除 ZCode 无效项目注册；注册入口测试按实际 matcher 选择\n输入，不再向 Codex 的 Bash-only 注册注入 Edit 并据此声称 FILE 保护。保留五条最小\n策略，仅纠正覆盖说明，不新增发布、PR、vendor 等已撤销的限制。\n\n2026-10-23 主会话运行 `python -B scripts/setup_env.py --run python -B -m unittest scripts.test_ai_tool_hooks`：\n26 项通过（6.402 秒）；以上 PASS 仅对应 JSON/TOML、匹配与协议探针、登记路径和隔离信号脚本。\nCodex CLI 0.163.0 的隔离 `debug prompt-input` 已实际读到根规则，但未发现 reviewer，\n破损项目 TOML 的负对照也未触发错误，因此该诊断不能证明项目配置已加载，角色发现保持"
+    },
+    {
+      "anchor": "AI 工具接入与验证账 > 验证账（按会话逐项记账，未运行不写 PASS）",
+      "doc": "docs/AI_TOOLS.md",
+      "id": "docs-ai-tools-md-ai-工具接入与验证账-验证账-按会话逐项记账-未运行不写-pass-part2",
+      "source_sha256": "9136f32693c6918fd8763f598f2f01dc57b39b726db02c56904a14730e3dea56",
+      "text": "PENDING。该版本明确拒绝 `--strict-config` 与 `debug` 组合，此组合记 N/A，不作为通过证据。\n真实客户端补验：另开会话检查规则与角色发现，在隔离测试仓库使用无副作用目标验证允许与\n拒绝两侧（例如对隔离仓库运行只读 `git status`，以及仅指向本地裸仓库的强推探针）；\n确认工具执行前拒绝及理由。不得用真实远程或敏感文件作为探针目标，直接 stdin 调用 hook\n只能证明脚本行为。完成对应层验证后才改账为 PASS 并注明日期。\n\nZCode 的项目配置不执行，不能靠新开会话使其生效；仅保留共享脚本与手动接入说明，\n本轮不改用户配置、不安装插件。[官方配置来源说明](https://zcode.z.ai/en/docs/hooks)\n已于 2026-10-22 核对。"
     },
     {
       "anchor": "herdr 架构地图",
@@ -1090,8 +1104,8 @@
       "anchor": "herdr 开发闭环 > 分支与上游",
       "doc": "docs/DEVELOPMENT.md",
       "id": "docs-development-md-herdr-开发闭环-分支与上游",
-      "source_sha256": "29000930c8f856d88b16e67e36e1cfa3bdd1b1ce42cda7e90845fa3ad32c8a80",
-      "text": "## 分支与上游\n\n本 fork（origin `gx0404/herdr`）跟踪 upstream `herdrdev/herdr`：维护分支为 `feature/gx_herdr`，\n特性分支从 `feature/gx_herdr` 派生；合并上游后按 `AGENT_RULES/README.md` 的章节映射表移植\nAGENTS.md 变化到领域文档。对上游的 issue/PR 行为遵守 `AGENT_RULES/governance.md`\n守门。较大特性建议独立 worktree（见 governance 维护者工作流小节的布局约定）。\n\n`master` 保留上游基线，GX 取舍与兼容修复留在 `feature/gx_herdr`。同步前确认工作区干净、\n保存两条分支的旧 SHA 与本地回退引用，再抓取并审查上游增量。固定本轮上游 SHA 后按以下顺序操作：\n\n```bash\ngit fetch upstream master\ngit switch master\ngit merge --ff-only <已审查的上游完整SHA>\ngit switch feature/gx_herdr\ngit merge --no-ff --no-commit master\n```\n\nmaster 不能快进时先核查分叉原因，不强制重置。feature 上逐块解决冲突，保留六家集成边界、\nGX 功能、端点冻结契约及工作流归档；不以整文件 ours/theirs、squash 或 cherry-pick 替代合并。\n运行 `python3 scripts/upstream_sync_drop_check.py`、相关回归与 `just check` 后，按提交规范完成\n真正的双亲 merge；用 `git merge-base --is-ancestor master feature/gx_herdr` 核对祖先关系。\n本地同步不自动推送或发布，远端更新另行授权。下次仍从上次 master 基线增量合并。"
+      "source_sha256": "1ace3334ec88434ec35f092a60f71ea2404f3bf7e583e2f23de95b4ce47fb0d8",
+      "text": "## 分支与上游\n\n本 fork（origin `gx0404/herdr`）跟踪 upstream `herdrdev/herdr`：维护分支为 `feature/gx_herdr`，\n特性分支从 `feature/gx_herdr` 派生；合并上游后按 `AGENT_RULES/README.md` 的章节映射表移植\nAGENTS.md 变化到领域文档。对上游的 issue/PR 行为遵守 `AGENT_RULES/governance.md`\n守门。较大特性建议独立 worktree（见 governance 维护者工作流小节的布局约定）。\n\n`master` 只接收 upstream 的已审查提交并保留上游基线，不在其上开发 GX 功能；\n`feature/gx_herdr` 是 fork 的主开发分支（origin 默认分支），GX 取舍与兼容修复留在这里。\n工作分支完整合入主分支并验证、确认远程保留后再删除。同步前确认工作区干净、\n保存两条分支的旧 SHA 与本地回退引用，再抓取并审查上游增量。固定本轮上游 SHA 后按以下顺序操作：\n\n```bash\ngit fetch upstream master\ngit switch master\ngit merge --ff-only <已审查的上游完整SHA>\ngit switch feature/gx_herdr\ngit merge --no-ff --no-commit master\n```\n\nmaster 不能快进时先核查分叉原因，不强制重置。feature 上逐块解决冲突，保留六家集成边界、\nGX 功能、端点冻结契约及工作流归档；不以整文件 ours/theirs、squash 或 cherry-pick 替代合并。\n运行 `python3 scripts/upstream_sync_drop_check.py`、相关回归与 `just check` 后，按提交规范完成\n真正的双亲 merge；用 `git merge-base --is-ancestor master feature/gx_herdr` 核对祖先关系。\n本地同步不自动推送或发布，远端更新另行授权。下次仍从上次 master 基线增量合并。"
     },
     {
       "anchor": "herdr 开发闭环 > 定向 CI Release 资格",
@@ -1230,8 +1244,8 @@
       "anchor": "just 命令手册 > 框架面（AI 协作）",
       "doc": "docs/MAKE_COMMANDS.md",
       "id": "docs-make-commands-md-just-命令手册-框架面-ai-协作",
-      "source_sha256": "c8eed13fadf933cf781637036e1ecf4efd9f7396f956351a67ec914acb7c0357",
-      "text": "## 框架面（AI 协作）\n\n| 命令 | 用途 | 前置 | 副作用 | 证据 |\n|---|---|---|---|---|\n| `just agent-rules [paths..]` | 解析本轮必读领域规则（转发 resolver） | Python3 | 无 | 文档路径列表；未知路径退出 2 |\n| `just agent-rules-check` | 规则闭集/体积/双射守门（resolver --check） | Python3 | 无 | `OK: 16 份领域规则…` |\n| `just framework-check` | agent-rules-check + hook 探针 + kb-check + graph-check | Python3、图谱/KB 产物 | 无 | 各子检查 OK |\n| `just graph` | 重建代码图谱（仅 `src/`，全量重建） | graphify（`graphifyy`，wrapper 校验版本） | 写 `graphify-out/`（大文件本机） | 报告生成 + 指纹更新 |\n| `just graph-check` | 指纹 + 报告镜像一致性校验 | 已建图 | 无 | 退出码 0 |\n| `just kb` | 重建知识库 `docs/kb/chunks.json` | Python3 | 写 tracked 生成物（审 diff） | 确定性 diff |\n| `just kb-check` | KB freshness（只读） | 同上 | 无 | 退出码 0 |"
+      "source_sha256": "9730ebc2db7b01780e823d19ed35403a8e53d155db8574e783064fb3ea917f10",
+      "text": "## 框架面（AI 协作）\n\n| 命令 | 用途 | 前置 | 副作用 | 证据 |\n|---|---|---|---|---|\n| `just agent-rules [paths..]` | 解析本轮必读领域规则（转发 resolver） | Python3 | 无 | 文档路径列表；未知路径退出 2 |\n| `just agent-rules-check` | 规则闭集/体积/双射守门（resolver --check） | Python3 | 无 | `OK: 16 份领域规则…` |\n| `just framework-check` | 规则路由、hook/KB/视图适配器单测 + kb-check + graph-check | Python3、图谱/KB 产物 | 单测写项目内隔离临时目录 | 各子检查 OK；本机页面另跑 graph-view-check |\n| `just graph` | 重建代码图谱（仅 `src/`，全量重建） | graphify（`graphifyy`，wrapper 校验版本） | 写 `graphify-out/`（大文件本机） | 报告生成 + 指纹更新 |\n| `just graph-check` | 指纹 + 报告镜像一致性校验 | 已建图 | 无 | 退出码 0 |\n| `just graph-view` | 由已建图生成离线全图星群视图（底层 `bash scripts/graphify.sh export html`）：固定 Graphify 0.9.20 对 `src/` 的 AST 抽取，输出 `graphify-out/GRAPH_TREE.html` 与 `view-data.js`、`view-assets/`、`view-sources/`、`view-manifest.json` | 已建图（先 `just graph`）、Python3、浏览器 | 写 `graphify-out/`；全图与视图不入库，只重建不提交 | 退出码 0；3D 不可用时降级 2D；全量搜索与源位置可用，无来源的节点不猜位置 |\n| `just graph-view-check` | 校验视图 manifest、资源与来源快照的完整和一致性（底层 `bash scripts/graphify.sh view-check`） | 已生成视图 | 无 | 退出码 0；不代表浏览器内视觉验收 |\n| `just kb` | 重建知识库 `docs/kb/chunks.json` | Python3 | 写 tracked 生成物（审 diff） | 确定性 diff |\n| `just kb-check` | KB freshness（只读） | 同上 | 无 | 退出码 0 |"
     },
     {
       "anchor": "summary",
@@ -4534,43 +4548,50 @@
       "anchor": "herdr 贡献者文档索引 > 生成物登记",
       "doc": "docs/README.md",
       "id": "docs-readme-md-herdr-贡献者文档索引-生成物登记-part1",
-      "source_sha256": "635207d34a059a5f374b89d4cd6708cdda001423443d3a9824390236e6559ca2",
-      "text": "## 生成物登记\n\n默认只检查，有意变更才重建并审 diff；Freshness 门失败不是「重跑生成器盖掉」，\n而是先确认输入变化是否真的有意。\n\n| 产物 | 输入 | 生成器 | 消费者 | 检查 |\n|---|---|---|---|---|\n| `docs/next/website/src/data/config-reference.json` | `src/config` 模型 | 内部生成 | 网站 config-reference 页 | `python3 scripts/config_reference_check.py`（release-docs-check 内） |\n| `docs/next/api/herdr-api.schema.json` | `src/api/schema`（schemars） | `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`（默认只比对不写入） | socket API 文档与客户端 | `just test`（`generated_protocol_schema_artifact_is_current`，陈旧即红） |\n| `distribution/agent-detection/*.toml` | `src/detect/manifests/*.toml` | 复制 + index | 稳定客户端运行时下载 | `python3 scripts/agent_detection_manifest_check.py`（maintenance-test） |\n| `crates/ghostty-vt/src/bindings.rs` | vendored C API | `just libghostty-bindings`（bindgen-cli 0.72.1） | `crates/ghostty-vt/src` | 编译本身 + `test_vendor_libghostty_vt` |\n| `docs/kb/chunks.json` | 上述文档、manifest、config 契约、`src/**/*.rs` 结构 | `scripts/build_agent_kb.py` | `scripts/agent_kb.py` 检索 | `just kb-check` + `scripts/test_agent_kb.py` golden |\n| `graphify-out/GRAPH_REPORT.md`（镜像 `docs/graphify/`）、标签+sig、指纹 | `src/**`（Rust 与宿主集成脚本） | `scripts/graphify.sh rebuild` | 图查询、overview | `just graph-check` |\n| `CHANGELOG.md` / `docs/versions/<v>/` / `distribution/latest.json` | `docs/next` + tag | 上游 release 流程（`just release*`；release.yml 在本 fork 已归档） | 用户/更新器/网站 | `just release-docs-check`；上游 distribution.yml 在本 fork 已归档 |\n\n约定：新增生成物时在本表登记输入→生成器→产物→消费者→检查，并默认提供只读"
+      "source_sha256": "2fe9e9bd8c88ed2b702becf79a474a2ab39b609b07df50a94c71c907bb20e7f3",
+      "text": "## 生成物登记\n\n默认只检查，有意变更才重建并审 diff；Freshness 门失败不是「重跑生成器盖掉」，\n而是先确认输入变化是否真的有意。\n\n| 产物 | 输入 | 生成器 | 消费者 | 检查 |\n|---|---|---|---|---|\n| `docs/next/website/src/data/config-reference.json` | `src/config` 模型 | 内部生成 | 网站 config-reference 页 | `python3 scripts/config_reference_check.py`（release-docs-check 内） |\n| `docs/next/api/herdr-api.schema.json` | `src/api/schema`（schemars） | `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`（默认只比对不写入） | socket API 文档与客户端 | `just test`（`generated_protocol_schema_artifact_is_current`，陈旧即红） |\n| `distribution/agent-detection/*.toml` | `src/detect/manifests/*.toml` | 复制 + index | 稳定客户端运行时下载 | `python3 scripts/agent_detection_manifest_check.py`（maintenance-test） |\n| `crates/ghostty-vt/src/bindings.rs` | vendored C API | `just libghostty-bindings`（bindgen-cli 0.72.1） | `crates/ghostty-vt/src` | 编译本身 + `test_vendor_libghostty_vt` |\n| `docs/kb/chunks.json` | 上述文档、manifest、config 契约、`src/**/*.rs` 结构 | `scripts/build_agent_kb.py` | `scripts/agent_kb.py` 检索 | `just kb-check` + `scripts/test_agent_kb.py` golden |\n| `graphify-out/GRAPH_REPORT.md`（镜像 `docs/graphify/`）、标签+sig、指纹 | `src/**`（Rust 与宿主集成脚本） | `scripts/graphify.sh rebuild` | 图查询、overview | `just graph-check` |\n| 本机 `graphify-out/GRAPH_TREE.html`、`view-data.js`、`view-assets/`、`view-sources/`、`view-manifest.json` | 当前完整图、`src/` 来源、`scripts/graphify_view.py` 与离线视图资源 | `just graph-view`（显式写入） | 离线星群探索、搜索与来源行定位 | `just graph-view-check`（只读）；浏览器流程另验 |"
     },
     {
       "anchor": "herdr 贡献者文档索引 > 生成物登记",
       "doc": "docs/README.md",
       "id": "docs-readme-md-herdr-贡献者文档索引-生成物登记-part2",
-      "source_sha256": "635207d34a059a5f374b89d4cd6708cdda001423443d3a9824390236e6559ca2",
-      "text": "check 与显式写入两个入口（详见 `AGENT_RULES/testing.md`、`ai-tooling.md`）。"
+      "source_sha256": "2fe9e9bd8c88ed2b702becf79a474a2ab39b609b07df50a94c71c907bb20e7f3",
+      "text": "| `CHANGELOG.md` / `docs/versions/<v>/` / `distribution/latest.json` | `docs/next` + tag | 上游 release 流程（`just release*`；release.yml 在本 fork 已归档） | 用户/更新器/网站 | `just release-docs-check`；上游 distribution.yml 在本 fork 已归档 |\n\n约定：新增生成物时在本表登记输入→生成器→产物→消费者→检查，并默认提供只读\ncheck 与显式写入两个入口（详见 `AGENT_RULES/testing.md`、`ai-tooling.md`）。"
     },
     {
       "anchor": "仓库知识维护与测试覆盖说明",
       "doc": "docs/REPOSITORY_AUDIT.md",
       "id": "docs-repository-audit-md-仓库知识维护与测试覆盖说明",
-      "source_sha256": "d231288376fee82f5e23f9f98d16432cdd28928d3e6a418ea9758e1afe44c51d",
-      "text": "# 仓库知识维护与测试覆盖说明\n\n本轮以当前 GX fork 实现为现状真源，历史版本用对应 Git 对象核对。\n行为实现不变；更新对象是测试编排/分类、AI 薄适配、文档、注释和派生知识。"
+      "source_sha256": "621d00fc97f110dc5501d0e012089b41d050ef8ab39551d6b8e649343257f288",
+      "text": "# 仓库知识维护与测试覆盖说明\n\n本文件分两部分：「2026-10-23 收尾」只记录该日实际执行或明确未执行的事项；\n其后各节是上一轮盘点的历史证据，保留作背景，不代表今天重新验证，数字和结论\n不得当作本轮结果引用。现状以源码、分类清单和最新 manifest/日志为准。"
     },
     {
-      "anchor": "仓库知识维护与测试覆盖说明 > 全仓盘点与修订",
+      "anchor": "仓库知识维护与测试覆盖说明 > 2026-10-23 收尾",
       "doc": "docs/REPOSITORY_AUDIT.md",
-      "id": "docs-repository-audit-md-仓库知识维护与测试覆盖说明-全仓盘点与修订",
-      "source_sha256": "8373e4a3a261bb02acc100fc05fa5cbc45488f0e6006e4599a2464d395adaf7e",
-      "text": "## 全仓盘点与修订\n\n盘点包括 Git 跟踪及未忽略的新文件，区分自有代码、第三方、发布快照和生成物。\n工作证据位于项目内 `target/knowledge-audit/`：文件及 hash 清单、历史版本比对和源码引用扫描。\n静态清单证明覆盖范围，不能代替逐条业务正确性证明。当前文档按入口、配置、调用者和\n测试交叉核对；未发现漂移的内容保持原文，第三方源码不做注释重写。\n\n| 面 | 真源与本轮处理 |\n|---|---|\n| 规则与工具 | resolver/routes、共享 hooks 与薄适配；修正绑定子 crate 路径、测试脚本路由和默认/完整验收口径，保留模型与权限配置 |\n| 架构 | 根 Cargo workspace、server/runtime、client shell、harness 注册表；修正旧 ghostty 模块地图，说明图谱只覆盖 src |\n| 测试 | 分类清单、编排器、Windows 包装与 CI；自动收集新测试，完整入口保留扩展覆盖 |\n| 用户文档 | 当前 CLI/API/config 与 Sessions/Inspector 消费链；三语集成页修正旧 Agents 面板名称 |\n| 注释 | harness 能力注册边界、Inspector 身份/缓存、持久化发布提交点、KB 文件收集与生成代码排除范围 |\n| README | 标明 GX 当前检出、待发布文档与历史版本各自口径，避免将上游 stable 文案当作 fork 现状 |\n| 生成物 | 源码/文档修订后全量图谱重建、报告镜像与指纹更新，最后重建 KB 并检索回归 |"
+      "id": "docs-repository-audit-md-仓库知识维护与测试覆盖说明-2026-10-23-收尾",
+      "source_sha256": "29fcdd54efcd3271de54c740f6bc8b54e63cc2307e4ea2b3638e120030407ece",
+      "text": "## 2026-10-23 收尾\n\n分支与上游：`master` 只接收 upstream（本轮固定到 `5bd900d8`），`feature/gx_herdr`\n是主开发分支（origin 默认分支）。origin 新增的 21 个提交（`d73bf801..3669ca2d`，\n远程连接激活、旧连接清理与相关测试）、工作分支收拢删除、upstream→master→feature\n整合已完成，对应整合提交为 `eb017c5a`。上游三个提交\n`ccc7521a`、`a2008661`、`5bd900d8` 中，管道修复的生产行为 fork 已有 1 MiB\n覆盖，本轮只引入新增测试。\n\n本轮文档收尾：开发、命令与测试文档对齐上述分支口径，补充 `just graph-view` /\n`just graph-view-check`；两份 Unreleased 只增补远程工作区键盘焦点与共享 SSH\n主连接生命周期两条用户可见修复，纯框架、CI 与文档变更不入产品 changelog。\n知识库在真源冻结后重建，查询结果同时返回索引来源节或结构摘要的完整 SHA-256。\n\n| 项 | 状态 | 说明 |\n|---|---|---|\n| hooks 测试 | PASS | 26 个测试，6.402 秒 |\n| KB 来源（provenance）测试 | PASS | 3 个测试，0.002 秒；`source_sha256` 已加入 |\n| 图谱适配器测试 | PASS | 16 个测试，含真实脚本入口、来源定位和覆盖保护 |\n| Windows 突发 pipe、启动目录、plugin worker | PASS | 三项单项验证 |\n| `just check-full` | PASS | 五个阶段通过；Rust 5,743 项，维护阶段 639 项，UI 热路径 12 项，集成资产 88 项，文档契约 7 项；平台/显式跳过项见 manifest |\n| 图谱重建、`graph-check` / `graph-view-check` | PASS | 25,029 节点、76,856 关系、606 社区、596 源文件；4,631 节点无源码定位 |\n| 星群视图浏览器与视觉验收 | PASS | 三视口、断网、搜索/关系分页、来源行、键盘、深链接及 WebGL 上下文丢失降级；截图已读回 |\n| 当前机器性能门 | PASS | SwiftShader 软件渲染，首帧约 504 ms、筛选低于 80 ms、交互约 60.7 FPS；不代表其他设备性能 |\n| KB 重建与 `kb-check` | PASS | 语料和来源摘要一致；代表查询与空结果另验 |\n| 原生客户端项目配置、角色与 hooks | PENDING | 配置解析/脚本探针不代证新会话自动加载，详见 AI_TOOLS |\n| 真实浏览器后台暂停 | PENDING | headless 两个页面都保持可见，未覆盖真实后台状态 |\n\n本机证据位于 `target/ai-refresh-20261023/`、`target/graph-view-acceptance-pagination/`\n与测试编排输出目录。首次完整检查发现显式浏览器工具误用 `test_*.py` 命名，改为\n`graphify_view_browser.py` 后补跑完整入口通过；没有放宽自动收集或移除浏览器验收。"
     },
     {
-      "anchor": "仓库知识维护与测试覆盖说明 > 历史 CHANGELOG",
+      "anchor": "仓库知识维护与测试覆盖说明 > 上一轮盘点（历史证据，非 2026-10-23 验证）",
       "doc": "docs/REPOSITORY_AUDIT.md",
-      "id": "docs-repository-audit-md-仓库知识维护与测试覆盖说明-历史-changelog",
-      "source_sha256": "937d16944d6dab3dd52abe97d9a6f9807cd5e5716ca2aa64413407b9086edab8",
-      "text": "## 历史 CHANGELOG\n\n核对的 59 个已发布段落中，初始有 51 段与原发布记录一致，4 段不同，4 段缺少本地\n原始记录。这里只纠正可证实的差异，不把当前 fork 行为写入旧版本。\n\n- v0.6.7：`src/agent_resume.rs::is_reserved_native_state_source` 在该 tag 只保留\n  Claude/Codex/OpenCode 的原生状态权威；恢复原发布中 Copilot hook 与状态来源的两条说明。\n- v0.2.0：恢复当时发布记录中的公共 ID 示例 `1` 与 `1-2`，仅描述该版本，不作为当前 API 示例。\n- v0.1.2、v0.5.1：差异是旧 CONFIGURATION.md 链接迁移，保留可用的文档链接。\n- **PENDING**：v0.9.1、v0.9.2、v0.9.3 的本地 tag/manifest 原始源码对象不可用；\n  v0.1.0 tag 没有 CHANGELOG。保留原有段落，不按后续代码补写。补验需取得对应发布\n  源码对象或可信发布记录，再逐条核实；这些待核项不影响当前源码测试结果。\n\n未发布段落补齐 Graphite、统一 Sessions/Inspector、注意力与会话洞察、可选 prompt、\n本地已读标记和移除账号用量的行为。测试基础设施说明移至贡献者文档，不作为产品功能发布。"
+      "id": "docs-repository-audit-md-仓库知识维护与测试覆盖说明-上一轮盘点-历史证据-非-2026-10-23-验证",
+      "source_sha256": "e603de8ae81bb5c4bf8f05875cb791982e3b58c999c65db04f66b61aad775d6b",
+      "text": "## 上一轮盘点（历史证据，非 2026-10-23 验证）\n\n下列各节是上一轮的记录；其中\n盘点包括 Git 跟踪及未忽略的新文件，区分自有代码、第三方、发布快照和生成物。\n工作证据位于项目内 `target/knowledge-audit/`：文件及 hash 清单、历史版本比对和源码引用扫描。\n静态清单证明覆盖范围，不能代替逐条业务正确性证明。当前文档按入口、配置、调用者和\n测试交叉核对；未发现漂移的内容保持原文，第三方源码不做注释重写。\n\n| 面 | 真源与本轮处理 |\n|---|---|\n| 规则与工具 | resolver/routes、共享 hooks 与薄适配；修正绑定子 crate 路径、测试脚本路由和默认/完整验收口径，保留模型与权限配置 |\n| 架构 | 根 Cargo workspace、server/runtime、client shell、harness 注册表；修正旧 ghostty 模块地图，说明图谱只覆盖 src |\n| 测试 | 分类清单、编排器、Windows 包装与 CI；自动收集新测试，完整入口保留扩展覆盖 |\n| 用户文档 | 当前 CLI/API/config 与 Sessions/Inspector 消费链；三语集成页修正旧 Agents 面板名称 |\n| 注释 | harness 能力注册边界、Inspector 身份/缓存、持久化发布提交点、KB 文件收集与生成代码排除范围 |\n| README | 标明 GX 当前检出、待发布文档与历史版本各自口径，避免将上游 stable 文案当作 fork 现状 |\n| 生成物 | 源码/文档修订后全量图谱重建、报告镜像与指纹更新，最后重建 KB 并检索回归 |"
     },
     {
-      "anchor": "仓库知识维护与测试覆盖说明 > 测试覆盖变化",
+      "anchor": "仓库知识维护与测试覆盖说明 > 上一轮盘点（历史证据，非 2026-10-23 验证） > 历史 CHANGELOG",
       "doc": "docs/REPOSITORY_AUDIT.md",
-      "id": "docs-repository-audit-md-仓库知识维护与测试覆盖说明-测试覆盖变化",
-      "source_sha256": "7d4df39cbdf6df2ffbf331db3aef94cbc6dab3a5b84b1780b8b8d53281a89741",
-      "text": "## 测试覆盖变化\n\n没有删除业务回归断言。精确迁移清单与原因见 `.config/test-suites.toml`：已知真实\n集成二进制、少量大数据/deadline 资格、发布环境演练与长重试窗口移入完整集；新测试默认纳入。\n普通单测线程运行以减少启动开销，进程资源数量和初始 ID 断言仍在默认集单独隔离。\n完整集使用 nextest，为这些约束保留逐测试进程基线。\n\nHook 决策矩阵逐条调用真实 JSON/参数/配置入口，复用 Python 解释器；原样注册命令、\nBash 包装与 Codex 协议适配仍跑真实子进程。决策断言不删减，优化只减少重复进程启动。\n\n试跑发现的两项共享进程限制已通过显式隔离分类处理，不改其断言。现有测试中裸\n`python3` 在 Windows 可能触发安装管理器，已改为当前解释器。既有 setup 入口对传入\n`--` 的命令行转发限制另记待修问题，本轮测试入口通过自身脚本传递参数，不依赖该路径。\n\n默认集通过不证明真实 SSH/PTY/安装升级或任意 CLI 版本兼容；需要这些证据时执行\n`just test-full` 和对应专项入口。默认目标 60 秒与完整验收分别出账，实际结果以本轮\nmanifest/log 为准。Linux/macOS 与真实桌面客户端未本地运行的项目保持 PENDING。\n\n完整集复测发现 Windows 发布演练夹具向原生子进程传入 Bash 风格 TMP/TEMP，\n偶发产生额外临时目录警告。夹具改为保留带盘符的项目内路径，原始 stderr 字节断言不变。\n\n图谱诊断没有缺失端点、悬空关系或重复边，但有 3 条 AST 导入自环：harness/json、\nharness/time、remote/process 与同名外部导入的解析发生合并。这是当前钉版提取器的\n关系解析局限，保留原始生成数据与诊断，不手工删除边；涉及这些关系时回到源码核验。"
+      "id": "docs-repository-audit-md-仓库知识维护与测试覆盖说明-上一轮盘点-历史证据-非-2026-10-23-验证-历史-changelog",
+      "source_sha256": "9f448f771d916568e6a869e73d83d13a1ae1b95cf5d12afa9754185e8a4c1e38",
+      "text": "### 历史 CHANGELOG\n\n核对的 59 个已发布段落中，初始有 51 段与原发布记录一致，4 段不同，4 段缺少本地\n原始记录。这里只纠正可证实的差异，不把当前 fork 行为写入旧版本。\n\n- v0.6.7：`src/agent_resume.rs::is_reserved_native_state_source` 在该 tag 只保留\n  Claude/Codex/OpenCode 的原生状态权威；恢复原发布中 Copilot hook 与状态来源的两条说明。\n- v0.2.0：恢复当时发布记录中的公共 ID 示例 `1` 与 `1-2`，仅描述该版本，不作为当前 API 示例。\n- v0.1.2、v0.5.1：差异是旧 CONFIGURATION.md 链接迁移，保留可用的文档链接。\n- **PENDING**：v0.9.1、v0.9.2、v0.9.3 的本地 tag/manifest 原始源码对象不可用；\n  v0.1.0 tag 没有 CHANGELOG。保留原有段落，不按后续代码补写。补验需取得对应发布\n  源码对象或可信发布记录，再逐条核实；这些待核项不影响当前源码测试结果。\n\n未发布段落补齐 Graphite、统一 Sessions/Inspector、注意力与会话洞察、可选 prompt、\n本地已读标记和移除账号用量的行为。测试基础设施说明移至贡献者文档，不作为产品功能发布。"
+    },
+    {
+      "anchor": "仓库知识维护与测试覆盖说明 > 上一轮盘点（历史证据，非 2026-10-23 验证） > 测试覆盖变化",
+      "doc": "docs/REPOSITORY_AUDIT.md",
+      "id": "docs-repository-audit-md-仓库知识维护与测试覆盖说明-上一轮盘点-历史证据-非-2026-10-23-验证-测试覆盖变化",
+      "source_sha256": "4c68d0431c67e1effbdb56d6ab211c51245033e1635cb07ed7b9f312b678ac0e",
+      "text": "### 测试覆盖变化\n\n没有删除业务回归断言。精确迁移清单与原因见 `.config/test-suites.toml`：已知真实\n集成二进制、少量大数据/deadline 资格、发布环境演练与长重试窗口移入完整集；新测试默认纳入。\n普通单测线程运行以减少启动开销，进程资源数量和初始 ID 断言仍在默认集单独隔离。\n完整集使用 nextest，为这些约束保留逐测试进程基线。\n\nHook 决策矩阵逐条调用真实 JSON/参数/配置入口，复用 Python 解释器；原样注册命令、\nBash 包装与 Codex 协议适配仍跑真实子进程。决策断言不删减，优化只减少重复进程启动。\n\n试跑发现的两项共享进程限制已通过显式隔离分类处理，不改其断言。现有测试中裸\n`python3` 在 Windows 可能触发安装管理器，已改为当前解释器。既有 setup 入口对传入\n`--` 的命令行转发限制另记待修问题，本轮测试入口通过自身脚本传递参数，不依赖该路径。\n\n默认集通过不证明真实 SSH/PTY/安装升级或任意 CLI 版本兼容；需要这些证据时执行\n`just test-full` 和对应专项入口。默认目标 60 秒与完整验收分别出账，实际结果以本轮\nmanifest/log 为准。Linux/macOS 与真实桌面客户端未本地运行的项目保持 PENDING。\n\n完整集复测发现 Windows 发布演练夹具向原生子进程传入 Bash 风格 TMP/TEMP，\n偶发产生额外临时目录警告。夹具改为保留带盘符的项目内路径，原始 stderr 字节断言不变。\n\n图谱诊断没有缺失端点、悬空关系或重复边，但有 3 条 AST 导入自环：harness/json、\nharness/time、remote/process 与同名外部导入的解析发生合并。这是当前钉版提取器的\n关系解析局限，保留原始生成数据与诊断，不手工删除边；涉及这些关系时回到源码核验。"
     },
     {
       "anchor": "herdr 测试分层",
@@ -4583,8 +4604,8 @@
       "anchor": "herdr 测试分层 > 入口与范围",
       "doc": "docs/TESTING.md",
       "id": "docs-testing-md-herdr-测试分层-入口与范围",
-      "source_sha256": "c951209f7f7d0991c9b1c3b46064d0ec3dd3b783a074fc2aa62fc00ad558c905",
-      "text": "## 入口与范围\n\n| 入口 | 范围 | 边界 |\n|---|---|---|\n| `just test` | 固定默认回归：Rust、维护脚本、UI 热路径、集成资产、文档契约 | 热缓存端到端目标 60 秒，扩展集未执行 |\n| `just test-full` | 默认集与所有扩展自动测试；Rust 全部 nextest 隔离 | 不隐含 ignored 性能、真实桌面输入或安装资格 |\n| `just check` | fmt、clippy、默认回归、平台编译检查 | Windows 还构建普通二进制；不受 60 秒目标约束 |\n| `just check-full` | lint、完整自动回归、平台编译检查 | 测试框架变更、广泛回归和发布准备使用 |\n| `just test-one <filter>` / `just nextest-all` | 指定 Rust 集 / 完整 nextest | 每测试独立进程，不受默认集排除项限制 |\n| `just maintenance-test` | Python 自动收集、顶层 Bun 契约、fork 丢弃路径检查 | `HERDR_TEST_SUITE=full` 包含扩展项 |\n| `just integration-assets-test` / `just docs-contract-test` | 对应目录 Bun 自动收集 | 分类同上，不代证真实 CLI 兼容 |\n| `just framework-check` | resolver、hook 探针、KB/图谱 freshness | 同步检查不代证文档语义和真实会话接入 |"
+      "source_sha256": "559ba68e00c7d94347f906764d5d99392656aa7ae535e68e6beb006947286612",
+      "text": "## 入口与范围\n\n| 入口 | 范围 | 边界 |\n|---|---|---|\n| `just test` | 固定默认回归：Rust、维护脚本、UI 热路径、集成资产、文档契约 | 热缓存端到端目标 60 秒，扩展集未执行 |\n| `just test-full` | 默认集与所有扩展自动测试；Rust 全部 nextest 隔离 | 不隐含 ignored 性能、真实桌面输入或安装资格 |\n| `just check` | fmt、clippy、默认回归、平台编译检查 | Windows 还构建普通二进制；不受 60 秒目标约束 |\n| `just check-full` | lint、完整自动回归、平台编译检查 | 测试框架变更、广泛回归和发布准备使用 |\n| `just test-one <filter>` / `just nextest-all` | 指定 Rust 集 / 完整 nextest | 每测试独立进程，不受默认集排除项限制 |\n| `just maintenance-test` | Python 自动收集、顶层 Bun 契约、fork 丢弃路径检查 | `HERDR_TEST_SUITE=full` 包含扩展项 |\n| `just integration-assets-test` / `just docs-contract-test` | 对应目录 Bun 自动收集 | 分类同上，不代证真实 CLI 兼容 |\n| `just framework-check` | resolver、hook 探针、KB/图谱 freshness | 同步检查不代证文档语义和真实会话接入 |\n| `just graph-view-check` | 离线星群视图的 manifest、资源与来源快照一致性 | 静态校验；3D/2D 降级、搜索与源位置跳转需浏览器读回截图，未做记 PENDING |\n\n星群视图的浏览器验收在 `just graph-view` 后显式运行：\n`python scripts/graphify_view_browser.py --html graphify-out/GRAPH_TREE.html --output target/graph-view-<新批次>`。\n需要已安装的 Python Playwright 与 Chromium，可用 `--browser` 指定已有浏览器。\n脚本保存断网操作、截图与渲染器/性能证据；`--enforce-performance` 开启当前机器的\n2 秒可交互、200 ms 筛选、30 FPS 交互门槛。性能测量应避开重型构建。\n这是需要本机已生成页面的显式验收工具，不属于自动发现的 `test_*.py` 单测。"
     },
     {
       "anchor": "herdr 测试分层 > 分类真源与调度",

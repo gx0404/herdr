@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>herdr · 源码星图</title>
+  <link rel="stylesheet" href="view-assets/viewer.css">
+</head>
+<body>
+  <a class="skip" href="#search">跳到源码搜索</a>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="herdr 源码星图首页"><span class="brand-symbol" aria-hidden="true">h</span><strong>herdr</strong><span class="brand-divider"></span><span>源码星图</span></a>
+    <div class="top-actions"><span class="local-badge"><i></i>完全离线</span><button id="toggle-panel" aria-expanded="true" aria-controls="navigator">收起导航</button><button id="home" class="quiet">返回全景</button></div>
+  </header>
+  <main id="atlas">
+    <section id="stage" aria-label="交互星图，可使用导航列表访问全部节点">
+      <div id="scene" aria-hidden="true"></div><div id="scene-labels" aria-label="星团快捷导航"></div>
+      <div class="scene-heading"><div class="breadcrumb" id="breadcrumb">herdr / src</div><h1 id="scene-title">在代码之间，<br>看见连接。</h1><p id="scene-description">从模块星群出发，探索真实的源码关系。</p></div>
+      <div id="scene-status" class="scene-status" role="status">正在载入完整索引…</div>
+      <div class="scene-tools"><button id="zoom-in" aria-label="放大星图">+</button><button id="zoom-out" aria-label="缩小星图">−</button><button id="reset-camera" aria-label="重置视角">归位</button><button id="renderer-toggle" aria-pressed="false">二维视图</button></div>
+      <div class="scene-caption"><span class="orbit-mark" aria-hidden="true"></span><span id="scene-help">拖动旋转 · 滚轮缩放 · 点击星团进入</span></div>
+    </section>
+    <aside id="navigator" class="panel navigator" aria-label="源码导航">
+      <div class="panel-heading"><h2>探索源码</h2><span id="index-count" class="count">—</span></div>
+      <label class="search-label" for="search">搜索全部节点</label><div class="search-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"></circle><path d="m15 15 5 5"></path></svg><input id="search" type="search" placeholder="符号、路径或节点 ID" autocomplete="off" spellcheck="false"><kbd>/</kbd></div>
+      <div class="filter-row"><label for="grouping">分组</label><select id="grouping"><option value="module">源码模块</option><option value="community">图谱社区</option></select></div>
+      <div class="filter-row"><label for="scope">范围</label><select id="scope"><option value="">全部模块</option></select></div>
+      <div class="list-heading"><h3 id="list-title">模块星群</h3><span id="result-count" role="status"></span></div>
+      <div id="results" class="results" aria-label="搜索结果与模块列表"></div>
+      <div class="pagination" id="pagination"><button id="previous" aria-label="上一页">上一页</button><span id="page-count"></span><button id="next" aria-label="下一页">下一页</button></div>
+      <footer class="panel-foot"><span id="index-status">索引载入中</span><span id="fingerprint" title="图谱内容摘要"></span></footer>
+    </aside>
+    <aside id="detail" class="panel detail" aria-label="节点详情" hidden>
+      <div class="panel-heading"><h2>节点详情</h2><button id="close-detail" aria-label="关闭节点详情">×</button></div>
+      <div class="detail-content"><span class="detail-kind" id="detail-community"></span><h3 id="detail-title" tabindex="-1"></h3><code id="detail-id"></code><p id="detail-path"></p><a id="source-link" class="source-link" target="_blank" rel="noopener">查看源码 <span aria-hidden="true">↗</span></a><p id="no-source" class="notice" hidden>无源码定位。此节点保留图谱中的引用身份，未推测文件或行号。</p>
+      <div class="relation-heading"><h3>直接关系</h3><span id="relation-count"></span></div><p id="direction-note" class="relation-note">实线为直接提取，虚线为推断。关系图未编码方向。</p><div id="relations"></div><div class="pagination"><button id="relation-previous">上一页</button><span id="relation-page"></span><button id="relation-next">下一页</button></div></div>
+    </aside>
+  </main>
+  <footer class="statusbar"><div class="legend"><span><i class="line"></i>直接提取</span><span><i class="line inferred"></i>推断</span><span class="decoration-note">星尘仅为装饰</span></div><div class="totals"><span id="total-nodes">— 节点</span><span id="total-edges">— 关系</span><span id="renderer-status">准备中</span></div></footer>
+  <div id="fatal" role="alert" hidden></div>
+  <script src="view-data.js"></script>
+  <script src="view-assets/vendor/three.bundle.js"></script>
+  <script src="view-assets/viewer.js"></script>
+</body>
+</html>

@@ -53,9 +53,17 @@ graph:
 graph-check:
     bash scripts/graphify.sh check
 
-# Aggregate framework gate: rule routing closed set + hook probes + KB/graph freshness
+# Export the local offline star-cluster viewer from the current code graph
+graph-view:
+    bash scripts/graphify.sh export html
+
+# Check graph, viewer inputs and all local viewer artifacts without writing
+graph-view-check:
+    bash scripts/graphify.sh view-check
+
+# Aggregate framework gate: rules, hooks, graph-view contracts and KB/graph freshness
 framework-check: agent-rules-check
-    {{python}} -m unittest scripts.test_resolve_agent_rules scripts.test_ai_tool_hooks scripts.test_agent_kb
+    {{python}} -m unittest scripts.test_resolve_agent_rules scripts.test_ai_tool_hooks scripts.test_agent_kb scripts.test_graphify_view
     just kb-check
     just graph-check
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # herdr Graphify 固定入口：只索引 src/（Rust 与宿主集成脚本 AST，无 LLM），全量重建。
-# 子命令：rebuild|check|query|path|explain|diagnose|affected|export|save-result|reflect
+# 子命令：rebuild|check|query|path|explain|diagnose|affected|export|view-check|save-result|reflect
 
 set -euo pipefail
 
@@ -89,13 +89,17 @@ case "${command_name}" in
         exec "${cli}" "${command_name}" "$@" --graph "${GRAPH_JSON}"
         ;;
     export)
-        # 本机可选视图：D3 collapsible tree；视图失败不得宣称图谱交付完成。
+        # 完全离线星群视图；完整数据与来源快照由项目适配器生成。
         [ "${2:-}" = "html" ] || die "本项目只放行 export html"
         [ "$#" -eq 2 ] || die "export html 不接受额外参数"
         [ -f "${GRAPH_JSON}" ] || die "图谱尚未构建，请先运行 just graph"
-        cli="$(resolve_cli)"
         cd "${ROOT}"
-        exec "${cli}" tree --graph "${GRAPH_JSON}" --label herdr
+        exec python3 "${WRAPPER_DIR}/graphify_view.py" export
+        ;;
+    view-check)
+        [ "$#" -eq 1 ] || die "view-check 不接受额外参数"
+        cd "${ROOT}"
+        exec python3 "${WRAPPER_DIR}/graphify_view.py" check
         ;;
     save-result|reflect)
         # 查询记忆是本机经验层：钉死 --memory-dir 与 reflect --out。
@@ -123,7 +127,7 @@ case "${command_name}" in
         die "禁止直接执行 ${command_name}；本项目固定使用 just graph 全量重建"
         ;;
     ""|help|-h|--help)
-        echo "用法：scripts/graphify.sh rebuild|check|query|path|explain|diagnose|affected|export|save-result|reflect ..."
+        echo "用法：scripts/graphify.sh rebuild|check|query|path|explain|diagnose|affected|export|view-check|save-result|reflect ..."
         ;;
     *)
         die "不支持的命令：${command_name}"

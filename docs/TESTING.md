@@ -12,6 +12,14 @@
 | `just maintenance-test` | Python 自动收集、顶层 Bun 契约、fork 丢弃路径检查 | `HERDR_TEST_SUITE=full` 包含扩展项 |
 | `just integration-assets-test` / `just docs-contract-test` | 对应目录 Bun 自动收集 | 分类同上，不代证真实 CLI 兼容 |
 | `just framework-check` | resolver、hook 探针、KB/图谱 freshness | 同步检查不代证文档语义和真实会话接入 |
+| `just graph-view-check` | 离线星群视图的 manifest、资源与来源快照一致性 | 静态校验；3D/2D 降级、搜索与源位置跳转需浏览器读回截图，未做记 PENDING |
+
+星群视图的浏览器验收在 `just graph-view` 后显式运行：
+`python scripts/graphify_view_browser.py --html graphify-out/GRAPH_TREE.html --output target/graph-view-<新批次>`。
+需要已安装的 Python Playwright 与 Chromium，可用 `--browser` 指定已有浏览器。
+脚本保存断网操作、截图与渲染器/性能证据；`--enforce-performance` 开启当前机器的
+2 秒可交互、200 ms 筛选、30 FPS 交互门槛。性能测量应避开重型构建。
+这是需要本机已生成页面的显式验收工具，不属于自动发现的 `test_*.py` 单测。
 
 ## 分类真源与调度
 

@@ -3,7 +3,7 @@
 # hooks 语法以真实 Codex CLI（v0.154）为准：事件键是数组表，命令嵌套在 .hooks 数组。
 
 approval_policy = "never"
-# 用户明确授权放开（2026-09）：关闭沙箱，破坏性操作仍由 hook 策略真源拦截。
+# 用户明确授权放开（2026-09）：关闭沙箱；hook 只匹配已登记的有限命令形状。
 sandbox_mode = "danger-full-access"
 # 根 AGENTS.md 是短入口；领域规则由 resolver 按路径显式读取。
 project_doc_max_bytes = 32768
@@ -29,8 +29,8 @@ exclude = [
 ]
 
 # 危险模式判定经 .codex/hooks/pre_tool_use_policy.py 复用 .claude 的策略真源；
-# FILE 段在 Codex 侧只覆盖 Bash 面（apply_patch 无 file_path 字段），
-# 敏感文件的重定向写入已由 SHELL 段模式拦截。
+# 此注册只匹配 Bash 并消费 SHELL 段，不覆盖 FILE 段或 apply_patch。
+# 敏感文件重定向、任意脚本间接访问不在现有匹配覆盖内。
 [[hooks.PreToolUse]]
 matcher = "^Bash$"
 

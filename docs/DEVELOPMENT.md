@@ -204,7 +204,9 @@ server 由原始句柄确认，记录 `shutdown=already_exited`，但不跳过 J
 AGENTS.md 变化到领域文档。对上游的 issue/PR 行为遵守 `AGENT_RULES/governance.md`
 守门。较大特性建议独立 worktree（见 governance 维护者工作流小节的布局约定）。
 
-`master` 保留上游基线，GX 取舍与兼容修复留在 `feature/gx_herdr`。同步前确认工作区干净、
+`master` 只接收 upstream 的已审查提交并保留上游基线，不在其上开发 GX 功能；
+`feature/gx_herdr` 是 fork 的主开发分支（origin 默认分支），GX 取舍与兼容修复留在这里。
+工作分支完整合入主分支并验证、确认远程保留后再删除。同步前确认工作区干净、
 保存两条分支的旧 SHA 与本地回退引用，再抓取并审查上游增量。固定本轮上游 SHA 后按以下顺序操作：
 
 ```bash

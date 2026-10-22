@@ -48,6 +48,8 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
   不保留组件源码；Oh My Zsh 外部 builder 负责包身份、许可证清单与 build receipt，
   合并安装包由 `gx0404/gx_shell` 发布。独立手动打包链与消费契约见
   `release-channels.md` 和 `docs/DEVELOPMENT.md`。
+- `master` 接收上游源码同步，再合入 `feature/gx_herdr` 并按 fork 规则兼容与裁剪；
+  工作分支先完整合入主分支并验证，确认远程保留后再清理，不向上游推送 fork 改动。
 
 ## 项目模型
 
@@ -87,6 +89,7 @@ python3 scripts/resolve_agent_rules.py --check                   # 闭集/体积
 | `just docs-contract-test` / `just integration-assets-test` | bun 契约测试 |
 | `just agent-rules` / `just framework-check` | resolver 用法 / 框架守门聚合 |
 | `just graph` / `just graph-check` / `just kb` / `just kb-check` | 图谱与知识库 |
+| `just graph-view` / `just graph-view-check` | 离线星群视图导出与完整性检查 |
 | `just bench-render-scale` / `just bench-terminal-targets` / `just bench-bsp-layout` | 渲染、终端目标查找、BSP 布局画像 |
 | `just bench-retained-graphics` / `just bench-api-fairness` / `just bench-release-smoke` | retained graphics、API 公平性、发布性能 smoke |
 | `just bench-process-inspection` | Windows 进程检查画像（原生 Windows） |

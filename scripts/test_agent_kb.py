@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import json
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import agent_kb
 from scripts import build_agent_kb
@@ -98,6 +101,45 @@ class KbChunkingTests(unittest.TestCase):
     def test_single_part_keeps_plain_id_and_blank_lines_inside_a_part(self) -> None:
         chunks = self._emit("alpha\n\nbeta", 100)
         self.assertEqual([(chunk["id"], chunk["text"]) for chunk in chunks], [("doc-md-anchor", "alpha\n\nbeta")])
+
+
+class KbProvenanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.index = agent_kb.KBIndex(
+            [
+                {"id": "first", "doc": "first.md", "anchor": "First", "text": "alpha", "source_sha256": "1" * 64},
+                {"id": "second", "doc": "second.md", "anchor": "Second", "text": "alpha beta", "source_sha256": "2" * 64},
+            ]
+        )
+
+    def _query_output(self, *args: str) -> str:
+        output = StringIO()
+        with (
+            patch.object(agent_kb, "KB_PATH") as kb_path,
+            patch.object(agent_kb, "load_index", return_value=self.index),
+            redirect_stdout(output),
+        ):
+            kb_path.is_file.return_value = True
+            self.assertEqual(agent_kb.main(list(args)), 0)
+        return output.getvalue()
+
+    def test_search_keeps_each_matches_source_hash(self) -> None:
+        results = self.index.search("alpha", top=2)
+        self.assertEqual(
+            [(item["doc"], item["anchor"], item["source_sha256"]) for item in results],
+            [("first.md", "First", "1" * 64), ("second.md", "Second", "2" * 64)],
+        )
+
+    def test_json_query_includes_full_source_hash(self) -> None:
+        results = json.loads(self._query_output("beta", "--top", "1", "--json"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["doc"], "second.md")
+        self.assertEqual(results[0]["source_sha256"], "2" * 64)
+
+    def test_text_query_displays_full_source_hash(self) -> None:
+        output = self._query_output("beta", "--top", "1")
+        self.assertIn("second.md  [Second]", output)
+        self.assertIn(f"source_sha256: {'2' * 64}", output)
 
 
 class KbRetrievalTests(unittest.TestCase):

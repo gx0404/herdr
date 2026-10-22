@@ -29,9 +29,13 @@ paths = [
   "scripts/build_agent_kb.py",
   "scripts/graphify.sh",
   "scripts/graphify_fingerprint.py",
+  "scripts/graphify_view.py",
+  "scripts/graphify_view_assets/**",
+  "scripts/graphify_view_browser.py",
   "scripts/resolve_agent_rules.py",
   "scripts/test_agent_kb.py",
   "scripts/test_ai_tool_hooks.py",
+  "scripts/test_graphify_view.py",
   "scripts/test_resolve_agent_rules.py",
   "src/.graphifyignore",
 ]

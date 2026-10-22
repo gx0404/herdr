@@ -1,2 +1,4 @@
 * text=auto eol=lf
 packaging/windows/licenses/* binary
+# Preserve the pinned upstream bundle, including whitespace in GLSL strings.
+scripts/graphify_view_assets/vendor/three.bundle.js -whitespace

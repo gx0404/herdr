@@ -210,6 +210,14 @@ class PreToolUseGateTests(unittest.TestCase):
         decision, _ = _decision(_run_gate("Read", {"file_path": "CHANGELOG.md"}))
         self.assertEqual("allow", decision)
 
+    def test_shell_redirection_is_outside_current_file_policy(self) -> None:
+        # 只发送 JSON 字符串，不执行命令、不创建秘密文件。记录有限覆盖边界，
+        # 不把 Edit 的 FILE 拒绝误报成 shell 重定向保护。
+        for path in (".env", "keys/id_rsa"):
+            with self.subTest(path=path):
+                self.assertEqual("allow", _decision(_run_gate("Bash", {"command": f"echo placeholder > {path}"}))[0])
+                self.assertEqual("deny", _decision(_run_gate("Edit", {"file_path": path}))[0])
+
     def test_bash_wrapper_matches_python_gate(self) -> None:
         # 按 PATH 解析 bash：Windows 上裸 "bash" 经 CreateProcess 先命中
         # System32\bash.exe（WSL 启动器，CI runner 无发行版），而不是 Git Bash。
@@ -314,31 +322,47 @@ class CodexConfigShapeTests(unittest.TestCase):
         agent_path = PROJECT_ROOT / ".codex" / "agents" / "herdr_reviewer.toml"
         self.assertTrue(agent_path.is_file())
 
+    def test_reviewer_does_not_claim_separate_permission_policy(self) -> None:
+        import tomllib
 
-def _registered_hook_commands() -> list[tuple[str, str, str]]:
-    """三份工具配置登记的全部 hook 命令：(工具, 事件, 原样 command)。"""
+        agent_path = PROJECT_ROOT / ".codex" / "agents" / "herdr_reviewer.toml"
+        reviewer = tomllib.loads(agent_path.read_text(encoding="utf-8"))
+        self.assertEqual("herdr_reviewer", reviewer["name"])
+        self.assertTrue(reviewer["developer_instructions"].strip())
+        self.assertNotIn("sandbox_mode", reviewer)
+        self.assertNotIn("approval_policy", reviewer)
+
+
+class ZCodeProjectScopeTests(unittest.TestCase):
+    def test_project_does_not_register_ignored_hooks(self) -> None:
+        for relative in (".zcode/config.json", "zcode.json"):
+            path = PROJECT_ROOT / relative
+            if path.is_file():
+                self.assertNotIn("hooks", json.loads(path.read_text(encoding="utf-8")), relative)
+
+
+def _registered_hook_commands() -> list[tuple[str, str, str, str]]:
+    """受支持项目配置中的 hook：(工具, 事件, matcher, 原样 command)。"""
     try:
         import tomllib
     except ModuleNotFoundError:  # Python 3.10 回退已装的 tomli
         import tomli as tomllib
     claude = json.loads((PROJECT_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    zcode = json.loads((PROJECT_ROOT / ".zcode" / "config.json").read_text(encoding="utf-8"))
     codex = tomllib.loads((PROJECT_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8"))
-    commands: list[tuple[str, str, str]] = []
+    commands: list[tuple[str, str, str, str]] = []
     for tool, events in (
         ("claude", claude["hooks"]),
-        ("zcode", zcode["hooks"]["events"]),
         ("codex", codex["hooks"]),
     ):
         for event, blocks in events.items():
             for block in blocks:
                 for hook in block["hooks"]:
-                    commands.append((tool, event, hook["command"]))
+                    commands.append((tool, event, block.get("matcher", ""), hook["command"]))
     return commands
 
 
 class RegisteredEntryProbeTests(unittest.TestCase):
-    """按三份配置里的原样 command 经 `bash -c` 验证独立仓入口与安全决策。"""
+    """按项目配置 matcher 与原样 command 验证脚本；不代替客户端信任/加载。"""
 
     def test_registered_probe_uses_path_resolved_bash(self) -> None:
         from unittest.mock import patch
@@ -364,22 +388,38 @@ class RegisteredEntryProbeTests(unittest.TestCase):
         # 危险字面量拆分构造：宿主会话可能挂着同一安全门，命令文本不得整串出现。
         probes = [
             ("Bash", {"command": "git push origin master --fo" + "rce"}, "deny"),
+            ("Bash", {"command": "git status"}, "allow"),
+            ("Bash", {"command": "echo placeholder > .env"}, "allow"),
             ("Edit", {"file_path": str(PROJECT_ROOT / ".env")}, "deny"),
             ("Edit", {"file_path": str(PROJECT_ROOT / "src" / "app" / "state.rs")}, "allow"),
         ]
-        entries = [(tool, command) for tool, event, command in _registered_hook_commands() if event == "PreToolUse"]
-        self.assertEqual({"claude", "zcode", "codex"}, {tool for tool, _ in entries})
-        for tool, command in entries:
+        entries = [(tool, matcher, command) for tool, event, matcher, command in _registered_hook_commands() if event == "PreToolUse"]
+        self.assertEqual({"claude", "codex"}, {tool for tool, _, _ in entries})
+        for tool, matcher, command in entries:
+            observed_decisions = set()
             for tool_name, tool_input, expected in probes:
+                if matcher and re.search(matcher, tool_name) is None:
+                    continue
                 with self.subTest(tool=tool, probe=tool_name, expected=expected):
                     result = self._run_registered(command, {"tool_name": tool_name, "tool_input": tool_input})
                     self.assertEqual(0, result.returncode, result.stderr.decode("utf-8", "replace"))
                     self.assertEqual(expected, _decision(result)[0])
+                    observed_decisions.add(_decision(result)[0])
+            self.assertEqual({"allow", "deny"}, observed_decisions, tool)
+
+    def test_codex_pre_tool_use_registration_only_covers_bash(self) -> None:
+        entries = [(matcher, command) for tool, event, matcher, command in _registered_hook_commands()
+                   if tool == "codex" and event == "PreToolUse"]
+        self.assertTrue(entries)
+        for matcher, _ in entries:
+            self.assertIsNotNone(re.search(matcher, "Bash"))
+            for name in ("apply_patch", "Edit", "Write"):
+                self.assertIsNone(re.search(matcher, name), name)
 
     def test_registered_scripts_resolve_inside_standalone_checkout(self) -> None:
         # 只把解释器换成 test -f：路径与 $(git rev-parse ...) 仍按原样经 shell 求值，
         # 但不真正执行会写本机状态的 PostToolUse/Stop 信号钩子。
-        for tool, event, command in _registered_hook_commands():
+        for tool, event, _matcher, command in _registered_hook_commands():
             with self.subTest(tool=tool, event=event):
                 probe, replaced = re.subn(r"^(?:bash|python3)\s+", "test -f ", command)
                 self.assertEqual(1, replaced, f"无法识别的解释器：{command}")
