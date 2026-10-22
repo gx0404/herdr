@@ -193,7 +193,7 @@ def run_rust(data: dict, suite: str) -> int:
             run.manifest["status"] = "passed" if code == 0 else "failed"
             run.save()
             return code
-        command = [*common, "--quiet", "--", "--test-threads", str(jobs)]
+        command = [*common, "--", "--format", "pretty", "--test-threads", str(jobs)]
         for name in [*deferred_tests, *isolated]:
             command += ["--skip", name]
         code = run.command("unit-tests", command)

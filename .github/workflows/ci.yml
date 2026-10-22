@@ -207,6 +207,8 @@ jobs:
       - name: Run Windows checks
         if: matrix.kind == 'windows'
         shell: pwsh
+        env:
+          HERDR_TEST_PHASE_JOBS: "1"
         run: |
           $env:CARGO_INCREMENTAL = "1"
           just check

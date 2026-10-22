@@ -1153,8 +1153,8 @@
       "anchor": "just 命令手册",
       "doc": "docs/MAKE_COMMANDS.md",
       "id": "docs-make-commands-md-just-命令手册",
-      "source_sha256": "7010df6fcff8dff86ea4ee2f1b4f08dbed92797843e2637c44204e52a7e06c67",
-      "text": "# just 命令手册\n\n入口统一是 `just`（仓库无 Makefile）。列：用途 / 前置 / 副作用 / 通过条件与证据。\n改动 recipe 时同步本表与 CI 调用面。\n\n`nextest-all` 和 Rust 分类入口中的 nextest 调用使用 `--status-level pass --failure-output immediate-final`：每条用例完成时显示状态，失败诊断立即输出并保留到最终汇总。成功用例正文仍由 `--success-output never` 隐藏，最终状态汇总仍使用 `--final-status-level fail`。\n\n`test-one` 由 justfile 直接调用 nextest，保留 `--status-level leak --failure-output final`：运行中显示失败、重试、慢测试及 leaky 用例，失败正文在最终汇总输出。`leak` 不显示普通通过用例的完成状态，即使用例此前出现过 `SLOW`。这些输出选项不改变测试通过条件、超时、并发或退出码判定。"
+      "source_sha256": "467fb917f446f539a6b4204490c5d0572b7e1a8a98236668beab5fec390e217b",
+      "text": "# just 命令手册\n\n入口统一是 `just`（仓库无 Makefile）。列：用途 / 前置 / 副作用 / 通过条件与证据。\n改动 recipe 时同步本表与 CI 调用面。\n\n`nextest-all` 和 Rust 分类入口中的 nextest 调用使用 `--status-level pass --failure-output immediate-final`：每条用例完成时显示状态，失败诊断立即输出并保留到最终汇总。成功用例正文仍由 `--success-output never` 隐藏，最终状态汇总仍使用 `--final-status-level fail`。\n\n`test-one` 由 justfile 直接调用 nextest，保留 `--status-level leak --failure-output final`：运行中显示失败、重试、慢测试及 leaky 用例，失败正文在最终汇总输出。`leak` 不显示普通通过用例的完成状态，即使用例此前出现过 `SLOW`。这些输出选项不改变测试通过条件、超时、并发或退出码判定。\n\n默认 Rust 单测使用 Cargo/libtest 的 `--format pretty`，逐项显示用例名和完成状态；测试筛选、隔离分类与 `--test-threads` 不变。\n\nWindows CI 的 `Run Windows checks` 步骤设置 `HERDR_TEST_PHASE_JOBS=1`，依次执行 Rust、维护、UI 热路径、集成资产和文档契约阶段。总 worker 预算沿用既有设置：当前 budget=4 时，Rust 与维护阶段各用 4 个 worker，阶段之间不重叠。25 分钟 job 上限保持不变，是否在限时内完成以真实 CI 结果为准。"
     },
     {
       "anchor": "just 命令手册 > GX fork 安装包",
