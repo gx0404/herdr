@@ -572,49 +572,70 @@ test("V2 ignores events without data", async () => {
 });
 
 test("V2 completes and interrupts without legacy idle events", async () => {
-  for (const terminal of ["succeeded", "interrupted", "failed"]) {
-    const plugin = await loadPlugin();
-    const tui = v2Api();
-    const dispose = await plugin.setup(tui.api);
-    activeDisposers.push(dispose);
-    await flushReports();
-    requests.length = 0;
-    tui.emit("session.execution.started", { sessionID: "a" });
-    tui.emit(`session.execution.${terminal}`, { sessionID: "a", error: { type: "ProviderError", message: "quota exceeded" } });
-    await flushReports();
-    expect(states()).toEqual(["working", "idle"]);
-    const failures = requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention");
-    expect(failures.length).toBe(terminal === "failed" ? 1 : 0);
-    if (terminal === "failed") {
-      expect(requestParam(failures[0], "kind")).toBe("failed");
-      expect(requestParam(failures[0], "detail")).toBe("quota exceeded");
-      expect(requests.indexOf(failures[0])).toBeLessThan(requests.length - 1);
+  const originalNow = Date.now;
+  const now = originalNow();
+  // This test checks event order, not the independent selection retry clock.
+  Date.now = () => now;
+  try {
+    for (const terminal of ["succeeded", "interrupted", "failed"]) {
+      const plugin = await loadPlugin();
+      const tui = v2Api();
+      const dispose = await plugin.setup(tui.api);
+      activeDisposers.push(dispose);
+      try {
+        await flushReports();
+        requests.length = 0;
+        tui.emit("session.execution.started", { sessionID: "a" });
+        tui.emit(`session.execution.${terminal}`, { sessionID: "a", error: { type: "ProviderError", message: "quota exceeded" } });
+        await flushReports();
+        expect(states()).toEqual(["working", "idle"]);
+        const failures = requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention");
+        expect(failures.length).toBe(terminal === "failed" ? 1 : 0);
+        if (terminal === "failed") {
+          expect(requestParam(failures[0], "kind")).toBe("failed");
+          expect(requestParam(failures[0], "detail")).toBe("quota exceeded");
+          expect(requests.indexOf(failures[0])).toBeLessThan(requests.length - 1);
+        }
+      } finally {
+        dispose();
+      }
     }
-    dispose();
+  } finally {
+    Date.now = originalNow;
   }
 });
 
 test("V2 aggregates root and child blockers and ignores other roots and child completion", async () => {
-  const plugin = await loadPlugin();
-  const tui = v2Api();
-  const dispose = await plugin.setup(tui.api);
-  activeDisposers.push(dispose);
-  await flushReports();
-  requests.length = 0;
-  tui.emit("session.execution.started", { sessionID: "a" });
-  tui.emit("permission.asked", { sessionID: "a", id: "permission-a" });
-  tui.emit("form.created", { form: { sessionID: "child", id: "form-child" } });
-  tui.emit("permission.replied", { sessionID: "a", requestID: "permission-a" });
-  tui.emit("session.execution.succeeded", { sessionID: "child" });
-  tui.emit("session.execution.started", { sessionID: "b" });
-  tui.emit("permission.asked", { sessionID: "b", id: "other" });
-  await flushReports();
-  expect(states().at(-1)).toBe("blocked");
-  expect(requests.every((r) => requestParam(r, "agent_session_id") === "a")).toBe(true);
-  tui.emit("form.cancelled", { sessionID: "child", id: "form-child" });
-  tui.emit("session.execution.succeeded", { sessionID: "a" });
-  await flushReports();
-  expect(states().slice(-2)).toEqual(["working", "idle"]);
+  const originalNow = Date.now;
+  const now = originalNow();
+  // This test checks event order, not the independent selection retry clock.
+  Date.now = () => now;
+  let dispose: (() => void) | undefined;
+  try {
+    const plugin = await loadPlugin();
+    const tui = v2Api();
+    dispose = await plugin.setup(tui.api);
+    activeDisposers.push(dispose);
+    await flushReports();
+    requests.length = 0;
+    tui.emit("session.execution.started", { sessionID: "a" });
+    tui.emit("permission.asked", { sessionID: "a", id: "permission-a" });
+    tui.emit("form.created", { form: { sessionID: "child", id: "form-child" } });
+    tui.emit("permission.replied", { sessionID: "a", requestID: "permission-a" });
+    tui.emit("session.execution.succeeded", { sessionID: "child" });
+    tui.emit("session.execution.started", { sessionID: "b" });
+    tui.emit("permission.asked", { sessionID: "b", id: "other" });
+    await flushReports();
+    expect(states().at(-1)).toBe("blocked");
+    expect(requests.every((r) => requestParam(r, "agent_session_id") === "a")).toBe(true);
+    tui.emit("form.cancelled", { sessionID: "child", id: "form-child" });
+    tui.emit("session.execution.succeeded", { sessionID: "a" });
+    await flushReports();
+    expect(states().slice(-2)).toEqual(["working", "idle"]);
+  } finally {
+    dispose?.();
+    Date.now = originalNow;
+  }
 });
 
 test("V2 discards queued reports after selection changes and stops on disposal", async () => {
@@ -698,27 +719,38 @@ test("V2 settles a connection that never completes", async () => {
 });
 
 test("V1 publishes a root failure before idle, never as a blocker", async () => {
-  const plugin = await loadPlugin();
-  const tui = fakeApi();
-  tui.addSession({ id: "root" });
-  tui.select("root");
-  await plugin.tui(tui.api);
-  await flushReports();
-  tui.emit("session.status", { sessionID: "root", status: { type: "busy" } });
-  await flushReports();
-  requests.length = 0;
-  tui.emit("session.error", { sessionID: "root", error: { name: "APIError", data: { message: "quota exceeded" } } });
-  await flushReports();
-  expect(requests).toEqual([]);
-  tui.emit("session.status", { sessionID: "root", status: { type: "idle" } });
-  tui.emit("session.idle", { sessionID: "root" });
-  await flushReports();
-  expect(states()).toEqual(["idle"]);
-  const failures = requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention");
-  expect(failures.length).toBe(1);
-  expect(requestParam(failures[0], "kind")).toBe("failed");
-  expect(requestParam(failures[0], "detail")).toBe("quota exceeded");
-  expect(requests.indexOf(failures[0])).toBeLessThan(requests.length - 1);
+  const originalNow = Date.now;
+  const now = originalNow();
+  // This test checks event order, not the independent selection retry clock.
+  Date.now = () => now;
+  let dispose: (() => void) | undefined;
+  try {
+    const plugin = await loadPlugin();
+    const tui = fakeApi();
+    dispose = () => tui.dispose();
+    tui.addSession({ id: "root" });
+    tui.select("root");
+    await plugin.tui(tui.api);
+    await flushReports();
+    tui.emit("session.status", { sessionID: "root", status: { type: "busy" } });
+    await flushReports();
+    requests.length = 0;
+    tui.emit("session.error", { sessionID: "root", error: { name: "APIError", data: { message: "quota exceeded" } } });
+    await flushReports();
+    expect(requests).toEqual([]);
+    tui.emit("session.status", { sessionID: "root", status: { type: "idle" } });
+    tui.emit("session.idle", { sessionID: "root" });
+    await flushReports();
+    expect(states()).toEqual(["idle"]);
+    const failures = requests.filter((r) => isRecord(r) && r.method === "pane.report_agent_attention");
+    expect(failures.length).toBe(1);
+    expect(requestParam(failures[0], "kind")).toBe("failed");
+    expect(requestParam(failures[0], "detail")).toBe("quota exceeded");
+    expect(requests.indexOf(failures[0])).toBeLessThan(requests.length - 1);
+  } finally {
+    dispose?.();
+    Date.now = originalNow;
+  }
 });
 
 test("V1 recovery, abort and child errors do not fail the selected root", async () => {
