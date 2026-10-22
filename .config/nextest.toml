@@ -1,4 +1,10 @@
-# nextest 配置：默认 profile 保持工具默认值，不改变 `just test` 行为。
+# 默认保留工具行为，仅给 Windows Codex 启动诊断添加外部截止。
+# 300 秒覆盖四个 60 秒阶段和清理；同步系统调用卡住时仍由 nextest 终止并输出失败日志。
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'binary(=codex_launch_windows) & test(=windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles)'
+slow-timeout = { period = '60s', terminate-after = 5, on-timeout = 'fail' }
+
 # timing profile 仅用于本地耗时分析：JUnit 相对路径锚定在 target/nextest/timing/。
 [profile.timing]
 junit.path = "junit.xml"

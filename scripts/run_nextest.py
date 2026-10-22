@@ -7,6 +7,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -64,6 +65,39 @@ def has_recording_config(value: object) -> bool:
     return False
 
 
+def is_shard_safe_timeout_override(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) - {"filter", "platform", "slow-timeout"}:
+        return False
+    if not {"filter", "platform"} & value.keys():
+        return False
+    if "filter" in value and (not isinstance(value["filter"], str) or not value["filter"].strip()):
+        return False
+    if "platform" in value:
+        platform = value["platform"]
+        if isinstance(platform, str):
+            if not platform.strip():
+                return False
+        elif not (isinstance(platform, dict) and platform and not set(platform) - {"host", "target"}
+                  and all(isinstance(item, str) and item.strip() for item in platform.values())):
+            return False
+    timeout = value.get("slow-timeout")
+    if not isinstance(timeout, dict) or set(timeout) - {"period", "terminate-after", "grace-period", "on-timeout"}:
+        return False
+    count = timeout.get("terminate-after")
+    # Require an explicit failure outcome, even if an inherited profile changes its default.
+    if type(count) is not int or count <= 0 or timeout.get("on-timeout") != "fail":
+        return False
+    # Deliberately accept only simple finite durations here, not a second copy of
+    # nextest's humantime/filter parser. More complex syntax still requires one runner.
+    for key, number in (("period", "[1-9][0-9]*"), ("grace-period", "(?:0|[1-9][0-9]*)")):
+        if key == "grace-period" and key not in timeout:
+            continue
+        duration = timeout.get(key)
+        if not isinstance(duration, str) or re.fullmatch(number + r"(?:ns|us|ms|s|m|h|d|w)", duration) is None:
+            return False
+    return True
+
+
 def check_shard_config(root: Path, environment: Mapping[str, str]) -> None:
     def refuse(reason: str) -> None:
         raise ValueError(f"Cannot shard nextest: {reason}; use HERDR_NEXTEST_SHARDS=1")
@@ -81,10 +115,13 @@ def check_shard_config(root: Path, environment: Mapping[str, str]) -> None:
     safe = {
         "default-filter", "retries", "slow-timeout", "leak-timeout", "fail-fast",
         "status-level", "final-status-level", "failure-output", "success-output",
-        "junit", "flaky-result",
+        "junit", "flaky-result", "overrides",
     }
     if set(profile) - safe:
-        refuse("default profile overrides, thread constraints or unknown settings require one runner")
+        refuse("default profile thread constraints or unknown settings require one runner")
+    overrides = profile.get("overrides", [])
+    if not isinstance(overrides, list) or not all(is_shard_safe_timeout_override(item) for item in overrides):
+        refuse("only pure finite failing timeout overrides can be sharded")
     junit = profile.get("junit", {}).get("path")
     if junit is not None:
         path_value = PureWindowsPath(junit)

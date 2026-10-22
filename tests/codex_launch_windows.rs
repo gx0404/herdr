@@ -54,6 +54,7 @@ impl Sandbox {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        eprintln!("sandbox checkpoint=create-fixture; root={}", root.display());
         fs::create_dir(&root).unwrap();
         let sandbox = Self(root, Cell::new(false));
         for directory in [
@@ -88,6 +89,7 @@ impl Sandbox {
         .unwrap();
         let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
         let source = sandbox.0.join("source 中文");
+        eprintln!("sandbox checkpoint=archive-command");
         let archive = sandbox
             .phase_output(
                 "archive-create",
@@ -98,6 +100,7 @@ impl Sandbox {
             )
             .unwrap();
         success(&archive);
+        eprintln!("sandbox checkpoint=write-codex-fixture");
         fs::rename(
             source.join("fixture.tar.gz"),
             sandbox.0.join("archive 中文.tar.gz"),
@@ -116,6 +119,7 @@ impl Sandbox {
             "[Console]::Error.WriteLine(('codex-fixture: tar-returned exit={0}' -f $LASTEXITCODE)); exit $LASTEXITCODE\"\r\n",
             "exit /b %errorlevel%\r\n"
         )).unwrap();
+        eprintln!("sandbox checkpoint=ready");
         sandbox
     }
 
@@ -135,17 +139,23 @@ impl Sandbox {
                 .stdout(fs::File::create_new(&stdout)?)
                 .stderr(fs::File::create_new(&stderr)?)
                 .creation_flags(CREATE_SUSPENDED);
+            eprintln!("phase={phase} checkpoint=create-job");
             let job = job.insert(private_job()?);
+            eprintln!("phase={phase} checkpoint=spawn");
             let child = child.insert(command.spawn()?);
+            eprintln!("phase={phase} checkpoint=assign; pid={}", child.id());
             if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } == 0
             {
                 return Err(io::Error::last_os_error());
             }
+            eprintln!("phase={phase} checkpoint=resume");
             resume_child(child)?;
+            eprintln!("phase={phase} checkpoint=wait");
             loop {
                 root_status = child.try_wait()?;
                 active = Some(active_processes(job)?);
                 if let Some(status) = root_status.filter(|_| active == Some(0)) {
+                    eprintln!("phase={phase} checkpoint=read-output; root={status}");
                     return Ok(Output {
                         status,
                         stdout: bounded_file(&stdout)?,
@@ -153,6 +163,7 @@ impl Sandbox {
                     });
                 }
                 if started.elapsed() >= Duration::from_secs(60) {
+                    eprintln!("phase={phase} checkpoint=deadline; root={root_status:?}; active_processes={active:?}");
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "phase exceeded 60s",
@@ -171,19 +182,25 @@ impl Sandbox {
                 if !output.status.success() {
                     eprintln!("{}", self.phase_diagnostics(&stdout, &stderr));
                 }
+                eprintln!("phase={phase} checkpoint=return-and-drop-handles");
                 Ok(output)
             }
             Err(error) => {
                 self.1.set(true);
+                eprintln!("phase={phase} checkpoint=cleanup; error={error}");
                 let cleanup = match (child.as_mut(), job.as_ref()) {
                     (Some(child), Some(job)) => stop_phase(child, job),
                     _ => Ok(()),
                 };
                 // Closing the non-inherited job is also the kill-tree fallback.
+                eprintln!("phase={phase} checkpoint=close-job; cleanup={cleanup:?}");
                 drop(job);
+                eprintln!("phase={phase} checkpoint=read-failure-diagnostics");
+                let diagnostics = self.phase_diagnostics(&stdout, &stderr);
+                eprintln!("phase={phase} checkpoint=return-error");
                 Err(io::Error::new(error.kind(), format!(
                     "phase={phase} elapsed={:?}; root={root_status:?}; active_processes={active:?}; error={error}; cleanup={cleanup:?}; sandbox={}\n{}",
-                    started.elapsed(), self.0.display(), self.phase_diagnostics(&stdout, &stderr),
+                    started.elapsed(), self.0.display(), diagnostics,
                 )))
             }
         }
@@ -193,6 +210,7 @@ impl Sandbox {
         [stdout, stderr, &self.0.join("report.json")]
             .into_iter()
             .map(|path| {
+                eprintln!("diagnostic checkpoint=read; path={}", path.display());
                 let text = match bounded_file(path) {
                     Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                     Err(error) => format!("<unavailable: {error}>"),
@@ -320,10 +338,15 @@ impl Drop for Sandbox {
             eprintln!("preserving failed phase sandbox: {}", self.0.display());
             return;
         }
+        eprintln!("sandbox checkpoint=remove-start; root={}", self.0.display());
         let deadline = Instant::now() + Duration::from_secs(30);
         while fs::remove_dir_all(&self.0).is_err() && self.0.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
+        eprintln!(
+            "sandbox checkpoint=remove-returned; root={}",
+            self.0.display()
+        );
     }
 }
 
@@ -431,10 +454,13 @@ fn resume_child(child: &Child) -> io::Result<()> {
 
 fn stop_phase(child: &mut Child, job: &OwnedHandle) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
+    eprintln!("cleanup checkpoint=terminate-job; pid={}", child.id());
     let job_error =
         (unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0).then(io::Error::last_os_error);
     // Assignment failure leaves a suspended child outside the job. Use its handle.
+    eprintln!("cleanup checkpoint=kill-root; pid={}", child.id());
     let root_error = child.kill().err();
+    eprintln!("cleanup checkpoint=wait; pid={}", child.id());
     loop {
         let root = child.try_wait();
         let active = active_processes(job);
@@ -540,7 +566,9 @@ fn windows_codex_sandbox_confines_git_bash_runtime_environment() {
 
 #[test]
 fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles() {
+    eprintln!("codex-launch checkpoint=test-enter");
     let sandbox = Sandbox::new();
+    eprintln!("codex-launch checkpoint=entry-command");
     let mut command = sandbox.command(Path::new(env!("CARGO_BIN_EXE_herdr")));
     let original = command
         .get_envs()
@@ -556,6 +584,7 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
         )
         .unwrap();
     success(&output);
+    eprintln!("codex-launch checkpoint=entry-assertions");
     assert_eq!(
         fs::read(sandbox.0.join("output 中文/payload.txt")).unwrap(),
         b"launcher extraction\n"
@@ -571,6 +600,7 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
     assert_eq!(std::env::join_paths(entries).unwrap(), original);
     let shim = tools.parent().unwrap();
     assert!(shim.join(".herdr-codex-launch-v1").is_file());
+    eprintln!("codex-launch checkpoint=shim-command");
     let mut command = sandbox.command(&shim.join("codex.exe"));
     command
         .env("HERDR_ENV", "1")
@@ -586,6 +616,7 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
         .phase_output("shim-resume", command.args(["resume", "中文 session"]))
         .unwrap();
     success(&output);
+    eprintln!("codex-launch checkpoint=shim-assertions");
     let report = sandbox.report();
     assert_eq!(report["arg1"], "--no-daemon");
     assert_eq!(report["arg2"], "resume");
@@ -600,6 +631,7 @@ fn windows_codex_launch_real_entry_and_shared_shim_extract_without_user_profiles
         .unwrap();
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
+    eprintln!("codex-launch checkpoint=test-body-complete");
 }
 
 #[test]

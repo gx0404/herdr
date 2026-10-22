@@ -101,6 +101,78 @@ class ConfigurationTests(unittest.TestCase):
                 with self.subTest(content=content), self.assertRaisesRegex(ValueError, "SHARDS=1"):
                     run_nextest.check_shard_config(root, {"NEXTEST_USER_CONFIG_FILE": "none"})
 
+    def test_shard_config_accepts_only_independent_failing_timeout_overrides(self):
+        configurations = [
+            "filter='test(=probe)'\nslow-timeout={period='60s', terminate-after=5, on-timeout='fail'}",
+            "platform='cfg(windows)'\nslow-timeout={period='750ms', terminate-after=2, on-timeout='fail'}",
+            "filter='binary(=probe)'\nplatform={host='cfg(unix)', target='cfg(unix)'}\n"
+            "slow-timeout={period='5m', terminate-after=1, grace-period='0s', on-timeout='fail'}",
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".config").mkdir()
+            config = root / ".config/nextest.toml"
+            for content in configurations:
+                with self.subTest(content=content):
+                    config.write_text("[[profile.default.overrides]]\n" + content, encoding="utf-8")
+                    run_nextest.check_shard_config(root, {"NEXTEST_USER_CONFIG_FILE": "none"})
+            # A safe timeout must not bypass the existing user recording guard.
+            user = root / "user.toml"
+            user.write_text("[record]\nenabled=true", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "recording"):
+                run_nextest.check_shard_config(root, {"NEXTEST_USER_CONFIG_FILE": str(user)})
+
+    def test_shard_config_rejects_unbounded_or_non_failing_timeout_overrides(self):
+        policies = [
+            "'60s'", "{period='60s', on-timeout='fail'}",
+            "{period='60s', terminate-after=5}",
+            "{period='60s', terminate-after=0, on-timeout='fail'}",
+            "{period='60s', terminate-after=-1, on-timeout='fail'}",
+            "{period='60s', terminate-after=true, on-timeout='fail'}",
+            "{period='60s', terminate-after='5', on-timeout='fail'}",
+            "{period='60s', terminate-after=1.5, on-timeout='fail'}",
+            "{period='60s', terminate-after=5, on-timeout='pass'}",
+            "{period='60s', terminate-after=5, on-timeout='skip'}",
+            "{period='60s', terminate-after=5, on-timeout=false}",
+            "{period='0s', terminate-after=5, on-timeout='fail'}",
+            "{period='infinite', terminate-after=5, on-timeout='fail'}",
+            "{period=inf, terminate-after=5, on-timeout='fail'}",
+            "{period='60s', terminate-after=5, grace-period='infinite', on-timeout='fail'}",
+            "{period='60s', terminate-after=5, on-timeout='fail', unknown=1}",
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".config").mkdir()
+            for policy in policies:
+                content = "[[profile.default.overrides]]\nfilter='test(=probe)'\nslow-timeout=" + policy
+                (root / ".config/nextest.toml").write_text(content, encoding="utf-8")
+                with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, "finite failing timeout.*SHARDS=1"):
+                    run_nextest.check_shard_config(root, {"NEXTEST_USER_CONFIG_FILE": "none"})
+
+    def test_shard_config_rejects_mixed_timeout_rules_and_malformed_selectors(self):
+        timeout = "slow-timeout={period='60s', terminate-after=5, on-timeout='fail'}\n"
+        bodies = [
+            "filter='test(=probe)'\ntest-group='serial'\n" + timeout,
+            "filter='test(=probe)'\nthreads-required=2\n" + timeout,
+            "filter='test(=probe)'\nretries=2\n" + timeout,
+            "filter='test(=probe)'\nunknown-scheduler=true\n" + timeout,
+            "filter='test(=probe)'\n" + timeout + "[[profile.default.overrides]]\nfilter='all()'\ntest-group='serial'",
+            "filter='test(=probe)'", timeout,
+            "filter=''\n" + timeout, "filter=true\n" + timeout,
+            "platform=''\n" + timeout, "platform=true\n" + timeout,
+            "platform={}\n" + timeout, "platform={host=true}\n" + timeout,
+            "platform={other='cfg(windows)'}\n" + timeout,
+        ]
+        configs = ["[[profile.default.overrides]]\n" + body for body in bodies]
+        configs += ["[profile.default]\noverrides='invalid'", "[profile.default]\noverrides=[1]"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".config").mkdir()
+            for content in configs:
+                (root / ".config/nextest.toml").write_text(content, encoding="utf-8")
+                with self.subTest(content=content), self.assertRaisesRegex(ValueError, "finite failing timeout.*SHARDS=1"):
+                    run_nextest.check_shard_config(root, {"NEXTEST_USER_CONFIG_FILE": "none"})
+
     def test_profile_run_id_recording_and_junit_guards(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -168,6 +240,26 @@ class CoverageTests(unittest.TestCase):
 
 
 class OrchestrationTests(unittest.TestCase):
+    def test_repository_timeout_override_preserves_shard_coverage_and_command_selection(self):
+        repository_config = (run_nextest.PROJECT_ROOT / ".config/nextest.toml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".config").mkdir()
+            config = root / ".config/nextest.toml"
+            config.write_text(repository_config, encoding="utf-8")
+            run = SimulatedRun(root)
+            self.assertEqual(run.run(), 0)
+            self.assertEqual(run.manifest["status"], "passed")
+            self.assertEqual(run.manifest["coverage"]["count"], 2)
+            self.assertEqual(run.manifest["expected_counts"], [1, 1])
+            self.assertEqual(sum(record["workers"] for record in run.manifest["runners"]), 8)
+            runners = [(name, command) for name, command, _ in run.calls if name in {"shard-1", "shard-2"}]
+            self.assertEqual(len(runners), 2)
+            for name, command in runners:
+                self.assertEqual(command[command.index("--filterset") + 1], "test(probe)")
+                self.assertIn("hash:" + name.removeprefix("shard-") + "/2", command)
+            self.assertEqual(config.read_text(encoding="utf-8"), repository_config)
+
     def test_compile_once_reuse_has_no_build_options_and_stores_are_independent(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = SimulatedRun(Path(temporary))
