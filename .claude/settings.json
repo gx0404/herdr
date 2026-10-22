@@ -1,56 +1,21 @@
 {
   "permissions": {
+    "defaultMode": "acceptEdits",
     "allow": [
       "Read(./**)",
+      "Edit(./**)",
       "Glob",
       "Grep",
-      "Bash(git status:*)",
-      "Bash(git diff:*)",
-      "Bash(git log:*)",
-      "Bash(git show:*)",
-      "Bash(git ls-files:*)",
-      "Bash(git check-ignore:*)",
-      "Bash(git rev-parse:*)",
-      "Bash(git blame:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(git branch:*)",
-      "Bash(git checkout:*)",
-      "Bash(git switch:*)",
-      "Bash(git restore:*)",
-      "Bash(git stash:*)",
-      "Bash(git merge:*)",
-      "Bash(git rebase:*)",
-      "Bash(git cherry-pick:*)",
-      "Bash(git tag:*)",
-      "Bash(git worktree:*)",
-      "Bash(python3 scripts/resolve_agent_rules.py:*)",
-      "Bash(python3 -m unittest scripts.*)",
-      "Bash(just lint)",
-      "Bash(just test)",
-      "Bash(just check)",
-      "Bash(just maintenance-test)",
-      "Bash(just docs-contract-test)",
-      "Bash(just integration-assets-test)",
-      "Bash(just framework-check)",
-      "Bash(just agent-rules:*)",
-      "Bash(just graph-check)",
-      "Bash(just kb-check)",
-      "Bash(cargo nextest run:*)",
-      "Bash(cargo fmt --check)",
-      "Bash(cargo clippy:*)"
-    ],
-    "ask": [
-      "Bash(just release*:*)",
-      "Bash(just bench*:*)",
-      "Bash(cargo run:*)"
+      "WebSearch",
+      "WebFetch",
+      "Agent",
+      "Skill",
+      "Bash"
     ],
     "deny": [
       "Read(./.env)",
       "Read(./**/.env)",
-      "Read(./**/*.pem)",
-      "Read(./.git/**)"
+      "Read(./**/*.pem)"
     ]
   },
   "hooks": {

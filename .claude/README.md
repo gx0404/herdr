@@ -9,7 +9,9 @@
 - `rules/*.md`：带 `paths:` frontmatter 的薄适配，只提醒运行
   `python3 scripts/resolve_agent_rules.py <paths...>`，不复制领域规则。
 - `hooks/`：`dangerous_patterns.conf` 是危险模式唯一真源（SHELL/FILE 两段，
-  TSV 四列），`pre_tool_use_gate.py` 是判定逻辑，`.sh` 是各协议适配器；
+  TSV 四列；2026-10 起按用户授权仅保留 force push、根/家目录 rm、凭据/私钥
+  读取与写入四类最小核心 deny），`pre_tool_use_gate.py` 是判定逻辑，`.sh` 是
+  各协议适配器；
   `record_edit.py` 记录编辑（PostToolUse），`notify_review.py` 写
   `review/READY.json`（Stop，跨工具复审信号）。
 - 修改模式/脚本后运行：`python3 -m unittest scripts.test_ai_tool_hooks`。
