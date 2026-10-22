@@ -276,11 +276,11 @@ fn send_json_request(socket_path: &PathBuf, request: &str) -> Value {
     serde_json::from_str(&response).expect("response should be valid JSON")
 }
 
-fn diagnostic_json_request(socket_path: &PathBuf, request: Value) -> String {
+fn diagnostic_json_request(socket_path: &std::path::Path, request: Value) -> String {
     const LIMIT: usize = 64 * 1024;
     let timeout = Duration::from_secs(2);
     let deadline = Instant::now() + timeout;
-    let socket_path = socket_path.clone();
+    let socket_path = socket_path.to_path_buf();
     let (sender, receiver) = std::sync::mpsc::channel();
     // connect() has no timeout. Detach this failure-only worker; never join it.
     if let Err(error) = thread::Builder::new()
