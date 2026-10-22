@@ -140,6 +140,11 @@ selector = "test:worktree::tests::submodule_worktree_removal_requires_explicit_f
 reason = "Real submodule checkout/removal qualification; refusal policy remains default."
 
 [[rust_isolated]]
+selector = "cli::pane::tests::pane_projection_help_and_invalid_syntax_do_not_use_transport"
+platform = "unix"
+reason = "CLI output changes process-wide SIGPIPE disposition; still runs in default."
+
+[[rust_isolated]]
 selector = "server::client_transport::tests::windows_transport_handles_threads_and_idle_cpu_remain_bounded"
 platform = "windows"
 reason = "Process-wide resource counts require an isolated process; still runs in default."
